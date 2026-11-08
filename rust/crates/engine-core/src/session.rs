@@ -39,7 +39,7 @@
 //! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -47,7 +47,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::oneshot;
 
 use engine_events::{
-    ContentBlock, EngineCommand, EngineEvent, EngineState, PermissionMode,
+    ContentBlock, EngineCommand, EngineEvent, EngineState, InputReason, PermissionMode,
     PermissionPromptDecision, PermissionRequest, QuestionPromptAnswer, QuestionPromptRequest,
     RequestId, TurnComplete,
 };
@@ -69,6 +69,15 @@ use crate::subagent_completion::{CompletionState, EventSink};
 /// The driver never inspects engine internals — it only calls these methods and
 /// forwards the results as [`EngineEvent`]s.
 pub trait EngineDelegate: Send + Sync + 'static {
+    /// Whether this session requires fresh caller-owned context before each turn.
+    fn requires_host_context(&self) -> bool {
+        false
+    }
+
+    /// Replace only caller-owned appended context, retaining history and policy.
+    fn apply_host_context(&self, _text: String) -> Result<(), RuntimeError> {
+        Err(RuntimeError::new("host context is unsupported"))
+    }
     /// Run exactly one turn to completion (or cancellation), driving the
     /// model/tool loop.
     ///
@@ -273,6 +282,7 @@ impl EngineSession {
 /// the shared table so the pump can route the matching answer command back to
 /// the blocked prompter.
 enum PendingAnswer {
+    HostContext(oneshot::Sender<Result<String, String>>),
     Permission(oneshot::Sender<PermissionPromptDecision>),
     Question(oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>),
 }
@@ -281,10 +291,21 @@ enum PendingAnswer {
 /// and the pump for a single turn.
 #[derive(Clone, Default)]
 struct RequestTable {
-    pending: Arc<Mutex<HashMap<RequestId, PendingAnswer>>>,
+    requests: Arc<Mutex<RequestState>>,
     next_id: Arc<AtomicU64>,
-    cancelled: Arc<AtomicBool>,
     interaction: runtime::PromptQueue,
+}
+
+#[derive(Default)]
+struct RequestState {
+    pending: HashMap<RequestId, PendingRequest>,
+    cancelled: bool,
+}
+
+struct PendingRequest {
+    // An answered user request retains input ownership until its lease ends.
+    answer: Option<PendingAnswer>,
+    input_reason: Option<InputReason>,
 }
 
 impl RequestTable {
@@ -292,31 +313,32 @@ impl RequestTable {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn insert(&self, id: RequestId, answer: PendingAnswer) {
-        let mut pending = self
+    fn take(&self, id: RequestId) -> Option<PendingAnswer> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pending
+            .get_mut(&id)?
+            .answer
+            .take()
+    }
+
+    /// Dropping answer senders wakes host-context and user-prompt waits. Input
+    /// ownership ends now, while the turn may still drain.
+    fn cancel_all(&self, tx: &EventSink) {
+        let mut requests = self
+            .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !self.cancelled.load(Ordering::SeqCst) {
-            pending.insert(id, answer);
+        requests.cancelled = true;
+        let had_input = requests
+            .pending
+            .values()
+            .any(|request| request.input_reason.is_some());
+        requests.pending.clear();
+        if had_input {
+            let _ = tx.send(EngineEvent::State(EngineState::Running));
         }
-    }
-
-    fn take(&self, id: RequestId) -> Option<PendingAnswer> {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id)
-    }
-
-    /// Dropping the answer senders wakes a worker blocked in a permission or
-    /// question prompt when the enclosing turn is cancelled.
-    fn cancel_all(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
     }
 }
 
@@ -324,6 +346,45 @@ impl RequestTable {
 enum ShutdownReason {
     ExplicitClose,
     Disconnected,
+}
+
+fn forward_engine_commands(
+    cmd_rx: std_mpsc::Receiver<EngineCommand>,
+) -> tokio_mpsc::UnboundedReceiver<EngineCommand> {
+    let (tcmd_tx, tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
+    std::thread::Builder::new()
+        .name("engine-cmd-forward".into())
+        .spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                if tcmd_tx.send(cmd).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn engine-cmd-forward thread");
+
+    tcmd_rx
+}
+
+async fn next_session_command(
+    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    evt_tx: &EventSink,
+) -> Option<EngineCommand> {
+    loop {
+        // A control already in the channel precedes an automatically resumed batch.
+        if let Ok(command) = tcmd_rx.try_recv() {
+            return Some(command);
+        }
+        if let Some((command, state)) = evt_tx.inputs.next_prompt() {
+            let _ = evt_tx.send(EngineEvent::InputState(state));
+            return Some(command);
+        }
+        tokio::select! {
+            command = tcmd_rx.recv() => return command,
+            () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
+            () = evt_tx.inputs.changed() => {}
+        }
+    }
 }
 
 /// The command loop. Runs on the engine thread's Tokio runtime.
@@ -339,37 +400,17 @@ async fn drive(
     let next_request_id = Arc::new(AtomicU64::new(0));
     // Bridge the std command receiver into a Tokio channel so the per-turn pump
     // can `select!` on it. A tiny forwarder thread does the blocking `recv`.
-    let (tcmd_tx, mut tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
-    std::thread::Builder::new()
-        .name("engine-cmd-forward".into())
-        .spawn(move || {
-            while let Ok(cmd) = cmd_rx.recv() {
-                if tcmd_tx.send(cmd).is_err() {
-                    break;
-                }
-            }
-        })
-        .expect("spawn engine-cmd-forward thread");
+    let mut tcmd_rx = forward_engine_commands(cmd_rx);
 
     let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
 
     let mut shutdown = ShutdownReason::Disconnected;
-    loop {
-        // A control already in the channel precedes an automatically resumed batch.
-        let cmd = if let Ok(command) = tcmd_rx.try_recv() {
-            command
-        } else if let Some((command, state)) = evt_tx.inputs.next_prompt() {
-            let _ = evt_tx.send(EngineEvent::InputState(state));
-            command
-        } else {
-            tokio::select! {
-                cmd = tcmd_rx.recv() => { let Some(cmd) = cmd else { break; }; cmd },
-                () = evt_tx.completions.delivery_changed() => { evt_tx.completions.deliver(&evt_tx); continue; }
-                () = evt_tx.inputs.changed() => { continue; }
-            }
-        };
+    while let Some(cmd) = next_session_command(&mut tcmd_rx, &evt_tx).await {
         let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
+            EngineCommand::RuntimeStatus { request_id } => {
+                handle_runtime_status(request_id, &tasks, &evt_tx);
+            }
             EngineCommand::Input { id, action } => {
                 handle_input(delegate.as_ref(), id, action, &evt_tx);
             }
@@ -447,13 +488,19 @@ async fn drive(
                 }
                 delegate.abort_signal().abort();
             }
-            EngineCommand::PermissionAnswer { .. } | EngineCommand::QuestionAnswer { .. } => {}
+            EngineCommand::PermissionAnswer { .. }
+            | EngineCommand::QuestionAnswer { .. }
+            | EngineCommand::HostContextAnswer { .. } => {}
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
                 break;
             }
         }
     }
+    finish_engine_session(delegate.as_ref(), shutdown);
+}
+
+fn finish_engine_session(delegate: &dyn EngineDelegate, shutdown: ShutdownReason) {
     if let Some(tasks) = delegate.background_tasks() {
         tasks.shutdown();
     }
@@ -496,6 +543,16 @@ fn handle_completion(id: Option<u64>, action: engine_events::CompletionAction, s
     }
 }
 
+fn handle_runtime_status(
+    id: u64,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+    sink: &EventSink,
+) {
+    let result =
+        serde_json::to_value(sink.runtime_status(tasks)).map_err(|error| error.to_string());
+    let _ = sink.send(EngineEvent::CommandResult { id, result });
+}
+
 fn handle_subagent_cancel(id: u64, agent_id: &str, sink: &EventSink) {
     let result = sink.completions.cancel_subagent(agent_id);
     let _ = sink.send(EngineEvent::CommandResult { id, result });
@@ -518,6 +575,7 @@ fn handle_background_task(
                 let _ = tx.send(EngineEvent::BackgroundTaskError { id, message });
             }
         }
+        engine_events::BackgroundTaskAction::Inspect { id } => tasks.inspect(&id),
     }
 }
 
@@ -602,6 +660,68 @@ impl TurnInput {
     }
 }
 
+fn report_turn_worker_result(
+    evt_tx: &EventSink,
+    result: Result<Result<TurnComplete, RuntimeError>, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Ok(complete)) => {
+            let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
+        }
+        Ok(Err(error)) => {
+            let _ = evt_tx.send(EngineEvent::TurnFailed {
+                message: error.to_string(),
+                context_window: error.is_context_window_blocked(),
+            });
+        }
+        Err(join_error) => {
+            let _ = evt_tx.send(EngineEvent::TurnFailed {
+                message: format!("engine turn panicked: {join_error}"),
+                context_window: false,
+            });
+        }
+    }
+}
+
+fn spawn_turn_worker(
+    delegate: &Arc<dyn EngineDelegate>,
+    input: TurnInput,
+    evt_tx: &EventSink,
+    table: &RequestTable,
+    subagents: &SubagentRelay,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+) -> tokio::task::JoinHandle<Result<TurnComplete, RuntimeError>> {
+    let worker = delegate.clone();
+    let turn_tx = evt_tx.clone();
+    let turn_table = table.clone();
+    let subagents = subagents.clone();
+    let turn_tasks = tasks.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut input = input;
+        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
+            .with_subagent_relay(subagents)
+            .with_background_tasks(turn_tasks);
+        observer.initial_inputs = std::mem::take(&mut input.input_views);
+        let mut prompter = PrompterAdapter {
+            tx: turn_tx,
+            table: turn_table,
+        };
+        if input.management.is_none() && worker.requires_host_context() {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let _lease = prompter.table.begin_request(
+                &prompter.tx,
+                PendingAnswer::HostContext(answer_tx),
+                |id| EngineEvent::HostContextRequest { id },
+            );
+            let context = futures::executor::block_on(answer_rx)
+                .map_err(|_| RuntimeError::new("host context resolution was cancelled"))?
+                .map_err(RuntimeError::new)?;
+            worker.apply_host_context(context)?;
+        }
+        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
+    })
+}
+
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
 /// on a blocking task, and concurrently service answer/cancel commands until it
 /// finishes. Returns the shutdown reason if a close or disconnection arrived
@@ -624,14 +744,6 @@ async fn run_one_turn(
         |(line, _)| line.chars().take(80).collect(),
     );
 
-    // The question prompter is installed on the tool executor (via the delegate)
-    // before the turn; the permission prompter + observer are passed into the
-    // blocking turn below.
-    delegate.set_question_prompter(Box::new(QuestionAdapter {
-        tx: evt_tx.clone(),
-        table: table.clone(),
-    }));
-
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
@@ -641,23 +753,7 @@ async fn run_one_turn(
     let _ = evt_tx.send(EngineEvent::TurnStarted { label });
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
-    let worker = delegate.clone();
-    let turn_tx = evt_tx.clone();
-    let turn_table = table.clone();
-    let subagents = subagents.clone();
-    let turn_tasks = tasks.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        let mut input = input;
-        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
-            .with_subagent_relay(subagents)
-            .with_background_tasks(turn_tasks);
-        observer.initial_inputs = std::mem::take(&mut input.input_views);
-        let mut prompter = PrompterAdapter {
-            tx: turn_tx,
-            table: turn_table,
-        };
-        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
-    });
+    let mut handle = spawn_turn_worker(delegate, input, evt_tx, &table, subagents, tasks);
 
     let mut shutdown = None;
     loop {
@@ -666,7 +762,7 @@ async fn run_one_turn(
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
                 Some(EngineCommand::Input { id, action }) => {
                     if handle_input(delegate.as_ref(), id, action, evt_tx) {
-                        table.cancel_all();
+                        table.cancel_all(evt_tx);
                     }
                 }
                 Some(EngineCommand::Steer { inputs }) => {
@@ -688,7 +784,13 @@ async fn run_one_turn(
                         let _ = tx.send(answers);
                     }
                 }
+                Some(EngineCommand::HostContextAnswer { id, context }) => {
+                    if let Some(PendingAnswer::HostContext(tx)) = table.take(id) {
+                        let _ = tx.send(context);
+                    }
+                }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 // Both paths abort and reap; only explicit Close persists.
@@ -700,7 +802,7 @@ async fn run_one_turn(
                     });
                     tasks.begin_shutdown();
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 // Cancel aborts the in-flight turn; it then
                 // finishes (cancelled) and we fall through to the `result` arm.
@@ -709,7 +811,7 @@ async fn run_one_turn(
                         let _ = evt_tx.send(EngineEvent::InputState(state));
                     }
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 // A Prompt arriving mid-turn is a renderer bug (renderers serialize
@@ -718,28 +820,12 @@ async fn run_one_turn(
             },
             () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
             result = &mut handle => {
-                table.cancel_all();
+                table.cancel_all(evt_tx);
                 if let Some(inbox) = &inbox {
                     let unapplied = inbox.finish();
                     if !unapplied.is_empty() { let _ = evt_tx.send(EngineEvent::InputDeferred(unapplied)); }
                 }
-                match result {
-                    Ok(Ok(complete)) => {
-                        let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
-                    }
-                    Ok(Err(error)) => {
-                        let _ = evt_tx.send(EngineEvent::TurnFailed {
-                            message: error.to_string(),
-                            context_window: error.is_context_window_blocked(),
-                        });
-                    }
-                    Err(join_error) => {
-                        let _ = evt_tx.send(EngineEvent::TurnFailed {
-                            message: format!("engine turn panicked: {join_error}"),
-                            context_window: false,
-                        });
-                    }
-                }
+                report_turn_worker_result(evt_tx, result);
                 let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
                 break;
             }
@@ -802,6 +888,7 @@ async fn run_direct_tool(
         tx: evt_tx.clone(),
         table: table.clone(),
     };
+    let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
     let mut handle =
         tokio::task::spawn_blocking(move || worker.run_direct_tool(&name, &input, &mut prompter));
     let mut shutdown = None;
@@ -810,7 +897,7 @@ async fn run_direct_tool(
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
                 Some(EngineCommand::Input { id, action }) => {
-                    if handle_input(delegate.as_ref(), id, action, evt_tx) { table.cancel_all(); }
+                    if handle_input(delegate.as_ref(), id, action, evt_tx) { table.cancel_all(evt_tx); }
                 }
                 Some(EngineCommand::PermissionAnswer { id, decision }) => {
                     if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
@@ -822,6 +909,7 @@ async fn run_direct_tool(
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 command @ (Some(EngineCommand::Close) | None) => {
@@ -831,14 +919,14 @@ async fn run_direct_tool(
                         ShutdownReason::Disconnected
                     });
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 Some(EngineCommand::Cancel) => {
                     if let Some(state) = evt_tx.inputs.cancel() {
                         let _ = evt_tx.send(EngineEvent::InputState(state));
                     }
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 // The host serializes turns and direct calls on one lane, so a
                 // prompt arriving here is a renderer bug. Ignore it, as a turn
@@ -846,7 +934,7 @@ async fn run_direct_tool(
                 Some(_) => {}
             },
             result = &mut handle => {
-                table.cancel_all();
+                table.cancel_all(evt_tx);
                 let result = match result {
                     Ok(Ok(result)) => Ok(serde_json::json!({
                         "content": result.content,
@@ -876,7 +964,7 @@ fn execute_input(
     delegate: &dyn EngineDelegate,
     input: TurnInput,
     observer: &mut dyn RuntimeObserver,
-    prompter: &mut dyn PermissionPrompter,
+    prompter: &mut PrompterAdapter,
 ) -> Result<TurnComplete, RuntimeError> {
     if let Some((line, build)) = input.management {
         let cancelled = delegate.run_management(&line, &build, observer)?;
@@ -890,6 +978,12 @@ fn execute_input(
         });
     }
     let blocks = delegate.prepare_prompt(input.blocks, input.image_policy)?;
+    // Host context and image preparation can rebuild the runtime. Install the
+    // question bridge only once preparation has selected the runtime to execute.
+    delegate.set_question_prompter(Box::new(QuestionAdapter {
+        tx: prompter.tx.clone(),
+        table: prompter.table.clone(),
+    }));
     delegate.run_turn(blocks, observer, prompter)
 }
 
@@ -1137,7 +1231,7 @@ impl PermissionPrompter for PrompterAdapter {
         let request = request.clone();
         self.table.interaction.enqueue(move || async move {
             let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.show_prompt(&tx, PendingAnswer::Permission(answer_tx), |id| {
+            let _lease = table.begin_request(&tx, PendingAnswer::Permission(answer_tx), |id| {
                 EngineEvent::PermissionRequest { id, request }
             });
             answer_rx
@@ -1175,7 +1269,7 @@ impl QuestionPrompter for QuestionAdapter {
         let request = request.clone();
         self.table.interaction.enqueue(move || async move {
             let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.show_prompt(&tx, PendingAnswer::Question(answer_tx), |id| {
+            let _lease = table.begin_request(&tx, PendingAnswer::Question(answer_tx), |id| {
                 EngineEvent::QuestionRequest { id, request }
             });
             answer_rx.await.unwrap_or_else(|_| {
@@ -1185,37 +1279,65 @@ impl QuestionPrompter for QuestionAdapter {
     }
 }
 
-/// Releases input ownership and removes an unanswered request even if its
+/// Removes the request and releases any user-input ownership even if its
 /// future is dropped on cancellation or a provider stream failure.
-struct PromptLease {
+struct RequestLease {
     table: RequestTable,
     tx: EventSink,
     id: RequestId,
 }
 
-impl Drop for PromptLease {
+impl Drop for RequestLease {
     fn drop(&mut self) {
-        self.table.take(self.id);
-        if !self.table.cancelled.load(Ordering::SeqCst) {
+        let mut requests = self
+            .table
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if requests
+            .pending
+            .remove(&self.id)
+            .is_some_and(|request| request.input_reason.is_some())
+            && !requests.cancelled
+        {
             let _ = self.tx.send(EngineEvent::State(EngineState::Running));
         }
     }
 }
 
 impl RequestTable {
-    fn show_prompt(
+    fn begin_request(
         &self,
         tx: &EventSink,
         answer: PendingAnswer,
         event: impl FnOnce(RequestId) -> EngineEvent,
-    ) -> PromptLease {
+    ) -> RequestLease {
         let id = self.alloc();
-        if !self.cancelled.load(Ordering::SeqCst) {
-            self.insert(id, answer);
-            let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput));
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Admission, cancellation and lifecycle publication share this lock.
+        // A queued prompt cannot publish AwaitingInput after cancellation.
+        if !requests.cancelled {
+            let input_reason = match &answer {
+                PendingAnswer::HostContext(_) => None,
+                PendingAnswer::Permission(_) => Some(InputReason::Permission),
+                PendingAnswer::Question(_) => Some(InputReason::Question),
+            };
+            requests.pending.insert(
+                id,
+                PendingRequest {
+                    answer: Some(answer),
+                    input_reason,
+                },
+            );
+            if let Some(reason) = input_reason {
+                let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
+            }
             let _ = tx.send(event(id));
         }
-        PromptLease {
+        RequestLease {
             table: self.clone(),
             tx: tx.clone(),
             id,

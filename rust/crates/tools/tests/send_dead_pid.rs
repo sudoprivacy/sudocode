@@ -14,8 +14,7 @@ use tools::testing::reject_dead_pid_for_test;
 fn temp_store(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     std::env::temp_dir().join(format!("send-dead-pid-{label}-{nanos}"))
 }
 

@@ -3,11 +3,11 @@
 //!
 //! Locks in the pipeline:
 //!
-//!   persist_terminal (under coord mode)
-//!     -> render_manifest_task_notification (SSOT XML shape)
-//!     -> runtime::coordinator_notification::emit
+//!   `persist_terminal` (under coord mode)
+//!     -> `render_manifest_task_notification` (SSOT XML shape)
+//!     -> `runtime::coordinator_notification::emit`
 //!     -> `<workspace>/.sudocode-inbox/coordinator.jsonl` grows
-//!     -> runtime::coordinator_notification::drain returns it
+//!     -> `runtime::coordinator_notification::drain` returns it
 //!
 //! With coord mode OFF, emit is a no-op and the mailbox file must
 //! not appear — protects non-coordinator sessions from surprise
@@ -15,7 +15,6 @@
 
 use std::path::PathBuf;
 
-use runtime::agent_mailbox;
 use runtime::coordinator_mode::COORDINATOR_ENV_VAR;
 use runtime::coordinator_notification::{self, COORDINATOR_INBOX_RECIPIENT};
 use tools::testing::{persist_terminal_with_telemetry_for_test, seed_agent_manifest_for_test};
@@ -24,14 +23,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn unique_workspace(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!(
         "sudocode-coord-push-{label}-{nanos}-{}",
         std::process::id()
@@ -111,10 +109,14 @@ fn coord_mode_off_persist_terminal_does_not_touch_inbox() {
     )
     .expect("persist ok");
 
-    let inbox = agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
+    let transcript = std::path::PathBuf::from(
+        runtime::mailbox::InboxConvention::new(ws.to_string_lossy().into_owned())
+            .transcript_path("agent-push-noop", COORDINATOR_INBOX_RECIPIENT),
+    );
     assert!(
-        !inbox.exists(),
-        "coord mode OFF must not create the coordinator inbox file"
+        !transcript.exists(),
+        "coord mode OFF must not create the coordinator conversation: {}",
+        transcript.display()
     );
     let pending = coordinator_notification::drain(&ws).unwrap_or_default();
     assert_eq!(pending.messages().count(), 0);

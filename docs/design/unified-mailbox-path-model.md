@@ -1,6 +1,7 @@
 # Unify the mailbox path model: one `PerRecipient { root }` shape + `SharedStream`
 
-**Status:** design for review (implementation lands as follow-up commits on this branch).
+**Status:** superseded. Per-pair conversations (`runtime::mailbox::InboxConvention`,
+`/conversations/<id>/transcript`) replaced both shapes below; this file is the design record.
 **Scope:** `runtime` mailbox layer + its standalone REPL wiring. Aligns the on-disk
 mailbox path model with the Nexus end-state in
 `docs/design/agent-context-storage-matrix.html` (A2A row: everything converges on

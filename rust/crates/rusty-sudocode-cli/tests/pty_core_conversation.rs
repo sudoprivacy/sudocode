@@ -51,18 +51,22 @@ fn multi_turn_references_prior() {
     let env = TestEnv::new("multi-turn");
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.expect("❯").expect("should see REPL prompt");
+    let budget = if env.is_live() {
+        LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
+    expect_input_line_cleared(&sess, env.timeout(), "should see REPL prompt");
 
-    // First turn: introduce a name.
+    // First turn: introduce a name. The prompt itself says "Alice", so the
+    // turn's completion, not the name, gates the second turn.
     let first = env.prompt(
         "My name is Alice. Please greet me by name.",
         "multi_turn_context",
     );
+    let first_marker = turn_status_marker(&sess);
     sess.send(&format!("{first}\r")).expect("send first msg");
-    sess.expect("Alice")
-        .expect("first response should mention Alice");
-
-    expect_input_line_cleared(&sess, env.timeout(), "first turn should re-arm input");
+    expect_turn_complete_after(&sess, &first_marker, budget, "first turn should complete");
 
     // Second turn: ask for the name back.
     let second = env.prompt(
@@ -71,24 +75,26 @@ fn multi_turn_references_prior() {
     );
     let second_marker = turn_status_marker(&sess);
     sess.send(&format!("{second}\r")).expect("send second msg");
-    sess.expect("Alice")
-        .expect("second response should recall Alice");
-
     expect_turn_complete_after(
         &sess,
         &second_marker,
-        if env.is_live() {
-            LIVE_TURN_BUDGET
-        } else {
-            env.timeout()
-        },
+        budget,
         "second turn should complete before exiting",
+    );
+    // Only the reply below the second prompt counts; the first prompt and
+    // its reply say "Alice" too.
+    let screen = sess.render(common::screen_contents);
+    assert!(
+        screen
+            .rsplit_once("What is my name?")
+            .is_some_and(|(_, reply)| reply.contains("Alice")),
+        "second response should recall Alice\nPTY screen:\n{screen}"
     );
     sess.send("/exit\r").expect("send /exit");
 
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("scode should exit after /exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "interactive scode should exit 0; got {exit}");
@@ -118,7 +124,7 @@ fn streaming_tokens_render_incrementally() {
 // 4. Multi-tool turn roundtrip — read_file + grep_search in one turn
 // ──────────────────────────────────────────────────────────────────────
 
-/// Model calls read_file + grep_search, results feed the final response.
+/// Model calls `read_file` + `grep_search`, results feed the final response.
 /// Agent trigger test: verifies LLM selected the correct tools.
 #[test]
 fn multi_tool_roundtrip() {
@@ -149,7 +155,7 @@ fn multi_tool_roundtrip() {
     // Mock: deterministic requests, independently completing tools. Live: model may call tools
     // in any order or use different tools — verify at least one tool
     // call appears and the response references the fixture content.
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     if env.is_mock() {
         // The card header now shows the canonical tool label (`Read`, `Grep`),
         // not the wire name (`read_file`, `grep_search`), consistently in the
@@ -161,7 +167,7 @@ fn multi_tool_roundtrip() {
                     && screen.contains("╭─ Grep(")
                     && screen.contains("multi-tool roundtrip complete:")
             },
-            common::at_least(Duration::from_secs(60)),
+            common::at_least(Duration::from_mins(1)),
             "both completed tool identities and final response, in any order",
         );
     } else {
@@ -173,9 +179,9 @@ fn multi_tool_roundtrip() {
     sess.expect("(?i)(parity|2|two|lines|occurrences|matches|complete|result|found)")
         .expect("final response should reference tool results");
 
-    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(2)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("multi-tool scode should exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "multi-tool should exit 0; got {exit}");

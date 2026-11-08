@@ -6,7 +6,7 @@
 //! `statusline-setup`) gets one test that drives the FULL Agent-tool
 //! round-trip: parent LLM calls `Agent(subagent_type='X', ...)`, the
 //! child preset runs its allowed-tool subset to completion, and the
-//! parent surfaces a task-notification or agent_id sentinel.
+//! parent surfaces a task-notification or `agent_id` sentinel.
 //!
 //! ## Local-only per current convention
 //!
@@ -152,7 +152,7 @@ fn run_preset(preset: &str, description: &str, worker_task: &str) {
     // test harness.
     sess.set_default_timeout(preset_test_timeout());
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "preset {preset}: scode did not exit cleanly after the run: {e}\n\
              tail: {tail}",

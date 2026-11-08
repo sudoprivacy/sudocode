@@ -2,8 +2,10 @@
 //!
 //! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
 //! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
-//! is absent or empty the tests silently pass (return early). On CI they run
-//! only on main merges / workflow_dispatch where the GitHub secret is available.
+//! is absent or empty the tests return early. Invoke the shared `acp` scenario
+//! in `.github/scripts/live_model_acceptance.py` explicitly with local credentials,
+//! or through the authorized on-demand/release workflow. Ordinary PR, queue and
+//! main-push checks do not run paid provider tests.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!
@@ -24,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -33,7 +35,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const RECV_TIMEOUT: Duration = Duration::from_secs(120);
+const RECV_TIMEOUT: Duration = Duration::from_mins(2);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fail with the real cause when the provider answered with a credential rejection
@@ -58,14 +60,13 @@ fn fail_clearly_if_the_credential_was_rejected(text: &str) {
         "unauthorized",
     ];
     let lowered = text.to_lowercase();
-    if MARKERS.iter().any(|m| lowered.contains(m)) {
-        panic!(
-            "the provider rejected this run's credential — it answered with an \
-             authentication failure instead of a model reply, so this is NOT a \
-             model-behaviour failure. Rotate the live API credential this job uses. \
-             The provider said: {text:?}"
-        );
-    }
+    assert!(
+        !MARKERS.iter().any(|m| lowered.contains(m)),
+        "the provider rejected this run's credential — it answered with an \
+         authentication failure instead of a model reply, so this is NOT a \
+         model-behaviour failure. Rotate the live API credential this job uses. \
+         The provider said: {text:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -537,29 +538,13 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 }
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
-    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let prompt = subagent_calculation_prompt();
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": concat!(
-                    "CRITICAL INSTRUCTION — you MUST use the Agent tool exactly 3 times.\n",
-                    "Do NOT answer the questions yourself. Do NOT skip the Agent tool.\n",
-                    "The entire purpose of this request is to test the Agent tool.\n\n",
-                    "For each calculation below, call Agent with:\n",
-                    "  model: <LIVE_MODEL>\n",
-                    "  description: \"calc <N>\"\n",
-                    "  prompt: \"What is <expr>? Reply with ONLY the number.\"\n\n",
-                    "Omit auth_mode entirely: all child agents must inherit this session's current credential path.\n",
-                    "No switch to subscription or api-key authentication is requested.\n\n",
-                    "Calculations:\n",
-                    "1. 101 + 102\n",
-                    "2. 201 + 202\n",
-                    "3. 301 + 302\n\n",
-                    "After all 3 agents return, output exactly this JSON and nothing else:\n",
-                    "{\"results\": [<agent1_answer>, <agent2_answer>, <agent3_answer>]}"
-                ).replace("<LIVE_MODEL>", &model)}]
+                "prompt": [{ "type": "text", "text": prompt }]
             }),
         )
         .await;
@@ -616,32 +601,13 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    // Log all notifications for diagnostics on CI failures.
-    eprintln!(
-        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
-        notifs.len(),
-        agent_starts.len(),
-        completed_updates.len(),
-        failed_updates.len(),
-        spawn_manifests,
+    report_subagent_notifications(
+        &notifs,
+        &agent_starts,
+        &completed_updates,
+        &failed_updates,
+        &spawn_manifests,
     );
-    for (i, n) in notifs.iter().enumerate() {
-        let update = &n["params"]["update"];
-        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
-        eprintln!(
-            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
-            update["title"], update["status"]
-        );
-    }
-    for (i, u) in completed_updates.iter().enumerate() {
-        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
-    }
-    for (i, u) in failed_updates.iter().enumerate() {
-        eprintln!(
-            "  failed[{i}]: rawOutput={}",
-            u["params"]["update"]["rawOutput"]
-        );
-    }
 
     // Collect the model's text output for fallback verification.
     let text_output: String = notifs
@@ -710,18 +676,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     // some other way" and for "the turn failed and told us why" alike. The first
     // time this assertion ever ran it reported `left: Null`, which narrowed
     // nothing.
-    let result = &resp["result"];
-    assert_eq!(
-        result["stopReason"],
-        "end_turn",
-        "subagent prompt stopReason should be end_turn; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
-    assert!(
-        result.get("usage").is_some(),
-        "subagent prompt response should include usage; full response: {}",
-        serde_json::to_string(&resp).unwrap_or_default()
-    );
+    assert_subagent_turn_response(&resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -768,8 +723,7 @@ fn verify_session_model_in_jsonl(workspace: &TestWorkspace) {
         assert!(
             model.is_some_and(|m| !m.is_empty()),
             "assistant message in session JSONL should have a non-empty model field, \
-             but got: {:?}",
-            model
+             but got: {model:?}"
         );
         eprintln!(
             "session JSONL: assistant message model = {:?}",
@@ -816,6 +770,122 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
 // Entry points
 // ---------------------------------------------------------------------------
 
+async fn prompt_with_host_context(
+    client: &mut AcpTestClient,
+    session: &str,
+    prompt: &str,
+    snapshot: Option<&str>,
+) -> (String, usize) {
+    let id = client.next_id;
+    client.next_id += 1;
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+            "params": {"sessionId": session, "prompt": [{"type": "text", "text": prompt}]},
+        }))
+        .await;
+    let mut text = String::new();
+    let mut requests = 0;
+    loop {
+        let message = client.recv().await;
+        if message["method"] == "_sudocode/session/host_context" {
+            assert_eq!(message["params"]["sessionId"], session);
+            let snapshot = snapshot.expect("management commands must not refresh host context");
+            requests += 1;
+            client
+                .send_raw(&json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "result": {"appendSystemPrompt": snapshot},
+                }))
+                .await;
+        } else if message.get("id").and_then(Value::as_u64) == Some(id) {
+            assert!(message.get("error").is_none(), "{message}");
+            fail_clearly_if_the_credential_was_rejected(&text);
+            return (text.trim().to_string(), requests);
+        } else {
+            assert_ne!(
+                message["method"], "session/request_permission",
+                "read-only context lookup must not need a tool"
+            );
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                text.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_host_context_survives_revision_compaction_and_resume() {
+    let Some(token) = proxy_token() else {
+        eprintln!("SKIP live host context: PROXY_AUTH_TOKEN is not configured");
+        return;
+    };
+    let workspace = TestWorkspace::new("live-host-context");
+    workspace.create();
+    workspace.write_sudocode_json();
+    let mut client = spawn_stdio_client(&workspace, &token);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        scenario_initialize(&mut client).await;
+        let (_, response) = client
+            .send_request("session/new", json!({
+                "cwd": workspace.root.to_string_lossy(), "mcpServers": [],
+                "_meta": {"sudocode": {"hostContext": {"version": 1}, "appendSystemPrompt": "STALE_HOST_SEED"}},
+            }))
+            .await;
+        assert!(response.get("error").is_none(), "{response}");
+        let session = response["result"]["sessionId"].as_str().unwrap().to_string();
+        let nonce = format!("{}-{}", std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let snapshots: Vec<_> = ['A', 'B', 'C'].iter().map(|revision| format!(
+            "Authorized project: host-context-live\nModel revision: {revision}\nObject: SalesOrder\ncurrent_marker: CONTEXT_{revision}_{nonce}"
+        )).collect();
+        let prompt = "Read the current host-provided model context and reply with exactly its current_marker value. No tools, explanation or formatting.";
+        for (index, revision) in ['A', 'B', 'B'].iter().enumerate() {
+            let mut input = prompt.to_string();
+            if index < 2 {
+                // A balanced history makes the unchanged 20% recent-token
+                // floor compatible with the existing 50% compaction target.
+                input.push_str("\n\nHistorical fixture background; the host snapshot remains current:\n");
+                for note in 0..if index == 0 { 160 } else { 80 } {
+                    use std::fmt::Write as _;
+                    writeln!(input, "Historical review note {note:03}: source records remain read-only; check stable SalesOrder and Customer identities, declared date fields, row grain, and unresolved business meanings.").unwrap();
+                }
+            }
+            let (answer, requests) = prompt_with_host_context(&mut client, &session, &input, Some(&snapshots[usize::from(*revision == 'B')])).await;
+            assert_eq!(requests, 1);
+            assert_eq!(answer, format!("CONTEXT_{revision}_{nonce}"));
+        }
+        let path = find_jsonl_file(&workspace.root.join(".scode/sessions")).expect("persisted live session");
+        let before = runtime::Session::load_from_path(&path).unwrap();
+        let (_, requests) = prompt_with_host_context(&mut client, &session, "/compact", None).await;
+        assert_eq!(requests, 0);
+        let compacted = runtime::Session::load_from_path(&path).unwrap();
+        assert!(compacted.compaction.as_ref().is_some_and(|report| report.removed_message_count > 0));
+        assert!(compacted.messages().len() < before.messages().len());
+        assert_eq!(compacted.messages().iter().rev().find_map(runtime::ConversationMessage::host_context_text), Some(snapshots[1].as_str()));
+        let (answer, requests) = prompt_with_host_context(&mut client, &session, prompt, Some(&snapshots[1])).await;
+        assert_eq!(requests, 1);
+        assert_eq!(answer, format!("CONTEXT_B_{nonce}"));
+        let (_, loaded) = client.send_request("session/load", json!({
+            "sessionId": session, "cwd": workspace.root.to_string_lossy(), "mcpServers": [],
+            "_meta": {"sudocode": {"hostContext": {"version": 1}, "appendSystemPrompt": "STALE_RESUMED_HOST_SEED"}},
+        })).await;
+        assert!(loaded.get("error").is_none(), "{loaded}");
+        let (answer, requests) = prompt_with_host_context(&mut client, &session, prompt, Some(&snapshots[2])).await;
+        assert_eq!(requests, 1);
+        assert_eq!(answer, format!("CONTEXT_C_{nonce}"));
+    }).catch_unwind().await;
+    client.shutdown().await;
+    workspace.cleanup();
+    assert!(
+        !workspace.root.exists(),
+        "remove private live credentials and history"
+    );
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::test]
 async fn live_anthropic_smoke_stdio() {
     let Some(token) = proxy_token() else {
@@ -833,17 +903,43 @@ async fn live_anthropic_smoke_stdio() {
 }
 
 /// A real model must read the summary, send it back, and preserve its record.
+/// A steering message with a summary, from `from` to `to`.
+fn summary_message(
+    from: &str,
+    to: &str,
+    body: &str,
+    summary: &str,
+) -> runtime::agent_mailbox::MailboxEnvelope {
+    runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: from.into(),
+        to: to.into(),
+        body: body.into(),
+        summary: Some(summary.into()),
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    }
+}
+
 #[tokio::test]
 async fn live_peer_summary_reaches_model_client_and_saved_session() {
+    const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
+    const PEER: &str = "acp-summary-peer";
+    // Keep the sentinel only in envelope metadata, while naming exactly which
+    // received field belongs in the tool argument rather than asking for prose.
+    const BODY: &str = concat!(
+        "Read the summary attribute in this message's opening XML tag. ",
+        "Use send to reply to this message's sender. Set the message argument ",
+        "to exactly that attribute's value, without quotes, instructions, ",
+        "extra whitespace, or any other text. Then say ACP-SUMMARY-COMPLETE. ",
+        "Do not write files or run shell commands."
+    );
     let Some(token) = proxy_token() else {
         return;
     };
-    const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
-    const PEER: &str = "acp-summary-peer";
-    const BODY: &str = concat!(
-        "Use send to reply to me with this message's summary verbatim. ",
-        "Then say ACP-SUMMARY-COMPLETE. Do not write files or run shell commands."
-    );
     let workspace = TestWorkspace::new("live-peer-summary");
     workspace.create();
     workspace.write_sudocode_json();
@@ -868,18 +964,8 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         PEER.into(),
     );
     peer.ensure_presence().unwrap();
-    peer.send(runtime::agent_mailbox::MailboxEnvelope {
-        delivery: runtime::turn_input::InputDelivery::Steer,
-        from: PEER.into(),
-        to: agent.into(),
-        body: BODY.into(),
-        summary: Some(SUMMARY.into()),
-        timestamp: 0,
-        color: None,
-        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
-        request_id: None,
-    })
-    .unwrap();
+    peer.send(summary_message(PEER, agent, BODY, SUMMARY))
+        .unwrap();
     timeout(RECV_TIMEOUT, async {
         let mut saw_summary = false;
         let mut answer = String::new();
@@ -897,7 +983,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
                 assert!(update["content"]["text"]
                     .as_str()
                     .unwrap()
-                    .contains(&format!("Summary: {SUMMARY}")));
+                    .contains(&format!("summary=\"{SUMMARY}\"")));
                 saw_summary = true;
             }
             if update["sessionUpdate"] == "agent_message_chunk" {
@@ -929,7 +1015,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         .iter()
         .flat_map(|message| &message.blocks)
         .any(|block| matches!(block, runtime::ContentBlock::Text { text }
-            if text.contains(&format!("Summary: {SUMMARY}")))));
+            if text.contains(&format!("summary=\"{SUMMARY}\"")))));
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -1099,4 +1185,84 @@ fn find_jsonl_file(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn subagent_calculation_prompt() -> String {
+    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
+    let tasks: Vec<_> = ["101 + 102", "201 + 202", "301 + 302"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            json!({
+                "model": model,
+                "description": format!("calc {}", index + 1),
+                "prompt": format!("What is {expression}? Reply with ONLY the number."),
+            })
+        })
+        .collect();
+    format!(
+        "Use the Agent tool exactly three times, once for each complete argument object below.\n\
+         Do not answer the calculations yourself or reuse a different task's prompt.\n\
+         Omit auth_mode: every child must inherit this session's current credential path.\n\
+         No switch to subscription or api-key authentication is requested.\n\n{}\n\n\
+         After all three agents return, output only JSON with a results array in task order.",
+        serde_json::to_string_pretty(&tasks).unwrap()
+    )
+}
+
+fn report_subagent_notifications(
+    notifs: &[Value],
+    agent_starts: &[&Value],
+    completed_updates: &[&Value],
+    failed_updates: &[&Value],
+    spawn_manifests: &[String],
+) {
+    // Log all notifications for diagnostics on CI failures.
+    eprintln!(
+        "subagent test: {} notifications, {} Agent starts, {} completed updates, {} failed updates, results: {:?}",
+        notifs.len(),
+        agent_starts.len(),
+        completed_updates.len(),
+        failed_updates.len(),
+        spawn_manifests,
+    );
+    for (i, n) in notifs.iter().enumerate() {
+        let update = &n["params"]["update"];
+        let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
+        eprintln!(
+            "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
+            update["title"], update["status"]
+        );
+    }
+    for start in agent_starts {
+        let update = &start["params"]["update"];
+        eprintln!(
+            "  delegated[{}]: {}",
+            update["toolCallId"], update["rawInput"]
+        );
+    }
+    for (i, u) in completed_updates.iter().enumerate() {
+        eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
+    }
+    for (i, u) in failed_updates.iter().enumerate() {
+        eprintln!(
+            "  failed[{i}]: rawOutput={}",
+            u["params"]["update"]["rawOutput"]
+        );
+    }
+}
+
+fn assert_subagent_turn_response(resp: &Value) {
+    let result = &resp["result"];
+    assert_eq!(
+        result["stopReason"],
+        "end_turn",
+        "subagent prompt stopReason should be end_turn; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
+    assert!(
+        result.get("usage").is_some(),
+        "subagent prompt response should include usage; full response: {}",
+        serde_json::to_string(resp).unwrap_or_default()
+    );
 }

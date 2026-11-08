@@ -18,6 +18,66 @@ fn assert_diagram(screen: &str) {
     );
 }
 
+fn assert_diagram_palette(session: &pty_expect::PtySession, no_color: bool) {
+    common::expect_screen(
+        session,
+        |screen| {
+            screen
+                .find("Reply")
+                .zip(screen.rfind('┘'))
+                .is_some_and(|(label, border)| border > label)
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete diagram before inspecting colors",
+    );
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/codex_styles.json")).unwrap();
+    let variant = &reference["variants"]["dark-truecolor"];
+    let expected: Vec<_> = ["diagram_node", "diagram_edge"]
+        .iter()
+        .map(|role| {
+            if no_color {
+                "Default".to_string()
+            } else {
+                variant["styles"]
+                    [usize::try_from(variant["roles"][role].as_u64().unwrap()).unwrap()]["fg"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
+        })
+        .collect();
+    session.render(|screen| {
+        let raw = screen.raw();
+        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        let start = rows
+            .iter()
+            .rposition(|row| row.contains("DiagramBefore."))
+            .unwrap();
+        let end = rows.iter().rposition(|row| row.contains('┘')).unwrap();
+        let mut found = [false; 2];
+        for row in start..=end {
+            for column in 0..raw.size().1 {
+                let cell = raw.cell(u16::try_from(row).unwrap(), column).unwrap();
+                if cell.contents().chars().any(|ch| "─│┌┐└┘▼▲▶◀".contains(ch)) {
+                    let foreground = format!("{:?}", cell.fgcolor());
+                    for (index, expected) in expected.iter().enumerate() {
+                        found[index] |= foreground == *expected;
+                    }
+                    assert!(
+                        foreground == "Default" || expected.contains(&foreground),
+                        "diagram glyph uses a color outside the semantic theme: {foreground}"
+                    );
+                }
+            }
+        }
+        assert!(
+            found.into_iter().all(|found| found),
+            "diagram node/edge colors do not match Codex: {expected:?}"
+        );
+    });
+}
+
 fn assert_model_wire_and_original_source(env: &TestEnv, prompt: &str) {
     let requests = env.captured_message_bodies();
     let request: serde_json::Value = serde_json::from_str(&requests[0]).unwrap();
@@ -55,14 +115,18 @@ fn assert_model_wire_and_original_source(env: &TestEnv, prompt: &str) {
 
 #[test]
 fn mermaid_stream_and_replay_preserve_input_and_original_markdown() {
-    for mode in ["off", "queue"] {
+    for (mode, no_color) in [("off", true), ("queue", true), ("queue", false)] {
         eprintln!("Mermaid native fixture mode={mode}");
         let env = TestEnv::new_mock("mermaid-stream-replay");
         let prompt = common::terminal_host::prose_prompt(&env, DOCUMENT, serde_json::json!({}));
-        let mut session = env.spawn_with_env(
-            &["--permission-mode", "read-only"],
-            &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode), ("NO_COLOR", "1")],
-        );
+        let settings = [
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+            ("COLORFGBG", "15;0"),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ];
+        let mut session = env.spawn_with_env(&["--permission-mode", "read-only"], &settings);
         session.resize(60, 100).unwrap();
         common::expect_input_line_cleared(&session, Duration::from_secs(30), "initial prompt");
         let initial_status = common::turn_status_marker(&session);
@@ -92,6 +156,7 @@ fn mermaid_stream_and_replay_preserve_input_and_original_markdown() {
             "streamed Mermaid before EOF",
         );
         assert_diagram(&screen);
+        assert_diagram_palette(&session, no_color);
         if mode == "queue" {
             session.send("draftkeep").unwrap();
             common::expect_input_line(
@@ -123,6 +188,7 @@ fn mermaid_stream_and_replay_preserve_input_and_original_markdown() {
             common::DEFAULT_TIMEOUT,
             "draft after handoff",
         );
+        assert_diagram_palette(&session, no_color);
         session.send("\x15/exit").unwrap();
         common::expect_input_line(&session, "/exit", common::DEFAULT_TIMEOUT, "exit input");
         session.send("\r").unwrap();
@@ -131,7 +197,7 @@ fn mermaid_stream_and_replay_preserve_input_and_original_markdown() {
 
         let mut replay = env.spawn_with_env(
             &["--resume", "latest", "--permission-mode", "read-only"],
-            &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode), ("NO_COLOR", "1")],
+            &settings,
         );
         replay.resize(60, 100).unwrap();
         let screen = common::expect_screen_settled(
@@ -141,6 +207,7 @@ fn mermaid_stream_and_replay_preserve_input_and_original_markdown() {
             "replayed Mermaid",
         );
         assert_diagram(&screen);
+        assert_diagram_palette(&replay, no_color);
         common::expect_input_line_cleared(&replay, common::DEFAULT_TIMEOUT, "replay ready");
         replay.send("/exit").unwrap();
         common::expect_input_line(&replay, "/exit", common::DEFAULT_TIMEOUT, "replay exit");

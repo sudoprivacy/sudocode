@@ -409,7 +409,12 @@ fn memory_tab_completion() {
 
     // After Tab, the line should complete to `/memory`.
     // Then press Enter to execute.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/memory",
+        common::at_least(Duration::from_secs(10)),
+        "Tab should complete /mem to /memory",
+    );
     sess.send("\r").expect("send Enter");
 
     // `/memory` opens the resolved instruction file in $EDITOR (set to `true`,
@@ -428,10 +433,14 @@ fn memory_tab_completion() {
     }
 
     // Wait for prompt, then exit.
-    sess.expect("❯").expect("prompt after /memory");
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_secs(10)),
+        "prompt after /memory",
+    );
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should exit after tab test: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "tab completion test should exit 0; got {exit}");
@@ -489,11 +498,11 @@ fn memory_write_read_forget_workflow() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8")),
         ],
     );
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
 
     // Wait for the REPL prompt.
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("should see initial REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -515,7 +524,7 @@ fn memory_write_read_forget_workflow() {
 
     // Verify a .md file appeared in the memory directory.
     if count_md_files(&memory_dir) == 0 {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "expected memory files after 'remember' command\n\
              memory_dir: {}\n\
@@ -543,7 +552,11 @@ fn memory_write_read_forget_workflow() {
     if matched.to_lowercase().contains("select memory file") {
         sess.send("\r").expect("accept memory-file selection");
     }
-    sess.expect("❯").expect("prompt after /memory");
+    common::expect_input_line_cleared(
+        &sess,
+        common::at_least(Duration::from_mins(1)),
+        "prompt after /memory",
+    );
 
     // ── Step 3: Forget memory ────────────────────────────────────────
     let marker = common::turn_status_marker(&sess);
@@ -573,13 +586,13 @@ fn memory_write_read_forget_workflow() {
         !remaining.to_lowercase().contains("rust"),
         "forget must remove the entry, not just acknowledge the request; \
          still on disk:\n{remaining}\nPTY screen:\n{}",
-        sess.render(|s| s.contents())
+        sess.render(common::screen_contents)
     );
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("scode should exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "workflow should exit 0; got {exit}");
@@ -641,9 +654,9 @@ fn memory_dedup_does_not_create_duplicate() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
         ],
     );
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -742,9 +755,9 @@ fn memory_staleness_updates_existing_entry() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
         ],
     );
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -758,7 +771,7 @@ fn memory_staleness_updates_existing_entry() {
     if env.is_mock() {
         sess.expect("(?i)(edit_file|write_file)")
             .unwrap_or_else(|e| {
-                let screen = sess.render(|s| s.contents());
+                let screen = sess.render(common::screen_contents);
                 panic!("should see tool call for memory update: {e}\nPTY screen:\n{screen}");
             });
     }
@@ -800,7 +813,7 @@ fn memory_staleness_updates_existing_entry() {
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
@@ -886,7 +899,7 @@ fn memory_multi_type_single_session() {
     );
     sess.set_default_timeout(common::at_least(Duration::from_secs(90)));
     sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
@@ -948,13 +961,12 @@ fn memory_multi_type_single_session() {
     }
     assert!(
         types_seen.len() >= 2,
-        "should have at least 2 different memory types. Found: {:?}",
-        types_seen,
+        "should have at least 2 different memory types. Found: {types_seen:?}",
     );
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);

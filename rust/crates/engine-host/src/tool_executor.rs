@@ -67,6 +67,41 @@ pub struct CliToolExecutor {
 }
 
 impl CliToolExecutor {
+    fn check_external_tool_dispatch(
+        &self,
+        tool_name: &str,
+        value: &serde_json::Value,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<(), ToolError> {
+        if let Some(call) = &ctx.external_a2a {
+            call.validate_dispatch(
+                tool_name,
+                value,
+                self.external_a2a_binding().as_ref(),
+                ctx.tool_use_id.as_deref(),
+            )
+            .map_err(ToolError::new)?;
+            if self.tool_registry.has_runtime_tool(tool_name) {
+                return Err(ToolError::new(
+                    "external A2A cannot dispatch a shadowing MCP tool",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_allowed_tool(&self, name: &str) -> Result<(), ToolError> {
+        if self.allowed_tools.as_ref().is_some_and(|allowed| {
+            !allowed.contains(name) && !allowed.contains(&tools::canonicalize_tool_name(name))
+        }) {
+            return Err(ToolError::new(format!(
+                "tool `{name}` is not enabled by the current --allowedTools setting"
+            )));
+        }
+        Ok(())
+    }
+
+    #[must_use]
     pub fn new(
         allowed_tools: Option<AllowedToolSet>,
         tool_registry: GlobalToolRegistry,
@@ -308,17 +343,7 @@ impl ToolExecutor for CliToolExecutor {
         // act. Comparing only the canonical name is wrong too — the allow-list
         // parser stores the *spec* name, and not every spec has an alias. Either
         // spelling matching is what "this tool is allowed" means.
-        let gate = |name: &str| -> Result<(), ToolError> {
-            if self.allowed_tools.as_ref().is_some_and(|allowed| {
-                !allowed.contains(name) && !allowed.contains(&tools::canonicalize_tool_name(name))
-            }) {
-                return Err(ToolError::new(format!(
-                    "tool `{name}` is not enabled by the current --allowedTools setting"
-                )));
-            }
-            Ok(())
-        };
-        gate(tool_name)?;
+        self.check_allowed_tool(tool_name)?;
         let value = parse_tool_call_input(input)?;
 
         // Canonicalize ONCE; every intercept below matches the canonical name.
@@ -328,20 +353,7 @@ impl ToolExecutor for CliToolExecutor {
         // cross-machine message written to a local file instead.
         let tool_name = tools::canonicalize_tool_name(tool_name);
 
-        if let Some(call) = &ctx.external_a2a {
-            call.validate_dispatch(
-                &tool_name,
-                &value,
-                self.external_a2a_binding().as_ref(),
-                ctx.tool_use_id.as_deref(),
-            )
-            .map_err(ToolError::new)?;
-            if self.tool_registry.has_runtime_tool(&tool_name) {
-                return Err(ToolError::new(
-                    "external A2A cannot dispatch a shadowing MCP tool",
-                ));
-            }
-        }
+        self.check_external_tool_dispatch(&tool_name, &value, ctx)?;
 
         if tool_name == "AskUserQuestion"
             && self
@@ -475,128 +487,6 @@ impl ToolExecutor for CliToolExecutor {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliInput {
-    question: Option<String>,
-    options: Option<Vec<String>>,
-    title: Option<String>,
-    description: Option<String>,
-    #[serde(default)]
-    questions: Vec<AskUserQuestionCliField>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliField {
-    id: String,
-    // Accept `question` as an alias for `prompt`: the natural caller mistake
-    // (mirroring the tool's legacy top-level `question` field) otherwise fails
-    // the whole call with a cryptic "missing field `prompt`".
-    #[serde(alias = "question")]
-    prompt: String,
-    kind: Option<String>,
-    required: Option<bool>,
-    allow_custom_input: Option<bool>,
-    custom_input_hint: Option<String>,
-    #[serde(default)]
-    options: Vec<AskUserQuestionCliOption>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliOption {
-    label: String,
-    value: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    recommended: Option<bool>,
-}
-
-impl AskUserQuestionCliInput {
-    fn into_request(self) -> Result<QuestionPromptRequest, ToolError> {
-        let fields = if !self.questions.is_empty() {
-            self.questions
-                .into_iter()
-                .map(|field| {
-                    let options = field
-                        .options
-                        .into_iter()
-                        .map(|option| QuestionOption {
-                            label: option.label,
-                            value: option.value,
-                            description: option.description,
-                            recommended: option.recommended.unwrap_or(false),
-                        })
-                        .collect::<Vec<_>>();
-                    let kind = field
-                        .kind
-                        .as_deref()
-                        .and_then(QuestionKind::from_str)
-                        .unwrap_or_else(|| {
-                            if options.is_empty() {
-                                QuestionKind::Text
-                            } else {
-                                QuestionKind::SingleSelect
-                            }
-                        });
-                    QuestionField {
-                        id: field.id,
-                        prompt: field.prompt,
-                        kind,
-                        required: field.required.unwrap_or(true),
-                        allow_custom_input: field.allow_custom_input.unwrap_or(false),
-                        custom_input_hint: field.custom_input_hint,
-                        options,
-                    }
-                })
-                .collect::<Vec<_>>()
-        } else {
-            let prompt = self
-                .question
-                .map(|question| question.trim().to_string())
-                .filter(|question| !question.is_empty())
-                .ok_or_else(|| ToolError::new("question or questions is required"))?;
-            let options = self
-                .options
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|option| !option.trim().is_empty())
-                .map(|option| QuestionOption {
-                    label: option.clone(),
-                    value: option,
-                    description: None,
-                    recommended: false,
-                })
-                .collect::<Vec<_>>();
-            let kind = if options.is_empty() {
-                QuestionKind::Text
-            } else {
-                QuestionKind::SingleSelect
-            };
-            vec![QuestionField {
-                id: "q1".to_string(),
-                prompt,
-                kind,
-                required: true,
-                allow_custom_input: options.is_empty(),
-                custom_input_hint: None,
-                options,
-            }]
-        };
-
-        Ok(QuestionPromptRequest {
-            presentation: runtime::QuestionPresentation::Question,
-            title: self.title,
-            description: self
-                .description
-                .map(|text| runtime::PromptText::Markdown(text.into())),
-            fields,
-        })
-    }
-}
-
 impl CliToolExecutor {
     fn begin_question(
         &self,
@@ -617,40 +507,13 @@ impl CliToolExecutor {
         &self,
         value: serde_json::Value,
     ) -> Result<String, ToolError> {
-        let input: AskUserQuestionCliInput = serde_json::from_value(value)
-            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-
-        let request = input.into_request()?;
+        let request = tools::parse_question_request(value).map_err(ToolError::new)?;
 
         let answers = self
             .begin_question(&request)?
             .await
             .map_err(ToolError::new)?;
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "answered",
-            "title": request.title,
-            "description": request.description.as_ref().map(runtime::PromptText::as_str),
-            "questions": request.fields.iter().map(|field| serde_json::json!({
-              "id": field.id,
-              "prompt": field.prompt,
-              "kind": field.kind.as_str(),
-              "required": field.required,
-              "allowCustomInput": field.allow_custom_input,
-              "customInputHint": field.custom_input_hint,
-              "options": field.options.iter().map(|option| serde_json::json!({
-                "label": option.label,
-                "value": option.value,
-                "description": option.description,
-                "recommended": option.recommended,
-              })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-            "answers": answers.iter().map(|answer| serde_json::json!({
-              "id": answer.id,
-              "value": answer.value,
-              "label": answer.label,
-            })).collect::<Vec<_>>(),
-        }))
-        .map_err(|error| ToolError::new(error.to_string()))
+        tools::question_result(&request, &answers).map_err(ToolError::new)
     }
 
     /// Persist the complete document first, then approve the exact stored
@@ -680,47 +543,7 @@ impl CliToolExecutor {
         // QuestionAdapter turns this into a QuestionRequest the renderer answers
         // (the REPL / iocraft / ACP each draw the dialog + read the choice their
         // own way), so it works on Windows too (no raw stdin read_line here).
-        let request = QuestionPromptRequest {
-            presentation: runtime::QuestionPresentation::PlanReview {
-                plan_file: plan_file.clone(),
-            },
-            title: Some("Choose an action".to_string()),
-            description: Some(runtime::PromptText::Markdown(plan.clone().into())),
-            fields: vec![QuestionField {
-                id: "action".to_string(),
-                prompt: "Choose an action".to_string(),
-                kind: QuestionKind::SingleSelect,
-                required: true,
-                allow_custom_input: true,
-                custom_input_hint: Some("type a comment to revise the plan".to_string()),
-                options: vec![
-                    QuestionOption {
-                        label: "Clear context & execute plan".to_string(),
-                        value: "1".to_string(),
-                        description: None,
-                        recommended: true,
-                    },
-                    QuestionOption {
-                        label: "Keep context & execute".to_string(),
-                        value: "2".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                    QuestionOption {
-                        label: "Keep planning (provide feedback)".to_string(),
-                        value: "3".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                    QuestionOption {
-                        label: "Exit plan (don't execute)".to_string(),
-                        value: "4".to_string(),
-                        description: None,
-                        recommended: false,
-                    },
-                ],
-            }],
-        };
+        let request = plan_review_request(&plan, &plan_file);
 
         let answers = self
             .begin_question(&request)?
@@ -782,6 +605,50 @@ impl CliToolExecutor {
                 plan_review_output(&result)
             }
         }
+    }
+}
+
+fn plan_review_request(plan: &str, plan_file: &str) -> QuestionPromptRequest {
+    QuestionPromptRequest {
+        presentation: runtime::QuestionPresentation::PlanReview {
+            plan_file: plan_file.to_owned(),
+        },
+        title: Some("Choose an action".to_string()),
+        description: Some(runtime::PromptText::Markdown(plan.into())),
+        fields: vec![QuestionField {
+            id: "action".to_string(),
+            prompt: "Choose an action".to_string(),
+            kind: QuestionKind::SingleSelect,
+            required: true,
+            allow_custom_input: true,
+            custom_input_hint: Some("type a comment to revise the plan".to_string()),
+            options: vec![
+                QuestionOption {
+                    label: "Clear context & execute plan".to_string(),
+                    value: "1".to_string(),
+                    description: None,
+                    recommended: true,
+                },
+                QuestionOption {
+                    label: "Keep context & execute".to_string(),
+                    value: "2".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+                QuestionOption {
+                    label: "Keep planning (provide feedback)".to_string(),
+                    value: "3".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+                QuestionOption {
+                    label: "Exit plan (don't execute)".to_string(),
+                    value: "4".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+            ],
+        }],
     }
 }
 

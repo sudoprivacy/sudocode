@@ -209,10 +209,1287 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
 <h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
 
 <p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
-of the scode-native testable feature surface, green on every
-<code>main</code> commit of sudocode CI.</p>
+of the scode-native testable feature surface. Every PR must pass mandatory
+local acceptance and complementary native CI before landing; the merge queue
+verifies those exact PR heads and the combined Git history.</p>
+
+<h3>CI cadence and coverage (2026-10-29)</h3>
+
+<p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
+run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
+locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs
+Windows and macOS. Workspace, Clippy, terminal resize, release startup and shared
+service checks reuse the same command profiles on the local and hosted sides.
+All three operating systems remain covered; every CPU architecture is not a
+per-PR promise. Tagged co-host releases retain their five-platform builds.</p>
+
+<p><strong>Co-host build graph (2026-10-31).</strong> Pre-merge
+<code>native-cohost</code> uses the workspace dev profile with the deployed
+<code>daemon,driver-ai,egress-gate-presidio</code> features and runs the resulting
+binary to verify its exact source revision stamp. This avoids a separate
+optimized build graph per PR. Tagged releases still require five-platform
+optimized builds, version checks and platform size budgets before publication.
+This deliberately reduces pre-merge coverage: optimization-specific failures
+and footprint regressions are caught at release time. A real Git/Cargo/native
+canary checks the production dispatcher, required features, dev execution and
+refusal of a missing stamp; it adds no product journey coverage. Actual product
+builds qualify the migration on the author and complementary native hosts.
+Elapsed savings remain unmeasured until those builds finish.</p>
+
+<p><strong>Performance placement (2026-11-01).</strong> A full macOS acceptance
+measured 5.5 hours of command time; the statistical browser comparison (145 min)
+and rendering matrix (84 min) were 70% of it, and a dependency-only change
+selected both. Typing feel is judged by mandatory author-local rendering before
+push for CLI, engine-core, PTY helper/harness, rendering-driver and named native
+observer inputs: keypress-to-echo P95
+while reading history, waiting and streaming, plus first output, cancel, paste
+and resize, with RSS peak/after limits on short replies and CPU/peak memory on the
+12 KB Markdown stream. These two required scenarios replace four: task-specific
+foreground/background performance comparisons are removed, while their applicable
+functional PTY checks remain. Each scenario names the metrics it is judged on. The pre-merge
+<code>browser</code> profile is a functional smoke of clickable links, selection
+during streaming, viewport interaction and an idle terminal, selected by CLI
+and browser-harness inputs. Scheduled and manual runs do not replace this local
+gate. Cargo/dependency metadata and unrelated crate source omit the rendering
+comparison, reducing coverage of their indirect performance effects. This retires
+painted-browser latency, Chromium resource budgets
+and the viewport cost benchmarks. This supersedes the broader input scope
+and the browser and viewport comparisons of "Reduce repeated measurements
+(2026-10-31)" and "Consolidate mandatory rendering workloads (2026-11-01)",
+and the browser comparison of "Remove unjudged full warm-up workloads
+(2026-11-01)". Short keeps 5/7 pairs and heavy keeps 3/3: 36 judged observations
+without warm-ups. The original short-reply RSS checks remain judged.
+When rendering and browser run in one acceptance process, the browser reuses the
+immutable image and measured normal release, bound to candidate, protected
+policy, image context, output namespace and binary hash. All functional GUI and
+viewport steps still run. Browser-only invocations retain the dev build;
+paired runs check the release GUI instead of an additional dev-GUI variant.
+Paired browser drivers share rendering's leased release Cargo cache. Its mutable
+checkout is synchronized to the exact candidate before normal Cargo builds;
+changed driver/dependency inputs rebuild. No prior test outcome substitutes for
+the current interactions. Standalone browser drivers keep their dev profile and
+cache. This changes the paired test driver's optimization profile, with product
+configuration, steps and assertions unchanged. Both native harnesses verify
+the expected driver hash before execution.
+Invalid promotions fail before npm/Cargo/GUI, with no silent replacement build.
+Every independent build keeps its own invocation-owned image tag; old evidence
+directories cannot grant reuse. The report records expected/actual binary digests
+and whether a measured release was supplied.
+These measurement drivers back no Feature inventory row, so the coverage
+denominator is unchanged.</p>
+
+<p>A managed Git pre-push hook selects checks from changed inputs and blocks a
+push on failure. It publishes an SSH-signed Git note with the exact commit, tree,
+diff base, native host, command exit codes and local log hashes. Full logs stay
+local. GitHub verifies enrolled public keys and freshness before scheduling the
+missing platforms. Signatures authenticate an enrolled author's attestation;
+they do not remotely attest machine execution. Missing or stale evidence blocks
+the required <code>Local acceptance</code> check. Existing PRs use the protected
+runner without needing a cosmetic merge. A protected contract edit prints an
+executable <code>contract-update</code> command through the installed runner.
+An enrolled repository maintainer or authorized agent runs the exact candidate
+checks and publishes separate, exact-head authorization for the rule change.
+The read-only gate verifies current authority and both contract hashes; signed
+results and complementary native hosts remain required. This authorization is
+not a test pass and does not require the end user personally to inspect code.</p>
+
+<p>Full rendering A/A and A/B, painted browser and viewport performance checks
+run automatically in local Docker for changed CLI or engine-core sources,
+shared PTY helpers, measurement sources, or Rust build/dependency inputs.
+The existing fixed baseline, workload rounds, sample counts, normal release
+binary graph and budgets remain. A failed A/A calibration is inconclusive.
+There is no scheduled/manual cloud replacement. Ordinary test-only changes skip
+unchanged performance pairs; docs-only changes run preflight. Local compiler
+workers use one job at reduced priority, with Cargo and actual tests at Normal.</p>
+<p><strong>Keep active benchmark build state on Linux storage (2026-10-31).</strong>
+The reusable checkouts, npm trees, Cargo dependency cache and targets now use a
+Docker Linux volume, while command logs and measurement evidence remain on the
+host. The first invocation copies only the existing <code>cargo</code> and
+<code>leased-benchmarks-v1</code> directories under the original global lease.
+It preserves canonical <code>/state</code> paths, modes and timestamps; the old
+host cache remains read-only and is not deleted. The completion receipt is
+written only after copying succeeds. First-run migration counts toward local
+time; future runs reuse the volume. Workloads, samples and budgets are unchanged,
+and both changed Docker recipes require fresh evidence. Native recipes remain
+unchanged. Real Cargo checks artifact freshness and identity after migration,
+changed-source rebuilding, interrupted-copy recovery and invalid-root/receipt
+refusal. Real Docker launcher checks retain frozen Git/image inputs and private
+labelled-volume cleanup. A separate actual Windows-bind-to-Linux-volume trial
+verified a previously warm graph stayed warm, with identical binary bytes and
+mtime, then rebuilt changed source; this is infrastructure evidence, not a
+production end-to-end speed claim. Windows bind timestamps rounded Cargo dep-info
+to whole seconds in the initial fast fixture, making that legacy graph already
+stale before migration; no timestamps or assertions were changed to hide it.</p>
+<p><strong>Retain one measured normal release across performance profiles
+(2026-10-31).</strong> In the same acceptance process, browser reuses rendering's
+immutable image ID and saved candidate release when the candidate, protected
+policy and Docker context match. An in-memory entry authorizes reuse; prior
+output directories and mutable image tags cannot. Read-only staged inputs bind
+the source, policy, image and binary SHA256. Fresh processes or changed inputs
+build normally; corrupted retained files fail. Baselines, dev-feature drivers,
+GUI rounds and viewport observers remain. Real Cargo acceptance compiles another
+workline's source into the shared cache between profiles, then verifies that
+browser uses the original normal release without another normal candidate build.
+Actual Docker acceptance checks frozen images, the invocation boundary and five
+tampered release identities/bytes. Each build also retains an invocation-owned
+image tag, allocated by the same helper for contract and performance images.
+An actual same-context build is interleaved before the original browser launch
+to verify that another BuildKit index does not replace the retained reference.
+This removes duplicate compilation without
+reducing measurement coverage; production elapsed savings remain unmeasured.
+The host and container entrypoint now share the canonical
+<code>container/&lt;profile&gt;</code> output layout. Docker regression uses the
+real entrypoint, dispatcher and native child command before retaining the
+binary for browser reuse; its workload replaces product measurements. This
+fixes a host file lookup that could fail after all six real rendering scenarios
+passed. Previous failed records remain failed; raw output is not promoted into
+signed acceptance.
+Both Docker recipes require new evidence; native recipes stay unchanged.</p>
+<p><strong>Stop a failed rendering matrix after its first complete scenario
+(2026-10-31).</strong> Each scenario retains two warm-ups, all per-run
+interaction counts and budgets. A failed, noisy or invalid scenario
+stops later scenarios, preserving their unrun status and releasing the shared
+lease. Warm-ups and measurements now group by scenario; this changes scheduling,
+and future noise still needs observation. The required interface prints the active
+scenario and evidence path. The combined report retains original policy, binary
+and observer identities plus completed and remaining scenarios. Real native
+fixture processes exercise success, relative RSS failure, invalid drivers and
+changed observers through the unchanged paired evaluator. An offline replay of
+one complete real failed run preserved its verdict and metric rows: the first
+scenario accounted for 360.46 of 1,989.19 recorded driver seconds. That projects
+81.9% less sample work before this failure; it is not a measured new production
+latency result and excludes compilation and lease waiting. Passing-run cost is
+not reduced by that scheduling change.</p>
+<p><strong>Shared native cache paths and earlier lint (2026-10-31).</strong>
+The cache publisher and native consumers derive paths from one helper. Native
+sources remain in <code>candidate/rust</code>; compiled outputs use the publisher's
+<code>rust/target</code> path. Previously, Linux and macOS requested an existing
+main key but reported no cache because their path-derived cache versions differed.
+Cargo's target is bound after restore to preserve the publisher's environment
+hash. Required output prints the source and target. Real Cargo/native-process
+acceptance checks dependency reuse, candidate execution and conflicting-target
+refusal; hosted CI establishes actual remote restores and timings. These are
+executor checks, with no product journey credit. Lint now denies warnings before
+long builds/tests. Full workspace changes lint all targets with the native mailbox
+feature graph; targeted changes lint their targets. The queue additionally checks
+all features.</p>
+<p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
+scenarios remain. Short retains five A/A and seven alternating A/B pairs,
+preserving the full check that caught a real RSS regression. Long, cap, markdown,
+foreground and background use three A/A and three A/B pairs. With two warm-ups
+per scenario this is 96 native samples instead of 156. Browser comparison uses
+three A/A and three A/B pairs plus two warm-ups: 14 instead of 26 runs. Per-run
+interaction counts, workloads, budgets and the relative evaluator stay unchanged.
+Headless and painted viewport comparisons also inherit 3/3 rounds: each runs 14
+instead of 26 samples. The separate 60-sample painted interaction check remains.
+The repeated-turn stress scenario retains five A/A and seven A/B pairs.
+Across these repeated comparisons this removes 96 of 234 runs (41.0%);
+it does not imply a 41% reduction in total CI or local elapsed time.
+<strong>Coverage reduction:</strong> fewer repetitions reduce precision and the
+chance of exposing intermittent regressions or environmental noise. A preserved
+actual viewport A/A calibration refuses CPU noise with five pairs but not its
+first three; the original record remains noisy. Equivalent statistical sensitivity
+is not established. Required output prints pair counts; both changed recipes
+need fresh execution. Real native infrastructure canaries verify counts,
+alternating sides, regression refusals and minimum-round refusals without claiming
+product performance coverage. Actual production latency savings remain unmeasured.</p>
+<p><strong>Thin repeated typing observations (2026-11-06).</strong> Only the
+30-turn stress case uses 20 typed keys per input phase per turn, down from 60.
+All 24 paired processes, 720 conversation turns, 480 cancels, paste checks and
+resource measurements remain. Each repeated turn keeps one narrow/wide resize
+pair: 1,440 resize observations overall instead of 28,800. This leaves 600
+observations per input phase per process: 43,200 total instead of 129,600.
+The core short/heavy cases retain 60 keys per phase and 40 resizes per turn. Performance limits,
+relative comparisons, pairing and deadlines are unchanged.
+<strong>Coverage reduction:</strong> repeated typing density falls by two thirds
+and resize density by 95%; intermittent latency spikes and small resize-dependent
+memory leaks may be missed. Equivalent statistical sensitivity
+is not established. The required <code>RENDERING_SAMPLING</code> output reports
+the effective counts. Each process retains its resolved workload policy and
+SHA256 alongside the original parent policy; old policies retain 60 keys.
+The parent independently counts raw arrays using the evaluator's shared helper.
+Real process controls reject missing observations, tampered summaries and unsupported reductions.
+Fresh full product stress execution is required to measure elapsed savings;
+these inventory counts do not establish the overall 10% delivery target.</p>
+<p><strong>Isolate render measurements from throwaway-session disk flushes
+(2026-11-06).</strong> Rendering alone places temporary sessions in a private
+512 MiB container tmpfs. Reports, binaries and build caches retain their storage.
+The exact historical baseline's debugger stacks show response-archive
+<code>fsync</code> and write-lock contention during exit. A native alternating
+disk/tmpfs control keeps the binary, driver, workload, assertions and deadlines
+fixed: eight processes averaged 17.695 seconds on disk versus 12.527 on tmpfs
+(29.2% less); terminal restoration to exit averaged 3.737 versus 0.093 seconds.
+This is one local host's small control. Exit checks and all performance budgets remain unchanged.
+<strong>Coverage reduction:</strong> this rendering gate no longer measures
+slow persistent storage and does not qualify durability. Browser, native
+persistence, response gzip, compression and cache checks retain their storage.
+The mandatory command prints <code>RENDERING_FIXTURE_STORAGE</code>; a real
+Docker/native process verifies the temporary mount, capacity and durable report
+location. A small control's saving is not an end-to-end CI result.</p>
+<p><strong>Consolidate mandatory rendering workloads (2026-11-01).</strong>
+The required matrix adopts the 12 KiB Markdown workload proposed in
+<a href="https://github.com/sudoprivacy/sudocode/pull/1196">#1196</a>.
+It replaces independent 8 KiB prose, 12 KiB prose and short Markdown scenarios;
+short prose, foreground tools and background tools stay separate. The four
+scenarios run 68 samples instead of 96. Every affected PR still runs mandatory
+local rendering acceptance. All remaining metric judgements, interaction counts,
+baselines and budgets remain. This reduces workload coverage: regressions
+specific to the removed plain-text sizes or short Markdown can escape the
+combined case. The benchmark CLI validates and describes the plan before builds;
+the host refuses changed policy hashes and incomplete passing sample counts.
+Real native fixtures retain the original 156-process control and reject relative
+RSS regression, missing CPU metrics and missing samples. Fixture verdicts do not
+establish equivalent product coverage or production speedup. Browser and both
+viewport comparisons keep 14 runs each: 110 repeated runs in total, down from
+138 after the earlier round reduction and 234 originally. Changes limited to
+<code>benchmark.py</code>, <code>gui-benchmark.py</code> and their two measurement
+policy JSON files retain both statistical profiles and the native benchmark
+builder guard. Ordinary workspace/resize suites do not execute these explicit
+measurement inputs, so those native suites and their complementary CI hosts are
+omitted for this narrow set. Rust, shared terminal hosts, unknown inputs and mixed
+changes retain their applicable native checks. Real Git planner and PR/push/queue
+fixtures cover the boundary, deletions and renaming a shared host into this set.</p>
+<p><strong>Remove unjudged full warm-up workloads (2026-11-01).</strong>
+Rendering now runs 60 judged observations and browser comparison runs 12. This
+removes eight rendering and two browser runs that did not enter A/A or A/B
+statistics. The retained field spent 151.84 driver seconds on those ten runs;
+this is a recorded component cost, not a measured new lifecycle saving. Every
+sample starts fresh driver/Node/SUT and browser processes, so JIT state does not
+carry between samples. All judged pair counts, interactions, metrics and budgets
+remain. Colder file caches may affect the first calibration pair; unchanged A/A
+noise checks still refuse inconclusive fields. Exact stage/round/side inventories
+reject missing, extra and duplicate/mispaired observations. Headless and painted
+viewport comparisons retain 14 runs each, for 100 total instead of 110; all 96
+judged observations remain. Rendering needs fresh evidence. An exact protected
+pair preserves browser execution for an unchanged candidate head through the
+shared helper edit; candidate-owned browser code and the relative evaluator keep
+their existing ownership. Native recipes remain unchanged. Real Cargo/native
+regression retains all 144 judged calls of the former six-scenario control and
+its RSS refusal. Original historical reports remain preserved.</p>
+<p><strong>Retain completed checks across image reference ownership (2026-11-01).</strong>
+Exact protected recipe pairs preserve completed guard and browser evidence for
+the same candidate head after private Docker image tags replaced a shared alias.
+Passed assertions, browser observers and statistical budgets are unchanged.
+Browser pairs include the previously approved equivalent wrapper transitions.
+Rendering's changed warm-up conditions still require fresh execution. A live
+saved-profile diagnostic verifies real SSH signatures and original log hashes,
+resumes only the approved profiles, and refuses a different head, changed logs
+or signature, missing execution and an unapproved rendering profile. It never
+signs, publishes or relabels old results. These checks add no product journey
+coverage; lifecycle benefit depends on an author having compatible completed work.</p>
+<p><strong>Omit unused benchmark binaries (2026-11-01).</strong>
+Performance drivers use a binary-free Cargo package that references the same CLI
+test sources and launches the copied normal release through
+<code>SCODE_TEST_BIN</code>. Distinct opt-in target names avoid duplicating cases
+in normal workspace acceptance. Real Cargo/native-process fixtures inspect
+artifacts, keep an unused trusted CLI deliberately uncompilable, verify normal/dev
+feature separation and execute every observer stage. Older author snapshots use
+their original targets; a present but broken new package is refused. These
+infrastructure checks add no product journey coverage. Sampling, assertions,
+baselines and budgets remain unchanged; end-to-end savings need measurement.</p>
+<p><strong>Reduced statistical performance coverage (2026-10-30).</strong>
+Source-only changes in API, runtime, tools, ACP and services no longer select
+these two Docker profiles. Their selected native functional checks, including
+cache-prefix and compaction cases, remain. Indirect performance regressions in
+those crates can therefore escape this per-PR performance comparison. Known
+performance changes must include the corresponding measurement scenario.
+Direct CLI, engine-core, build/dependency and shared measurement inputs still
+select the unchanged workloads, samples, baselines and budgets. In 290 historical
+PRs with complete file lists, this removes both profiles from 64 of the 225 PRs
+previously selecting them: 128 fewer profile invocations, or 28.4% of selected
+PRs. This is a static scope comparison, not measured latency savings. Local
+waiting and validation count toward author time before CI can start.</p>
+<p>The primary latency clock starts with the first recorded local validation or
+acceptance operation and ends with the first local/hosted failure or merge.
+It includes local setup, compilation, benchmark-lock waiting, retries,
+publication and hosted queues. The mandatory interface emits
+<code>LOCAL_ACCEPTANCE_TIMING</code> and
+<code>LOCAL_ACCEPTANCE_OPERATION_TIMING</code>; attempt/operation JSON records
+retain successful and failed runs, while signed receipts/checkpoints carry the
+earliest recorded start through verified resumes. Join the earliest applicable
+start to the hosted outcome; overlapping intervals are not added together.
+Keep whole-PR and final-head observations. Older/manual local history may be
+unknown, and abrupt termination can leave an unfinished record; neither counts
+as zero elapsed time or a complete end-to-end sample. Historical hosted means
+remain reference thresholds because historical local timing was not collected.</p>
+<p>Every successful local profile preserves an SSH-signed checkpoint while the
+source is still clean and unchanged, before starting the next profile. Complete
+signed generations are immutable; an atomic <code>checkpoint.json</code> pointer
+advertises only a verified generation. This preserves earlier completed work
+even when a later profile exits without exception cleanup. The installed push path
+automatically reuses compatible same-head, same-base, same-host evidence and its
+original log hashes. Custom output runs print an executable resume command.
+Only unfinished or changed profiles rerun. Checkpoints have a separate signature
+purpose and cannot substitute for full acceptance, publish a successful GitHub
+status or authorize a push. Legacy <code>checkpoint/</code> records remain readable.
+An unfinished profile cannot be reused, and this does not claim host power-loss
+recovery. An unsigned abandoned generation cannot replace completed proof.
+The actual Git/SSH regression exercises a successful native process followed by
+a failed rendering process, partial-note rejection, damaged logs, automatic
+discovery and a complete successful resume. It additionally uses a real abrupt CLI
+exit, explicit/automatic recovery without repeating the completed process, a
+legacy checkpoint, an unsigned generation and an escaped-pointer refusal. The
+earliest recorded local time remains in the resumed receipt. This removes repeated validation
+without reducing product checks.</p>
+<p>Acceptance-contract changes run the complete Git/SSH decision matrix in a
+private local Docker container, with a pinned Rust/Python-capable image. The
+author OS and complementary native CI hosts retain the real checkpoint/failure/resume
+smoke and native nextest enforcement fixture; Windows also checks native color
+initialization. Full Windows/macOS negative-hook decision matrices are no
+longer repeated natively; that OS-specific infrastructure coverage is reduced.
+The full Linux matrix retains its cases, while product native checks and the
+complementary CI platforms remain unchanged. Guard image/entrypoint inputs bind
+the guard fingerprint without invalidating unrelated completed native profiles.
+The container takes no shared benchmark lease. Full Linux and author-native
+guards now overlap after the original protected staging and Docker/tool
+preflight, under the same exclusive host FIFO. Both full results and original
+command hashes remain required. Seven real native/Docker controls verify both
+failure directions, clean completion, interruption, owner/image refusal and
+empty container-ID recovery. Failed or interrupted work removes only its exact
+owned container and native descendants. An unchanged experimental full field
+took 501 seconds; an earlier serial author run took 907 seconds. These are
+different runs, not proof of a fixed or population delivery-time reduction.
+Product cases, guard assertions and Docker resource limits remain unchanged.
+Within the native guard, the original Git/SSH/HTTP controls overlap one serial
+compiler/test lane through the same supervisor. Five additional actual native
+process controls require clean success, both failure directions, original serial
+ordering, exited-process history and cleanup of both parents and children after
+interruption, with an unrelated sibling preserved. Identity polling avoids
+waiting on exited or reused PIDs; inaccessible live identities still refuse
+cleanup. Every
+original fixture, assertion and command log remains required. Same-source
+observations took 488 seconds serial and 344 seconds overlapping; this is one
+field, not a population delivery-time claim. Compiler concurrency stays unchanged.
+In a same-source probe, the full
+matrix took 586.65 seconds on Windows and 49.88 seconds in Linux Docker; these
+single trials concern infrastructure validation, not production PR latency.</p>
+<p>Changes limited to the independent Cargo benchmark, Docker input or Clippy
+executor fixtures skip the unchanged local enforcement matrix. CI preflight
+still requires each changed fixture. Shared executors, policy/signers, guard
+fixtures and unknown new fixtures retain the complete guard, including mixed
+changes and renames in either direction. The planner and mandatory command
+output explain the CI responsibility directly. Real Git/public-planner and
+CI-selector regressions verify these boundaries; product checks and selected
+fixture assertions are unchanged.</p>
+<p>The guard fixture handles Windows archive CRLF conversion by reconstructing
+only bytes that exactly match each original protected SHA256 pin. Its private
+Git fixture keeps those bytes unchanged. Production pin checks and author Git
+configuration stay unchanged; modified content is still rejected.</p>
+<p>Complementary hosted builds use the available compiler CPUs, applied after
+cache restore; local author builds retain one worker. Test concurrency,
+assertions, deadlines and production build profiles are unchanged.</p>
+<p>Windows SDK initialization no longer restores the launcher's inherited
+<code>NO_COLOR</code> after acceptance cleared it. Explicit fixture values remain
+honored. The native policy guard uses actual Cargo/SDK child processes for
+inherited, explicit and empty values, including cached initialization. An old
+executor fails the inherited-color case; the corrected executor passes all three.
+Product commands, assertions and budgets remain unchanged. Protected equivalence
+entries retain earlier successful exact-head evidence; the expanded policy guard
+requires a fresh run. This removes an environment-dependent local failure and
+adds no product feature-coverage credit.</p>
+<p>Native release acceptance uses a standalone test-profile driver from the
+original stream/capture source, without compiling an unused debug CLI.
+<code>SCODE_TEST_BIN</code> selects an immutable copy of the normal release
+<code>scode</code>; the stream/resume assertions and 40-sample, 100 ms startup
+budget remain. The driver and its in-process fixture helpers run in the test
+profile, while the tested product process keeps the normal release graph.
+A real Cargo/native-process regression checks warm driver reuse, exact release
+artifact identity and rejection of a debug executable substituted for it.
+This removes a duplicate compilation graph; it does not claim a measured
+end-to-end percentage improvement.</p>
+<p><strong>Share the native service build graph (2026-11-02).</strong> Native
+service acceptance verifies/builds the existing workspace dev/mailbox test graph
+with <code>--no-run</code>, then runs both original service harnesses against its
+debug <code>scode</code>. Cargo still checks current source; no driver cases run
+twice. This removes the switch back to a separate normal dependency graph.
+The standalone default-feature debug graph is no longer covered by these service
+journeys; selected normal release acceptance retains its product graph. Service
+cases, RPCs, assertions, deadlines and cleanup remain. The mandatory command
+prints the scope change. Real Cargo/native-process guards check warm reuse,
+standalone construction and refusal of stale artifacts after a source error;
+they add no product e2e coverage credit. On one unchanged Windows source tree,
+the baseline spent 163.5 of 307.0 seconds compiling the separate graph; the
+revised run spent 16.9 of 159.8 seconds verifying/building the available workspace
+graph. Both original service suites passed. This warm reuse observation is not
+a controlled cold-build comparison or a whole-PR saving.</p>
+<p><strong>Gate optimized artifacts before publication (2026-11-06).</strong>
+Each newly built artifact must pass its native release gate before packaging:
+Linux x64 musl and ARM64, both Mac architectures, and both Windows architectures.
+The gate verifies actual Git revision, native architecture and SHA256, then runs
+the original stream/resume journey, 40-sample 100 ms startup budget and connected
+compiler-context journey against those exact bytes. A standalone driver avoids
+building an unused debug CLI; the optimized artifact is not rebuilt.
+Failure, stale source or changed bytes blocks packaging and publication.
+Evidence artifacts stay outside the packaged assets. Existing-asset publication
+resumes keep their original validation and create no new executable.
+Ordinary product changes retain native functional/resize/service checks and
+selected Linux release rendering. <code>native-context</code> reuses the current
+workspace dev/mailbox binary for the compiler-context journey; optimized
+acceptance harness edits still select <code>native-release</code> locally.
+<strong>Coverage reduction:</strong> native optimization-specific failures and
+startup regressions can surface at release instead of before merge.
+Required <code>RELEASE_ACCEPTANCE_SCOPE</code> and <code>NATIVE_CONTEXT_SCOPE</code>
+output explain this boundary. Real committed
+Git plans exercise ordinary, retained, mixed, renamed and deleted inputs; the
+selected release executor retains actual Cargo/native artifact identity checks.
+Two earlier Windows receipts spent 406.49 and 409.98 seconds in this profile;
+those are historical costs, not controlled savings for a new PR.</p>
+
+<p><strong>Complete the native terminal handshake (2026-11-07).</strong>
+The pinned shared PTY reader now answers primary device attributes (DA1), as
+well as cursor position, once per query in wire order. This removes ConPTY's
+three-second startup wait without changing product journeys, existing test
+deadlines, worker counts or process cleanup. Shared-library CI covers all query
+split points and batched replies through real Unix PTYs, plus four fresh
+Windows native processes. A scode Windows version journey independently
+requires readiness within two seconds and verifies that no model request was
+sent. These infrastructure checks add no product feature-coverage credit.
+In a private same-executable wire control, startup changed from 3,029/3,031 ms
+without a DA1 reply to 28/26 ms with it. Three original UI journeys, repeated
+three times per dependency against the same frozen scode and native runtime,
+took 38.546 seconds with the old pin and 11.163 seconds with the corrected pin
+(71.04% less case time). Reversing only the pin on current source restored the
+delay; all eighteen case executions passed. These are local measurements;
+whole-suite and end-to-end delivery savings require separate evidence.</p>
+
+<p><strong>Compile shared native fixtures once (2026-11-07).</strong>
+<code>scode-test-support</code> owns the existing PTY workspace, mock/live
+backend, terminal and shell helpers. Thin inline caller adapters retain lazy
+<code>SCODE_TEST_BIN</code>/<code>CARGO_BIN_EXE_scode</code> selection, including
+the standalone benchmark's refusal to guess an executable. Original individual
+and grouped test targets, cases, assertions, timeouts and process isolation
+remain unchanged. The extracted path selects the same resize, rendering and
+browser acceptance as the former common module. A new real native PTY journey
+checks lazy caller resolution, independent mock workspaces and peer isolation;
+it adds no product feature-coverage credit. In one Windows helper-edit rebuild
+comparison, the identical 102-target Cargo command rebuilt 27 test drivers in
+127.249 seconds before extraction and 86.310 seconds afterward (32.17% less).
+Both variants passed the same two original groups, 218 cases each, with their
+five existing ignored cases retained. Live-only early returns earn no provider
+coverage. These are local compiler measurements, excluding lease waits; original
+waits, setup, failed diagnostics and source acceptance remain part of delivery
+time. They do not establish whole-suite or end-to-end delivery savings.
+The Windows artifact infrastructure fixture keeps its private Cargo outputs
+short while retaining the requested evidence directory. Its mandatory native
+guard exercises deeply nested evidence; all original artifact identity and
+refusal controls remain required. An actual 263-character linker output failed
+before this correction; a deeper 265-character legacy layout passed the complete
+fixture using the independent short build directory.</p>
+
+<p>When both a fresh contract guard and native workspace are required, the
+original formatting, metadata and strict lint prefix runs before the contract
+matrix under the existing host FIFO. Its passing command records and original
+logs are verified and consumed once by the later workspace; every remaining
+test and the complete guard remain required. Preparation binds the clean HEAD,
+base, executor, output and Cargo target, and never signs a completed workspace.
+Real native Cargo/Clippy controls reject warnings, changed source/target/executor
+and altered logs. Real Git/SSH/child-process controls check early refusal,
+partial recovery, three separate FIFO acquisitions and complete signed resume.
+These are infrastructure enforcement checks, adding no product journey coverage.
+One earlier actual failure spent 622.597 seconds in contract commands before
+Clippy reported a naming error. This change removes that preceding work from
+the lint-failure path; it does not establish a measured population or whole-PR
+speedup. Successful end-to-end validation and all failed/retried attempts still
+count toward the delivery clock. Clippy workers join rustc/linkers at reduced
+priority while Cargo and actual test processes remain at Normal.</p>
+
+<p>Contract hashing now reads the committed tree once and batches immutable Git
+blobs through the same byte parser used by dependency-scope inspection. It
+preserves the original canonical hashes and never caches mutable refs. A real
+three-revision Windows comparison returned identical hashes, reducing one
+15-file contract read from about 0.9 seconds to 0.11 seconds (16 Git processes
+to two). This is a small repeated metadata cost, not a measured whole-PR or
+population improvement. Required Docker and native guards compare the original
+hash reference using binary/empty/duplicate blobs, Unicode paths, committed
+link text, changed refs and export-ignore attributes; missing files, objects,
+refs and unsupported Git entries still refuse acceptance. All signature,
+coverage, budget and command requirements remain in force.</p>
+
+<p>Frozen-source <code>start-pr</code> can start complementary native CI while
+the author runs every mandatory local check. A separate SSH purpose signs the
+execution plan, which cannot satisfy full acceptance or a completed-profile
+checkpoint. The required Actions-owned <code>Local acceptance</code> status
+stays pending without the complete author signature. Main-only finalization
+binds its publication to the source SHA and reuses the original native jobs;
+the merge queue still verifies complete evidence. Normal pre-push output
+reports the executable entry. Ordinary pushes remain serial, and acceptance
+rule changes retain the full contract-update route.</p>
+<p>Required Docker and native protocol controls use actual private Git remotes,
+push hooks, SSH, HTTP metadata and child processes to cover both completion
+orders, pending-to-success, retries, signature/purpose/scope refusals, source
+and publisher binding, and a real later failed process superseding old success.
+The HTTP service models GitHub, and all actual fixture children use one host;
+these controls add no cross-platform product journey coverage. A six-PR
+observation found complementary native jobs ran after author completion for
+12–29 minutes (mean about 21). This is an opportunity bound, not a measured
+parallel delivery gain or proof of the overall 10% target. Original author,
+cross-platform and queue coverage, counts and budgets remain required.</p>
+
+<p>API, runtime and tools retain their original integration targets and use
+opt-in wrappers for canonical nextest acceptance. Fixed-name self-spawning,
+cache/compaction and model-limit process-global checks remain independent.
+The same Windows component cases passed before and after: 332 passed and 40
+ignored, with identical case identities, ignored flags and dependency features.
+Forced test-driver rebuilds in an original/grouped/original sequence took
+132.0/57.0/116.5 seconds. Grouping reduces these
+drivers from 56 to 21; this is a warm one-host compilation observation, not
+cold dependency, other-platform, whole-PR or population timing proof. Canonical
+author and complementary native CI still run the complete selected workspace;
+no product case, performance budget, retry limit or deadline is removed.</p>
+
+<p>Queue scope reuses the committed manifest proof for newly added, disabled
+integration grouping sources. Such files skip unchanged daemon/A2A/cohost
+journeys while all native cases, examples, all-feature Clippy and provider/live
+scope remain. Ordinary/existing tests, mixed source/build changes and invalid
+or indirect grouping inputs retain the daemon gates. Required preflight JSON
+prints the exact excluded source paths. Real Git PR/push/merge-group events,
+Cargo native-product hash/freshness, nextest inventories and native processes
+are checked by the required Linux Docker and author-native contract guards.
+The preceding grouping-only PR spent about 14 minutes in its daemon queue job;
+this is one observed avoidable job, not a measured population saving or proof
+of the end-to-end 10% target.</p>
+
+<p>Signed parallel execution plans survive unrelated protected metadata
+updates only after their original signature/contract and trusted ancestry,
+unchanged source contract, current author/native responsibilities, every
+selected command, native workflow and dispatcher are verified. Required output
+explains reuse. Real Git/SSH/HTTP/native controls cover both completion orders,
+unchanged notes/logs, retained native jobs and refusal of changed assertions,
+executors, images, workflows, dispatchers, profiles, signatures and signers.
+Plans remain scheduling evidence; full author and native acceptance still gate
+merge. This prevents rule maintenance from needlessly restarting unchanged
+work; no population timing reduction has been established.</p>
+
+<p>A real post-merge GitHub smoke ran two PTY cases on each of Windows, Linux
+and macOS: six passed, zero skipped. Both complementary native command steps
+overlapped the author checks, each ran once, and protected-main publication
+passed source binding. Local controller start to Actions acceptance success
+took 337 seconds. The temporary PR was closed without merging. This small
+smoke has no matched serial or cold-cache control and establishes no population
+speedup or achievement of the 10% target.</p>
+
+<p>Two actual blocked PRs exposed a receipt migration cost: adding Clippy to
+reduced-priority compiler workers invalidated ten otherwise identical profile
+recipes. Explicit protected old/new hash pairs retain those original signed
+results; the changed workspace and contract guard profiles still need current
+validation. Executor code and selected profile AST/image identity are checked
+before approving the exact pairs. Real private Git pushes and SSH notes cover
+modern and historical receipt formats without rerunning the original process;
+a subsequent executor change remains refused. This reduces repeated acceptance,
+adds no product coverage and claims no population timing improvement.</p>
+
+<p>Complementary Linux CI exposed an existing terminal-completion race:
+the durable journal could publish a completion before the background registry
+recorded the observed process exit. The monitor now updates the terminal status
+before publishing, while retaining ownership of journal persistence retries.
+A real native-child regression reads the task count synchronously at the
+publication boundary; the original code reports one running terminal and the
+corrected code reports none. The existing ACP exit-code, immediate status,
+ACK retry, cold replay and purge journey retains its assertions and deadlines.
+This adds no paid-provider or PTY feature-coverage credit.</p>
+
+<p>The merge queue checks each PR head's signed receipt and successful
+cross-platform workflow, plus the integrated Git history. It does not rerun the
+native suites on the integrated merge-group tree: runtime interactions found
+only in a combination of otherwise passing PRs are outside this pre-merge
+runtime coverage. For one ready Windows/Mac PR, one queue group and one main
+push, cloud workspace executions drop from the original eight to two (four to
+two after the first cleanup), plus one local native execution. This is an
+execution-count reduction, not a measured percentage of runner minutes.</p>
+
+<p>Cache-prefix, compaction, paste, subagent, tool-pause, colors/layout, plan,
+model precedence and stderr cases remain in the workspace. Standalone Mermaid
+tests and benchmark type checking remain explicit. Dev/test symbols are omitted
+while debug assertions and normal release settings remain. Real provider/API
+assertions remain explicit local/manual acceptance and mock results earn no live-model coverage
+credit. Rust caches retain the 10 GB quota and three shared main publishers;
+sustained hits and net build-time savings still require hosted observation.
+Queue cleanup cancels only removed refs whose heads are absent from the queue.</p>
+
+<p>Native, SDK and installer test matrices stop peer work after the first failure.
+Strict all-feature Clippy runs once on the three-platform merge queue;
+the duplicate Linux PR job is removed (2026-11-02). Native per-host lint remains.
+All-feature-only findings can arrive later in the queue; the final lint
+requirement is unchanged. Main pushes no longer allocate another Rust CI
+preflight after the same tree passed the queue. Independent cache/package
+publishers and legacy development-branch push checks retain their own triggers.</p>
+<p>
+Strict all-feature Clippy also stops scheduling extra crates after
+its first error, allowing matrix cancellation sooner; already running compilers
+can finish. All three queue platforms and <code>-D warnings</code> remain.
+A real Cargo/Clippy fixture with three independent feature-gated warning failures
+compares continuing compilation with the current CI command, then verifies all
+three clean packages, test targets and enabled features. Actual compiler
+priorities are retained. This infrastructure check runs once on changed lint
+workflow/fixture/selector inputs, with no repeat on queue/main. This saves work
+after a failure without reducing passing-run product or lint coverage; its small
+fixture timings are not a production PR latency claim.</p>
+<p><strong>Stop independent Rust CI peers after a known failure
+(2026-11-01; extended 2026-11-08).</strong> Queue Clippy, CLI daemon and cohost failures independently invoke one
+shared cancellation job. It stops only its own workflow run, preserves the
+original failed step and prints inspection and repair commands. The Actions
+write token stays in a job without a candidate checkout. Successful runs skip
+all three callers and allocate no cancellation runner. A real GitHub fixture tests
+all three failure directions and a clean run; its controlled timings do not establish
+production lifecycle savings. Passing-run coverage, budgets and assertions stay
+unchanged.</p>
+<p><strong>Run independent daemon paths together (2026-11-08).</strong>
+CLI A2A and cohost each start and clean their own nodes, so their original
+journeys run on independent Ubuntu jobs after the same pin preflight. Every
+selected job must succeed and every unselected job must be skipped. The real
+GitHub comparison retained identical source, shell commands, features, fault
+cases, budgets and full cache hits: 825 seconds sequentially versus 506 seconds
+in parallel (38.7% less elapsed time); total runner time was 825 versus 837
+seconds (1.5% more). This is one daemon-phase observation, with no population
+or whole author-to-merge saving established. Native Bash and real hosted failure
+controls protect the independent results, all three cancellation directions
+and the no-cancellation success path.</p>
+<p><strong>Prepare selected Windows terminal inputs before compilation
+(2026-11-02).</strong> The author hook and complementary CI install the
+checksum-pinned terminal host before long native builds when resize acceptance
+is selected. Failed installation stops early; its actual command/log is reused
+in the resize receipt. Every selected real terminal test still runs. The input
+scope described below determines artificial installer fault checks. Real Git/hook and native-launcher negative controls refuse failed
+preparation before profile execution. This adds no product coverage and changes
+neither assertions nor deadlines.</p>
+<p><strong>Reuse native resize inputs (2026-11-02).</strong> Ignored terminal
+drivers use the workspace dev/mailbox graph and Cargo's current-source checks.
+Their separate standalone default-feature debug graph is no longer covered.
+Rust-only changes, optionally with known README/contribution/roadmap or Markdown
+documentation paths, skip unchanged artificial installer HTTP/cache corruption
+checks. Changed installer/helper/executor or unknown non-Rust inputs, mixed
+changes, renames/deletions of those inputs and unresolved Git scope retain the
+fault checks. Actual checksum-pinned setup and all selected real terminal cases
+remain. Negative installer paths therefore have less coverage on ordinary source
+PRs. Mandatory output and <code>installer-scope.json</code> record the decision.
+A Windows baseline took 109.1 seconds; an ordinary-scope prototype took 88.6
+seconds with the same seven real ConPTY cases. The former included 19.9 seconds
+of artificial installer faults; compilation reuse needs separate evidence, and
+these observations do not prove whole-PR savings. Real Git/Cargo/native-process
+guards verify inherited Git isolation, ordinary/unknown/renamed/unresolved input
+scope, warm artifacts and ignored-only target selection. Their controlled
+dependency-acquisition boundaries add no product journey credit.</p>
+<p><strong>Preserve package selection with the feature graph (2026-11-02).</strong>
+Resize, service and release-driver tests use one package selector: full native
+acceptance keeps <code>--workspace</code>, while isolated CLI-test acceptance
+keeps <code>-p rusty-sudocode-cli</code>. Matching the mailbox flag alone was
+insufficient: a real trial still rebuilt CLI artifacts because other workspace
+members enabled additional dependency features. The original failed reuse
+assertion is retained. <code>NATIVE_CLI_TEST_GRAPH</code> reports the selection;
+real Git/Cargo/native guards model an extra workspace member and verify both
+full and isolated modes. Normal release product builds keep their original
+graph. This changes dependency-graph reuse, without adding product journey
+credit or reducing any selected terminal case or performance budget.</p>
+<p><strong>Drain PTY teardown without waiting for its own master (2026-11-02).</strong>
+The pinned <code>pty-expect</code> revision closes the master after terminating
+and reaping the child, then joins the independent reader. Previously an active
+Windows ConPTY exhausted its 500 ms reaper budget while retaining the handle
+that kept its output open. Five real Windows samples fell from 506–510 ms to
+10.5–11.0 ms. The existing cleanup budget and child ownership rules remain.
+The upstream three-platform native suite, final-output integrity, child reaping
+and macOS fresh-controller regressions passed. A new Windows regression rejects
+waiting out the reaper budget on every sample. It protects the test harness;
+it adds no product journey credit and does not establish a whole-suite speedup.</p>
+<p>
+The protected publisher verifies completed jobs directly; the redundant hosted
+summary job is removed. Scheduling-only edits reuse signed local results when
+the same executor/profile/image ran every currently required check. New source
+commits or command changes require acceptance. Main provider and queue daemon
+journeys skip unchanged inputs on docs/CI-only edits; no unique test case or
+performance budget is removed by this deduplication.</p>
+<p>CLI integration-test-only edits keep native PTY and existing provider
+acceptance while skipping the unchanged daemon queue suite. CLI manifests,
+production source, daemon/service harnesses and moves into production still
+select the daemon guard; no daemon journey is removed.</p>
+<p>Standalone CLI integration-test-only edits run the changed Cargo test targets
+with the existing mailbox feature, while reusing unchanged workspace quality
+checks. Root README and Markdown docs may accompany this narrow case. Shared
+helpers/fixtures/specs, target deletion, source, manifests and cross-boundary
+moves retain the full workspace. Other selected native and local measurement
+profiles remain; no test target is deleted.</p>
+<p>Shared PTY helper inputs retain native terminal resize acceptance at both
+the CLI <code>tests/common</code> path and the shared test-crate path. This
+preserves the native guard when reducing repeated helper compilation.</p>
+<p><strong>Keep native test scope on the PR branch (2026-11-01).</strong>
+The selector compares the common ancestor with the candidate HEAD. A newer main
+revision supplied by complementary CI cannot add reverse differences from
+unrelated main commits to an isolated test PR. In the observed #1205 Windows run,
+a one-test-file PR was expanded by 12 main-only paths into 2,512 cases and
+1,026.641 seconds of workspace acceptance despite a complete dependency-cache
+hit. Real divergent Git branches now drive the selected Cargo test and a full
+nextest control, checking actual native process markers. Actual branch source,
+shared helpers, unknown inputs, deletion, renaming into production and coincident
+main/branch source edits retain full scope. Test assertions, ignored cases,
+complement platforms and budgets remain unchanged. These executor fixtures add
+no product journey coverage; cloud savings require a subsequent real run.</p>
+<p>Deterministic workspace cases use checksum-pinned nextest, preserving test
+targets and ignored markers. The initial rollout used four global workers.
+It stops scheduling after
+the first failure, lets running cases clean up, disables retries and refuses an
+empty selection. Cargo retains doctests; live-provider commands remain unchanged.
+A Windows comparison matched all 2,574 declared cases across 230 binaries,
+including 70 ignored cases. The same 2,504 executed cases passed: Cargo took
+892.09 seconds, nextest took 456.33 seconds, and a four-CPU nextest run took
+490.18 seconds. These single local trials measure execution, not cloud PR
+latency. Earlier eight/sixteen-worker stress runs on four logical CPUs failed
+existing UI/resume checks; small hosts retain four workers. No assertion deadline or unique case is
+removed to obtain these results.</p>
+<p><strong>Reduce repeated native test linking (2026-10-31).</strong> The native
+workspace opts into eight declarative integration wrappers for 128 CLI targets,
+selecting 91 instead of 211 integration targets. The selector contract was
+qualified before this Rust activation so installed verifiers agree on required
+checks. Original per-file Cargo commands remain available and newly added ungrouped targets are selected
+automatically. Self-spawning cases and named release, performance and terminal
+drivers stay standalone. Every case still runs in its own nextest process, with
+the configured worker limit, no retries and the same fail-fast cleanup. The prototype's real
+Windows run passed all 2,505 active cases with 70 ignored markers; doctests and
+Clippy also passed. Publication then stopped because the old installed selector
+required seven profiles while the new selector required three. The separately
+merged contract prerequisite resolved that bootstrap mismatch without authorizing
+missing product checks. Activation requires fresh exact-head author and
+complementary native acceptance; the prototype alone is not a cross-platform
+claim. The first
+grouped compilation/list command took 322.78 seconds. Its earlier reference used
+another helper graph and cache state, so this is not a controlled latency saving.</p>
+<p>Selection reads real Cargo metadata and accepts only canonical wrapper path
+modules. Duplicate, missing, redirected, unregistered or feature-hidden members
+fail. Original modules keep their own helper namespaces; only the intentional
+<code>clippy::duplicate_mod</code> diagnostic is allowed in these wrappers.
+Other lint rules and product assertions remain required. Real Git/Cargo/nextest
+regression compares exact case/ignore inventories, checks independent native
+process state, executes original developer and named driver commands, rejects
+invalid wrappers, and verifies a Cargo-fresh, byte-identical normal product.
+This infrastructure fixture adds no product feature coverage.</p>
+<p><strong>Retire legacy workspace unit execution (2026-11-02).</strong>
+Grouped native runtime acceptance explicitly selects every integration/PTY target.
+Older ungrouped sources retain Cargo's original complete default suite, including
+legacy units and disabled/feature-gated target exclusions; a failing manual
+target protects this compatibility path. Grouped acceptance stops executing
+library/binary unit harnesses, matching the test-layer policy. An audited Windows
+run had 1,423 unit and 1,089 integration cases: 56.6% of case count is retired,
+but those unit cases contributed only 73 summed worker seconds. Compilation
+savings and whole-PR latency still require measurement. Legacy unit assertions
+cease to be runtime regression gates; every integration/PTY case and ignore
+marker, queue all-feature Clippy, vendored Mermaid checks and workspace
+doctests remain. Real native controls poison library and binary units, observe
+the old selection fail and the production dispatcher pass every integration
+case. This adds no e2e coverage credit.</p>
+<p><strong>Bound grouped workspace concurrency (2026-11-02).</strong> Complete
+grouped native suites retain eight processes on hosts with at least eight CPUs.
+Qualified hosted resume-test source also enables eight from four CPUs, or three
+on macOS after its matched full-suite comparison; old or
+unknown source keeps four. Smaller/unknown
+hosts, older ungrouped workspaces, isolated
+targets and other profiles retain four. An explicit
+<code>SCODE_ACCEPTANCE_TEST_THREADS=1..4</code> lowers the pool. Local compilation
+still uses one worker and compiler-only BelowNormal priority; tests stay Normal.
+Author workspace execution and current-host plan previews print
+<code>LOCAL_ACCEPTANCE_CONCURRENCY</code> before the work starts. It separates the
+current invocation's one-job compiler policy from its requested test-worker cap.
+For an explicit cap of one, the output gives the shell command to restore the
+protected pool default; the cap is honored. Historical signature verification
+omits current-environment diagnostics. The declared plan, selected cases and
+execution settings remain unchanged.
+A matched Windows run on 20 logical CPUs reused identical native binaries and
+case identities: all 1,089 integration cases passed with 69 ignored markers,
+424.5 seconds at four workers and 244.7 seconds at eight, 42.4% less test execution
+time. Actual ConPTY echo P95 was 0.58/0.74 ms. This warm single-host trial excludes
+compilation and proves neither cross-hardware nor whole-PR savings. A prior run
+with one leaked ACP child was refused; the test now awaits its existing shutdown
+helper. Real native process guards observe overlap and explicit four-worker
+limits. Cases, assertions, retries, deadlines and budgets remain unchanged;
+the guards add no e2e coverage credit.</p>
+<p><strong>Bound Docker readiness (2026-11-05).</strong> Before contract
+validation starts its container/native checks, the real Docker Engine version
+request has a 30-second connection deadline and prints recovery steps on
+failure. This avoids leaving the shared host lease held by an unresponsive
+readiness query. The native enforcement guard runs the real Docker CLI against
+a deliberately stalled local HTTP endpoint and checks ordinary client errors.
+The guard image carries the official Docker CLI pinned by image digest so
+these checks also run inside its nested policy fixtures;
+this adds infrastructure fault coverage, not product journey credit. Healthy
+execution still requires the complete container/native validation matrix.</p>
+<p><strong>Run metadata before the host queue (2026-11-06).</strong>
+The managed hook, manual checks and contract updates execute metadata preflight
+before requesting the existing host lease. Revisions selecting only metadata,
+and runs that restore fully verified signed results, finish without that wait.
+Partial signed checkpoints still wait for and execute each missing check.
+Required output prints <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> with the
+selected and pending checks. One shared helper retains source verification,
+signatures, carried results, checkpoint publication and original start times.
+Real Git, SSH signatures and concurrent processes reproduce both old waits and
+verify metadata success/failure, complete/partial resume, FIFO order, nesting
+and recovery after a holder or waiter exits. These are infrastructure controls;
+product journey counts and acceptance budgets retain their current values.
+A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
+of command execution; this is a measured scheduling incident, not a forecast
+of whole-PR savings.</p>
+<p><strong>Rejoin the FIFO between fresh profiles (2026-11-06).</strong>
+Each running profile keeps the existing exclusive host lease through execution
+and its signed checkpoint. Its next fresh profile rejoins the queue after existing
+waiters. Metadata and fully verified reused results retain their path without a
+host wait; native tool preparation still occurs once in the first fresh slot.
+Required output reports the reservation boundary and active holder profile.
+Attempt diagnostics retain each acquisition and their cumulative wait.
+Real Git, SSH signatures and concurrent processes reproduce the old order
+<code>Long, Long-two, Short</code> and verify <code>Long, Short, Long-two</code>,
+with every required signed profile completed once. The same controls retain
+metadata success/failure, complete/partial resume, abandoned waiters, abrupt
+holder exit and service execution order. Product cases, measurement counts,
+budgets and checkpoint validation retain their current requirements.</p>
+<p><strong>Reject invalid guard inputs before queueing (2026-11-06).</strong>
+Fresh contract guards reuse the existing static staging checks before entering
+the host queue: protected file pins, selection digest and release recipe.
+Required <code>GUARD_STATIC_PREFLIGHT</code> output explains the check and keeps
+full execution required. An actual malformed pin is refused while another
+private workflow holds the host, with zero host wait, no queue ticket and no
+Docker/native entry; its signed metadata progress stays incomplete.
+Execution reads and validates a separate snapshot from the protected Git ref
+again. Preliminary files grant no execution or acceptance credit. Verified
+reuse and older policy modules retain their existing paths. An earlier failed
+attempt spent 1,592.270 seconds in the queue before discovering its invalid
+pin; this observation is not a forecast of mean delivery-time savings.</p>
+<p><strong>Preserve full published dependency tags (2026-11-06).</strong>
+CI preflight compares the complete Nexus manifest tag with its unique lockfile
+tag and commit, preserving prerelease and build suffixes. The earlier extraction
+truncated a real <code>v0.8.29-rc.5</code> manifest to <code>v0.8.29</code>, falsely
+refusing a matching lockfile. The same preflight job executes ten real Bash
+workflow-step scenarios, including correct prereleases and genuine mismatch,
+ambiguity and missing-input refusal. This fixes an infrastructure false failure;
+it adds no product journey coverage and removes no product checks.</p>
+<p><strong>Verify completed publisher reruns (2026-11-06).</strong> Merge-queue
+verification binds the trusted publisher's status to its current attempt's
+completed successful jobs, matching source/run identities and execution times.
+GitHub can keep an earlier failed aggregate after all rerun jobs succeed. Old
+jobs and old success statuses cannot approve a pending or failed current
+attempt. The required gate reports the run and recovery command. Real Git,
+SSH signatures, HTTP and independent gate processes cover the observed stale
+aggregate and refusal cases. This restores delivery after metadata inconsistency;
+it adds infrastructure coverage without changing product case counts.</p>
+<p><strong>Check services before expensive profiles (2026-11-06).</strong>
+After the selected native workspace checks, existing service acceptance
+runs before optimized release builds and rendering/browser measurements.
+A recorded source attempt passed 1,107 native cases and spent 19m 01s building
+release before encountering an existing-Box bootstrap failure. The reordered
+service check offers earlier feedback for that failure pattern; this is not
+a measured whole-population saving. All profile commands, assertions and
+coverage remain required, and the declared signed plan retains its order.
+Required output reports actual execution order. Real Git, SSH signatures and
+child processes prove service failure prevents slow-profile entry, successful
+execution retains every profile, and verified restore repeats no commands.
+The complementary native CI entrypoint shares the local ordering helper;
+<code>CI_NATIVE_EXECUTION_ORDER</code> reports the declared and executed order.
+Real entrypoint/child-process controls verify service failure stops before
+release, success runs all selected checks, and release-only jobs still run.
+These controls add infrastructure coverage without product journey credit.</p>
+<p><strong>Discover signed external outputs (2026-11-06).</strong>
+Explicit <code>--output</code> directories now register one atomic discovery
+reference per source/output. Same-head resume and unchanged-profile carry
+share this discovery path with default outputs. Required output names both the
+reference and original evidence; signatures, source, native host, protected
+commands and original log hashes are still verified before reuse.
+A real historical counterexample had six valid reusable profiles outside the
+registry, and the later run repeated all six. This proves missed discovery;
+it does not establish an average delivery saving.
+<code>index-output --directory PATH --policy-ref origin/main</code> verifies
+older original evidence and registers only its location, without rerunning,
+rewriting or re-signing it. Index I/O failure preserves signed progress and prints
+explicit resume recovery. Real Git, SSH and independent processes cover automatic
+same-head/cross-head reuse, old-evidence adoption, Unicode paths, corrupt
+signatures/logs, invalid references and index I/O failures. These controls add
+infrastructure coverage; product cases and acceptance budgets remain required.</p>
+<p><strong>Bind carry admission to publication authority (2026-11-06).</strong>
+A contract update's managed child keeps its candidate command recipe separate
+from protected signing authority. Carry admission, checkpoints, resume and the
+publication verifier use that same authority. An unmerged candidate policy cannot
+be its own protected ancestor; incompatible evidence is refused before fresh
+required checks run. Exact-source recovery retains candidate recipe compatibility
+and protected enrolled-key verification. Real Git, SSH and child processes retain
+the former local-pass/publication-refusal counterexample, then exercise the actual
+managed child through fresh execution and successful publication. These controls
+add infrastructure coverage without product journey credit.</p>
+<p><strong>Count the entire delivery clock (2026-11-06).</strong>
+Through November 5, 20:20 UTC, 26 merged Rust source/build PRs average 51.452
+minutes from final-candidate CI to merge, versus the historical 185.261 minutes
+(27.8%). From the first observed PR CI across all heads, including later repairs,
+validation, idle and queues, the mean is 199.509 versus 1,036.282 minutes (19.3%).
+Initial author-local time remains outside those hosted clocks. Five strictly
+associated local histories add a mean 94.513 initial minutes and average 236.969
+minutes from observed local start to merge; this subset cannot replace the whole
+source cohort. Unknown local histories and unfinished work remain explicit.
+The 10% delivery goal is not met. These rollout observations establish no causal
+speedup for one change; case and coverage counts retain their declared scopes.</p>
+<p><strong>Verify the initial local clock (2026-11-06).</strong>
+For the same 27 merged Rust source/build PRs observed through November 6,
+00:02 UTC, original SSH notes provide a verified local start before the first
+CI trigger for every PR. Earliest available signed local start to merge averages
+<strong>360.935 minutes</strong> (median 261.702); this is a lower bound.
+The initial notes-only snapshot was 329.648 minutes (median 247.156).
+Unioning the same PRs' commit lists and observed CI heads found 118 candidate
+commits. Twenty-five verification observations of 23 distinct original SSH
+envelopes, including nine completed-profile checkpoints, moved four PRs' verified
+starts earlier; 21 distinct available local proofs
+also had their original completed-command log hashes checked. Partial checkpoints
+prove completed profiles and timing, never full acceptance. Manual, dropped or
+unpublished heads and other-host history can remain missing. These clocks
+add a mean 159.091 minutes before the first observed CI; overlapping time
+is not summed. Hosted clocks alone average 51.135 minutes from the final candidate
+and 201.843 minutes across all observed candidates. The historical hosted
+baseline cannot establish an exact total-delivery ratio. Missing history and
+unfinished work remain explicit; the one-tenth goal is not met. The audit retains
+all 27 source observations and the earlier five-history snapshot. These code PRs
+merged before the latest worker/scheduling rollouts, whose prospective effect must
+be measured separately.</p>
+<p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
+Modern receipts still validate both recorded fingerprint maps against their
+attested original source. Verification skips an overwritten whole-policy hash
+and shares computed maps within one call when the immutable source/policy
+references match. There is no global cache. Legacy whole-hash/bootstrap paths,
+signatures, source/base, required checks and strict refusal conditions remain.
+Two alternating observations per implementation on one original nine-profile
+SSH receipt produced identical verified data and diagnostics: median verification
+was 4.331/2.514 seconds, with 28/19 Git object reads. This component measurement
+does not establish a population or whole-PR speedup. Existing real Git/push/SSH
+compatibility and full Docker/native guards remain required; no product case,
+assertion or deadline is removed.</p>
+<p><strong>Copy only mutable fingerprint nodes (2026-11-06).</strong>
+Both fingerprint formats share one AST projection helper. Only the module shell
+and mutated dispatcher are copied; other nodes remain read-only and each profile
+keeps an independent dispatch projection. On three frozen source versions, all
+66 v1/v2 fingerprints matched the protected original byte for byte, including
+reverse traversal and repeated calls. Single ordered map observations ranged
+from 0.82&ndash;0.97 seconds before to 0.39&ndash;0.53 after. This is component timing,
+not a whole-PR speedup. There is no global cache, fingerprint-format change or
+new equivalence rule. Existing real Git/push/SSH recovery and refusal checks,
+plus the full Docker/native guard, remain required.</p>
+<p><strong>Prepare verified guard tools before the matrix (2026-11-06).</strong>
+A recorded 223.316-second attempt failed late when downloading the official
+nextest archive with a TLS EOF. Image preparation now reuses the frozen
+<code>nextest_binary</code> function, preserving its original URL/checksums;
+the production context builder is shared with real Docker controls.
+Archive/executable corruption refusal and restoration run in the tool image
+build layer. Unchanged tool/image inputs retain that layer. Each selected
+attempt checks the actual cached CLI with <code>--network none</code> before
+the full matrix and author-native checks. Mandatory output reports preparation
+failures and the saved build log before test execution. Real Docker validated
+official provisioning, offline execution, corruption refusal and recovery;
+these infrastructure controls add no product journey credit. Original matrix
+cases, assertions, deadlines and native platform coverage remain required.</p>
+<p><strong>Keep older source branches compatible.</strong> The hosted
+increase requires the measured canonical resume-test fingerprint, with CRLF
+normalized. Old or unknown fixtures retain four without merging main. Later
+fixture edits conservatively return to four until qualified; required output
+reports the decision. Existing eight-core behavior remains.</p>
+<p><strong>Retain completed author evidence across the worker default (2026-11-06).</strong>
+Exact protected recipe pairs preserve prior signed workspace results with
+their original commands and worker counts. Local thresholds and explicit
+lower counts remain valid; cases, assertions and deadlines are unchanged.
+Earlier execution is never presented as a new eight-worker run. Original
+source, signatures and logs still verify; further criteria changes and forged
+recipe maps refuse reuse. Pending unmerged origin policies remain refused,
+with origin/current policy and reviewed-merge recovery in required CLI output.
+These controls add no product journey coverage.</p>
+<p><strong>Measure hosted worker throughput (2026-11-06).</strong>
+One ordered 4/8-worker comparison per VM kept identical captured binaries and
+full case inventories. Windows (four CPUs, 1,104 cases) took 600.998/438.974
+seconds; macOS (five CPUs, 1,157 cases) took 868.141/459.716 seconds. Observed
+test-stage reductions were 27.0% and 47.0%. Setup, compilation and queues are
+excluded; this does not establish population or whole-PR savings. Separate full
+eight-worker runs passed on all three platforms. The resume test acknowledges
+live input before recognizing a new completed turn and still requires a fresh
+provider request and identical persisted results. Real native control processes
+verify hosted/local thresholds, small/unknown hosts and explicit lower limits.
+No product case, assertion, retry policy or deadline is removed; these execution
+controls add no product journey coverage.</p>
+<p><strong>Use the measured three-core Mac pool (2026-11-06).</strong>
+On clean protected source <code>cffe7dad</code>, one standard three-core Mac ran
+eight then four workers using identical captured binaries and complete case
+inventories. Both phases passed all 1,161 cases with 76 unchanged ignored cases;
+134 binary hashes stayed identical. Test execution took 649.779/1,000.493 seconds,
+35.1% less at eight. Setup, compilation and queues are excluded; one ordered
+comparison establishes no population or whole-PR saving. Qualified hosted macOS
+now also uses eight from three CPUs. Three-core Windows/Linux, unknown source,
+local thresholds and explicit lower limits retain their existing behavior.
+Real native case processes cover qualified/unqualified three-core Mac selection,
+two-core refusal, local-host behavior and explicit limits. Existing valid signed
+results retain their original commands through exact protected recipe pairs;
+no old result is relabelled. No product case, assertion or deadline is removed.</p>
+<p><strong>Deduplicate per-host Clippy (2026-11-01).</strong> Native workspace
+lint shares the validated test-group inventory with nextest, checking covered
+modules through their wrappers once: 91 instead of 211 integration targets in
+the current workspace, 56.9% fewer. Library/bin test configurations, enabled
+ungrouped tests, examples and benches remain selected. Ungrouped sources retain
+<code>--all-targets</code>; disabled standalone tests keep their original exclusion.
+Queue all-feature lint retains original standalone targets for ordinary/shared
+source changes. Isolated test edits select changed original targets and their
+containing groups; unchanged unrelated integration crates are omitted only for
+that class. Every selected module still compiles. Real Cargo/Clippy regression
+compares actual target inventories and injected diagnostics in ordinary and
+test-only library/bin code, grouped/ignored tests, shared helpers, examples and
+benches, including the disabled-target boundary. Product cases, assertions and
+deadlines are unchanged; this fixture adds no product journey coverage.
+No production latency saving is claimed before comparable measurements.</p>
+<p><strong>Scope queue lint to isolated test edits (2026-11-02).</strong>
+Workspace-wide grouping reduced declared compiler targets but its first
+three-platform comparison on identical Rust inputs took 353 seconds versus
+348 seconds before, so it did not establish a time saving. Ordinary/shared
+source changes retain <code>--all-targets</code>. Committed isolated CLI test
+edits reuse the native selector and canonical wrapper validator: changed
+original targets and containing groups, with the full workspace all-feature
+dependency graph retained. Unchanged unrelated integration, library/bin test,
+example and bench roots are omitted only for this class. A real cross-member
+feature counterexample rejects a package-only command that loses the required
+dependency feature. Missing base history, dirty/untracked
+inputs, unknown or unregistered targets retain full lint. Invalid wrappers fail.
+The three manual <code>test=false</code> drivers retain Cargo's prior exclusion.
+Required <code>QUEUE_CLIPPY_SCOPE</code> output reports mode, reason, counts and
+the command. Real Git/Cargo/Clippy controls cover isolated modules, shared and
+ordinary full fallback, feature-only errors, manual exclusions and first-error
+behavior. Entry changes still exercise the real three-platform workspace in the
+queue; PR/push/queue event controls verify that trigger and docs-only exclusion.
+No functional case, assertion or timeout changes. Target counts alone do not
+establish whole-lifecycle savings.</p>
+<p><strong>Draft/ready ordering (2026-11-02).</strong> Draft snapshots use a
+separate concurrency group and explicit run title. A late draft event cannot
+cancel or supersede ready acceptance. Wholly skipped snapshots allocate no
+publisher runner. Publication still waits for the latest applicable ready/queue
+run and current attempt, verifies required jobs and real SSH evidence, and
+retains genuine failures. Required output explains ignored draft/old events.
+Nine real publisher child-process/HTTP/Git/SSH scenarios cover both orders,
+queued newer drafts, failed newer ready runs, stale attempts and corrupt notes.
+The controls protect CI protocol behavior and add no product journey credit.</p>
+<p><strong>Background readiness and checkpointed mock batches (2026-11-02).</strong>
+Background-task cases require the asserted input row and position, or resized
+urgent footer, to remain stable for 100 ms while task status keeps animating.
+The global full-screen settling guard remains for genuinely idle views. Existing
+cases, animation/input/resize/process-cleanup assertions and deadlines remain.
+The history journey still creates 50 completed tasks plus one running task,
+checks pruning and complete output retention, and rejects repeated tool IDs on
+the actual wire. The local HTTP provider fixture now emits only uncompleted
+calls after a partial checkpoint; completed stream gates cannot block the rest.
+Real streaming and non-streaming HTTP controls also verify that a fresh explicit
+batch can reuse its fixture IDs. These provider-fixture controls protect the
+test harness; they do not establish live Anthropic behavior or cache hits.
+Production compaction, context limits and cache-prefix checks are unchanged.</p>
+<p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
+confirmed that default selection compiles examples, while explicit grouped
+target selection omits them. Grouped or unknown sources therefore select the
+separate <code>native-examples</code> profile on the author and complementary
+hosts: normal Cargo build/link with the workspace mailbox feature graph, without
+running example entry points. Known ungrouped sources keep their existing
+selection and avoid a duplicate build. The mandatory plan prints
+<code>EXAMPLE_BUILD_SCOPE</code>. Real native guard processes prove compilation,
+linking, no implicit execution and refusal of a broken example. Existing signed
+workspace execution stays reusable for the same head when its recipe is
+unchanged; the newly selected example check still requires actual execution.</p>
+<p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
+changes contain only ordinary individual CLI test files, optionally accompanied
+by README or Markdown files under <code>docs/</code>, author and complementary
+plans omit the separate example build. Shared helpers, production sources,
+manifests, deletion, redirection and unknown inputs retain ordinary scope.
+The mandatory <code>EXAMPLE_BUILD_SCOPE</code> output reports
+<code>isolated_cli_tests</code>. Native test execution remains required. Real
+Git/Cargo controls execute the changed CLI test and independently verify that
+the example artifact remains fresh with an identical binary hash. Mixed changes
+and broken-example refusal remain covered. This removes unchanged compile-only
+work; population and whole-PR savings remain unmeasured. Compaction and
+cache-prefix cases retain their existing scope and assertions.</p>
+<p>Only newly added <code>test=false</code> declarations with exact name/path/test
+fields and previously absent names/paths can skip unchanged product and named
+performance builds. Workspace and existing manifest inputs must be unchanged;
+existing target edits, extra fields, missing files and unknown metadata retain
+ordinary scope. Changed dev dependencies and measurement sources keep their
+existing performance checks. Native workspace acceptance still runs locally and
+on the complementary operating systems.</p>
+<p>Exact protected migration pairs can retain a completed original-target
+workspace receipt only for committed sources without test groups. The verifier
+reads Git files and TOML without invoking Cargo or candidate code. Group files,
+escaped declarations, malformed metadata and outside workspace members require
+fresh validation. Real Git/SSH regression checks modern and legacy notes, runs
+an actual native process for every negative fixture head, and refuses to carry
+those receipts into grouped execution. This avoids repeating unchanged native
+work on old branches when the executor is upgraded.</p>
+<p>Contract validation now runs Docker Git/signature/authorization checks before
+its Cargo fixtures, then runs the author-host native guards. Passing runs retain
+all checks. Metadata errors stop before later compilation; first-failure evidence
+and unrun work remain recorded. Replaying one preserved missing-note fault through
+the real Docker launcher refused in 62.48 seconds before any Cargo fixture or
+author-native guard. The earlier path had spent at least 205.50 seconds in its
+commands, including 97.93 seconds on author-native guards. This one-fault replay
+is not an average PR-latency claim.</p>
+<p>The protected migration policy pairs exact old and new execution hashes so
+already completed full-Cargo evidence for the same candidate can remain valid.
+The new runner-enforcement guard still executes. Real Git/SSH regressions cover
+current and legacy signed receipts, unchanged notes, changed assertions and new
+required checks. Later recipe changes cannot inherit an obsolete pair. Reuse
+appears in mandatory hook and CI output; no product coverage is removed.</p>
+<p>Obsolete-recipe refusals include a machine-readable author-host recovery
+record. For protected-main policies it fetches main before resolving the current
+policy, preventing old CI diagnostics from publishing obsolete evidence after
+another main update. Explicit experimental snapshots remain pinned; each check
+still freezes its resolved source and policy. Real Git/SSH regression captures
+the diagnostic, advances main with another required process, then follows that
+original recovery record, publishes and independently verifies the fresh receipt.
+No required check or signature verification is removed.</p>
+<p>Local acceptance freezes candidate, PR base and authorized policy commits at
+invocation start. Docker snapshots and image context follow that fixed policy;
+the run uses the actual build's immutable image ID. Each invocation saves
+<code>container-provenance.json</code>. Real Git/SSH and Docker regressions cover
+references changing during execution, a replaced image tag and rejection of
+wrong-policy inputs. The container fixture runs only for relevant PR inputs in
+the existing preflight, with no queue/main repetition or product coverage credit.
+Rendering workloads, sampling, budgets and deadlines remain unchanged.</p>
+<p>Successful contract pushes and GitHub source-acceptance status descriptions
+show the merge-queue command directly. Authors request automatic queueing when
+the PR is ready to land, so required CI can finish without waiting for another
+agent turn to enqueue it. Source-only acceptance keeps its existing boundary.</p>
+<p>Main pushes reuse completed pre-merge formatting, schema, docs, boundary and
+fixture checks. Their lightweight preflight retains the protocol pin and input
+scope required by existing daemon/provider jobs. PR, queue and explicit runs
+retain full integrity checks; this removes duplicate post-merge work.</p>
+<p>ACP package integration stays on all four PR hosts. Main keeps builds and
+commit-bound package artifacts for its merged revision, reusing the PR's
+integration result. Obsolete package heads cancel within the same PR/ref.
+Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
+publisher changes still check for new dependency/toolchain/image keys.</p>
+<p>Cold cache publishers compile library/bin test targets to retain dev dependencies
+but omit standalone integration executables that the dependency cache discards.
+Full native acceptance still compiles and runs those journeys. The three host
+pools, production release warming and 10 GB quota remain; warm cache hits already
+skip this work. This removes redundant compilation, with no coverage reduction.</p>
+<p>Local benchmark snapshots retain identical source bytes and modes at their
+canonical paths, allowing Cargo to reuse valid artifacts. Changed bytes get fresh
+mtimes; unexpected sources and cached entry links are removed. The exclusive Linux
+lease remains and reports blocking waits in the execution log. Real Git/Cargo
+regressions check freshness, stale archives, tampering, permissions and mutual
+exclusion. Product workloads, budgets, sample counts and coverage are unchanged.</p>
+<p>Rendering and browser share the same canonical candidate checkout and build
+directory; browser integration drivers reuse it too. Both baselines stay
+independent, and copied production binaries remain fixed across dev-feature
+test builds. Rendering retains its trusted driver. The two profiles now use
+four target trees, down from the original seven and the previous five.
+The existing exclusive lease still covers source mutation, compilation and
+measurement. A real rendering-to-browser Cargo sequence verifies that the
+normal candidate build is reused without recompilation and has identical bytes.
+Real Cargo/npm/native-driver infrastructure acceptance checks freshness, binary
+identity and both observer stages when executor inputs change, once on the PR.
+It adds no product journey coverage. Selected execution fingerprints bind actual
+helper dependencies; unchanged native evidence survives browser-only helper edits.
+Old signed recipes require recoverable attested source, while changed used helpers,
+shared execution or images still invalidate their affected evidence.</p>
+<p>The acceptance target uses arithmetic mean first-recorded-local-validation
+to first local/hosted failure or merge, including waiting and retries. Keep
+whole-PR and final-head series. The historical hosted-only Rust source/build
+means are 32.252 minutes (419 failed heads) and 185.261 minutes (200 merged PRs),
+giving conservative reference thresholds of 3.225 and 18.526 minutes; historical
+local time is unknown. Early lightweight PR results
+and fewer runner minutes do not prove the comparable production target.</p>
+
+<p><strong>Coverage measures distinct user journeys.</strong> Halving repeated
+suite executions does not halve the feature surface or earn additional coverage.
+No unique PTY case is deleted solely for having no recorded failure.
+The month audit covers 8,323 runs and all 8,436 attempts, including retries;
+its 954 failed-step log bundles contain 160 distinct PTY failure identifiers.
+These include provider and fixture failures, so they are not a product-bug count.
+The audit lacks a complete per-case execution denominator and cannot certify
+that any case has never failed. See the
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workload-audit-20261029.md">CI workload audit</a>
+for timing, selection and measurement limits. Execution counts are a static
+reduction; actual latency savings require post-change CI observations.</p>
+
+<p>The required <code>CI preflight</code> job combines seven short hosted jobs
+into one checkout, environment setup and runner queue admission: formatting and
+cache schemas, docs, architecture boundary, pinned protocol, release mirror,
+provider probe and PR history keep their existing checks. The trusted queue
+gate checks integrated history once; preflight checks PR history. SDK-only PRs
+also start preflight, so required contexts cannot disappear behind path filters.
+A failed preflight step stops its daemon/provider dependents. This removes six
+jobs per event without deleting a unique product case. Shared native cache
+environments match the main publisher; net timing and hit rates still require
+hosted observation. The optimization target is measured end-to-end CI latency
+at most 10% of the historical baseline, not merely fewer runner minutes.</p>
+
+<p>Local preflight checks actual merge conflicts with its supplied base and
+fetched <code>origin/main</code> before product compilation or benchmark leases.
+It prints conflicting paths and the next step at the mandatory interface;
+the checkout and index stay untouched, and clean branches may remain behind main.
+The checker comes from the hash-pinned protected policy, including on older
+author branches; no source update is needed just to acquire the check.
+The actual-Git history regression stays required in CI preflight. Editing only
+<code>e2e/pr-history/run.py</code> skips unrelated three-OS product builds;
+mixed product changes, unknown fixtures and renames across that boundary retain
+native coverage. This catches avoidable work before a full gate; it does not
+prove the 10% latency target or detect main changes after the check.</p>
+
+<p>Normal release, service, co-host and daemon build selection shares one
+Git/TOML comparison for development-only Cargo metadata. Resolver 2, workspace
+settings and normal/build dependency declarations must stay unchanged. In the
+standard <code>crates/*</code> workspace, shared development dependency revisions
+and versions may change only when all reachable normal/build lock records and
+resolved edges remain identical. Aliases, optional and target-specific entries
+are included. Removed/replaced dev-only nodes are allowed; changed normal
+resolutions, missing/ambiguous edges and unsupported metadata retain ordinary
+scope. One Git batch reads immutable metadata blobs; candidate code is not
+executed. Older/custom layouts retain the conservative direct-addition verifier. Rust
+sources and changed release/service assertions retain their own input rules.
+Native workspace/lint, provider, resize and both performance scopes remain.
+The mandatory interface prints ignored normal-build inputs. Earlier broader
+signed full receipts/checkpoints retain valid completed work and original timing;
+the current canonical plan supplies required checks and missing hosts. New checks
+and still-required failures remain blocking. Real Git/Cargo/process/SSH regressions
+cover these boundaries, dev-feature isolation, unchanged normal binary bytes,
+legacy receipts and actual failed-profile recovery. This reduces redundant
+execution for qualifying inputs; it is not measured proof of the 10% target.</p>
+<p><strong>Shared workspace development dependency updates (2026-11-02).</strong>
+The same selector serves author-local, complementary native and daemon CI
+decisions. Real Git/Cargo/native workflows update a local Git dependency's
+revision and package version, execute the new test driver, and verify unchanged
+normal binary bytes. Normal, build, target and transitive consumers retain the
+product gates and actually reject broken dependency code. Existing broader
+signed receipts/checkpoints, failure history and original timing remain valid
+only for still-required checks. These infrastructure controls add no product
+journey credit. In the preceding dependency update, local release/services/cohost
+cost 1,057.2 seconds of a 1,690.6-second invocation; that identifies work this
+classification can omit, not a controlled whole-lifecycle speedup.</p>
 
 <h3>Test infrastructure — two layers, one of them counts</h3>
+
+<p>Release UI and resource checks use a frozen binary built with the normal
+release dependency graph. Compiling test drivers must not replace that binary.
+Before/after performance comparisons use isolated build directories and retain
+binary and harness hashes. A failed A/A noise calibration is inconclusive,
+not a performance pass. These resource checks do not add feature-coverage credit.</p>
+
+<p>macOS rendering and release startup timing windows require external
+AC power with Foundation reporting low-power mode disabled. One shared native
+probe records the state before/after and once per second; unknown state, probe
+errors and observed power changes refuse the profile without changing system
+settings or rerunning it. Original failures and supplementary
+<code>host-power.json</code> observations remain. Changes shorter than the poll
+interval may escape detection; fixed clock/thermal conditions are not proved.
+Linux/Windows and functional-only profiles keep their existing execution.
+Native process fixtures cover admission, transient changes, probe failures and
+preservation of the original command error. They earn no product journey credit;
+performance budgets, workloads and sample counts remain unchanged.</p>
+<p>The power monitoring context is created only when called, so unused timing
+helper bodies do not invalidate ordinary native evidence. Metadata preflight
+stages its history checker independently of unrelated native fixture pins; both
+paths share the original path and SHA256 verification. Exact protected recipe
+pairs preserve already completed execution through this refactor. Changed used
+helpers, timing rules, source, signatures and required checks retain their normal
+refusals. Real SSH/hook regression copies the production factory, proves an unused
+helper does not repeat the actual process, and refuses reuse when the selected
+profile calls that helper. The existing eleven native power scenarios still run.
+The original failure and earlier signed notes remain preserved.</p>
+<p>A Git/SSH-only debug entrypoint prints its limited scope and omits unrelated
+Cargo fixtures during local investigation. Mandatory acceptance keeps the full
+default matrix; this debug mode neither signs full source acceptance nor adds
+product journey coverage.</p>
+
+<p>The mandatory local browser profile runs the viewport browser interaction once
+as a functional check. The viewport on/off cost script
+(<code>scripts/benchmark_prompt_viewport.py</code>) and the source-before/after
+measurement script remain available for diagnosis and earn no coverage credit.</p>
 
 <table>
   <thead>
@@ -225,9 +1502,281 @@ of the scode-native testable feature surface, green on every
       (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
       either the raw stream or a VT100-rendered view. Catches what a
       real user sees: REPL UX, signals, tab completion, ANSI redraw,
-      cursor placement.</td>
+      cursor placement. Native grouping preserves individual case processes,
+      assertions and ignored markers; it reduces linked executables. Isolated
+      test edits compare the PR common ancestor with its HEAD, excluding
+      main-only changes from native target selection. Actual branch source,
+      shared/unknown inputs, deletion and renames retain full workspace scope.</td>
       <td><strong>Yes — this is the coverage measure.</strong></td>
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
+    </tr>
+    <tr>
+      <td>Bash input routing</td>
+      <td>A bare <code>!</code> completes an ordinary model turn on Windows,
+      Linux and macOS. The PTY first completes a conversation turn, then sends
+      the bare input and verifies the second request retains that input and
+      the previous assistant turn. The existing shell-command cases run on
+      Unix. This gives the isolated target meaningful Windows coverage while
+      preserving the required <code>--no-tests fail</code> rule.</td>
+      <td>Yes: native PTY with controlled HTTP/SSE responses.</td>
+      <td><code>pty_bash_mode</code></td>
+    </tr>
+    <tr>
+      <td>Acceptance executor guards</td>
+      <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
+      selection, signatures, case/ignore inventories, fail-fast and artifact
+      identity. Both existing completion-order controls now start from a stale
+      installed runner and require execution of protected new code. They verify
+      original start/output, signer/key, hook and source preservation; refusal
+      of nonmanaged candidate refresh; idempotent self-install; and a still-loaded
+      old module refreshing after its file was already updated. Current-version
+      retries retain the original completed logs and two native jobs.
+      Both completion orders also run actual CLI previews with the default
+      environment and an explicit single-test-worker cap. They require identical
+      declared plans, no preview execution and a clear concurrency diagnostic.
+      Actual historical signature verification with a different current cap
+      must omit current-environment execution claims.
+      Independent complete Docker/native guards overlap after original
+      preflight. Seven real process/engine controls require clean success,
+      cancellation in either failure direction, interruption cleanup,
+      owner/image refusal and empty-ID recovery. Both whole guards and original
+      command logs remain mandatory; no guard or product cases are removed.
+      Within the native guard, the original protocol controls overlap one serial
+      compiler/test lane using that same supervisor. Five more actual native
+      controls verify success, both failure directions, serial ordering and
+      parent/child cleanup on interruption, exited-process history and survival
+      of an unrelated sibling. All original command hashes remain
+      mandatory, and compiler concurrency stays at one.
+      Concurrent signed workflows verify that an existing FIFO waiter
+      runs between two exclusive profiles, both profiles complete once, and
+      accumulated wait includes every acquisition. A real protected pin mismatch
+      also fails before a held host queue, retaining incomplete signed metadata
+      without Docker/native entry or an acquisition. Grouping fixtures use small native programs and verify actual
+      eight-worker overlap on large hosts and explicit four-worker limits.
+      Smaller/unknown hosts retain four by default. Benchmark builder
+      fixtures also inspect real Cargo artifacts, reject broken standalone driver
+      packages and exercise original targets for older candidates; no unused
+      CLI binary is built with standalone drivers. Actual Cargo metadata protects
+      unique opt-in targets and shared sources; real Git events require this
+      guard when the driver package changes. A real GitHub fixture also verifies
+      cancellation of independent Rust CI peers in all three failure directions,
+      retention of the original failed step, and no cancellation runner on
+      successful runs. Native Bash guards reject failed, skipped or cancelled
+      selected queue lint and bind its three platforms, queue-only scheduling
+      and independent main cache publishers to the current workflow. These
+      queue lint controls also execute the actual Python entry and Cargo/Clippy,
+      reject feature-only warnings in both grouped modules, retain examples,
+      benches and library/bin test
+      configurations, preserve manual <code>test=false</code> exclusions with
+      real old/new compiler artifacts, and refuse invalid wrapper declarations.
+      Committed isolated CLI test edits select changed originals plus their
+      containing groups. Ordinary/shared changes and dirty or unavailable-base
+      inputs retain full all-feature lint; actual compiler artifacts verify each mode.
+      Actual publisher processes with HTTP, Git fetches and SSH notes also
+      exercise draft/ready ordering, current failure ownership and corrupt-note
+      refusal. Workflow wiring preserves separate draft concurrency and skips
+      publisher runners for wholly skipped source workflows.
+      These
+      executor checks add no product journey coverage. Author-hook and native
+      launcher controls reject failed prerequisites before profile execution.
+      Successful terminal preparation remains part of the resize command receipt.
+      Original/grouped integration inventories are also checked with library/bin
+      unit harnesses excluded; poisoned unit controls must fail the old selection
+      while the actual native workspace dispatcher retains every integration case.
+      Captured recovery instructions fetch current protected
+      main, execute a newly required real process and publish SSH-signed evidence
+      that an independent verifier fetches and validates. A copied production
+      timing factory preserves real signed hook execution while unused; selected
+      helper changes still require fresh evidence. Every pinned native input is
+      checked through real Git: unrelated pins leave metadata preflight unchanged,
+      while history-checker changes invalidate it. A real old-checkout preflight
+      runs against the changed protected native policy. Shared workspace dev
+      dependency revisions/versions are checked through committed normal/build
+      declarations and reachable lock edges, including aliases and targets.
+      Real Git/Cargo workflows run the updated driver, preserve normal binary
+      bytes, and refuse broken normal/build/target/transitive dependencies.
+      Native test and performance scopes remain selected; unchanged normal
+      product profiles may be omitted for these proven metadata-only inputs.</td>
+      <td>No; these protect the executor and add no product journey coverage.</td>
+      <td><code>e2e/local-acceptance/</code>; <code>.github/scripts/ci_clippy.py</code></td>
+    </tr>
+    <tr>
+      <td>SSE archive compressor reuse</td>
+      <td>Real PTY checks six distinct responses and earlier-file integrity.
+      A conditional PR check writes 42 real files, with six concurrent captures,
+      independently decodes them and compares exact gzip bytes and quota failure
+      prefixes. At most one finished compression state is retained, after
+      releasing its file, session budget and attachment lease.</td>
+      <td>PTY assertions cover archive persistence; native codec checks add no
+      provider or user journey coverage.</td>
+      <td><code>pty_model_stream_close</code> / <code>e2e/response-gzip/</code></td>
+    </tr>
+    <tr>
+      <td>Compile-only examples</td>
+      <td>Normal example binaries are compiled and linked. Grouped/unknown
+      sources use <code>native-examples</code>; original selection retains its
+      existing behavior. Isolated individual CLI test changes omit the separate
+      unchanged example build; shared/production/unknown inputs retain it.
+      Entry points are not run by this check.</td>
+      <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
+      <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native release stream/resume and startup</td>
+      <td>Every newly built artifact passes native identity, optimized stream/resume,
+      40-sample 100 ms startup and compiler-context checks before packaging/publication,
+      on all six release platforms. Ordinary PRs retain functional tests, dev/mailbox
+      compiler context and selected Linux optimized rendering. Native optimization-only
+      and startup regressions may surface at release; harness edits still require local optimized checks.</td>
+      <td>The existing stream/resume PTY journey counts once. Optimized variants
+      and startup measurements add no extra unique journey credit.</td>
+      <td><code>native-context</code> · <code>native-release</code> ·
+      <code>release_artifact_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native terminal resize and installer inputs</td>
+      <td>All existing native ignored cases use the workspace dev/mailbox graph;
+      the separate standalone default-feature debug graph is outside this scope.
+      Actual checksum-pinned Windows setup remains. Artificial installer fault
+      checks are required for non-Rust control inputs, mixed/renamed/deleted
+      controls and unknown Git scope. Ordinary Rust with known docs omits that
+      unchanged fault matrix, reducing its negative-path coverage.</td>
+      <td>Existing terminal cases count once. Git/Cargo/process scope and warm
+      artifact guards add no product journey credit.</td>
+      <td><code>native-resize</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Native PTY disposal</td>
+      <td>Real Windows ConPTY teardown releases the master before waiting for
+      its reader. The upstream three-platform suite retains final-output,
+      child-reaping and concurrent lifecycle checks, including fresh macOS
+      controllers. The existing 500 ms reaper budget remains.</td>
+      <td>Native harness regression only; existing scode journeys count once.
+      A Windows five-sample latency check rejects the previous mandatory wait.
+      No assertion, deadline or selected product case is removed.</td>
+      <td><code>pty-expect/tests/drop_drain.rs</code> / upstream three-platform CI</td>
+    </tr>
+    <tr>
+      <td>Native service lifecycle and artifact selection</td>
+      <td>Both existing private-Node service journeys run on the workspace
+      dev/mailbox debug graph on selected native hosts. The standalone
+      default-feature debug graph is outside this profile. Cargo verifies
+      current source, including standalone builds and rejection of stale
+      executables after compilation errors.</td>
+      <td>Existing service journeys count once. Build reuse and compiler failure
+      guards add no extra unique journey credit.</td>
+      <td><code>native-services</code> / <code>release_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Co-host build and identity</td>
+      <td>Pre-merge dev build with deployed features and exact revision stamp,
+      on all three native OSes. Optimized builds and footprint budgets run on
+      five-platform release tags; optimized-only regressions can reach main.</td>
+      <td>No; build and startup checks add no product PTY journey credit.</td>
+      <td><code>native-cohost</code> / <code>release-nexusd-cohost.yml</code></td>
+    </tr>
+    <tr>
+      <td>Rendering matrix and browser smoke</td>
+      <td>Scoped mandatory author-local paired matrix before push: typing latency, first output, cancel,
+      paste, resize, CPU and peak memory against the fixed baseline; short keeps
+      5/7 paired rounds with RSS peak/after checks and heavy Markdown keeps 3/3,
+      36 judged observations. Foreground/background task-specific performance
+      comparisons are removed; applicable functional cases remain.
+      without warm-ups. Cargo/dependency metadata and unrelated crate source
+      omit these comparisons; their indirect performance effects are outside
+      this reduced scope. No scheduled/manual replacement. Pre-merge
+      painted-terminal smoke: clickable links, selection during streaming,
+      viewport interaction and an idle terminal, when CLI or harness inputs change.
+      Paired runs reuse the measured normal release and immutable image; browser-only
+      runs retain the dev build. Paired drivers share the leased release Cargo cache,
+      synchronized to the candidate and rebuilt normally; standalone drivers retain
+      the dev profile/cache. Both drivers still execute, and native harnesses refuse
+      an unexpected driver digest before execution.</td>
+      <td>No; their drivers back no Feature inventory row.</td>
+      <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
+    </tr>
+    <tr>
+      <td>Queue daemon and co-host scope</td>
+      <td>CLI source retains pinned-daemon, cross-node CLI and authenticated
+      sender journeys. Co-host duet, VFS search owner/restart and driver feature
+      checks run for shared Rust, build/dependency and daemon harness inputs.
+      CLI source is excluded only when both committed layouts prove a
+      binary-only package without declared workspace dependents. Unknown
+      layouts retain co-host checks; CLI tests stay outside co-host inputs.
+      Unknown manifest/build changes retain the conservative scope.
+      Fixed VFS cache helper/action/publisher changes retain current co-host,
+      search and feature checks, while omitting independent CLI A2A, cross-node
+      and sender-identity journeys. Product Rust, A2A/shared harness and mixed
+      changes retain those journeys. Selected cases and deadlines are unchanged.
+      Required output explains the choice and refuses missing decisions.
+      Seven independent reader/stall/receiver-seat fault cases run with the shared
+      pinned nextest executor, zero retries and first-failure cancellation.
+      After restart, these cases overlap the independent CLI journeys: one serial
+      CLI lane and at most three fault workers, at most four test cases together.
+      Explicit caps of two or three reserve one worker for CLI; a one-worker cap
+      keeps both lanes serial. The existing shared process supervisor cancels
+      the peer lane on failure; outer owned-daemon cleanup is
+      retained. Complete ignored-test inventory and successful JUnit results are
+      required. Original real lease clocks, assertions, deadlines and case count
+      remain; restart stays before both lanes and SIGSTOP stays after both pass.
+      Original per-lane logs and command receipts remain in the fault artifact;
+      an existing result directory is refused before either lane starts.
+      Cargo preparation and ignored-case enumeration finish before the lanes
+      start. The fixed nextest executor then uses those same build metadata and
+      binaries without reacquiring the CLI build lock. Source contents, helper,
+      binary, metadata, manifest and handoff hashes are checked; changed inputs
+      cannot satisfy the seven-case JUnit result. Preparation stays in the total
+      timing. Caller compiler settings and unset Cargo defaults are preserved;
+      owned desktop builds still explicitly select one compiler job. Real native
+      controls hold Cargo's target lock throughout all seven test executions,
+      and refuse source, binary, metadata and handoff drift. The shared supervisor
+      and command executor are included in daemon CI input selection.
+      Real Cargo/native controls exercise both failure directions, worker caps,
+      missing/non-ignored inventories and completed-child cleanup. A private
+      Windows same-source warm pair measured 307.554 seconds serial versus
+      282.280 seconds overlapping (8.2% for that pair); its Unix-only platform
+      exclusions remain, and it is not a Linux or overall delivery speed claim.
+      A2A harness-only edits omit unrelated native Cargo/PTY product reruns on
+      the author and complementary hosts; the Linux queue still executes the
+      changed real-daemon scripts. Author acceptance requires realistic testing
+      of the changed harness. Mixed Rust edits and moves into Rust keep full
+      native assignments. Required hook/CI output names this input scope.
+      Real Git events and Cargo processes verify CLI/co-host independence and
+      shared-runtime rebuilds; actual package metadata guards that boundary.</td>
+      <td>Existing CLI PTYs retain their current credit. Infrastructure scope
+      checks add no product journey coverage. Co-host runs are omitted on
+      CLI-only revisions; independent CLI journeys are omitted on fixed VFS
+      cache-only revisions. No product case is deleted.</td>
+      <td><code>rust-ci.yml</code> / <code>ci_input_scope.py</code> /
+      <code>dependency_scope_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Fixed VFS search compiler reuse</td>
+      <td>The Linux queue restores a pinned checkout with isolated Cargo inputs
+      and outputs; only main pushes publish missing exact keys. Compiler, runner
+      image, recipe, paths and codegen settings bind the key.
+      A fallback may share dependencies across source pins only under the same
+      compiler context. The old Git tree and saved identity are verified before
+      fetching the required pin with hooks disabled. Old workspace outputs are
+      cleaned, and the new tree is verified before normal compilation. An exact
+      current-pin legacy key is accepted for format migration. A missing main key
+      downloads compatible inputs before prewarming; queue consumers never publish.
+      Refusal messages name the actual restored cache key for recovery. Source bytes
+      are verified before normal Cargo builds. The original authorization/restart
+      case still runs against the current co-host outside the cache, with unchanged
+      optimization profiles and assertions. Command logs and timings are retained.
+      Outer and nested Cargo calls share the real test package metadata to avoid
+      repeated native dependency rebuilds caused by inherited environment changes.
+      Main alone explicitly prewarms compiler outputs. Consumers use normal
+      <code>cargo test</code> to compile and execute the original case; the required
+      command refuses an extra pre-test build that switches plugin variants.
+      Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
+      <td>Coverage unchanged; cached compiler outputs never replace the real
+      journey or authorize reuse of a passing result. Infrastructure fixtures add
+      no product journey credit. Cache footprint and cold/warm product measurements
+      are required before a lifecycle speedup claim.</td>
+      <td><code>vfs_search_cache.py</code> / <code>ci-vfs-search-cache.yml</code> /
+      <code>vfs_search_cache_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Mock parity harness</td>
@@ -235,7 +1784,7 @@ of the scode-native testable feature surface, green on every
       asserts on the byte stream <code>scode</code> produces. Catches
       API integration / tool dispatch / streaming regressions without
       any TTY.</td>
-      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td>No — optional debugging aid, not an e2e measure.</td>
       <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
     </tr>
   </tbody>
@@ -243,10 +1792,15 @@ of the scode-native testable feature surface, green on every
 
 <div class="callout">
   <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
-  when <code>pty-expect</code> exercises it end-to-end on
-  <code>main</code> CI. The mock parity harness still runs on every
-  PR as a required gate and catches API / dispatch / streaming
-  regressions early — but it tests the lower half of the stack
+  when <code>pty-expect</code> exercises it end-to-end on the exact PR head,
+  with the selected author-local and complementary native checks passing before
+  merge. The queue verifies signed head evidence and integrated Git history;
+  it does not repeat native journeys on the combined merge-group tree.
+  Runtime interactions unique to a combination of passing PRs are outside this
+  current pre-merge coverage. This is a documented reduction from the earlier
+  integrated-tree runtime rule.
+  The optional mock parity harness helps debug API / dispatch / streaming
+  failures, but it tests the lower half of the stack
   ("does <code>scode</code> dispatch and stream correctly?") and
   not the upper half a user actually sees ("does the REPL render it
   correctly, does Ctrl+C interrupt cleanly, does the prompt redraw
@@ -482,7 +2036,7 @@ bugs nor refactor confidence.</p>
   <tbody>
     <tr>
       <td><strong>PTY (pty-expect)</strong></td>
-      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td><strong>Required acceptance gate (local + complementary CI); the only layer that counts toward the 90% e2e coverage metric</strong></td>
       <td>Every user-facing feature</td>
     </tr>
     <tr>
@@ -591,8 +2145,8 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Multi-tool turn roundtrip</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_tool_roundtrip</code></td><td>read_file + grep_search in one turn → final response references results. Live: agent trigger — tool names verified in PTY output.</td></tr>
     <tr><td>Concurrent tool execution (CC parallel-tools parity)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Streaming scheduler; conservative transport limits</strong></td><td><code>pty_tool_concurrency</code> · <code>pty_core_conversation::multi_tool_roundtrip</code></td><td><strong>CCB validation:</strong> read <code>StreamingToolExecutor.ts</code>, <code>BashTool/readOnlyValidation.ts</code> and <code>shell/readOnlyCommandValidation.ts</code> at <code>77a7934e</code>; checked the official CC <code>2.1.291</code> native release and real CLI against a loopback provider/MCP server. Confirmed early streaming dispatch and overlapping pre-hooks. Correction to the old baseline: CC's batch path defaults to 10, but its streaming path started 12 read-only calls together; scode deliberately retains the configurable resource cap of 10. The old CCB Bash-error sibling-abort policy is not present in that current official executor. <strong>Implementation:</strong> one incremental scheduler owns preparation, authorization, execution and post-hooks. Complete tool blocks enter during provider streaming; hooks run off the polling thread, with ordered admission and reclassification after PreToolUse preserving writer barriers. Completion events arrive immediately; transcript results retain provider call order. Provider disconnects preserve completed outputs and close unfinished ids without replaying side effects. Permissions and questions share one asynchronous input queue through engine-core; independent tools and rendering continue while a question awaits its answer. Bash AST validation shares one flag parser across branch queries, fd, diff and gh read commands; safe globs/input redirection are supported, while unknown syntax, writes and compound cd + Git remain serial. stdio/Streamable HTTP MCP overlap is unchanged. SSE/WebSocket and MCP resource/prompt wrappers remain deferred, as MCP is secondary to the core tool workflow. No renderer-framework change.</td></tr>
     <tr><td>Graceful cancel (Ctrl+C)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_core_conversation::sigint_cancels_streaming</code></td><td>Ctrl+C during bash tool → process exits, no hang.</td></tr>
-    <tr><td>Graceful cancel (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code> · <code>pty_async_esc_cancel::esc_cancels_turn_in_async_repl</code></td><td>ESC cancel works in both sync REPL (HookAbortMonitor raw-mode stdin) and async REPL (EscCancelHandler ConditionalEventHandler). Live-verified 2026-07-30.</td></tr>
-    <tr><td>Double Ctrl-C force exit (CC parity)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_double_ctrlc_exit::double_ctrlc_exits_sync_repl</code> · <code>pty_double_ctrlc_exit::double_ctrlc_exits_async_repl</code></td><td>Two rapid Ctrl-C within 800ms exits the process cleanly. Unified through <code>cancel.rs</code> SSOT — same API for sync (HookAbortMonitor) and async (LineEditor abort_hook) paths. Live-verified 2026-07-30.</td></tr>
+    <tr><td>Graceful cancel (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code> · <code>pty_async_esc_cancel::esc_cancels_turn_in_async_repl</code></td><td>ESC cancels the running turn in the REPL (EscCancelHandler ConditionalEventHandler). Live-verified 2026-07-30.</td></tr>
+    <tr><td>Double Ctrl-C force exit (CC parity)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_double_ctrlc_exit::double_ctrlc_exits_repl</code></td><td>Two rapid Ctrl-C within 800ms exits the process cleanly, through the <code>cancel.rs</code> SSOT. Live-verified 2026-07-30.</td></tr>
     <tr><td><code>/config set</code> runtime toggle</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_config_set::config_set_auto_interrupt_toggles</code> · <code>pty_config_set::config_set_queue_toggles</code></td><td><code>/config set auto-interrupt on|off</code> and <code>/config set queue on|off</code> toggle the shared atomic QueueMode at runtime. Slash commands dispatch synchronously on the coordinator thread via <code>TurnDriver::try_handle_slash_command</code> (PR #354). Live-verified 2026-08-03.</td></tr>
     <tr><td>REPL input chrome (separator + permission-mode footer)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_repl_async_queue::async_repl_processes_single_turn_and_exits</code></td><td>CC-parity input chrome: <code>❯</code> prompt with separator + permission-mode footer (<code>⏵⏵ full access mode</code>) below. Two-phase stdin ownership: readline (idle) ↔ HookAbortMonitor (turn running), gated by <code>prompt_ready</code> channel so <code>❯</code> only appears after output is fully flushed. <code>input_chrome.rs</code> SSOT. Live-verified 2026-08-03.</td></tr>
     <tr><td>REPL steering, next-turn queue and cancellation</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Separate delivery and cancellation</strong></td><td><code>pty_turn_steering</code> · <code>pty_queue_overlay</code> · <code>pty_a2a_overlay</code></td><td><strong>CCB validation:</strong> read <code>src/utils/messageQueueManager.ts</code>: one queue carries human input and task notifications, with FIFO ordering within priority and an editable-human recall path. Codex reference <code>970111f6</code>: composer Enter/Tab separate steering and queueing; engine preempts sampling for steering, settles admitted tools, and commits input before the next request. Ordinary steering adds no mandatory redirection instruction. <strong>Product contract:</strong> Enter steers the current task; Tab explicitly queues the next turn (slash completion remains Tab). Esc flushes all pending messages without cancellation, or cancels when none are pending. Ctrl+C always cancels and preserves unapplied input. Unlike Codex's interrupt-and-resubmit shortcut, flush never emits an interruption marker or restarts a task. One runtime inbox receives human, peer and task-completion steering through engine-core; the session execution lock never gates these controls. Replayable text deltas, complete non-text blocks and settled tool results bound insertion, preserving signed thinking, complete tool arguments and result pairing. Stable ids distinguish pending from durably committed input. A2A <code>send.delivery</code> selects <code>steer</code> (default) or <code>queue</code>, retains peer provenance and body, and cannot cancel the recipient. Existing structured subagent shutdown retains its separate authorization contract. Busy session-management commands return immediately. Pending overlays and footer hints project delivery state through the existing iocraft and ColorTheme paths. <strong>Host delivery:</strong> ACP exposes <code>_sudocode/session/input</code> and revisioned input updates. The coordinator lives in engine-core and is shared with the CLI; Desktop, WebUI and Moss forward intent and render admission versus durable consumption. Human recall retains images and editor metadata; peer messages and completion notifications retain provenance and cannot cancel the recipient. Automatic next turns use the same permission/question route and lifecycle fence. Cancellation pauses unapplied input, including background results; explicit steering or flush resumes it. Ordinary ACP hosts share the CLI background-notification reducer; clients using durable task receipts acknowledge only committed input. Pending human drafts remain session-memory state, not a crash-recovery guarantee.</td></tr>
@@ -619,8 +2173,8 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Inline terminal refresh (unified render loop)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>repl_ui.rs ReplApp</code></td><td>Async REPL uses <strong>iocraft</strong> <code>render_loop()</code> — Rust equivalent of CC's Ink. Bottom chrome (spinner + separator + TextInput prompt + separator + footer) is a single iocraft component tree. <code>UseOutput::println()</code> routes turn output above the fixed chrome. Spinner ticks via <code>use_future</code> at 80ms. Keyboard input via <code>use_terminal_events</code> replaces rustyline in the async path. PR #382 removed MultiProgress; PR #383 added iocraft.</td></tr>
-    <tr><td>Foreground lifecycle and elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_foreground_activity</code> · <code>pty_background_tasks</code></td><td><code>render/activity.rs ActivityState</code> projects <code>Running / AwaitingInput / Idle</code> from the engine event bridge. Status and footer share one foreground lifecycle snapshot and the task browser's cached event projection. Foreground activity owns the status row, then a static background conclusion with the completed turn number, then turn statistics. Running, stopping, unconfirmed execution and unread failures remain distinct; ordinary unread results stay in the footer. Questions and approvals own the input panel. Hidden task output introduces no animation or clock redraw. Shared inline/one-shot formatters preserve elapsed time, model, tokens and ETA.</td></tr>
+    <tr><td>Inline terminal refresh (unified render loop)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>repl_ui.rs ReplApp</code></td><td>The REPL uses <strong>iocraft</strong> <code>render_loop()</code> — Rust equivalent of CC's Ink. Bottom chrome (spinner + separator + TextInput prompt + separator + footer) is a single iocraft component tree. <code>UseOutput::println()</code> routes turn output above the fixed chrome. Spinner ticks via <code>use_future</code> at 80ms. Keyboard input via <code>use_terminal_events</code>. PR #382 removed MultiProgress; PR #383 added iocraft.</td></tr>
+    <tr><td>Foreground lifecycle and elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_foreground_activity</code> · <code>pty_background_tasks</code></td><td><code>render/activity.rs ActivityState</code> projects <code>Running / AwaitingInput / Idle</code> from the engine event bridge. Status and footer share one foreground lifecycle snapshot and the task browser's cached event projection. Foreground activity owns the status row, then the <a href="docs/usage.md#background-tasks-in-the-repl">background-work status</a> with the completed turn number, then turn statistics. Running, stopping, unconfirmed execution and unread failures remain distinct; ordinary unread results stay in the footer. Questions and approvals own the input panel. Hidden task output does not drive status animation or clock redraws. Shared inline/one-shot formatters preserve elapsed time, model, tokens and ETA.</td></tr>
     <tr><td>Spinner status line — token counter (↓ N tokens)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_spinner_token_counter::status_line_shows_token_count_after_turn</code> · <code>live_spinner_shows_token_counter_during_streaming</code></td><td>Spinner shows <code>↓ N tokens</code> (bytes/4 approximation) after 1s of streaming. Shared <code>AtomicU32</code> counter incremented on each <code>TextDelta</code> in <code>api_client.rs</code>, read by spinner thread in <code>render.rs</code>.</td></tr>
     <tr><td>Spinner status line — reasoning status</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_render_boundaries</code> · <code>pty_chrome_styles</code></td><td>Actual thinking deltas select <code>Thinking...</code>; other model work uses <code>Working...</code>. A fixed four-cell animation approximates the Sudoprivacy mark and uses the existing <code>ColorTheme.logo</code> role. Tools prioritize available progress; quiet tools show their canonical name or active count. Time and tokens share the same row; ordinary activity text uses terminal foreground and metadata uses the muted role. Streamed prose does not hide foreground activity. Asynchronous output suspension does not reset reasoning or retry phase. All colors use <code>ColorTheme</code>.</td></tr>
     <tr><td>Spinner status line — token budget / ETA</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>When <code>max_output_tokens</code> is set (from <code>max_tokens_for_model</code>), spinner shows <code>↓ 1.2k / 16k (8%) ~3m</code>. Rate-based ETA: <code>output_tokens / elapsed</code>. Falls back to plain <code>↓ N tokens</code> when budget unknown.</td></tr>
@@ -749,11 +2303,11 @@ See <a href="docs/acp.md#direct-a2a-requests">the wire contract and test limits<
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Session background task footer and browser</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_background_tasks</code></td><td>Background terminals and explicit/auto-background child agents share an optional footer entry. ↓ → Enter opens the list; Enter inspects bounded recent output/status/exit code; k stops one task. Read results hide the entry; /tasks preserves history. Background producers report while the parent is idle, and session exit reaps owned shell processes.</td></tr>
+    <tr><td>Session background task footer and browser</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_background_tasks</code> &middot; <code>mock-anthropic-service::tool_batch_continuation</code></td><td>Background terminals and explicit/auto-background child agents share an optional footer entry. ↓ → Enter opens the list; Enter inspects bounded recent output/status/exit code; k stops one task. Read results hide the entry; /tasks preserves history. Background producers report while the parent is idle, and session exit reaps owned shell processes.</td></tr>
     <tr><td><code>Agent</code> (sub-agents, 6 presets + auto-background + custom <code>.md</code> agents + auto-summarize + permission_mode=bubble + agent color + backgrounded-agents view)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family</code>, <code>tools::tests::auto_bg_*</code>, <code>tools::tests::{lookup_custom_agent_*,allowed_tools_for_custom_agent_*,build_system_prompt_embeds_custom_agent_body}</code>, <code>runtime::custom_agents::tests</code>, <code>tools::agent_summary_threshold</code> (4 integration tests), <code>pty_presets_e2e</code> + <code>pty_custom_agents</code> + <code>pty_agent_summary</code> (live-only per plan §6.4)</td><td>LLM tool with 6 presets. <code>fork</code> preset rebuilt with real parent-context inheritance. Sync <code>Agent(run_in_background=false)</code> auto-backgrounds after <code>SUDOCODE_AGENT_AUTO_BG_SECS</code>. Custom <code>.md</code>-with-YAML-frontmatter sub-agents parsed from <code>~/.nexus/sudocode/agents/</code> and <code>&lt;cwd&gt;/.sudocode/agents/</code>. Built-in preset names are NOT shadowable. **AgentSummary auto-summarize**: when a sub-agent's final text exceeds <code>SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS</code> (default 8000 chars, <code>0</code> disables), the tools crate writes the FULL text to a <code>&lt;agent_id&gt;.full.md</code> sibling next to the normal output, updates the manifest's <code>resultFullPath</code> field, and spawns a summarizer sub-turn against the same provider config (empty tools, ≤500-word system prompt). Parent's <code>TaskOutput</code> returns the SHORT summary; the parent can still <code>read_file(resultFullPath)</code> for the raw output. Summarizer errors fall back to the full text so a flaky provider never blocks the parent.</td></tr>
     <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code> (mock) · <code>pty_task_family::task_create_then_list_shows_task_e2e</code> (live) · <code>runtime::task_registry::tests</code></td><td>LLM tool. Background task management. Mock test covers TaskList empty-registry path. Live e2e covers full journey: TaskCreate → TaskList (verify task appears) → clean exit. Unit-covered in <code>runtime::task_registry::tests</code> (create/get/list/stop status transitions).</td></tr>
     <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code></td><td>Worker lifecycle via <code>runtime::spawn_task</code> mailbox loop + <code>global_agent_registry</code> completion tracking. Covered indirectly through TaskList PTY test; end-to-end <code>Agent</code>-spawn PTY live e2e scheduled with the fork rebuild.</td></tr>
-    <tr><td>Coordinator Mode (role prompt swap + hard tool gate + task-notification XML + SendMessage live delivery + usage counters + proactive push)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_coordinator_mode::{coordinator_prompt_absent_without_env_var,coordinator_prompt_present_with_env_var}</code>, <code>runtime::coordinator_gate</code>, <code>tools::coordinator_dispatch_guard</code>, <code>runtime::task_notification_render</code>, <code>tools::subagent_multi_turn_loop</code>, <code>pty_send_message_multi_turn</code> (live-only)</td><td>Enabled by <code>SUDOCODE_COORDINATOR_MODE=1</code>. Ports CC-fork's <code>getCoordinatorSystemPrompt()</code> — Research → Synthesis → Impl → Verify workflow. Hard tool-allowlist gate landed: schema-side filter hides write-side tools from the LLM's tool list when coord mode is on; dispatch-side guard catches hallucinated calls with an instructive error. <code>&lt;task-notification&gt;</code> XML output format landed via <code>runtime::coordinator_mode::render_task_notification</code>. **SendMessage plain-text live delivery landed**: <code>run_agent_job_returning_text</code> now runs a multi-turn loop — after each <code>run_turn</code>, exits if aborted; else drains the agent's <code>.sudocode-inbox/&lt;agent_id&gt;.jsonl</code> and, if new envelopes arrived, feeds them into the next turn as a synthetic <code>&lt;mailbox-message from="…"&gt;</code> block. <code>shutdown_request</code> envelopes exit cleanly (no synth turn). Cap at <code>SUDOCODE_SUBAGENT_MAX_MULTI_TURNS</code> (default 16). 6 integration tests in <code>tools/tests/subagent_multi_turn_loop.rs</code> cover: empty mailbox, follow-up message resume with correct XML shape, shutdown_request early exit, abort-signal preempts drain, multiple envelopes collapse to one synth turn, cap enforcement.</td></tr>
+    <tr><td>Coordinator Mode (role prompt swap + hard tool gate + task-notification XML + SendMessage live delivery + usage counters + proactive push)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_coordinator_mode::{coordinator_prompt_absent_without_env_var,coordinator_prompt_present_with_env_var}</code>, <code>runtime::coordinator_gate</code>, <code>tools::coordinator_dispatch_guard</code>, <code>runtime::task_notification_render</code>, <code>tools::subagent_multi_turn_loop</code>, <code>pty_send_message_multi_turn</code> (live-only)</td><td>Enabled by <code>SUDOCODE_COORDINATOR_MODE=1</code>. Ports CC-fork's <code>getCoordinatorSystemPrompt()</code> — Research → Synthesis → Impl → Verify workflow. Hard tool-allowlist gate landed: schema-side filter hides write-side tools from the LLM's tool list when coord mode is on; dispatch-side guard catches hallucinated calls with an instructive error. <code>&lt;task-notification&gt;</code> XML output format landed via <code>runtime::coordinator_mode::render_task_notification</code>. **SendMessage plain-text live delivery landed**: <code>run_agent_job_returning_text</code> now runs a multi-turn loop — after each <code>run_turn</code>, exits if aborted; else drains the agent's conversation transcripts (<code>runtime::mailbox::Mailbox::read_pending</code>) and, if new envelopes arrived, feeds them into the next turn as a synthetic <code>&lt;mailbox-message from="…"&gt;</code> block. <code>shutdown_request</code> envelopes exit cleanly (no synth turn). Cap at <code>SUDOCODE_SUBAGENT_MAX_MULTI_TURNS</code> (default 16). 6 integration tests in <code>tools/tests/subagent_multi_turn_loop.rs</code> cover: empty mailbox, follow-up message resume with correct XML shape, shutdown_request early exit, abort-signal preempts drain, multiple envelopes collapse to one synth turn, cap enforcement.</td></tr>
     <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="must-have">must-have</td><td data-status="shipped">Shipped</td><td>—</td><td>Complete cron shipped: persistent scheduler (cron/every/at + IANA tz), <code>scode cron</code> CLI (add/list/remove/enable/disable/run/tick/daemon) + REPL <code>/cron</code>, firing via the in-process agent-run path (same as <code>scode prompt</code>), <code>tools::run_cron_*</code> on the persistent store, with behavioral PTY live coverage.<br><br><strong>Host coherence (short term, shipped):</strong> a host that owns scheduling — sudowork runs its own scheduler and never ticks scode's <code>crons.json</code> — sets <code>SUDOCODE_DISABLE_CRON_TOOLS=1</code> when it spawns scode, so the agent can't create a cron that persists but never fires (an orphan). Only the agent-facing tools are hidden; the <code>scode cron</code> CLI is untouched. Chosen because sudowork and sudocode each have production users today.<br><br><strong>Long term (target):</strong> collapse to ONE scheduler — sudowork's scheduling delegates entirely to scode's cron (sudowork keeps its UI/conversation/enterprise layer and drives <code>scode cron tick</code>; its <code>[CRON_CREATE]</code> agent protocol and SQLite <code>cron_jobs</code> retire). Then the tool gate is removed and sudowork becomes a true wrapper/UI. Per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
       <tr><td>Sub-agents &mdash; 6 built-in presets end-to-end (<code>general-purpose</code>, <code>Explore</code>, <code>Plan</code>, <code>Verification</code>, <code>scode-guide</code>, <code>statusline-setup</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_presets_e2e::preset_{general_purpose,explore,plan,verification,scode_guide,statusline_setup}_e2e</code></td><td>Each preset PTY-runs the FULL Agent tool round-trip against live sudorouter (6/6 PASS, 2026-07-17, avg ~15s/preset).</td></tr>
     <tr><td>Sub-agent <code>permission_mode="bubble"</code> &mdash; escalation prompts surface on parent's terminal</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_agent_permission_bubble::permission_prompt_from_subagent_bubbles_to_parent_terminal</code></td><td>Sub-agent's <code>permission_mode="bubble"</code> param plumbs end-to-end; sentinel <code>BUBBLE_TEST_DONE</code> surfaces in parent's report (verified 2026-07-17).</td></tr>
@@ -1847,18 +3401,16 @@ rebac can serve as the backing store for <code>PermissionPolicy</code> rules,
 or whether the two layers remain separate (rebac for cross-agent, ABAC for
 intra-agent tool gating).</p>
 
-<h3>Slash command typeahead — replace rustyline Tab completion</h3>
+<h3>Slash command typeahead — replace Tab completion</h3>
 
 <p>CC shows a dropdown suggestion list the moment the user types <code>/</code>,
-without requiring Tab. scode currently uses rustyline's <code>Completer</code>
-trait — functional (Tab shows options, partial prefix completes), but
-requires an explicit Tab press.</p>
+without requiring Tab. The scode REPL completes a slash command on Tab
+(<code>suggest_slash_commands</code> in <code>repl_ui.rs</code>; repeated Tab
+cycles the matches) — functional, but it requires an explicit Tab press.</p>
 
-<p><strong>Plan:</strong> replace the current rustyline Tab completion with an
-inline typeahead that renders suggestions below the prompt as the user
-types. Delete the existing <code>SlashCommandHelper</code> /
-<code>Completer</code> implementation in <code>input.rs</code> — the new
-behavior fully supersedes it.</p>
+<p><strong>Plan:</strong> replace Tab completion with an inline typeahead that
+renders suggestions below the prompt as the user types; the new behavior
+fully supersedes the Tab cycle.</p>
 
 <p><strong>CC reference:</strong> <code>useTypeahead</code> hook
 (<code>src/hooks/useTypeahead.tsx</code>, 1384 lines). Heavy in code because
@@ -1868,8 +3420,8 @@ portion is ~50 lines of string prefix matching — runtime overhead is
 negligible. The rest of the hook's scope is out of scode's current surface.</p>
 
 <p><strong>PTY test impact:</strong> <code>memory_tab_completion</code> sends
-<code>/mem</code> + <code>\t</code> to trigger rustyline completion. When
-the typeahead replaces rustyline, this test must change: send <code>/mem</code>
+<code>/mem</code> + <code>\t</code> to trigger completion. When the typeahead
+replaces it, this test must change: send <code>/mem</code>
 → expect suggestions rendered inline → select → verify execution. The Tab
 send becomes irrelevant.</p>
 
@@ -1932,8 +3484,7 @@ shortcut. This changes presentation, not slot allocation or input ownership.</p>
 <table>
   <thead><tr><th>Component</th><th>Source</th><th>Role</th></tr></thead>
   <tbody>
-    <tr><td>Input (sync)</td><td><code>input.rs</code></td><td><code>rustyline</code>-based line editor with slash-command tab completion, Shift+Enter newline, history (sync REPL path only)</td></tr>
-    <tr><td>REPL UI (async)</td><td><code>repl_ui.rs</code></td><td><strong>iocraft</strong> <code>render_loop()</code>: <code>ReplApp</code> component with TextInput, spinner, chrome. <code>UseOutput</code> routes turn output above fixed chrome. Replaces rustyline + indicatif in async REPL path.</td></tr>
+    <tr><td>REPL UI</td><td><code>repl_ui.rs</code></td><td><strong>iocraft</strong> <code>render_loop()</code>: <code>ReplApp</code> component with TextInput, spinner, chrome. <code>UseOutput</code> routes turn output above fixed chrome.</td></tr>
     <tr><td>Rendering</td><td><code>render.rs</code></td><td>Markdown→terminal rendering (headings, lists, tables, code blocks with syntect highlighting, blockquotes); <code>SpinnerHandle</code> (indicatif, non-REPL paths)</td></tr>
     <tr><td>App/REPL loop</td><td><code>main.rs</code></td><td>The <code>LiveCli</code> struct: REPL loop, slash command handlers, streaming output, tool call display, permission prompting, session management</td></tr>
   </tbody>
@@ -1942,7 +3493,7 @@ shortcut. This changes presentation, not slot allocation or input ownership.</p>
 <p>Dependencies: <strong>crossterm 0.28</strong>,
 <strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
 <strong>iocraft 0.8</strong>, <strong>smol 2</strong>,
-<strong>rustyline 19</strong> (sync path, upstream buffered-input fix for external diagnostics), <strong>serde_json</strong>.</p>
+<strong>rustyline 19</strong> (one-line prompts outside the REPL), <strong>serde_json</strong>.</p>
 
 <h4>Phase 0 · Structural cleanup</h4>
 
@@ -2029,6 +3580,26 @@ namespace for the new TUI work.</p>
 </table>
 
 <h4>No alternate-screen / full-screen TUI mode — by rule</h4>
+
+<section id="prompt-viewport-experiment">
+<h5>Native inline prompt surfaces — 2026-10-31</h5>
+<p><strong>Experimental; off by default.</strong> The existing
+<code>promptViewport</code> setting now applies matching shading to the live
+editor and committed prompts. The fixed conversation viewport was removed after
+Windows VS Code testing exposed independent wheel and native scrollbar positions.
+All output uses the existing inline history writer, and the terminal owns
+scrolling and selection.</p>
+<ul>
+  <li>Keep one output path, one replay formatter and one prompt style. Styling
+  must not introduce another transcript store or input/navigation owner.</li>
+  <li>Verify native history growth, actual scrollbar dragging and wheel scrolling,
+  selection, Unicode drafts, resize and resume through real PTYs and browser
+  terminal interaction. Retain enabled/disabled performance budgets.</li>
+  <li>A composer and prompt header that remain visible during native scrollback
+  require terminal-host integration. They are deferred until the host can share
+  its scroll position.</li>
+</ul>
+</section>
 
 <p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
 sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
@@ -2234,7 +3805,7 @@ bounded chunks, and retained layouts have both entry and byte limits.</p>
   <thead><tr><th>Priority</th><th>Next user workflow</th><th>Current gap and implementation direction</th><th>Performance acceptance</th></tr></thead>
   <tbody>
     <tr><td>Next</td><td>Keep an unfinished composer draft when a question takes focus</td><td>Codex keeps composer state under its bottom-pane views. Scode clears input_value when ShowQuestion and ClearQuestion run. Reproduce a question arriving during a Unicode draft/paste, then separate composer state from temporary answer state, including cursor ownership.</td><td>Reuse the same draft and paste store; no duplicate editor loop. Preserve bytes and cursor through answer, cancellation, pager handoff and resize.</td></tr>
-    <tr><td>Next</td><td>Search prior prompts while preserving an unfinished draft</td><td>Codex documents Ctrl-R preview and cancellation restoring the original draft. Scode help advertises Ctrl-R, but the async input dispatcher and iocraft TextInput do not expose a reverse-search path. Confirm through a PTY before implementing one owner over the existing prompt history.</td><td>No history parsing or allocation on ordinary typing; bounded matches, exact draft/paste restoration on cancel, unchanged input latency and idle writes.</td></tr>
+    <tr><td>Next</td><td>Search prior prompts while preserving an unfinished draft</td><td>Codex documents Ctrl-R preview and cancellation restoring the original draft. Scode has no reverse search: iocraft TextInput walks the session's prompt history with Up/Down (seeded on resume), and help no longer advertises the rustyline Ctrl-R. Implement one owner over that prompt history.</td><td>No history parsing or allocation on ordinary typing; bounded matches, exact draft/paste restoration on cancel, unchanged input latency and idle writes.</td></tr>
     <tr><td>Next</td><td>Inspect complete historical tool output and diffs</td><td>Current cards truncate results and retain full source in the session. Add on-demand inspection through existing terminal pager ownership and persisted tool identities. Compare against Codex disclosure without retaining a second conversation viewport.</td><td>Load details only on request; release them on close. Measure large outputs, pager exit, cancellation and RSS growth.</td></tr>
     <tr><td>Later</td><td>Find text in the current conversation, including collapsed tool results</td><td>Current /search targets workspace files. Use an unambiguous conversation action over existing session records; Codex's bounded incremental search is a useful reference. Keep file search semantics.</td><td>Bound bytes scanned per input turn, support cancellation and large sessions, keep stable result identities and avoid a permanent duplicate text index.</td></tr>
     <tr><td>Later</td><td>Edit a proposed plan in an external editor and review the changed source</td><td>CCB exposes an editor action. Reuse scode's existing editor handoff and the engine's saved-plan comparison; a changed file requires fresh review. Verify CLI and ACP retain the same approval semantics.</td><td>No polling while idle; restore terminal, draft and cancellation after editor failure. Measure reopen latency on long documents.</td></tr>
@@ -2383,6 +3954,85 @@ The <a href="https://s.shareone.vip/s/nexus-integration-architecture">Nexus inte
 owns transport and runtime service boundaries. This section tracks implementation
 and acceptance against those references.</p>
 
+<h3 id="agent-runtime-status">Agent discovery: inspect runtime status without reading sessions</h3>
+
+<p><b>Requested behavior.</b> Extend <code>agent_list</code> with small, explicit
+runtime observations. A peer can be doing foreground work, waiting for an actual
+input request, or idle after its turn; background work is independent. CLI and
+cohost consume the same engine facts. No session scan, model request, terminal
+scrape, or inference from silence is part of discovery.</p>
+
+<p><b>Verified foundation.</b> The engine's <code>EngineState</code> owns foreground
+transitions, including management and direct tools. An outstanding input request
+has a typed permission/question reason; independent tools may continue while it
+waits. <code>BackgroundTasks</code> already owns shell and child-agent tasks and
+real tool-operation leases. The task browser consumes this registry. Nexus
+0.8.23 adds owner-authorized <code>managed_agent.list_sessions_v1</code> snapshots
+that preserve multiple managed instances of one Agent and SID. It is a node-local
+enumeration, not a complete cross-node presence directory.</p>
+
+<table>
+<thead><tr><th>Observation</th><th>Authority and meaning</th></tr></thead>
+<tbody>
+<tr><td>Agent name and SID</td><td>Durable identity and history, respectively.
+Neither establishes a running instance. One Agent or SID may have several
+instances; do not flatten their states into one last-writer-wins value.</td></tr>
+<tr><td>Runtime identity</td><td>An opaque, host-scoped instance handle. Preserve
+the host/node routing identity, PID and incarnation together. A PID alone is
+reusable. A managed channel generation is distinct from a SID and must be
+validated by its owning host.</td></tr>
+<tr><td>Online observation</td><td>The runtime host's registration and live
+instance ownership. Include query scope and freshness. An unreachable host,
+unsupported backend, expired observation, or authorization boundary yields
+unknown, not offline. Absence can establish offline only within an explicitly
+complete, authoritative scope. Directory existence is not liveness.</td></tr>
+<tr><td>Foreground state and input reason</td><td>Read the shared engine state.
+Only an actual permission/question request means awaiting input; an ordinary
+question in the final answer leaves the turn idle. Thinking-end, message-end,
+stalled-stream timers and recent output do not end a turn. A host that only
+reports attach/exit cannot claim to report foreground activity.</td></tr>
+<tr><td>Background tasks</td><td>Count background-marked running/stopping
+Terminal and Agent records from <code>BackgroundTasks</code>, with execution
+unconfirmed reported separately. Read metadata without copying output tails,
+reading manifests, or replacing the browser's event sink.</td></tr>
+<tr><td>Outstanding tool operations</td><td>Use the same registry's actual worker
+leases, including workers surviving caller cancellation. Keep this count
+separate from background tasks. A status read is observational; it never grants
+human control or replaces the existing pause/fence protocol.</td></tr>
+</tbody>
+</table>
+
+<p><b>Implementation boundary.</b> The common engine status command and
+<a href="docs/acp.md#runtime-status-extension-v1">ACP status extension</a> expose
+one lightweight snapshot through the existing command/event seam. Host adapters
+consume those facts; neither reimplements turn detection. Native CLI routing
+belongs in the local transient runtime layer, with OS-released instance
+ownership and an incarnation-safe query endpoint. An attached CLI registers
+through its node's external-runtime interface without making node availability
+a startup dependency or falling back to another peer namespace. Cohost retains
+the existing Nexus AgentRegistry as its runtime authority. Node routing and
+cross-node discovery belong to Nexus; do not replicate mutable status into
+Agent/SID transcripts or treat the attention-only state stream as a full
+runtime registry.</p>
+
+<p><b>Nexus contract still required.</b> External updates, heartbeats and teardown
+must validate the registered incarnation and carry the typed waiting reason.
+Discovery must expose supported observations, node scope and instance identity,
+including externally registered CLI processes. A remote directory must route
+to the authoritative runtime host and retain unknown/freshness semantics across
+disconnects. The released generic <code>agent_update_state</code> takes a PID
+and state only; the managed-only listing does not satisfy these requirements.</p>
+
+<p><b>Connected acceptance.</b> Drive real CLI PTYs and production cohost engines:
+quiet running tool; explicit question with a sibling tool completing before the
+answer; permission allow/deny/cancel; idle foreground with a live background
+shell and child agent; cancellation with a real worker still stopping; normal
+exit, crash and PID reuse; two instances of one Agent/SID; and owner-denied,
+disconnected and unsupported observations. Repeat discovery across two real
+nodes and verify exact instance identity and actual file/message results.
+Include a configured-but-offline node startup check. Retain structured traces
+outside temporary fixtures; a passing retry does not erase a failed run.</p>
+
 <h3 id="shared-sid-implementation">Shared SID: append history, restore a context chain</h3>
 
 <p><b>CCB validation.</b> The official
@@ -2402,12 +4052,14 @@ branch. A second run resumed while the original instance executed a real tool:
 the new context received an interrupted-call result with an unknown outcome,
 and the original tool subsequently completed in its own context.</p>
 
-<p><b>Restore parity acceptance.</b> Verify the written-prefix and branch-local
-recovery contract in the
+<p><b>Restore decision and acceptance.</b> New runtimes branch from the most
+recently completed turn, as chosen for Q1. The CC observation above explains
+its written-prefix behavior; it does not change this product decision. Verify
+the completed-turn boundary in the
 <a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>
-against the isolated CC run above. Acceptance includes a pending model response,
-an executing native tool, a sibling's synthetic interrupted result, the source's
-actual result, and a fresh restore after both branches finish.</p>
+through a pending model response, an executing native tool, the source's actual
+result, and fresh restores while the source is running and after both branches
+finish. Inspect actual provider requests and retain both durable branches.</p>
 
 <p>The durable object and authorization contract lives in the
 <a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>.
@@ -2455,18 +4107,24 @@ Exercise cancellation, stale candidates, crash and restart.</td></tr>
 context, and a durable repair targets that specific call. Opening another context
 does not establish that a live call in its sibling has ended.</td><td>Resume while
 the sibling tool is still running; A receives its real result once, while B
-inherits the already written prefix and persists an unknown-outcome interrupted
-result in B's branch. A's live call and actual result retain their original
-identity. A fresh restore reuses the persisted repair without repeating effects.</td></tr>
+inherits the latest completed turn. A's pending call remains absent from B's
+context. A's live call and actual result retain their original identity. A fresh
+restore selects the latest completed branch without repeating tool effects.</td></tr>
 <tr><td>Completion delivery</td><td>Separate transcript append from completion
 ownership. The completion protocol binds active traces, context revisions,
 terminal sources, reservations and acknowledgements to the originating context.
 Opening a second context preserves the first context's active trace. Deletion
 uses the shared durable storage identity and is coordinated with every admitted
 writer. Completion ownership and cache behavior stay behind the existing engine
-boundary.</td><td>Two active prompts and independent task completions; reconnect
+boundary. The accepted immediate deletion and automatic cleanup contract is
+recorded in <a href="docs/design/agent-context-storage-matrix.html#q1-deletion-contract">Q1</a>;
+<a href="docs/design/agent-context-storage-matrix.html#q1-backup-deletion">automatic backups</a>
+remain owned by the source Session and follow the same deletion and retirement rules;
+its remote implementation and backend acceptance remain open.</td><td>Two active prompts and independent task completions; reconnect
 and ACK retries; deletion racing with append; crash recovery with one sibling
-still alive. Verify the existing completion protocol's delivery guarantees.</td></tr>
+still alive. Verify old writers and ACKs are rejected, automatic cleanup resumes
+after restart, and physical removal waits for actual client retirement on Native
+OS FS and authenticated Nexus. Verify the existing completion protocol's delivery guarantees.</td></tr>
 <tr><td>Agent links and runtime routing</td><td><code>SessionStore</code> verifies
 the caller's authorized Agent link and target access. The service supplies the
 current execution identity and repository context. <code>agent_list</code>

@@ -1,12 +1,12 @@
 //! PTY live e2e — auto-verification streak nudge fires after 3
-//! todos are marked completed via TodoWrite and gets reset by a
+//! todos are marked completed via `TodoWrite` and gets reset by a
 //! Verification spawn.
 //!
 //! Roadmap coverage: sub-agent CC-fork parity §4.4 Commit 10.
 //!
 //! ## The chain, and who drives each link
 //!
-//! 1. Parent LLM tracks three items on a todo list via TodoWrite.
+//! 1. Parent LLM tracks three items on a todo list via `TodoWrite`.
 //! 2. Marks each completed by re-sending the whole list (whole-list
 //!    replace), one more completed each call.
 //! 3. After the third completion the tool's JSON return value carries

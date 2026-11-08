@@ -110,8 +110,7 @@ fn explore_and_plan_agents_have_isolated_memory() {
     // Nothing is lost by dropping the request: each agent's seeded memory tells
     // it to tag its own replies, so the tags surface because the parent
     // summarises what its workers actually said.
-    let prompt = format!(
-        "I want two perspectives on the same question: how would someone new to \
+    let prompt = "I want two perspectives on the same question: how would someone new to \
          a repository find where its HTTP requests are made? \
          Ask Agent(subagent_type=\"Explore\", description=\"search strategy\", \
          prompt=\"In two sentences, describe how you would search a repository \
@@ -120,7 +119,7 @@ fn explore_and_plan_agents_have_isolated_memory() {
          prompt=\"In two sentences, outline a plan for locating where HTTP \
          requests are made in a repository.\"). Then summarise what each of them \
          told you."
-    );
+        .to_string();
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access", &prompt],
@@ -137,7 +136,7 @@ fn explore_and_plan_agents_have_isolated_memory() {
     // its own tag, and the parent's summary carries them through. Order isn't
     // guaranteed — expect them separately.
     sess.expect(EXPLORE_SENTINEL).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "Explore sentinel did not surface: {e}\n\
              tail: {tail}",
@@ -152,7 +151,7 @@ fn explore_and_plan_agents_have_isolated_memory() {
         );
     });
     sess.expect(PLAN_SENTINEL).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "Plan sentinel did not surface: {e}\n\
              tail: {tail}",
@@ -170,7 +169,7 @@ fn explore_and_plan_agents_have_isolated_memory() {
     // Drain and exit cleanly.
     sess.set_default_timeout(long);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "scode did not exit cleanly: {e}\ntail: {tail}",
             tail = screen
@@ -202,6 +201,10 @@ fn explore_and_plan_agents_have_isolated_memory() {
     // Asserted per agent, which is strictly stronger than the old total: a leak
     // is one agent's tag appearing in the OTHER agent's result, and that is now
     // named directly instead of inferred from a count.
+    assert_isolated_memory_results(&env);
+}
+
+fn assert_isolated_memory_results(env: &TestEnv) {
     let manifests: Vec<Value> = fs::read_dir(env.workspace_root().join(".sudocode-agents"))
         .expect("read .sudocode-agents")
         .flatten()

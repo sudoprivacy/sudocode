@@ -8,8 +8,8 @@ use runtime::{ConfigLoader, ConfigSource, ContentBlock, ProjectContext, Session}
 use serde_json::json;
 
 use crate::cli::session::LATEST_SESSION_REFERENCE;
-use crate::render::{ansi_fg, theme, BOLD, RESET};
-use crate::PRIMARY_SESSION_EXTENSION;
+use crate::render::{theme, BOLD, RESET};
+use crate::SESSION_AUTO_SAVE_PATH;
 use crate::{truncate_for_prompt, CliOutputFormat, LocalHelpTopic, STUB_COMMANDS, VERSION};
 
 pub(crate) fn render_repl_help() -> String {
@@ -20,13 +20,12 @@ pub(crate) fn render_repl_help() -> String {
         "  ! <command>          Run a shell command; output is shown and added to context"
             .to_string(),
         "  Up/Down              Navigate prompt history".to_string(),
-        "  Ctrl-R               Reverse-search prompt history".to_string(),
         "  Enter / Tab          Steer current work / queue next turn; Tab completes /commands"
             .to_string(),
         "  Ctrl-C twice         Exit (second press within 800 ms)".to_string(),
         "  Esc / Ctrl+C         Flush pending input (or cancel) / always cancel".to_string(),
         "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
-        "  Auto-save            .scode/sessions/<session-id>.jsonl".to_string(),
+        format!("  Auto-save            {SESSION_AUTO_SAVE_PATH}"),
         "  Resume latest        /resume latest".to_string(),
         "  Browse sessions      /session list".to_string(),
         "  Show prompt history  /history [count]".to_string(),
@@ -260,13 +259,12 @@ pub(crate) fn render_config_json(
 
     if let Some(section) = section {
         let section_rendered: Option<String> = match section {
-            "env" => runtime_config.get("env").map(|v| v.render()),
-            "hooks" => runtime_config.get("hooks").map(|v| v.render()),
-            "model" => runtime_config.get("model").map(|v| v.render()),
+            "env" => runtime_config.render_value("env"),
+            "hooks" => runtime_config.render_value("hooks"),
+            "model" => runtime_config.render_value("model"),
             "plugins" => runtime_config
-                .get("plugins")
-                .or_else(|| runtime_config.get("enabledPlugins"))
-                .map(|v| v.render()),
+                .render_value("plugins")
+                .or_else(|| runtime_config.render_value("enabledPlugins")),
             other => {
                 return Ok(serde_json::json!({
                     "kind": "config",
@@ -323,7 +321,7 @@ pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error
             } else {
                 preview
             };
-            lines.push(format!("  {}. {}", index + 1, file.path.display(),));
+            lines.push(format!("  {}. {}", index + 1, file.path.display()));
             lines.push(format!(
                 "     lines={} preview={}",
                 file.content.lines().count(),
@@ -371,8 +369,7 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     if !in_git_repo {
         return Ok(format!(
             "Diff\n  Result           no git repository\n  Detail           {} is not inside a git project",
@@ -418,9 +415,9 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 pub(crate) fn colorize_unified_diff(diff: &str) -> String {
     let t = theme();
     let bold = BOLD;
-    let info = ansi_fg(t.info());
-    let added = ansi_fg(t.diff_added);
-    let removed = ansi_fg(t.diff_removed);
+    let info = t.fg_seq(crate::render::TextRole::Info);
+    let added = t.fg_seq(crate::render::TextRole::Added);
+    let removed = t.fg_seq(crate::render::TextRole::Removed);
     let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
     for line in diff.split_inclusive('\n') {
         let trailing_newline = line.ends_with('\n');
@@ -462,8 +459,7 @@ pub(crate) fn render_diff_json_for(
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     if !in_git_repo {
         return Ok(serde_json::json!({
             "kind": "diff",
@@ -776,10 +772,7 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "Resume-safe commands: {resume_commands}")?;
     writeln!(out)?;
     writeln!(out, "Session shortcuts:")?;
-    writeln!(
-        out,
-        "  REPL turns auto-save to .scode/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}"
-    )?;
+    writeln!(out, "  REPL turns auto-save to {SESSION_AUTO_SAVE_PATH}")?;
     writeln!(
         out,
         "  Use `{LATEST_SESSION_REFERENCE}` with --resume, /resume, or /session switch to target the newest saved session"
@@ -886,11 +879,11 @@ mod tests {
 
     #[test]
     fn colorize_diff_paints_added_and_removed_lines() {
-        use crate::render::{ansi_fg, theme, BOLD, RESET};
+        use crate::render::{theme, BOLD, RESET};
         let t = theme();
-        let added = ansi_fg(t.diff_added);
-        let removed = ansi_fg(t.diff_removed);
-        let info = ansi_fg(t.info());
+        let added = t.fg_seq(crate::render::TextRole::Added);
+        let removed = t.fg_seq(crate::render::TextRole::Removed);
+        let info = t.fg_seq(crate::render::TextRole::Info);
 
         let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
         let painted = colorize_unified_diff(diff);

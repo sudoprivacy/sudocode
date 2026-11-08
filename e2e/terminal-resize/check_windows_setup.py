@@ -3,6 +3,8 @@
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mmap
+import os
 from pathlib import Path
 import runpy
 import shutil
@@ -10,6 +12,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+
+
+# The actual installer before native preparation support, not a simulated reply.
+LEGACY_INSTALLER_BLOB = "20829f60e316bfc2fe07e3d75959be304f57e0cf"
+INSTALLER_TIMEOUT = 120
 
 
 # Redirect only the download boundary; run the unchanged installer entry point
@@ -17,24 +25,45 @@ import threading
 INSTALL = """import runpy, sys, urllib.request
 real_open = urllib.request.urlopen
 official, local, installer, destination = sys.argv[1:]
-def controlled_open(url, *args, **kwargs):
-    assert url == official, url
-    return real_open(local, *args, **kwargs)
+def controlled_open(request, *args, **kwargs):
+    if isinstance(request, str):
+        request = urllib.request.Request(request)
+    assert request.full_url == official, request.full_url
+    return real_open(urllib.request.Request(local, headers=dict(request.header_items())), *args, **kwargs)
 urllib.request.urlopen = controlled_open
 sys.argv = [installer, destination]
 runpy.run_path(installer, run_name='__main__')
 """
 
 
+def run_concurrent_installers(command):
+    processes = []
+    try:
+        for _ in range(2):
+            processes.append(subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ))
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=INSTALLER_TIMEOUT)
+            assert process.returncode == 0, stdout + stderr
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=10)
+
+
 def main():
     installer = Path(__file__).with_name("setup_windows.py")
     settings = runpy.run_path(str(installer))
+    profiles = runpy.run_path(str(Path(__file__).resolve().parents[2] / ".github/local-acceptance/checks.py"))
     commit = settings["COMMIT"]
     archive = Path(sys.argv[1]).resolve()
     with archive.open("rb") as source:
         assert hashlib.file_digest(source, "sha256").hexdigest() == settings["SHA256"]
     official = f"https://update.code.visualstudio.com/commit:{commit}/win32-x64-archive/stable"
-    counts = {"recover": 0, "reject": 0}
+    counts = {"recover": 0, "reject": 0, "resume": 0, "concurrent": 0}
+    ranges = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -43,7 +72,23 @@ def main():
         def do_GET(self):
             label = self.path.strip("/")
             counts[label] += 1
-            good = label == "recover" and counts[label] > 1
+            if label == "resume":
+                # The first body closes halfway without an HTTP error; the
+                # retry must request and append only the remaining bytes.
+                size = archive.stat().st_size
+                ranges.append(self.headers.get("Range"))
+                offset = int(ranges[-1][len("bytes="):-1]) if ranges[-1] else 0
+                self.send_response(206 if offset else 200)
+                if offset:
+                    self.send_header("Content-Range", f"bytes {offset}-{size - 1}/{size}")
+                self.send_header("Content-Length", str(size - offset))
+                self.end_headers()
+                with archive.open("rb") as source:
+                    source.seek(offset)
+                    self.wfile.write(source.read(size // 2 if not offset else size - offset))
+                self.close_connection = True
+                return
+            good = label == "concurrent" or (label == "recover" and counts[label] > 1)
             self.send_response(200)
             self.send_header("Content-Length", str(archive.stat().st_size if good else 7))
             self.end_headers()
@@ -58,7 +103,7 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="scode-terminal-installer-") as temporary:
             root = Path(temporary)
-            for label in ("recover", "reject"):
+            for label in ("recover", "reject", "resume"):
                 destination = root / label
                 proc = subprocess.run(
                     [
@@ -66,10 +111,19 @@ def main():
                         f"http://127.0.0.1:{server.server_port}/{label}",
                         str(installer), str(destination),
                     ],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                 )
-                assert "checksum mismatch" in proc.stdout, proc.stdout + proc.stderr
                 assert not (destination / "host.partial").exists()
+                if label == "resume":
+                    assert proc.returncode == 0 and counts[label] == 2, proc.stdout + proc.stderr
+                    size = archive.stat().st_size
+                    assert ranges == [None, f"bytes={size // 2}-"], ranges
+                    assert f"retrying from byte {size // 2}" in proc.stdout, proc.stdout
+                    assert (destination / "host.zip").stat().st_size == size
+                    assert (destination / "Code.exe").exists()
+                    print(f"Installer HTTP acceptance passed: {label}, {counts[label]} requests", flush=True)
+                    continue
+                assert "checksum mismatch" in proc.stdout, proc.stdout + proc.stderr
                 if label == "recover":
                     assert proc.returncode == 0 and counts[label] == 2, proc.stdout + proc.stderr
                     with (destination / "Code.exe").open("rb") as executable:
@@ -79,17 +133,108 @@ def main():
                     assert product["commit"] == commit
                     assert (package / "node_modules.asar").stat().st_size > 0
                     assert list((package / "node_modules.asar.unpacked/node-pty").rglob("*.node"))
-                    cached = subprocess.run(
-                        [sys.executable, str(installer), str(destination)],
-                        capture_output=True, text=True, timeout=120,
+                    executable = destination / "Code.exe"
+                    icu = destination / commit[:10] / "icudtl.dat"
+                    stable = [executable, icu, package / "node_modules.asar"]
+                    modified = {path: path.stat().st_mtime_ns for path in stable}
+                    host = None
+                    try:
+                        if os.name == "nt":
+                            ready = destination / "host-ready"
+                            host = subprocess.Popen(
+                                [str(executable), "-e", "Intl.DateTimeFormat('en').format(new Date());"
+                                 "require('fs').writeFileSync(process.argv[1], 'ready');"
+                                 "setInterval(() => {}, 1000)", str(ready)],
+                                env={**os.environ, "ELECTRON_RUN_AS_NODE": "1"},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            )
+                            deadline = time.monotonic() + 10
+                            while not ready.exists() and host.poll() is None and time.monotonic() < deadline:
+                                time.sleep(0.05)
+                            assert ready.exists() and host.poll() is None, "Native terminal host did not start"
+                        # A mapped ICU file reproduces Windows' real Errno 22.
+                        # Both installers must preserve it while repairing metadata.
+                        (package / "product.json").write_text("corrupt", encoding="utf-8")
+                        with icu.open("rb") as data, mmap.mmap(data.fileno(), 0, access=mmap.ACCESS_READ):
+                            run_concurrent_installers([sys.executable, str(installer), str(destination)])
+                        assert counts[label] == 2
+                        assert modified == {path: path.stat().st_mtime_ns for path in stable}
+                        assert json.loads((package / "product.json").read_text(encoding="utf-8"))["commit"] == commit
+                        if host:
+                            assert host.poll() is None, "Cache setup stopped the running terminal host"
+                    finally:
+                        if host:
+                            if host.poll() is None:
+                                host.terminate()
+                            host.wait(timeout=10)
+                            host.stderr.close()
+                    print("Installer in-use concurrent cache acceptance passed", flush=True)
+                    # Ordinary Rust drivers load ConPTY beside their executable.
+                    # Exercise repair and in-use provisioning against the same
+                    # real verified distribution, retaining mapped file identity.
+                    native_target = (root / "native-target").resolve()
+                    native_command = [sys.executable, str(installer), str(destination),
+                                      "--native-target", str(native_target), "--native-arch", "x64"]
+                    native = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
+                    assert native.returncode == 0, native.stdout + native.stderr
+                    print(native.stdout, end="", flush=True)
+                    native_log = root / "native-install.log"
+                    native_log.write_text(native.stdout, encoding="utf-8")
+                    verified = profiles["verify_native_terminal"](native_log, native_target)
+                    identities = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+                                  for line in native.stdout.splitlines() if line.startswith("NATIVE_CONPTY_HOST=")]
+                    assert len(identities) == 1 and identities[0]["archive_sha256"] == settings["SHA256"]
+                    assert verified == identities[0]
+                    files = [Path(entry["path"]) for entry in identities[0]["files"]]
+                    assert {file.name for file in files} == {"conpty.dll", "OpenConsole.exe"}
+                    assert all(file.parent == native_target / "debug/deps" for file in files)
+                    original = {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                for file in files}
+                    with files[0].open("rb") as data, mmap.mmap(data.fileno(), 0, access=mmap.ACCESS_READ):
+                        run_concurrent_installers(native_command)
+                    assert original == {file: (hashlib.sha256(file.read_bytes()).hexdigest(), file.stat().st_mtime_ns)
+                                        for file in files}
+                    # A real legacy installer exits successfully while ignoring
+                    # the new option. Even existing sidecars must not let its
+                    # missing preparation observation qualify a new invocation.
+                    legacy = root / "legacy-installer.py"
+                    legacy.write_bytes(subprocess.check_output(
+                        ["git", "show", LEGACY_INSTALLER_BLOB],
+                        cwd=Path(__file__).resolve().parents[2],
+                    ))
+                    ignored = subprocess.run(
+                        [sys.executable, str(legacy), str(destination), "--native-target", str(native_target)],
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                     )
-                    assert cached.returncode == 0 and counts[label] == 2, cached.stdout + cached.stderr
+                    assert ignored.returncode == 0, ignored.stderr
+                    legacy_log = root / "legacy-install.log"
+                    legacy_log.write_text(ignored.stdout, encoding="utf-8")
+                    try:
+                        profiles["verify_native_terminal"](legacy_log, native_target)
+                    except RuntimeError as error:
+                        assert "did not report exactly one verified provider" in str(error), error
+                    else:
+                        raise AssertionError("A legacy successful installer qualified unobserved native preparation")
+                    files[0].write_bytes(b"corrupt native host")
+                    try:
+                        profiles["verify_native_terminal"](native_log, native_target)
+                    except RuntimeError as error:
+                        assert "differs from the prepared provider" in str(error), error
+                    else:
+                        raise AssertionError("Changed sidecar bytes were accepted after preparation")
+                    repaired = subprocess.run(native_command, capture_output=True, text=True, timeout=INSTALLER_TIMEOUT)
+                    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+                    native_log.write_text(repaired.stdout, encoding="utf-8")
+                    profiles["verify_native_terminal"](native_log, native_target)
+                    assert all(hashlib.sha256(file.read_bytes()).hexdigest() == original[file][0] for file in files)
+                    assert counts[label] == 2, "Native host provisioning must reuse the verified archive"
+                    print("Native ConPTY mapped identity, legacy-installer refusal and corrupted-sidecar recovery passed", flush=True)
                     # Corrupted cache entries also fail closed, without being
                     # silently accepted or initiating an unobserved download.
                     (destination / "host.zip").write_bytes(b"corrupt")
                     corrupt = subprocess.run(
                         [sys.executable, str(installer), str(destination)],
-                        capture_output=True, text=True, timeout=120,
+                        capture_output=True, text=True, timeout=INSTALLER_TIMEOUT,
                     )
                     assert corrupt.returncode != 0 and "checksum mismatch" in corrupt.stderr
                     assert counts[label] == 2
@@ -98,6 +243,14 @@ def main():
                     assert not (destination / "host.zip").exists()
                     assert not (destination / "Code.exe").exists()
                 print(f"Installer HTTP acceptance passed: {label}, {counts[label]} requests", flush=True)
+            destination = root / "concurrent"
+            run_concurrent_installers(
+                [sys.executable, "-c", INSTALL, official,
+                 f"http://127.0.0.1:{server.server_port}/concurrent", str(installer), str(destination)],
+            )
+            assert counts["concurrent"] == 1, counts
+            assert json.loads((destination / commit[:10] / "resources/app/product.json").read_text(encoding="utf-8"))["commit"] == commit
+            print("Installer concurrent cold-cache acceptance passed: one download", flush=True)
     finally:
         server.shutdown()
         server.server_close()

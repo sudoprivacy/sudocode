@@ -1,7 +1,7 @@
-//! PTY tests for the TurnRenderer chrome.
+//! PTY tests for the `TurnRenderer` chrome.
 //!
 //! These tests verify that the turn-scoped chrome (spinner + output
-//! routing) works correctly. TurnRenderer is active by default when
+//! routing) works correctly. `TurnRenderer` is active by default when
 //! stdout is a terminal (which it is in PTY tests).
 //!
 //! ```bash
@@ -43,13 +43,55 @@ fn turn_renderer_repl_reprompt() {
     let env = TestEnv::new("tr-repl-reprompt");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
-    sess.expect("❯").expect("initial prompt");
-
     let prompt = env.prompt("What is 2+2? Answer only the number.", "single_turn_text");
-    sess.send(&format!("{prompt}\r")).expect("send prompt");
+    let budget = if env.is_live() {
+        common::LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
+    common::run_turn(&mut sess, &prompt, budget, "turn");
+    let screen = sess.render(common::screen_contents);
+    assert!(
+        screen
+            .rsplit_once("Answer only the number.")
+            .is_some_and(|(_, reply)| reply.contains('4')),
+        "the answer should render below the prompt:\n{screen}"
+    );
 
-    sess.expect("4").expect("response");
-    sess.expect("❯").expect("prompt after turn");
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().expect("clean exit");
+    assert_eq!(exit, 0);
+}
+
+/// A submitted line is echoed into the transcript exactly once, and the
+/// editor below it is empty again.
+#[test]
+fn submitted_line_is_echoed_once() {
+    let env = TestEnv::new("tr-single-echo");
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+
+    common::expect_input_line_cleared(&sess, env.timeout(), "REPL input ready");
+    sess.send("/version\r").expect("send /version");
+    common::expect_screen(
+        &sess,
+        |screen| {
+            screen
+                .lines()
+                .any(|line| line.trim_start().starts_with("Version"))
+        },
+        env.timeout(),
+        "version output should appear",
+    );
+    common::expect_input_line_cleared(&sess, env.timeout(), "prompt after /version");
+    let screen = sess.render(common::screen_contents);
+    let echoes = screen
+        .lines()
+        .filter(|line| line.trim_end().ends_with("/version") && line.contains('\u{276f}'))
+        .count();
+    assert_eq!(
+        echoes, 1,
+        "the submitted line should be echoed once:\n{screen}"
+    );
 
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().expect("clean exit");
@@ -72,7 +114,7 @@ fn turn_renderer_spinner_shows_model() {
     assert_eq!(exit, 0);
 }
 
-/// Tool output with TurnRenderer — process exits cleanly.
+/// Tool output with `TurnRenderer` — process exits cleanly.
 #[test]
 fn turn_renderer_tool_output() {
     let env = TestEnv::new("tr-tool-output");

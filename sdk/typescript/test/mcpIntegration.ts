@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { z } from 'zod';
 const root = path.resolve(__dirname, '../..');
 const { connectScode, sendScodeMessage, scodeNativeA2aAudit, forwardScodeToCodex } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scode-acp-mcp-'));
@@ -83,7 +84,52 @@ async function checkMcp(scenario: string): Promise<void> {
   finally { await client.close(); }
 }
 
+/** Claude Code channel: peers arrive as `notifications/claude/channel`, gated by policy. */
+async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise<void> {
+  const scenario = `channel-${peerPolicy}`;
+  const config = path.join(directory, `${scenario}.json`);
+  const log = path.join(directory, `${scenario}-fixture.jsonl`);
+  const auditLog = path.join(directory, `${scenario}-audit.jsonl`);
+  fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, scenario],
+    workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
+    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log },
+    claudeChannel: { peerPolicy, ...(peerPolicy === 'allowlist' ? { peers: ['fixture-peer'] } : {}) },
+  }), { mode: 0o600 });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: process.argv[2] ? [process.argv[2], '--config', config] : [path.join(root, 'dist/server.cjs'), '--config', config],
+    env: { ...process.env, NODE_PATH: '' } as Record<string, string>, stderr: 'pipe' });
+  let stderr = '';
+  transport.stderr?.on('data', bytes => { stderr += String(bytes); });
+  const client = new Client({ name: 'channel-smoke', version: '1' });
+  const events: Array<{ content: string; meta: Record<string, string> }> = [];
+  client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'),
+    params: z.object({ content: z.string(), meta: z.record(z.string(), z.string()) }) }), notification => {
+    events.push(notification.params);
+  });
+  try {
+    await client.connect(transport);
+    assert.deepEqual(client.getServerCapabilities()?.experimental?.['claude/channel'], {});
+    assert.match(String(client.getInstructions()), /reply only with the scode_send tool/);
+    const deadline = Date.now() + 5000;
+    const expected = peerPolicy === 'allowlist' ? 1 : 2;
+    while (events.length < expected && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.deepEqual(events.map(event => event.meta.from),
+      peerPolicy === 'allowlist' ? ['fixture-peer'] : ['fixture-peer', 'stranger'], 'policy gates the sender');
+    for (const event of events) {
+      assert.match(event.content, /^<mailbox-message from="/);
+      assert.equal(event.meta.verified, String(peerPolicy === 'node-namespace'),
+        'only a checked Node identity makes `from` verified');
+      assert.equal(event.meta.summary, 'greeting');
+    }
+    assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
+    assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message').length, expected);
+  } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
+  finally { await client.close(); }
+}
+
 async function main(): Promise<void> {
+  for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.
@@ -102,8 +148,8 @@ async function main(): Promise<void> {
     assert.equal(scodeNativeA2aAudit(first)?.requestedInputSha256, scodeNativeA2aAudit(second)?.requestedInputSha256);
   } finally { await connection.close(); }
 
-  const notification = { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk' as const,
-    content: { type: 'text' as const, text: 'peer data' } } };
+  const message = { sessionId: 'native', text: '<mailbox-message from="peer">peer data</mailbox-message>',
+    body: 'peer data', sudocode: { a2a: { from: 'peer' } } };
   for (const state of ['idle', 'active', 'notLoaded']) {
     const calls: Array<{ method: string; params: unknown }> = [];
     const request = async <T>(method: string, params: unknown): Promise<T> => {
@@ -113,13 +159,13 @@ async function main(): Promise<void> {
           : method === 'turn/steer' ? { turnId: 'running' } : { turn: { id: 'fresh' } };
       return result as T;
     };
-    if (state === 'notLoaded') await assert.rejects(forwardScodeToCodex(request, 'original', notification, 'event'));
-    else assert.equal((await forwardScodeToCodex(request, 'original', notification, 'event')).method,
+    if (state === 'notLoaded') await assert.rejects(forwardScodeToCodex(request, 'original', message, 'event'));
+    else assert.equal((await forwardScodeToCodex(request, 'original', message, 'event')).method,
       state === 'idle' ? 'turn/start' : 'turn/steer');
     assert.ok(!calls.some(call => /resume|fork/.test(call.method)));
     if (state === 'active') assert.equal((calls.at(-1)?.params as { expectedTurnId: string }).expectedTurnId, 'running');
   }
-  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit and callback routing');
+  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit, callback routing and Claude channel delivery');
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   // The smoke created and owns this exact disposable directory.

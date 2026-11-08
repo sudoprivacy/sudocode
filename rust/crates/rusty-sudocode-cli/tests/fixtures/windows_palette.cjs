@@ -48,8 +48,9 @@ async function run() {
     assert(!text.includes('rgb:') && !text.includes('ffff/'), `color reply leaked into UI\n${text}`);
     assert.deepEqual(queries, [], 'Windows must not solicit OSC 10/11 replies');
     const label = mutedLabel();
-    assert(label?.isFgPalette(), `Todo label must use the fallback palette\n${text}`);
-    assert.equal(label.getFgColor(), config.expectedMuted, 'COLORFGBG theme selection');
+    assert(label?.isFgRGB(), `Todo label must use the fallback theme's RGB foreground\n${text}`);
+    const color = label.getFgColor();
+    assert.deepEqual([color >>> 16, (color >>> 8) & 255, color & 255], config.expectedMuted, 'COLORFGBG theme selection');
     child.write('\x15/exit');
     await settle(text => exactInput(text, '/exit'));
     child.write('\r');

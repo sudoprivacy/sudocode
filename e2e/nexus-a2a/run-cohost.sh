@@ -171,8 +171,8 @@ CLIENT_ID="live-probe"
 [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
 CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" \
   || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
-# Recovery also exercises automatic replies, which address the authenticated
-# sender. Give that workflow the operator's own credential.
+# Recovery reads the co-host's `send` reply, which is addressed to the operator.
+# Give that workflow the operator's own credential.
 RESUME_CLIENT_BUNDLE="$(authon_mint "$OPERATOR")"
 # The front door: a plain agent cert whose whole job is minting the session
 # credential below. It never drives the agent control plane itself.

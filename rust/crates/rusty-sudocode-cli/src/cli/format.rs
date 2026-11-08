@@ -1,12 +1,15 @@
 //! Pure formatting and report functions extracted from `main.rs`.
 
 mod a2a;
+mod agent;
 mod plan;
+mod question;
+pub(crate) mod reasoning;
+use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;
 
-use engine_core::{AuthMode, ProviderKind};
 use runtime::{self, TokenUsage};
 use std::time::Duration;
 #[cfg(test)]
@@ -17,11 +20,7 @@ use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
 use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
-use crate::{
-    load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
-    InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
-    PRIMARY_SESSION_EXTENSION, VERSION,
-};
+use crate::{GitWorkspaceSummary, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, VERSION};
 use crossterm::style::Color;
 
 // ---------------------------------------------------------------------------
@@ -92,9 +91,10 @@ pub(crate) fn render_message(
             for block in &msg.blocks {
                 match block {
                     runtime::ContentBlock::Text { text } if !text.is_empty() => {
-                        let rendered = renderer.render_markdown_with_width(text, term_width);
+                        let formatted_text = renderer.render_markdown_with_width(text, term_width);
                         crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out, &rendered,
+                            &mut out,
+                            &formatted_text,
                         );
                     }
                     runtime::ContentBlock::Thinking { thinking, .. }
@@ -106,10 +106,9 @@ pub(crate) fn render_message(
                         // model wrote for itself, and letting a stray `#` or
                         // `*` in it become a heading or emphasis would make it
                         // louder than the answer it belongs under.
-                        let thinking =
-                            format!("{}{}", thinking_header(), dim_thinking(thinking.trim_end()));
                         crate::render::layout_policy::LayoutPolicy::append_block(
-                            &mut out, &thinking,
+                            &mut out,
+                            &reasoning::block(thinking.trim_end(), term_width),
                         );
                     }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
@@ -198,7 +197,7 @@ pub(crate) fn is_system_reminder_text(text: &str) -> bool {
 /// Extract concatenated text content from a message's blocks, skipping
 /// runtime-injected `<system-reminder>` blocks (see
 /// [`is_system_reminder_text`]).
-fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
+pub(crate) fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|b| match b {
@@ -209,34 +208,6 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Wrap one chunk of extended-thinking text in the dim attribute.
-///
-/// Deliberately one self-contained `DIM`…`RESET` pair per call rather than a
-/// single run held open across a whole reasoning block. The live path receives
-/// thinking as deltas that split mid-word, and [`ResponseGlyphState::apply`]
-/// injects its margin at every line start — so a run left open across a delta
-/// boundary would be closed by whichever writer comes next. Per-chunk pairs are
-/// idempotent under both, at the cost of one escape pair per delta.
-///
-/// [`ResponseGlyphState::apply`]: crate::render::ResponseGlyphState::apply
-#[inline]
-pub(crate) fn dim_thinking(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    format!("{DIM}{text}{RESET}")
-}
-
-/// Header that opens a reasoning block.
-///
-/// Without it dim text is ambiguous — it reads as a faded *answer* rather than
-/// as reasoning, and a turn that opens on thinking would look like the model
-/// started replying in the wrong style.
-#[inline]
-pub(crate) fn thinking_header() -> String {
-    format!("{DIM}✻ Thinking…{RESET}\n")
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
@@ -258,77 +229,13 @@ pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
 /// cut with an ellipsis. The full result is still in the session file.
 pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS: usize = 200;
 
-pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::Xai => "xai",
-        ProviderKind::OpenAi => "openai",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-    }
-}
-
-pub(crate) fn format_connected_line(model: &str) -> String {
-    format_connected_line_with_mode(model, None)
-}
-
-pub(crate) fn format_connected_line_with_mode(model: &str, mode: Option<AuthMode>) -> String {
-    let config = load_sudocode_config_for_current_dir();
-    format_connected_line_with_config(model, mode, &config)
-}
-
-pub(crate) fn format_connected_line_with_config(
-    model: &str,
-    mode: Option<AuthMode>,
-    sudocode_config: &engine_core::SudoCodeConfig,
-) -> String {
-    // Try to get provider label from sudocode.json config.
-    let resolved_mode = mode.or_else(|| {
-        // Auto-detect from model config: first available in priority order.
-        const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
-        let entry = engine_core::resolve_model(sudocode_config, model)?;
-        let mode_str = PRIORITY
-            .iter()
-            .find(|m| entry.providers.contains_key(**m))?;
-        AuthMode::parse(mode_str).ok()
-    });
-    let provider = {
-        // Look up provider name from config entry's mapping for the resolved mode.
-        let mode_key = resolved_mode.map(|m| m.label().to_string());
-        engine_core::resolve_model(sudocode_config, model)
-            .and_then(|entry| {
-                let mapping = if let Some(key) = &mode_key {
-                    entry.providers.get(key.as_str())
-                } else {
-                    entry.providers.values().next()
-                };
-                mapping.map(|m| m.provider.clone())
-            })
-            .unwrap_or_else(|| model.to_string())
-    };
-    let auth_hint = match resolved_mode {
-        Some(m) => format!(" ({})", m.label()),
-        None => String::new(),
-    };
-    let base_url = match mode {
-        Some(m) => engine_core::base_url_for_mode(m),
-        None => engine_core::read_base_url(),
-    };
-    let endpoint_hint = if base_url == engine_core::DEFAULT_BASE_URL {
-        String::new()
-    } else {
-        format!("\nEndpoint:  {base_url}")
-    };
-    format!("Connected: {model} via {provider}{auth_hint}{endpoint_hint}")
-}
-
 // The model / compact / sandbox report formatters now live in
 // `commands::reports` (shared with the ACP renderer so both render the same
 // reports from one definition). `format_model_report` gained a `config`
 // parameter there so it stays a pure formatter: the caller loads the config.
 pub(crate) use commands::reports::{
-    format_acp_compact_report, format_compaction_notice, format_compaction_report_with_messages,
-    format_model_report, format_model_switch_report, format_sandbox_report,
+    format_compaction_notice, format_compaction_report_with_messages, format_model_report,
+    format_model_switch_report, format_sandbox_report,
 };
 
 pub(crate) fn format_permissions_report(mode: &str) -> String {
@@ -515,15 +422,6 @@ pub(crate) fn format_resume_report(session_path: &str, message_count: usize, tur
     )
 }
 
-pub(crate) fn render_resume_usage() -> String {
-    format!(
-        "Resume
-  Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
-  Auto-save        .scode/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}
-  Tip              use /session list to inspect saved sessions"
-    )
-}
-
 pub(crate) fn format_compact_report(
     removed: usize,
     resulting_messages: usize,
@@ -631,56 +529,7 @@ pub(crate) fn render_version_report() -> String {
     )
 }
 
-pub(crate) fn format_internal_prompt_progress_line(
-    event: InternalPromptProgressEvent,
-    snapshot: &InternalPromptProgressState,
-    elapsed: Duration,
-    error: Option<&str>,
-) -> String {
-    let elapsed_seconds = elapsed.as_secs();
-    let step_label = if snapshot.step == 0 {
-        "current step pending".to_string()
-    } else {
-        format!("current step {}", snapshot.step)
-    };
-    let mut status_bits = vec![step_label, format!("phase {}", snapshot.phase)];
-    if let Some(detail) = snapshot
-        .detail
-        .as_deref()
-        .filter(|detail| !detail.is_empty())
-    {
-        status_bits.push(detail.to_string());
-    }
-    let status = status_bits.join(" · ");
-    match event {
-        InternalPromptProgressEvent::Started => {
-            format!(
-                "🧭 {} status · planning started · {status}",
-                snapshot.command_label
-            )
-        }
-        InternalPromptProgressEvent::Update => {
-            format!("… {} status · {status}", snapshot.command_label)
-        }
-        InternalPromptProgressEvent::Heartbeat => format!(
-            "… {} heartbeat · {elapsed_seconds}s elapsed · {status}",
-            snapshot.command_label
-        ),
-        InternalPromptProgressEvent::Complete => format!(
-            "✔ {} status · completed · {elapsed_seconds}s elapsed · {} steps total",
-            snapshot.command_label, snapshot.step
-        ),
-        InternalPromptProgressEvent::Failed => format!(
-            "✘ {} status · failed · {elapsed_seconds}s elapsed · {}",
-            snapshot.command_label,
-            error.unwrap_or("unknown error")
-        ),
-    }
-}
-
-/// Render the REPL echo for a submitted user input. Each line is on its own
-/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
-/// the REPL uses for echoed input.
+/// Render submitted input through the same formatter for live and replay.
 ///
 /// `lines_consumed` is the number of `\n`-delimited input lines so callers
 /// know how many rows of rustyline output to clear before printing the echo.
@@ -700,16 +549,25 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     let mut rendered = String::new();
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
-        // box uses, so a message echoed here (session-history replay on resume)
-        // is visually identical to how it appeared when you typed it: the plain
-        // `❯ text` prompt line, no styled background. Continuation lines indent
+        // box uses. Live commits and replay share this presentation; the
+        // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!("{prefix}{line}");
         if idx > 0 {
             rendered.push('\n');
         }
-        rendered.push_str(&body);
+        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
+            let styled = crate::render::theme()
+                .prompt_style()
+                .apply(body)
+                .to_string();
+            rendered.push_str(
+                &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
+            );
+        } else {
+            rendered.push_str(&body);
+        }
     }
     (rendered, raw_lines.len())
 }
@@ -736,6 +594,12 @@ pub(crate) enum ToolKind {
     Send,
     AgentList,
     WritePlan,
+    AskUserQuestion,
+    AgentSpawn,
+    PidFork,
+    PidOutput,
+    PidStatus,
+    PidKill,
 }
 
 impl ToolKind {
@@ -756,6 +620,12 @@ impl ToolKind {
             Self::Send => "Send",
             Self::AgentList => "AgentList",
             Self::WritePlan => "WritePlan",
+            Self::AskUserQuestion => "AskUserQuestion",
+            Self::AgentSpawn => "AgentSpawn",
+            Self::PidFork => "PidFork",
+            Self::PidOutput => "PidOutput",
+            Self::PidStatus => "PidStatus",
+            Self::PidKill => "PidKill",
         }
     }
 
@@ -785,6 +655,12 @@ impl ToolKind {
             "send" | "Send" => Some(Self::Send),
             "agent_list" | "AgentList" => Some(Self::AgentList),
             "write_plan" | "WritePlan" => Some(Self::WritePlan),
+            "AskUserQuestion" | "ask_user_question" => Some(Self::AskUserQuestion),
+            "agent_spawn" | "AgentSpawn" => Some(Self::AgentSpawn),
+            "pid_fork" | "PidFork" => Some(Self::PidFork),
+            "pid_output" | "PidOutput" => Some(Self::PidOutput),
+            "pid_status" | "PidStatus" => Some(Self::PidStatus),
+            "pid_kill" | "PidKill" => Some(Self::PidKill),
             _ => None,
         }
     }
@@ -857,22 +733,6 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     }
 }
 
-/// Staging (in-flight) render for a tool call: the SAME card the completed
-/// scrollback render draws, but with no `output` yet and a yellow Running
-/// frame. A thin shell over [`tool_card_content`] — the SSOT that guarantees a
-/// tool looks identical running and done, differing only in frame color and
-/// whether the result body is present.
-///
-/// **Invariant: overlay-only.** `Running` (amber) is a live status; the sole
-/// caller is the iocraft staging overlay ([`crate::repl_ui`]), a self-clearing
-/// region that removes the card on completion. It must NEVER be committed to
-/// durable scrollback — that would freeze an amber "in-flight" card above the
-/// real result forever. Scrollback carries exactly one card per call: the
-/// completed (green/red) [`format_tool_result`].
-pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
-    render_tool_card(&tool_call_start_content(name, input), ToolStatus::Running)
-}
-
 pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardContent {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -905,6 +765,11 @@ pub(crate) fn tool_card_content(
         }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
         Some(ToolKind::WritePlan) => plan::card(output, status),
+        Some(ToolKind::AskUserQuestion) => question::card(input, output),
+        Some(ToolKind::AgentSpawn | ToolKind::PidFork) => agent::spawn_card(name, input, output),
+        Some(ToolKind::PidOutput | ToolKind::PidStatus | ToolKind::PidKill) => {
+            agent::pid_card(name, input, output)
+        }
         Some(ToolKind::Read) => read_card(input, output, status),
         Some(ToolKind::Write) => write_card(input, output, status),
         Some(ToolKind::Edit) => edit_card(input, output, status),
@@ -1006,8 +871,10 @@ impl ToolCardContent {
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
-/// syntax-theme green (ok), or red (error). All frame strokes use regular
-/// weight without dimming so the corners align with the vertical border.
+/// syntax-theme green (ok), or red (error). A call that is still queued or
+/// running has not finished, so its frame stays open with a `╎` tail and closes
+/// when the result is committed. All frame strokes use regular weight without
+/// dimming so the corners align with the vertical border.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -1015,25 +882,43 @@ impl ToolCardContent {
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    render_tool_card_with_width(content, status, crate::render::query_terminal_width())
+    render_tool_card_with_width(
+        content,
+        status,
+        crate::render::query_terminal_width(),
+        false,
+    )
 }
 
 /// The layout owner supplies its width, so all cards in one UI frame use the
 /// same terminal-size snapshot instead of racing independent ioctl queries.
+/// `is_pulse_low` draws a running card's frame at the quiet point of its pulse.
 pub(crate) fn render_tool_card_with_width(
     content: &ToolCardContent,
     status: ToolStatus,
     term_width: usize,
+    is_pulse_low: bool,
 ) -> String {
     use crate::render::left_frame;
 
-    let colors = theme().tool_borders();
-    let color = match status {
-        ToolStatus::Queued => colors.queued,
-        ToolStatus::Running => colors.running,
-        ToolStatus::Ok => colors.success,
-        ToolStatus::Error => colors.error,
-        ToolStatus::Review => colors.queued,
+    let color = theme().color(match status {
+        ToolStatus::Queued => TextRole::Secondary,
+        ToolStatus::Running => TextRole::Brand,
+        ToolStatus::Ok => TextRole::Info,
+        ToolStatus::Error => TextRole::Error,
+        ToolStatus::Review => TextRole::Secondary,
+    });
+    let color = if is_pulse_low && status == ToolStatus::Running {
+        theme()
+            .brand_pulse_low(crate::render::ColorSupport::detect())
+            .unwrap_or(color)
+    } else {
+        color
+    };
+    let tail = if matches!(status, ToolStatus::Queued | ToolStatus::Running) {
+        left_frame::Tail::Open
+    } else {
+        left_frame::Tail::Closed
     };
     // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
@@ -1060,6 +945,7 @@ pub(crate) fn render_tool_card_with_width(
             .map(String::as_str),
         term_width,
         color,
+        tail,
     )
 }
 
@@ -1093,12 +979,12 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
         content.body = if summary.is_empty() {
             None
         } else {
-            let removed = ansi_fg(theme().diff_removed);
+            let removed = theme().fg_seq(TextRole::Removed);
             Some(format!("{removed}{summary}{RESET}"))
         };
     }
     if let (Some(feedback), false) = (hook_feedback, is_error) {
-        let hf = ansi_fg(theme().hook_feedback);
+        let hf = theme().fg_seq(TextRole::Notice);
         let feedback_body = format!("{hf}{feedback}{RESET}");
         content.body = Some(match content.body {
             Some(body) => format!("{body}\n{feedback_body}"),
@@ -1157,10 +1043,20 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// A string field with text in it; blank counts as absent. Shared by the
+/// per-tool card modules.
+#[inline]
+pub(super) fn text<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+}
+
 /// One theme role for every tool identity, independent of execution status.
 fn tool_label(name: &str) -> String {
     let name = ToolKind::visible_name(name);
-    format!("{}{name}{RESET}", theme().tool_name_fg())
+    format!("{}{name}{RESET}", theme().fg_seq(TextRole::Accent))
 }
 
 /// The card for a shell tool (`Bash`, `PowerShell`): the command, what happened
@@ -1273,9 +1169,7 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str, failed: bool) 
         return ToolCardContent::header_only(header);
     }
 
-    let term_width = crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80);
+    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
     // 4 = frame + space prefix applied by render_tool_card, plus safety margin
     // to avoid wrapping.
     let max_content_width = term_width.saturating_sub(6);
@@ -1422,7 +1316,7 @@ pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
 pub(crate) fn write_card(
     input: &serde_json::Value,
     output: Option<&serde_json::Value>,
-    _status: ToolStatus,
+    status: ToolStatus,
 ) -> ToolCardContent {
     let Some(output) = output else {
         // Staging: identity from input (path + content line count).
@@ -1436,7 +1330,14 @@ pub(crate) fn write_card(
             tool_label("Write")
         );
         header.push_str(&identity_annotation(input));
-        return ToolCardContent::header_only(header);
+        return match input
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|content| format_old_new_diff("", content, language_token_from_path(&path)))
+        {
+            Some(preview) => ToolCardContent::new(header, preview),
+            None => ToolCardContent::header_only(header),
+        };
     };
     // Path is authoritative in `input`; the body (type/content/originalFile)
     // comes from the result envelope.
@@ -1448,6 +1349,36 @@ pub(crate) fn write_card(
             p
         }
     };
+    if status != ToolStatus::Error
+        && output
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    {
+        // Oversized results are opaque persisted-output records. Keep source
+        // visible without reading the spill or pretending the file has zero
+        // lines. Live input includes hook rewrites from ToolStarted; replay
+        // uses the recorded request. Label its provenance in both paths.
+        if let Some(source) = input.get("content").and_then(serde_json::Value::as_str) {
+            let mut header = format!(
+                "✏️ {} {path} {DIM}({} input lines){RESET}",
+                tool_label("Write completed"),
+                source.lines().count()
+            );
+            header.push_str(&identity_annotation(input));
+            let notice = if output
+                .as_str()
+                .is_some_and(|text| text.starts_with("<persisted-output "))
+            {
+                "Input preview · complete tool result preserved in session"
+            } else {
+                "Input preview · structured file result unavailable"
+            };
+            let preview = format_old_new_diff("", source, language_token_from_path(&path))
+                .unwrap_or_default();
+            return ToolCardContent::new(header, format!("{DIM}{notice}{RESET}\n{preview}"));
+        }
+    }
     let kind = output
         .get("type")
         .and_then(|value| value.as_str())
@@ -1458,7 +1389,13 @@ pub(crate) fn write_card(
         .unwrap_or_default();
     let new_line_count = new_content.lines().count();
     let original = output.get("originalFile").and_then(|value| value.as_str());
-    let verb = if kind == "create" { "Wrote" } else { "Updated" };
+    let verb = if status == ToolStatus::Error {
+        "Write failed"
+    } else if kind == "create" {
+        "Wrote"
+    } else {
+        "Updated"
+    };
     let label = tool_label(verb);
     let mut header = match original {
         Some(prev) if kind != "create" => {
@@ -1487,7 +1424,10 @@ pub(crate) fn write_card(
             Some(preview) => ToolCardContent::new(header, preview),
             None => ToolCardContent::header_only(header),
         },
-        _ => ToolCardContent::header_only(header),
+        _ => match format_old_new_diff("", new_content, language_token_from_path(&path)) {
+            Some(preview) => ToolCardContent::new(header, preview),
+            None => ToolCardContent::header_only(header),
+        },
     }
 }
 
@@ -1526,7 +1466,7 @@ pub(crate) fn format_full_replace_diff_preview(
         old_changed,
         new_changed,
         &old_lines,
-        head,
+        head.saturating_sub(DIFF_PREVIEW_CONTEXT_LINES),
         edit_start_line,
         language,
     ))
@@ -1586,6 +1526,8 @@ pub(crate) fn edit_card(
 
     let verb = if status == ToolStatus::Running {
         "Editing"
+    } else if status == ToolStatus::Error {
+        "Edit failed"
     } else {
         "Edited"
     };
@@ -1608,10 +1550,18 @@ fn format_old_new_diff(old_value: &str, new_value: &str, language: &str) -> Opti
     Some(
         render_colored_diff(
             &[],
-            &old_value.lines().collect::<Vec<_>>(),
-            &new_value.lines().collect::<Vec<_>>(),
+            &old_value
+                .lines()
+                .take(DIFF_PREVIEW_MAX_BODY_LINES + 1)
+                .collect::<Vec<_>>(),
+            &new_value
+                .lines()
+                .take(DIFF_PREVIEW_MAX_BODY_LINES + 1)
+                .collect::<Vec<_>>(),
             &[],
             language,
+            1,
+            (old_value.lines().count(), new_value.lines().count()),
         )
         .join("\n"),
     )
@@ -1694,7 +1644,7 @@ fn render_diff_window(
     };
 
     let t = theme();
-    let muted = ansi_fg(t.muted);
+    let muted = t.fg_seq(TextRole::Secondary);
     out.push(format!(
         "{muted}@@ -{},{} +{},{} @@{RESET}",
         edit_start_line_1based,
@@ -1708,6 +1658,8 @@ fn render_diff_window(
         new_body,
         post_context,
         language,
+        pre_context_start + 1,
+        (old_body.len(), new_body.len()),
     ));
     out.join("\n")
 }
@@ -1720,6 +1672,8 @@ fn render_colored_diff(
     new: &[&str],
     post: &[&str],
     language: &str,
+    first_line: usize,
+    totals: (usize, usize),
 ) -> Vec<String> {
     let count = |body: &[&str]| {
         if body.len() > DIFF_PREVIEW_MAX_BODY_LINES {
@@ -1737,19 +1691,51 @@ fn render_colored_diff(
         .chain(new[..new_count].iter().map(|line| ('+', *line)))
         .chain(post.iter().map(|line| (' ', *line)))
         .collect();
-    let mut rendered = crate::render::diff_colors::render_rows(&rows, language, " ");
+    let numbers = (first_line..first_line + pre.len())
+        .chain(first_line + pre.len()..first_line + pre.len() + old_count)
+        .chain(first_line + pre.len()..first_line + pre.len() + new_count)
+        .chain(first_line + pre.len() + totals.1..first_line + pre.len() + totals.1 + post.len())
+        .collect::<Vec<_>>();
+    // Bound source work before highlighting, including pathological long lines.
+    let mut remaining = TOOL_OUTPUT_DISPLAY_MAX_CHARS;
+    let mut truncated = false;
+    let clipped = rows
+        .iter()
+        .map(|(sign, text)| {
+            use unicode_segmentation::UnicodeSegmentation;
+            let limit = remaining.min(TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS);
+            let mut used = 0;
+            let mut end = 0;
+            for (offset, grapheme) in text.grapheme_indices(true) {
+                let count = grapheme.chars().count();
+                if used + count > limit {
+                    break;
+                }
+                used += count;
+                end = offset + grapheme.len();
+            }
+            remaining = remaining.saturating_sub(used);
+            truncated |= end < text.len();
+            (*sign, &text[..end])
+        })
+        .collect::<Vec<_>>();
+    let mut rendered =
+        crate::render::diff_colors::render_numbered_rows(&clipped, language, &numbers);
     // Insert from the end so the earlier row offsets remain valid.
-    if new_count < new.len() {
+    if new_count < totals.1 {
         rendered.insert(
             pre.len() + old_count + new_count,
-            format!("{DIM}+ … +{} more lines{RESET}", new.len() - new_count),
+            format!("{DIM}+ … +{} more lines{RESET}", totals.1 - new_count),
         );
     }
-    if old_count < old.len() {
+    if old_count < totals.0 {
         rendered.insert(
             pre.len() + old_count,
-            format!("{DIM}- … +{} more lines{RESET}", old.len() - old_count),
+            format!("{DIM}- … +{} more lines{RESET}", totals.0 - old_count),
         );
+    }
+    if truncated {
+        rendered.push(DISPLAY_TRUNCATION_NOTICE.to_string());
     }
     rendered
 }
@@ -1781,7 +1767,8 @@ fn search_identity(label: &str, input: &serde_json::Value) -> String {
     let mut header = format!("{tool_name}({pattern})");
     if let Some(scope) = input.get("path").and_then(serde_json::Value::as_str) {
         if !scope.is_empty() {
-            header.push_str(&format!(" {DIM}in {scope}{RESET}"));
+            let _ =
+                std::fmt::Write::write_fmt(&mut header, format_args!(" {DIM}in {scope}{RESET}"));
         }
     }
     header.push_str(&identity_annotation(input));
@@ -1799,7 +1786,10 @@ pub(crate) fn glob_card(
             .get("numFiles")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        header.push_str(&format!(" {DIM}→ {num_files} files{RESET}"));
+        let _ = std::fmt::Write::write_fmt(
+            &mut header,
+            format_args!(" {DIM}→ {num_files} files{RESET}"),
+        );
     }
     ToolCardContent::header_only(header)
 }
@@ -1819,9 +1809,10 @@ pub(crate) fn grep_card(
             .get("numFiles")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        header.push_str(&format!(
-            " {DIM}→ {num_matches} matches across {num_files} files{RESET}"
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut header,
+            format_args!(" {DIM}→ {num_matches} matches across {num_files} files{RESET}"),
+        );
     }
     ToolCardContent::header_only(header)
 }
@@ -1837,7 +1828,7 @@ pub(crate) fn generic_tool_card(
     // called with, then any LLM description.
     let args = summarize_scalar_args(input);
     if !args.is_empty() {
-        header.push_str(&format!("({args})"));
+        let _ = std::fmt::Write::write_fmt(&mut header, format_args!("({args})"));
     }
     header.push_str(&identity_annotation(input));
     let Some(output) = output else {
@@ -2027,10 +2018,10 @@ fn read_tool_output_card(
             if !body.is_empty() {
                 body.push('\n');
             }
-            body.push_str(&format!(
-                "{DIM}{line}:{RESET} {}",
-                truncate_for_summary(text, 120)
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut body,
+                format_args!("{DIM}{line}:{RESET} {}", truncate_for_summary(text, 120)),
+            );
         }
         return if body.is_empty() {
             ToolCardContent::header_only(header)
@@ -2208,34 +2199,35 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let write_pct = efficiency.write_share_pct.unwrap_or(0.0).round() as u64;
 
-    let theme = crate::render::theme();
-    let hit_color = if hit_pct >= 80 {
-        theme.success
+    let hit_role = if hit_pct >= 80 {
+        TextRole::Success
     } else if hit_pct >= 40 {
-        theme.warning
+        TextRole::Warning
     } else {
-        theme.error
+        TextRole::Error
     };
     let mut segment = StyledLine::muted();
-    segment.push_colored(format!("\u{26a1}{hit_pct}%"), hit_color);
+    segment.push_role(format!("\u{26a1}{hit_pct}%"), hit_role);
     segment.push(" ");
-    // Write rate: muted normally, red on a spike (a cache break).
     let write = format!("\u{270e}{write_pct}%");
-    if write_pct >= 25 {
-        segment.push_colored(write, theme.error);
-    } else {
-        segment.push(write);
-    }
+    segment.push_role(
+        write,
+        if write_pct >= 25 {
+            TextRole::Error
+        } else {
+            TextRole::Secondary
+        },
+    );
 
     Some(segment)
 }
 
-/// Render the muted per-turn status line shown after each interactive turn.
+/// Render the semantic per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
 /// wall-clock time for the turn, and context-window occupancy. The workspace's
-/// branch lives in the footer instead: it is state, not a per-turn figure. Labels use the theme's muted foreground;
+/// branch lives in the footer instead: it is state, not a per-turn figure. Model and usage use syntax-derived accents; labels stay secondary;
 /// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
@@ -2260,14 +2252,14 @@ pub(crate) fn turn_status_line_with_context_estimate(
         account,
     } = status;
 
-    let mut segments: Vec<String> = Vec::with_capacity(8);
-    segments.push(format!("[{model}]"));
+    let mut segments: Vec<(TextRole, String)> = Vec::with_capacity(8);
+    segments.push((TextRole::Model, format!("[{model}]")));
     // Next to the model: together they answer "who served this turn, and on
     // whose account".
     if let Some(account) = account.filter(|a| !a.is_empty()) {
-        segments.push(format!("acct {account}"));
+        segments.push((TextRole::Secondary, format!("acct {account}")));
     }
-    segments.push(format!("turn {turn}"));
+    segments.push((TextRole::Secondary, format!("turn {turn}")));
 
     // Cost and tokens carry BOTH the last turn (`+`) and the session total
     // (`Σ`), so the line reads the same live or resumed: `+` is "just now", `Σ`
@@ -2276,19 +2268,22 @@ pub(crate) fn turn_status_line_with_context_estimate(
     let turn_cost = cost_for(usage, model);
     let cum_cost = cost_for(cumulative_usage, model);
     if let Some(cost) = combine_turn_and_cumulative(turn_cost.as_deref(), cum_cost.as_deref()) {
-        segments.push(cost);
+        segments.push((TextRole::Usage, cost));
     }
     let turn_tokens = format!("+{}", format_token_count(usage.total_tokens()));
     let cum_tokens = format!(
         "\u{3a3}{}",
         format_token_count(cumulative_usage.total_tokens())
     );
-    segments.push(format!("{turn_tokens} {cum_tokens} tokens"));
+    segments.push((
+        TextRole::Usage,
+        format!("{turn_tokens} {cum_tokens} tokens"),
+    ));
 
     // Wall-clock: the last turn (`+Ns`) and the session total (`Σs`). Both are
     // omitted on a resume where no duration was persisted.
     if let Some(dur) = combine_durations(elapsed, cumulative_duration) {
-        segments.push(dur);
+        segments.push((TextRole::Secondary, dur));
     }
 
     // Context-window usage: current occupancy / model window. Uses the same
@@ -2298,11 +2293,16 @@ pub(crate) fn turn_status_line_with_context_estimate(
             if estimated_context {
                 segment = segment.replacen("ctx ", "ctx ≈", 1);
             }
-            segments.push(segment);
+            segments.push((TextRole::Usage, segment));
         }
     }
     let mut line = StyledLine::muted();
-    line.push(segments.join(" · "));
+    for (index, (role, text)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            line.push(" · ");
+        }
+        line.push_role(text, role);
+    }
     // KV-cache efficiency: hit rate + write rate over the most recent turn's
     // prompt total.
     if let Some(segment) = format_cache_efficiency_segment(usage) {
@@ -2441,10 +2441,10 @@ pub(crate) fn format_permission_prompt_box(
     let border = "─".repeat(inner_width + 2);
 
     let t = theme();
-    let grey = ansi_fg(t.muted);
+    let grey = t.fg_seq(TextRole::Secondary);
     let reset = RESET;
-    let bold_yellow = ansi_bold_fg(t.warning);
-    let bold_info = ansi_bold_fg(t.info());
+    let bold_yellow = ansi_bold_fg(t.color(TextRole::Warning));
+    let bold_info = ansi_bold_fg(t.color(TextRole::Info));
     let dim = DIM;
 
     let mut out = String::new();
@@ -2467,61 +2467,6 @@ pub(crate) fn format_permission_prompt_box(
     }
     let _ = write!(out, "  {grey}╰{border}╯{reset}");
     out
-}
-
-/// Compact one-line summary of all tool calls that ran in a turn.
-///
-/// Returns `None` when no tool calls happened (silent for plain
-/// text-only turns). Each entry shows the tool name followed by a status
-/// glyph (`✓` for success, `✗` for error). The line ends with the total
-/// count and turn duration so users can read it as `"3 tools, 1.2s"`.
-///
-/// Example output:
-/// ```text
-/// 🔧 bash ✓  read_file ✓  edit_file ✗ (3 tools, 4.7s)
-/// ```
-pub(crate) fn format_tool_timeline(
-    tool_results: &[runtime::ConversationMessage],
-    elapsed: Duration,
-) -> Option<String> {
-    let mut entries: Vec<(String, bool)> = Vec::new();
-    for message in tool_results {
-        for block in &message.blocks {
-            if let runtime::ContentBlock::ToolResult {
-                tool_name,
-                is_error,
-                ..
-            } = block
-            {
-                entries.push((tool_name.clone(), !*is_error));
-            }
-        }
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    let count = entries.len();
-    let t = theme();
-    let success_fg = ansi_fg(t.success);
-    let error_fg = ansi_fg(t.error);
-    let parts: Vec<String> = entries
-        .into_iter()
-        .map(|(name, ok)| {
-            // Bold tool name; green check or red cross.
-            let glyph = if ok {
-                format!("{success_fg}✓{RESET}")
-            } else {
-                format!("{error_fg}✗{RESET}")
-            };
-            format!("{BOLD}{name}{RESET} {glyph}")
-        })
-        .collect();
-    let body = parts.join("  ");
-    let plural = if count == 1 { "tool" } else { "tools" };
-    let secs = elapsed.as_secs_f64();
-    Some(format!(
-        "🔧 {body} {DIM}({count} {plural}, {secs:.1}s){RESET}"
-    ))
 }
 
 pub(crate) fn truncate_output_for_display(
@@ -2608,7 +2553,7 @@ const CONTEXT_RESERVED_NAME: &str = "Autocompact buffer";
 struct ContextCategory<'a> {
     name: &'a str,
     tokens: usize,
-    color: Color,
+    role: TextRole,
 }
 
 /// Compact token count in Claude Code's `/context` style: `249`, `4.2k`,
@@ -2671,37 +2616,37 @@ pub(crate) fn format_context_report(
         ContextCategory {
             name: "System prompt",
             tokens: usage.system_prompt_tokens,
-            color: Color::DarkYellow,
+            role: TextRole::Brand,
         },
         ContextCategory {
             name: "System tools",
             tokens: usage.system_tools_tokens(),
-            color: Color::Blue,
+            role: TextRole::Accent,
         },
         ContextCategory {
             name: "MCP tools",
             tokens: usage.mcp_tools_tokens(),
-            color: Color::Cyan,
+            role: TextRole::Model,
         },
         ContextCategory {
             name: "Agent types",
             tokens: usage.agent_types_tokens,
-            color: Color::Green,
+            role: TextRole::Info,
         },
         ContextCategory {
             name: "Memory files",
             tokens: usage.memory_files_tokens,
-            color: Color::Magenta,
+            role: TextRole::Branch,
         },
         ContextCategory {
             name: "Skills",
             tokens: usage.skills_tokens,
-            color: Color::Yellow,
+            role: TextRole::Notice,
         },
         ContextCategory {
             name: "Messages",
             tokens: usage.message_tokens,
-            color: Color::DarkMagenta,
+            role: TextRole::Usage,
         },
     ];
     let visible: Vec<&ContextCategory<'_>> = categories.iter().filter(|c| c.tokens > 0).collect();
@@ -2758,7 +2703,10 @@ pub(crate) fn format_context_report(
                 1.0
             };
             let glyph = if fullness >= 0.7 { "⛁" } else { "⛀" };
-            squares.push(format!("{}{glyph}{reset}", paint(category.color)));
+            squares.push(format!(
+                "{}{glyph}{reset}",
+                paint(theme().color(category.role))
+            ));
         }
     }
     let reserved_squares = if reserved > 0 {
@@ -2771,7 +2719,10 @@ pub(crate) fn format_context_report(
         squares.push(format!("{dim}⛶{reset}"));
     }
     while squares.len() < total_squares {
-        squares.push(format!("{}⛝{reset}", paint(Color::DarkGrey)));
+        squares.push(format!(
+            "{}⛝{reset}",
+            paint(theme().color(TextRole::Secondary))
+        ));
     }
     let grid_rows: Vec<String> = squares
         .chunks(grid_width)
@@ -2803,7 +2754,7 @@ pub(crate) fn format_context_report(
     for category in &visible {
         legend.push(format!(
             "{}⛁{reset} {}: {dim}{} tokens ({:.1}%){reset}",
-            paint(category.color),
+            paint(theme().color(category.role)),
             category.name,
             format_context_tokens(category.tokens),
             context_percent(category.tokens, window)
@@ -2819,7 +2770,7 @@ pub(crate) fn format_context_report(
     if reserved > 0 {
         legend.push(format!(
             "{}⛝{reset} {dim}{CONTEXT_RESERVED_NAME}: {} tokens ({:.1}%){reset}",
-            paint(Color::DarkGrey),
+            paint(theme().color(TextRole::Secondary)),
             format_context_tokens(reserved),
             context_percent(reserved, window)
         ));
@@ -2986,26 +2937,6 @@ mod tests {
         );
     }
 
-    fn user_message_with_results(results: Vec<(&str, bool)>) -> runtime::ConversationMessage {
-        runtime::ConversationMessage {
-            history: None,
-            role: runtime::MessageRole::User,
-            blocks: results
-                .into_iter()
-                .enumerate()
-                .map(|(i, (name, is_error))| runtime::ContentBlock::ToolResult {
-                    tool_use_id: format!("tool_{i}"),
-                    tool_name: name.to_string(),
-                    output: String::new(),
-                    is_error,
-                })
-                .collect(),
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }
-    }
-
     fn strip_ansi(s: &str) -> String {
         let mut out = String::new();
         let mut chars = s.chars().peekable();
@@ -3027,8 +2958,8 @@ mod tests {
     /// Render a completed (`Ok`) tool card and strip ANSI, in one step — the
     /// shape every card test needs. Collapses the repeated
     /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
-    fn ok_card_plain(content: ToolCardContent) -> String {
-        strip_ansi(&render_tool_card(&content, ToolStatus::Ok))
+    fn ok_card_plain(content: &ToolCardContent) -> String {
+        strip_ansi(&render_tool_card(content, ToolStatus::Ok))
     }
 
     #[test]
@@ -3073,7 +3004,7 @@ mod tests {
         let header = "PowerShell(command=cd foo\ngit status)".to_string();
         let body = "col1\tcol2\tcol3".to_string();
         let content = ToolCardContent::new(header, body);
-        let plain = ok_card_plain(content);
+        let plain = ok_card_plain(&content);
         for line in plain.lines() {
             let first = line.trim_start().chars().next().unwrap_or(' ');
             assert!(
@@ -3096,7 +3027,12 @@ mod tests {
         let running = render_tool_card(&content, ToolStatus::Running);
         let ok = render_tool_card(&content, ToolStatus::Ok);
         if crate::render::ColorSupport::detect() == crate::render::ColorSupport::NoColor {
-            assert_eq!(running, ok, "plain output must not contain status colors");
+            // Only the shape tells them apart: a running card is still open.
+            assert_eq!(
+                running.replace('╎', "╰─"),
+                ok,
+                "plain output must not contain status colors"
+            );
         } else {
             assert_ne!(
                 running, ok,
@@ -3125,73 +3061,6 @@ mod tests {
             rendered.contains("Edited src/main.rs"),
             "edit header must show the path from input, not `?`: {rendered}"
         );
-    }
-
-    #[test]
-    fn tool_timeline_is_silent_when_no_tools_ran() {
-        let messages = vec![user_message_with_results(vec![])];
-        assert!(format_tool_timeline(&messages, Duration::from_millis(500)).is_none());
-        assert!(format_tool_timeline(&[], Duration::from_millis(500)).is_none());
-    }
-
-    #[test]
-    fn tool_timeline_singular_form_for_one_tool() {
-        let messages = vec![user_message_with_results(vec![("bash", false)])];
-        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(1.2)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("bash"), "{plain}");
-        assert!(plain.contains("✓"), "{plain}");
-        assert!(plain.contains("(1 tool, 1.2s)"), "{plain}");
-    }
-
-    #[test]
-    fn tool_timeline_lists_each_tool_with_status_glyph() {
-        let messages = vec![user_message_with_results(vec![
-            ("bash", false),
-            ("read_file", false),
-            ("edit_file", true),
-        ])];
-        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(4.7)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("bash ✓"), "{plain}");
-        assert!(plain.contains("read_file ✓"), "{plain}");
-        assert!(plain.contains("edit_file ✗"), "{plain}");
-        assert!(plain.contains("(3 tools, 4.7s)"), "{plain}");
-    }
-
-    #[test]
-    fn tool_timeline_walks_multiple_messages() {
-        let messages = vec![
-            user_message_with_results(vec![("bash", false)]),
-            user_message_with_results(vec![("read_file", false)]),
-        ];
-        let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
-        let plain = strip_ansi(&rendered);
-        assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
-    }
-
-    #[test]
-    fn running_header_and_completed_card_agree_on_tool_label() {
-        // Bug: the running card built its header from the raw wire name
-        // (lowercase `bash`), while the completed card hardcoded `Bash` — so a
-        // tool changed case the moment it finished. Both must resolve the same
-        // canonical label via ToolKind.
-        let running = strip_ansi(&format_tool_call_start("bash", r#"{"command":"echo hi"}"#));
-        let done = strip_ansi(&format_tool_result(
-            "bash",
-            r#"{"command":"echo hi"}"#,
-            r#"{"stdout":"hi","stderr":""}"#,
-            false,
-        ));
-        assert!(
-            running.contains("Bash"),
-            "running header should show canonical `Bash`: {running}"
-        );
-        assert!(
-            !running.contains("bash"),
-            "running header must not show lowercase `bash`: {running}"
-        );
-        assert!(done.contains("Bash"), "completed card shows `Bash`: {done}");
     }
 
     #[test]
@@ -3358,7 +3227,7 @@ mod tests {
         assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
         assert!(plain.contains("turn 3"), "{plain}");
         assert!(plain.contains("1.5k Σ1.5k tokens"), "{plain}");
-        assert!(plain.contains("$"), "expected cost segment in {plain}");
+        assert!(plain.contains('$'), "expected cost segment in {plain}");
         assert!(plain.contains("1.2s"), "{plain}");
     }
 
@@ -3377,7 +3246,7 @@ mod tests {
             account: None,
         });
         let plain = strip_ansi(&rendered);
-        assert!(!plain.contains("$"), "{plain}");
+        assert!(!plain.contains('$'), "{plain}");
     }
 
     #[test]
@@ -3694,7 +3563,7 @@ mod tests {
                 "totalLines": 3
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3719,7 +3588,7 @@ mod tests {
                 "totalLines": 137
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3738,7 +3607,7 @@ mod tests {
                 "total_lines": 42
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3812,7 +3681,7 @@ mod tests {
                 "totalLines": 0
             }
         });
-        let plain = ok_card_plain(read_card(
+        let plain = ok_card_plain(&read_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -3888,8 +3757,8 @@ mod tests {
         assert!(plain.contains("Edited src/main.rs"), "{plain}");
         // Diff preview survives — the +/- lines come from oldString/newString
         // against originalFile, which only parse if we stripped the suffix.
-        assert!(plain.contains("- alpha"), "{plain}");
-        assert!(plain.contains("+ omega"), "{plain}");
+        assert!(plain.contains("-alpha"), "{plain}");
+        assert!(plain.contains("+omega"), "{plain}");
         // Hook feedback should still be rendered, but as a separate line.
         assert!(plain.contains("Hook feedback:"), "{plain}");
         assert!(plain.contains("formatter clean"), "{plain}");
@@ -3907,8 +3776,8 @@ mod tests {
         assert!(plain.contains("  line 2"), "{plain}");
         assert!(plain.contains("  line 3"), "{plain}");
         // The change itself.
-        assert!(plain.contains("- old line"), "{plain}");
-        assert!(plain.contains("+ new line"), "{plain}");
+        assert!(plain.contains("-old line"), "{plain}");
+        assert!(plain.contains("+new line"), "{plain}");
         // Three lines of post-context.
         assert!(plain.contains("  line 5"), "{plain}");
         assert!(plain.contains("  line 6"), "{plain}");
@@ -3929,11 +3798,11 @@ mod tests {
         let preview = format_edit_diff_preview(&original, &old_str, &new_str, "").unwrap();
         let plain = strip_ansi(&preview);
         // Body collapses at DIFF_PREVIEW_MAX_BODY_LINES (8) per side.
-        assert!(plain.contains("- old1"), "{plain}");
-        assert!(plain.contains("- old7"), "{plain}");
-        assert!(!plain.contains("- old8"), "{plain}");
+        assert!(plain.contains("-old1"), "{plain}");
+        assert!(plain.contains("-old7"), "{plain}");
+        assert!(!plain.contains("-old8"), "{plain}");
         assert!(plain.contains("- … +13 more lines"), "{plain}");
-        assert!(plain.contains("+ new1"), "{plain}");
+        assert!(plain.contains("+new1"), "{plain}");
         assert!(plain.contains("+ … +13 more lines"), "{plain}");
     }
 
@@ -3963,8 +3832,8 @@ mod tests {
         assert!(plain.contains("@@ -5,1 +5,1 @@"), "{plain}");
         // The `-`/`+` rows show the full affected line with indentation,
         // not the bare fragment.
-        assert!(plain.contains("-     old_function();"), "{plain}");
-        assert!(plain.contains("+     new_function();"), "{plain}");
+        assert!(plain.contains("5 -    old_function();"), "{plain}");
+        assert!(plain.contains("5 +    new_function();"), "{plain}");
         // The full line must NOT also appear as a dim context row above
         // the change.
         let context_dup = "  \x1b[0m";
@@ -3985,7 +3854,7 @@ mod tests {
             "replaceAll": true,
             "userModified": false,
         });
-        let plain = ok_card_plain(edit_card(
+        let plain = ok_card_plain(&edit_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4001,7 +3870,7 @@ mod tests {
             "content": "a\nb\nc\nd\n",
             "originalFile": "a\nx\nc\n",
         });
-        let plain = ok_card_plain(write_card(
+        let plain = ok_card_plain(&write_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4010,18 +3879,18 @@ mod tests {
         // 4 new lines, was 3, delta +1.
         assert!(plain.contains("(4 lines, was 3 +1)"), "{plain}");
         // Diff body should show the changed middle line.
-        assert!(plain.contains("- x"), "{plain}");
-        assert!(plain.contains("+ b"), "{plain}");
+        assert!(plain.contains("2 -x"), "{plain}");
+        assert!(plain.contains("2 +b"), "{plain}");
     }
 
     #[test]
-    fn format_write_result_create_skips_delta_and_diff() {
+    fn format_write_result_create_keeps_line_count_without_delta() {
         let json = serde_json::json!({
             "type": "create",
             "filePath": "new.txt",
             "content": "hello\nworld\n",
         });
-        let plain = ok_card_plain(write_card(
+        let plain = ok_card_plain(&write_card(
             &serde_json::Value::Null,
             Some(&json),
             ToolStatus::Ok,
@@ -4104,7 +3973,7 @@ mod tests {
         // searched. The pattern (from input) must appear.
         let input = serde_json::json!({ "pattern": "TODO", "path": "src/" });
         let output = serde_json::json!({ "numMatches": 0, "numFiles": 1 });
-        let plain = ok_card_plain(grep_card(&input, Some(&output), ToolStatus::Ok));
+        let plain = ok_card_plain(&grep_card(&input, Some(&output), ToolStatus::Ok));
         assert!(plain.contains("Grep(TODO)"), "{plain}");
         assert!(plain.contains("in src/"), "{plain}");
         assert!(plain.contains("0 matches across 1 files"), "{plain}");
@@ -4114,7 +3983,7 @@ mod tests {
     fn glob_card_shows_the_search_pattern() {
         let input = serde_json::json!({ "pattern": "*.rs" });
         let output = serde_json::json!({ "numFiles": 3 });
-        let plain = ok_card_plain(glob_card(&input, Some(&output), ToolStatus::Ok));
+        let plain = ok_card_plain(&glob_card(&input, Some(&output), ToolStatus::Ok));
         assert!(plain.contains("Glob(*.rs)"), "{plain}");
         assert!(plain.contains("3 files"), "{plain}");
     }
@@ -4132,11 +4001,11 @@ mod tests {
         let content = tool_card_content("edit_file", &input, None, ToolStatus::Running);
         let plain = strip_ansi(&render_tool_card(&content, ToolStatus::Running));
         assert!(plain.contains("Editing src/main.rs"), "{plain}");
-        assert!(plain.contains("- line one"), "{plain}");
-        assert!(plain.contains("- line two"), "{plain}");
-        assert!(plain.contains("- line three"), "{plain}");
-        assert!(plain.contains("+ new one"), "{plain}");
-        assert!(plain.contains("+ new two"), "{plain}");
+        assert!(plain.contains("1 -line one"), "{plain}");
+        assert!(plain.contains("2 -line two"), "{plain}");
+        assert!(plain.contains("3 -line three"), "{plain}");
+        assert!(plain.contains("1 +new one"), "{plain}");
+        assert!(plain.contains("2 +new two"), "{plain}");
     }
 
     #[test]
@@ -4144,7 +4013,7 @@ mod tests {
         // The optional `description` (bash schema supports it) renders as a
         // ` · ...` suffix — LLM-authored transparency next to the real command.
         let input = serde_json::json!({ "command": "ls -la", "description": "list files" });
-        let plain = ok_card_plain(shell_card("Bash", &input, None));
+        let plain = ok_card_plain(&shell_card("Bash", &input, None));
         assert!(plain.contains("Bash(ls -la)"), "{plain}");
         assert!(plain.contains("· list files"), "{plain}");
     }
@@ -4156,7 +4025,7 @@ mod tests {
         // transparency: the exact command run is never hidden.
         let input = serde_json::json!({ "command": "cd foo\ngit status" });
         let output = serde_json::json!({ "stdout": "On branch main", "stderr": "" });
-        let plain = ok_card_plain(shell_card("Bash", &input, Some(&output)));
+        let plain = ok_card_plain(&shell_card("Bash", &input, Some(&output)));
         assert!(plain.contains("$ cd foo"), "{plain}");
         assert!(plain.contains("$ git status"), "{plain}");
         assert!(plain.contains("On branch main"), "{plain}");
@@ -4173,7 +4042,7 @@ mod tests {
         // is just the output — no redundant `$ ` echo.
         let input = serde_json::json!({ "command": "ls -la" });
         let output = serde_json::json!({ "stdout": "file.txt", "stderr": "" });
-        let plain = ok_card_plain(shell_card("Bash", &input, Some(&output)));
+        let plain = ok_card_plain(&shell_card("Bash", &input, Some(&output)));
         assert!(plain.contains("Bash(ls -la)"), "{plain}");
         assert!(
             !plain.contains("$ ls -la"),

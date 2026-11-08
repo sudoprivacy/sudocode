@@ -131,6 +131,7 @@ fn convention(root: &Path) -> InboxConvention {
 fn send(root: &Path, body: &str) {
     Mailbox::new(Arc::new(StdFsBackend), PEER.to_string(), convention(root))
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
@@ -166,7 +167,7 @@ fn events(path: &Path) -> Vec<String> {
 }
 
 fn wait_until(what: &str, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(100));

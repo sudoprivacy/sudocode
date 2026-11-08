@@ -1,7 +1,4 @@
 #![allow(
-    dead_code,
-    unused_imports,
-    unused_variables,
     clippy::doc_markdown,
     clippy::manual_string_new,
     clippy::match_same_arms,
@@ -18,8 +15,6 @@ mod cancel;
 mod cli;
 mod clipboard_image;
 mod init;
-mod input;
-mod input_chrome;
 mod input_queue;
 mod render;
 mod render_engine;
@@ -28,62 +23,45 @@ mod startup;
 mod stderr_capture;
 mod windows_console;
 
-use engine_acp::AcpError;
+use crate::render::TextRole;
 use engine_core::{
-    EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
-    TurnComplete,
+    EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession, TurnComplete,
 };
 use render_engine::{EngineEventRenderer, RenderOutcome};
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
-use std::net::TcpListener;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use engine_core::{
-    base_url_for_mode, resolve_startup_auth_source, AuthMode, AuthSource, ProviderKind,
-};
+use engine_core::AuthMode;
 
 use cli::args::{
-    config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
-    load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
+    default_permission_mode, format_unknown_slash_command, load_sudocode_config_for_current_dir,
     parse_args_with_prompt_overrides, permission_mode_from_label, require_sudocode_config_for_cwd,
-    resolve_model_alias, resolve_model_alias_with_config, try_resolve_bare_skill_prompt,
-    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
-    LocalHelpTopic,
+    AllowedToolSet, CliAction, CliOutputFormat, LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
     render_prompt_history_report, resolve_export_path, run_export, truncate_for_prompt,
-    PromptHistoryEntry,
 };
 use cli::format::{
-    describe_tool_progress, first_visible_line, format_account_report,
-    format_account_switch_report, format_acp_compact_report, format_auth_report,
+    format_account_report, format_account_switch_report, format_auth_report,
     format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
     format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
-    format_compaction_notice, format_context_report, format_cost_report,
-    format_internal_prompt_progress_line, format_issue_report, format_model_report,
-    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
-    format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_call_start, format_tool_result, format_ultraplan_report,
-    render_messages, render_resume_usage, render_version_report, truncate_for_summary,
-    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
+    format_compaction_notice, format_context_report, format_cost_report, format_issue_report,
+    format_model_report, format_model_switch_report, format_permission_prompt_box,
+    format_permissions_report, format_permissions_switch_report, format_pr_report,
+    format_resume_report, format_sandbox_report, format_ultraplan_report, render_messages,
+    render_version_report, turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
-    enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
-    parse_git_workspace_summary, resolve_git_branch_for, resolve_git_head_label_for,
-    GitWorkspaceSummary,
+    enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_workspace_summary,
+    resolve_git_branch_for, resolve_git_position_for, GitWorkspaceSummary,
 };
 use cli::help::{
     print_help, print_help_topic, render_config_json, render_config_report, render_diff_json_for,
@@ -93,43 +71,29 @@ use cli::help::{
 use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, format_session_picker_entry, list_managed_sessions,
-    render_session_list, LATEST_SESSION_REFERENCE,
+    render_session_list,
 };
 use cli::status::{
     format_status_report, print_sandbox_status_snapshot, print_status_snapshot, print_version,
-    sandbox_json_value, status_context, status_json_value, version_json_value, StatusContext,
-    StatusUsage,
+    sandbox_json_value, status_context, status_json_value, version_json_value, StatusUsage,
 };
 use commands::{
-    acp_slash_commands, classify_skills_slash_command, cwd_prompt_sections,
-    format_acp_unsupported_slash_command, handle_agents_slash_command,
+    classify_skills_slash_command, cwd_prompt_sections, handle_agents_slash_command,
     handle_agents_slash_command_json, handle_mcp_slash_command_json_with_plugins,
     handle_mcp_slash_command_with_plugins, handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_acp_slash_command_help, render_slash_command_help, render_slash_command_help_filtered,
-    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
-    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
-    SkillSlashDispatch, SlashCommand,
+    resolve_skill_invocation_with_plugins, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
-use engine_host::config::{resolve_auth_mode, resolve_model_switch_auth_mode};
-use engine_host::mcp::{
-    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_state_best_effort,
-    RuntimeMcpState,
-};
+use engine_host::config::resolve_auth_mode;
 use engine_host::prompt::{
-    apply_cli_prompt_overrides, build_acp_system_prompt, build_system_prompt_for,
-    set_cli_prompt_overrides,
+    apply_cli_prompt_overrides, build_system_prompt_for, set_cli_prompt_overrides,
 };
 use engine_host::session::{
-    canonical_session_cwd, context_overflow_user_message, create_managed_session_handle,
-    create_managed_session_handle_for, delete_managed_session, load_session_reference,
-    new_cli_session, new_cli_session_for, resolve_session_reference, write_session_clear_backup,
-    SessionHandle,
+    create_managed_session_handle, delete_managed_session, load_session_reference, new_cli_session,
+    resolve_session_reference, write_session_clear_backup, SessionHandle,
 };
-use engine_host::tool_executor::{permission_policy, CliToolExecutor};
 // The engine CORE cluster now lives below the seam in `engine-host`
 // (`runtime_build` + `session_engine`, re-exported at the crate root). The
 // renderer names these to build a session (`SessionEngine`), drive its non-turn
@@ -138,30 +102,19 @@ use engine_host::tool_executor::{permission_policy, CliToolExecutor};
 // `build_*` helpers). `RuntimeConfig` is the engine-side config struct; it does
 // not shadow `runtime::RuntimeConfig` (always named fully-qualified).
 use engine_host::{
-    build_engine_runtime, build_plugin_manager, build_runtime_plugin_state_with_loader,
-    plugin_load_outcome_for_cwd, AcpCliSession, BuiltRuntime, ModelSwitchReport, RuntimeConfig,
-    RuntimePluginState, SessionEngine, SessionLifecycle,
+    build_plugin_manager, plugin_load_outcome_for_cwd, SessionEngine, SessionLifecycle,
 };
 use init::initialize_repo;
-use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
-use render::{
-    ansi_bold_fg, ansi_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET,
-};
+use plugins::PluginLoadOutcome;
+use render::{theme, SpinnerHandle, TerminalRenderer, DIM, RESET};
 use runtime::{
-    check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
-    format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
-    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
-    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigScope, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
-    McpServerSpec, McpTool, MessageRole, MigrationScope, ModelPricing, PermissionMode,
-    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
-    Session, SystemPrompt, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    check_base_commit, format_stale_base_warning, format_usd, load_system_prompt,
+    pricing_for_model, resolve_expected_base, resolve_sandbox_status, ConfigLoader, ConfigScope,
+    McpServer, McpServerSpec, McpTool, MigrationScope, PermissionMode, ProjectContext, Session,
+    SystemPrompt, UsageTracker,
 };
-use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use tools::{
-    execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
-};
+use serde_json::{json, Value};
+use tools::{execute_tool, mvp_tool_specs};
 
 // The config / model / permission web moved below the seam into
 // `engine_host::config`. Re-export the handful the CLI names by their bare
@@ -187,14 +140,6 @@ impl ModelProvenance {
             resolved: DEFAULT_MODEL.to_string(),
             raw: None,
             source: ModelSource::Default,
-        }
-    }
-
-    fn from_flag(raw: &str) -> Self {
-        Self {
-            resolved: resolve_model_alias_with_config(raw),
-            raw: Some(raw.to_string()),
-            source: ModelSource::Flag,
         }
     }
 
@@ -228,14 +173,12 @@ pub(crate) const DEFAULT_DATE: &str = match option_env!("BUILD_DATE") {
     Some(d) => d,
     None => "unknown",
 };
-const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 pub(crate) const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
-const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
-const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
-const LEGACY_SESSION_EXTENSION: &str = "json";
+/// Where REPL turns auto-save, as the help texts name it.
+pub(crate) const SESSION_AUTO_SAVE_PATH: &str =
+    ".scode/sessions/<workspace>/<session-id>/transcript.jsonl";
 /// This crate's build metadata, packaged for the shared `commands::reports`
 /// doctor report (which is crate-agnostic and takes it as a parameter).
 pub(crate) fn build_info() -> commands::reports::BuildInfo<'static> {
@@ -321,15 +264,14 @@ impl WaitNotice {
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
                     Err(RecvTimeoutError::Timeout) => {
                         waited += interval;
-                        let described = match &target {
-                            Some(known) => known.clone(),
-                            None => {
-                                let described = describe
-                                    .take()
-                                    .map_or_else(String::new, |describe| describe());
-                                target = Some(described.clone());
-                                described
-                            }
+                        let described = if let Some(known) = &target {
+                            known.clone()
+                        } else {
+                            let described = describe
+                                .take()
+                                .map_or_else(String::new, |describe| describe());
+                            target = Some(described.clone());
+                            described
                         };
                         emit(format!(
                             "scode: still waiting on {described} ({}s)",
@@ -848,8 +790,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let is_interactive_session = matches!(&action, CliAction::Repl { .. })
         || matches!(&action, CliAction::ResumeSession { commands, output_format: CliOutputFormat::Text, .. } if commands.is_empty());
     if is_interactive_session {
-        cli::setup::startup_prompt(matches!(&action, CliAction::Repl { .. }))?;
+        cli::setup::startup_prompt()?;
         cli::update::startup_prompt()?;
+    } else if matches!(&action, CliAction::Acp { .. }) {
+        cli::setup::prepare_selected_runtime()?;
     }
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
@@ -921,7 +865,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cwd,
             date,
             output_format,
-        } => print_system_prompt(cwd, date, output_format)?,
+        } => print_system_prompt(&cwd, date, output_format)?,
         CliAction::Version { output_format } => {
             startup::measure("version_output", || print_version(output_format))?;
         }
@@ -937,7 +881,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &session_path,
             &commands,
             output_format,
-            model,
+            &model,
             permission_mode,
             auth_mode,
             reasoning_effort,
@@ -985,12 +929,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let session_start = Instant::now();
             let wait_model = model.clone();
             let mut cli = LiveCli::new(
-                model,
-                true,
+                &model,
                 allowed_tools,
                 permission_mode,
                 reasoning_effort,
                 auth_mode,
+                None,
             )?;
             // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
             // the turn across the seam (the running tool returns interrupted and
@@ -1000,12 +944,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _cancel_guard = SignalCancelGuard::install(cli.engine_handle.commands.clone());
             // Nothing renders until the model answers, so a slow upstream looks
             // exactly like a hang. Say what is being waited on instead.
-            let _wait_notice = WaitNotice::start(wait_model);
+            let wait_notice = WaitNotice::start(wait_model);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
-            drop(_wait_notice);
+            drop(wait_notice);
 
             // Record token usage and session ended event for non-interactive prompt mode
-            let duration_ms = session_start.elapsed().as_millis() as u64;
+            let duration_ms =
+                u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX);
             let usage_tracker = cli.lifecycle.usage_snapshot();
             let usage = usage_tracker.cumulative_usage();
             let total_turns = usage_tracker.turns();
@@ -1019,8 +964,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 tracer.record_session_ended(
                     total_turns,
-                    usage.input_tokens as u64,
-                    usage.output_tokens as u64,
+                    u64::from(usage.input_tokens),
+                    u64::from(usage.output_tokens),
                     duration_ms,
                 );
             }
@@ -1194,7 +1139,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         )
         .into());
     }
-    sessions.sort_by(|a, b| b.1.tracked_requests.cmp(&a.1.tracked_requests));
+    sessions.sort_by_key(|entry| std::cmp::Reverse(entry.1.tracked_requests));
 
     let reads: u64 = sessions
         .iter()
@@ -1239,6 +1184,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             "expected_invalidations": expected,
             "breaks_by_cause": by_cause,
             "root": root.display().to_string(),
+            "ttl_default": engine_core::cache_ttl::learned_default(),
             "coverage": "anthropic-provider only",
             "cache_metrics_schema_version": engine_core::cache_metrics::CACHE_METRICS_SCHEMA_VERSION,
             "cache_metrics_spec_sha256": engine_core::cache_metrics::CACHE_METRICS_SPEC_SHA256,
@@ -1254,16 +1200,10 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = serde_json::json!({
-                    "session": index + 1,
-                    "tracked_requests": stats.tracked_requests,
-                    "cache_efficiency": metrics,
-                    "completion_intervals": engine_core::cache_report::completion_intervals(
-                        &root.join(name).join("requests.jsonl")),
-                });
-                if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-                    report["ttl_advisor"] = engine_core::cache_advisor::report(&root.join(name));
-                }
+                let mut report = engine_core::cache_report::session_report(&root.join(name));
+                report["session"] = serde_json::json!(index + 1);
+                report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
+                report["cache_efficiency"] = serde_json::json!(metrics);
                 report
             }).collect::<Vec<_>>(),
         });
@@ -1286,9 +1226,8 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         None => println!("  prompt read     unknown (legacy input-token coverage)"),
     }
     println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
-    if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-        println!("  TTL advice      advisory only; decisions and forward scenarios in JSON; requests unchanged");
-    }
+    println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
+    println!("  TTL default     {}", ttl_default_label());
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
         // The counts that tell you what to go fix. "Expected" only means the
@@ -1515,11 +1454,11 @@ fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn st
 }
 
 fn print_system_prompt(
-    cwd: PathBuf,
+    cwd: &std::path::Path,
     date: String,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut prompt = load_system_prompt(cwd.clone(), date, env::consts::OS, "unknown")?;
+    let mut prompt = load_system_prompt(cwd.to_path_buf(), date, env::consts::OS, "unknown")?;
     // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
     // prepend the CC-fork coordinator role prompt so `scode
     // print-system-prompt` reflects what the runtime would send.
@@ -1537,8 +1476,8 @@ fn print_system_prompt(
     // Load failures captured inside PluginLoadOutcome are excluded naturally;
     // Result errors propagate, so a broken plugin install fails this preview
     // exactly as it fails a live session.
-    let outcome = plugin_load_outcome_for_cwd(&cwd)?;
-    prompt.extend_dynamic_sections(cwd_prompt_sections(&cwd, Some(&outcome)));
+    let outcome = plugin_load_outcome_for_cwd(cwd)?;
+    prompt.extend_dynamic_sections(cwd_prompt_sections(cwd, Some(&outcome)));
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -1584,7 +1523,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
                 serde_json::json!({
                     "id": s.id,
                     "messages": s.message_count,
-                    "modified_ms": s.modified_epoch_millis as u64,
+                    "modified_ms": u64::try_from(s.modified_epoch_millis).unwrap_or(u64::MAX),
                     "branch": s.branch_name,
                     "summary": s.summary.as_deref().map(cli::session::format_session_summary),
                     "path": s.path.display().to_string(),
@@ -1634,7 +1573,7 @@ fn run_resume(
     session_path: &Path,
     commands: &[String],
     output_format: CliOutputFormat,
-    model: String,
+    model: &str,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
     reasoning_effort: Option<String>,
@@ -1679,13 +1618,13 @@ fn run_resume(
             return Ok(());
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(
+        let cli = match LiveCli::new(
             model,
-            true,
             None,
             permission_mode,
             reasoning_effort,
             auth_mode,
+            Some((handle, session)),
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -1693,12 +1632,6 @@ fn run_resume(
                 std::process::exit(1);
             }
         };
-        // Load the restored session into the running CLI.
-        let session_ref = resolved_path.display().to_string();
-        if let Err(e) = cli.load_session(Some(session_ref)) {
-            eprintln!("failed to resume: {e}");
-            std::process::exit(1);
-        }
         // Enter the REPL loop (it renders banner + any existing messages).
         // Propagate terminal/save errors to the same top-level handler used
         // by a new REPL, after the loop has cleaned up its receiver/editor.
@@ -1773,7 +1706,7 @@ fn run_resume(
         let outcome = if matches!(command, SlashCommand::Compact) {
             run_resumed_compaction(
                 &resolved_path,
-                &model,
+                model,
                 permission_mode,
                 auth_mode,
                 reasoning_effort.clone(),
@@ -1844,15 +1777,15 @@ fn run_resumed_compaction(
     auth_mode: Option<AuthMode>,
     reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let persisted = load_session_reference(&path.display().to_string())?;
     let cli = LiveCli::new(
-        model.to_string(),
-        true,
+        model,
         None,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        Some(persisted),
     )?;
-    cli.lifecycle.resume_session(&path.display().to_string())?;
     // Maintenance runs through the lifecycle port while the turn pump is
     // idle. Keep SIGINT alive until its receipts and final report are saved.
     let _cancel_guard = SignalCancelGuard::install_compaction(cli.lifecycle.clone());
@@ -1925,7 +1858,7 @@ fn run_resume_command(
             let backup_path = write_session_clear_backup(session, session_path)?;
             let previous_session_id = session.session_id.clone();
             let mut cleared = new_cli_session()?;
-            cleared.model = session.model.clone();
+            cleared.model.clone_from(&session.model);
             let new_session_id = cleared.session_id.clone();
             let handle = create_managed_session_handle(&new_session_id)?;
             let cleared = cleared.with_persistence_path(handle.path.clone());
@@ -2080,7 +2013,7 @@ fn run_resume_command(
         }
         SlashCommand::Undo => {
             let already_undone = std::collections::HashSet::new();
-            match crate::cli::undo::find_last_undoable_edit(&session.messages(), &already_undone) {
+            match crate::cli::undo::find_last_undoable_edit(session.messages(), &already_undone) {
                 None => Ok(ResumeCommandOutcome {
                     session: session.clone(),
                     message: Some(
@@ -2139,7 +2072,7 @@ fn run_resume_command(
                 message: Some(handle_agents_slash_command(args.as_deref(), &cwd)?),
                 json: Some(
                     serde_json::to_value(handle_agents_slash_command_json(args.as_deref(), &cwd)?)
-                        .unwrap_or_else(|_| serde_json::json!(null)),
+                        .unwrap_or(serde_json::Value::Null),
                 ),
             })
         }
@@ -2345,12 +2278,12 @@ fn run_repl(
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
     let cli = LiveCli::new(
-        model,
-        true,
+        &model,
         allowed_tools,
         permission_mode,
         reasoning_effort,
         auth_mode,
+        None,
     )?;
 
     dispatch_repl(cli)
@@ -2359,229 +2292,10 @@ fn run_repl(
 /// New and resumed sessions share renderer selection and error propagation.
 #[inline]
 fn dispatch_repl(cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
-    // Select the input owner once for both entry paths. Either loop's returned
-    // error reaches main's normal diagnostic and nonzero-exit handling.
-    // The default async REPL accepts steering during a running turn.
-    // Explicit startup `off` retains the legacy synchronous receive loop.
-    let mode = input_queue::QueueMode::from_env();
-    if !matches!(mode, input_queue::QueueMode::Off) {
-        return run_repl_iocraft_dispatch(cli, mode);
-    }
-
-    run_repl_loop(cli)
-}
-
-/// The synchronous REPL loop. Handles both new sessions and resumed
-/// sessions identically: banner → existing messages (if any) → prompt.
-fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
-    cli.is_repl = true;
-    let editor = Rc::new(RefCell::new(input::LineEditor::new(
-        "❯ ",
-        cli.repl_completion_candidates().unwrap_or_default(),
-    )));
-    // Share the editor so mid-turn dialogs (write_plan approval) read their
-    // choice through this same rustyline instance — one owner of the terminal's
-    // raw-mode state. Thread-local because the sync REPL turn runs on this
-    // thread; `LiveCli` must stay `Send` for the iocraft path.
-    SYNC_REPL_EDITOR.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&editor)));
-    let _editor_scope = SyncReplEditorScope;
-    println!("{}", cli.startup_banner());
-
-    // The session's one receiver, on the same peer namespace its `send` tool
-    // writes through, as in the async REPL. Peer messages run as turns at the
-    // prompt boundary: rustyline cannot be interrupted from another thread, so
-    // a message that arrives while the prompt waits is announced at once and
-    // runs when the user next presses Enter. Its read position does not move
-    // until its turn has run.
-    let (peer_tx, pending_peer_turns) = mpsc::channel::<PendingPeerTurn>();
-    let peer_abort = runtime::HookAbortSignal::new();
-    // Counted before it is queued, so the count is never zero while a message
-    // is: Enter on an empty prompt must not be a no-op with one waiting.
-    let waiting_turns = editor.borrow().waiting_turns();
-    let queued = Arc::clone(&waiting_turns);
-    let deliver = peer_turn_sink(
-        peer_tx,
-        move |message, receipt| {
-            queued.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            (message, receipt)
-        },
-        peer_abort.clone(),
-    );
-    // The same native output handle preserves the current input for notices
-    // and stderr. Rustyline 19 checks already-buffered input before selecting,
-    // fixing the fast-burst stall that previously ruled this printer out.
-    let notice_printer = editor.borrow().background_printer();
-    let peer_receiver = engine_host::peer::attach(&cli.lifecycle.agent_name()).spawn_receiver(
-        peer_abort.clone(),
-        move |message| {
-            let notice = format!(
-                "Message from {} is waiting; it runs before the next prompt (press Enter)\n",
-                message.from
-            );
-            if let Some(printer) = &notice_printer {
-                let _ = printer.print(notice);
-            } else {
-                // Noninteractive/unsupported terminals have no active editor.
-                let _ = write!(io::stdout().lock(), "{notice}");
-            }
-            deliver(message)
-        },
-    );
-    // Render existing messages and seed editor history from user prompts.
-    // Same code path for new sessions (messages empty → no-op) and resumed
-    // sessions (messages present → render + populate history).
-    let session = cli.lifecycle.session_snapshot();
-    let messages = session.messages();
-    if !messages.is_empty() {
-        let term_width = crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or(80);
-        let renderer = render::TerminalRenderer::new();
-        let rendered = render_messages(messages, term_width, &renderer);
-        if !rendered.is_empty() {
-            println!("{rendered}");
-        }
-        // Seed rustyline history so ↑ recalls previous prompts. Skip
-        // runtime-injected `<system-reminder>` blocks (date announcements,
-        // rollover reminders) — they ride inside user messages for the
-        // model but were never typed by the user, and a multi-line history
-        // entry would auto-submit its first line when recalled.
-        for msg in messages {
-            if msg.role == runtime::MessageRole::User {
-                let text = msg
-                    .blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        runtime::ContentBlock::Text { text }
-                            if !cli::format::is_system_reminder_text(text) =>
-                        {
-                            Some(text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.trim().is_empty() {
-                    editor.borrow_mut().push_history(text);
-                }
-            }
-        }
-    }
-
-    // Track session metrics for session_ended event
-    let session_start = Instant::now();
-
-    let loop_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            run_pending_peer_turns(&mut cli, &pending_peer_turns, &waiting_turns);
-            editor
-                .borrow_mut()
-                .set_completions(cli.repl_completion_candidates().unwrap_or_default());
-            input_chrome::print_before_prompt(cli.lifecycle.current_permission_mode().as_str());
-            let read = editor.borrow_mut().read_line()?;
-            match read {
-                input::ReadOutcome::Submit(input) => {
-                    // Clear the pre-printed bottom sep + footer. After
-                    // readline, cursor is at the start of the bottom sep
-                    // line. \x1b[J clears from cursor to end of screen.
-                    print!("\x1b[J");
-                    let _ = io::stdout().flush();
-                    let trimmed = input.trim().to_string();
-                    // An empty line only comes back while peer messages wait: the
-                    // user handing the prompt back so they run, at the loop's top.
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if matches!(trimmed.as_str(), "/exit" | "/quit") {
-                        cli.persist_session()?;
-                        break;
-                    }
-                    // `!<cmd>` bash mode: run it here, no model turn.
-                    if let Some(command) = bash_mode::parse_bang_command(&trimmed) {
-                        println!("{}", bash_mode::render_input_line(command));
-                        cli.run_bash_mode(command);
-                        continue;
-                    }
-                    match SlashCommand::parse(&trimmed) {
-                        Ok(Some(command)) => {
-                            match cli.handle_repl_command(command) {
-                                Ok(true) => {
-                                    if let Err(e) = cli.persist_session() {
-                                        eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-                                    }
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-                                }
-                            }
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            eprintln!("{}{error}{}", ansi_fg(theme().error), RESET);
-                            continue;
-                        }
-                    }
-                    // Bare-word skill dispatch: if the first token of the input
-                    // matches a known skill name, invoke it as `/skills <input>`
-                    // rather than forwarding raw text to the LLM (ROADMAP #36).
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let plugin_outcome = cli.lifecycle.plugin_load_outcome();
-                    if let Some(prompt) = try_resolve_bare_skill_prompt_with_plugins(
-                        &cwd,
-                        &trimmed,
-                        Some(&plugin_outcome),
-                    ) {
-                        cli.record_prompt_history(&trimmed);
-                        if let Err(e) = cli.run_turn_interactive(&prompt) {
-                            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-                        }
-                        continue;
-                    }
-                    cli.record_prompt_history(&trimmed);
-                    if let Err(e) = cli.run_turn_interactive(&trimmed) {
-                        eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-                    }
-                }
-                input::ReadOutcome::Exit => {
-                    cli.persist_session()?;
-                    break;
-                }
-            }
-        }
-        Ok(())
-    })();
-
-    // Dropping the queue refuses whatever is still waiting, which unblocks the
-    // receiver so it can be joined; those messages stay unread.
-    peer_abort.abort();
-    drop(pending_peer_turns);
-    let _ = peer_receiver.join();
-    loop_result?;
-
-    // Record token usage and session ended event
-    let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage_tracker = cli.lifecycle.usage_snapshot();
-    let usage = usage_tracker.cumulative_usage();
-    let total_turns = usage_tracker.turns();
-    if let Some(tracer) = cli.session_tracer() {
-        tracer.record_usage(
-            "session_summary".to_string(),
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-        );
-        tracer.record_session_ended(
-            total_turns,
-            usage.input_tokens as u64,
-            usage.output_tokens as u64,
-            duration_ms,
-        );
-    }
-
-    Ok(())
+    // One input owner for both entry paths; its returned error reaches main's
+    // normal diagnostic and nonzero-exit handling. Startup `off` only starts
+    // the queue disabled, like `/config set queue off`.
+    run_repl_iocraft_dispatch(cli, input_queue::QueueMode::from_env())
 }
 
 /// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
@@ -2596,13 +2310,13 @@ async fn ctrl_break_cancel_signal() {
         Ok(mut stream) => {
             stream.recv().await;
         }
-        Err(_) => std::future::pending().await,
+        Err(_) => std::future::pending::<()>().await,
     }
 }
 
 #[cfg(not(windows))]
 async fn ctrl_break_cancel_signal() {
-    std::future::pending().await
+    std::future::pending::<()>().await;
 }
 
 /// Installs a process SIGINT / Ctrl-C handler for the duration of a
@@ -2705,8 +2419,7 @@ impl Drop for SignalCancelGuard {
 /// iocraft-based REPL dispatch. Spawns the iocraft render loop on a
 /// dedicated thread and runs the coordinator loop on the current thread.
 /// The coordinator reads `InputEvent`s from the iocraft UI and dispatches
-/// turns on runner threads, identical to the rustyline-based coordinator
-/// but with iocraft owning stdin+stdout.
+/// turns on runner threads, with iocraft owning stdin+stdout.
 type PendingQuestionAnswer = Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>;
 
 fn consume_pending_question_answer(pending: &PendingQuestionAnswer, text: String) -> bool {
@@ -2734,15 +2447,10 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
 ///
 /// Returns `Option<SlashSelectionHandler>` to support chained interactions
 /// (tree navigation). A struct wrapper breaks the recursive type alias cycle.
-struct SlashSelectionHandler(
-    Box<
-        dyn FnOnce(
-            &str,
-            &Arc<Mutex<LiveCli>>,
-            &repl_ui::OutputSender,
-        ) -> Option<SlashSelectionHandler>,
-    >,
-);
+type SlashSelectionCallback =
+    dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) -> Option<SlashSelectionHandler>;
+
+struct SlashSelectionHandler(Box<SlashSelectionCallback>);
 
 /// Events from all sources into the coordinator REPL loop.
 ///
@@ -2790,8 +2498,7 @@ enum CoordinatorEvent {
 /// Refuse delivery when the coordinator drops the receipt or shuts down. In
 /// particular, closing the engine must not acknowledge an interrupted turn.
 ///
-/// `wrap` packs the message and its receipt into whatever the REPL's loop
-/// receives, so both REPLs share this one acknowledgement rule.
+/// `wrap` packs the message and its receipt into the REPL coordinator's event.
 fn peer_turn_sink<E: Send + 'static>(
     tx: mpsc::Sender<E>,
     wrap: impl Fn(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>) -> E + Send + Sync,
@@ -2806,49 +2513,15 @@ fn peer_turn_sink<E: Send + 'static>(
     }
 }
 
-/// A peer message waiting for the synchronous REPL, with its receipt.
-type PendingPeerTurn = (runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>);
-
-/// Run every peer message that has arrived as its own turn, acknowledging each
-/// only once its turn has finished. A turn that fails leaves its message
-/// unread, to be delivered again. `waiting` counts the messages queued and not
-/// yet taken here.
-fn run_pending_peer_turns(
-    cli: &mut LiveCli,
-    pending: &mpsc::Receiver<PendingPeerTurn>,
-    waiting: &std::sync::atomic::AtomicUsize,
-) {
-    while let Ok((message, receipt)) = pending.try_recv() {
-        waiting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        let prompt = tools::compose_next_turn_from_envelopes(&[message]);
-        println!(
-            "{}",
-            cli::received::render_prompt(
-                &prompt,
-                render::query_terminal_width(),
-                &render::TerminalRenderer::new(),
-            )
-        );
-        match cli.run_turn_interactive(&prompt) {
-            Ok(()) => {
-                let _ = receipt.send(());
-            }
-            Err(e) => eprintln!("{}{e}{}", ansi_fg(theme().error), RESET),
-        }
-    }
-}
-
 /// Show an interactive selection question via iocraft's InputSlot and
 /// register a callback to handle the answer. The coordinator loop routes
 /// the `QuestionAnswer` event to the returned handler.
 ///
-/// `resolve_answer` maps the raw answer string (1-indexed option number
-/// or custom text) to the value to pass to `on_selected`.
+/// The input view resolves selection gestures; handlers consume the actual value.
 #[inline]
 fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
-    items: Vec<String>,
     on_selected: impl FnOnce(
             String,
             &Arc<Mutex<LiveCli>>,
@@ -2858,12 +2531,7 @@ fn show_slash_selection(
 ) -> SlashSelectionHandler {
     ui.show_question(question);
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let resolved = answer
-            .parse::<usize>()
-            .ok()
-            .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-            .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out)
+        on_selected(answer.to_string(), cli, out)
     }))
 }
 
@@ -2917,8 +2585,8 @@ fn show_effort_selection(
             custom_input_hint: None,
             force_fuzzy_select: true,
             back_value: None,
+            initial_value: None,
         },
-        items,
         move |level, cli, out| {
             let mut current = cli.lock().expect("LiveCli mutex poisoned");
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2931,7 +2599,11 @@ fn show_effort_selection(
                 Ok(())
             })();
             if let Err(error) = result {
-                out.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                out.println(&format!(
+                    "{}{error}{}",
+                    theme().fg_seq(TextRole::Error),
+                    RESET
+                ));
             }
             None
         },
@@ -2966,7 +2638,12 @@ impl IocraftQuestionPrompter {
         }
     }
 
-    fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
+    fn show_field(
+        &self,
+        request: &runtime::QuestionPromptRequest,
+        index: usize,
+        earlier: Option<&runtime::QuestionPromptAnswer>,
+    ) {
         let field = &request.fields[index];
         self.ui.show_question(repl_ui::QuestionPromptView {
             presentation: request.presentation.clone(),
@@ -2989,7 +2666,8 @@ impl IocraftQuestionPrompter {
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
             force_fuzzy_select: false,
-            back_value: None,
+            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
+            initial_value: earlier.map(|answer| answer.value.clone()),
         });
     }
 
@@ -3015,27 +2693,17 @@ impl IocraftQuestionPrompter {
         field: &runtime::QuestionField,
         raw_answer: String,
     ) -> runtime::QuestionPromptAnswer {
-        let matched = if field.options.is_empty() {
-            None
-        } else if let Ok(index) = raw_answer.parse::<usize>() {
-            index
-                .checked_sub(1)
-                .and_then(|zero_based| field.options.get(zero_based))
-        } else {
-            field
-                .options
-                .iter()
-                .find(|option| option.label == raw_answer || option.value == raw_answer)
-        };
-
+        let matched = field
+            .options
+            .iter()
+            .find(|option| option.value == raw_answer);
+        let label = matched
+            .map(|option| option.label.clone())
+            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
         runtime::QuestionPromptAnswer {
             id: field.id.clone(),
-            value: matched
-                .map(|option| option.value.clone())
-                .unwrap_or_else(|| raw_answer.clone()),
-            label: matched
-                .map(|option| option.label.clone())
-                .or_else(|| (!raw_answer.is_empty()).then_some(raw_answer)),
+            value: raw_answer,
+            label,
         }
     }
 }
@@ -3062,21 +2730,26 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         let this = self.clone();
         let request = request.clone();
         Box::pin(async move {
-            let mut answers = Vec::with_capacity(request.fields.len());
-            for index in 0..request.fields.len() {
+            // Answers are kept per question so going back restores them.
+            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
+                vec![None; request.fields.len()];
+            let mut index = 0;
+            while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
-                this.show_field(&request, index);
-                let raw = match rx.await {
-                    Ok(answer) => answer.trim().to_string(),
-                    Err(_) => {
-                        this.ui.clear_question();
-                        return Err("question prompt cancelled".into());
-                    }
+                this.show_field(&request, index, answers[index].as_ref());
+                let Ok(raw) = rx.await else {
+                    this.ui.clear_question();
+                    return Err("question prompt cancelled".into());
                 };
-                answers.push(Self::answer_for_field(&request.fields[index], raw));
+                if raw == repl_ui::QUESTION_BACK {
+                    index = index.saturating_sub(1);
+                    continue;
+                }
+                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
+                index += 1;
             }
             this.ui.clear_question();
-            Ok(answers)
+            Ok(answers.into_iter().flatten().collect())
         })
     }
 }
@@ -3142,13 +2815,12 @@ impl runtime::PermissionPrompter for IocraftQuestionPrompter {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Sync-REPL per-turn cancel monitor.
+// One-shot per-turn cancel monitor.
 //
-// The sync rustyline REPL runs a turn by blocking on the engine seam, so it
-// needs a side channel to catch ESC / Ctrl-C mid-turn and cancel. On Unix a
-// bare ESC (0x1b) can't be reliably read through crossterm's event system
-// after rustyline toggles raw mode, so we poll termios directly — exactly what
-// the pre-seam HookAbortMonitor did. The only change: the sink is now the seam
+// A one-shot text turn blocks on the engine seam, so it needs a side channel
+// to catch ESC / Ctrl-C mid-turn and cancel. On Unix a bare ESC (0x1b) can't be
+// reliably read through crossterm's event system, so we poll termios directly
+// — exactly what the pre-seam HookAbortMonitor did. The sink is the seam
 // (`EngineCommand::Cancel`), not a raw abort-signal handle.
 // ──────────────────────────────────────────────────────────────────────
 
@@ -3265,7 +2937,7 @@ struct MonitorCtl {
     cv: std::sync::Condvar,
 }
 
-/// A per-turn ESC / Ctrl-C monitor for the sync REPL. Polls the terminal on a
+/// A per-turn ESC / Ctrl-C monitor for a one-shot text turn. Polls the terminal on a
 /// dedicated thread and sends `EngineCommand::Cancel` across the seam when the
 /// user aborts. `suspend()`/`resume()` let the turn hand stdin to an interactive
 /// prompter (permission / question dialog) without the monitor eating the reply.
@@ -3457,7 +3129,7 @@ impl Drop for ReplTurnCancelMonitor {
 /// line separates the echo from the turn output that follows, matching the
 /// spacing between other scrollback blocks.
 fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
-    output.print_block(cli::format::format_input_echo(display, render::query_terminal_width()).0);
+    output.user_prompt(display);
 }
 
 /// Commit a received envelope through the same formatter used by replay.
@@ -3471,16 +3143,67 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
-/// The footer's cache-TTL tip and whether it offers a switch.
+/// Peer-messaging health, not raw receiver errors, reaches the footer. An
+/// outage that heals within the grace period shows nothing, and the tip clears
+/// itself once receiving recovers. Detail stays in `/status`.
+fn spawn_a2a_health_tip(agent: String, ui: repl_ui::UiCommandSender) {
+    let _ = thread::Builder::new()
+        .name("a2a-health-tip".into())
+        .spawn(move || {
+            let mut shown = None;
+            loop {
+                let tip = a2a_health_tip(&engine_host::peer::status(&agent).health);
+                if tip != shown {
+                    ui.set_status_tip(repl_ui::StatusSource::A2a, tip.clone());
+                    shown = tip;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+}
+
+fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_core::Tip> {
+    // Important, not Urgent, for both: it stays visible at the prompt, but the
+    // footer does not hold it through every turn of a session that may not use
+    // A2A at all.
+    if !matches!(health.level, "warn" | "fail") {
+        return None;
+    }
+    let priority = engine_core::TipPriority::Important;
+    let what = match health.failing.as_slice() {
+        [] if health.level == "fail" => "node binding unusable".to_string(),
+        [] => "receiving not yet recovered".to_string(),
+        [(scope, _)] => format!("{scope} failing"),
+        [(scope, _), rest @ ..] => format!("{scope} and {} more failing", rest.len()),
+    };
+    let age = match health.outage_secs {
+        Some(secs) if secs >= 60 => format!(" for {}m", secs / 60),
+        Some(secs) => format!(" for {secs}s"),
+        None => String::new(),
+    };
+    Some(engine_core::Tip {
+        priority,
+        message: format!("A2A: {what}{age} · /status"),
+    })
+}
+
+/// The footer's cache-TTL tip and whether it offers a choice. Pinned, the tip
+/// suggests the other TTL; automatic, it is a stop only while a move to 1h
+/// waits for a cold point, which can be applied now or pinned instead.
 fn cache_tip(session_id: &str, model: &str) -> repl_ui::CacheTip {
     let advice = engine_core::cache_advisor::ttl_advice(session_id, model);
+    let just_switched = engine_core::cache_ttl::take_switch_notice(session_id);
     let actionable = advice.as_ref().is_some_and(|advice| {
-        advice.pending.is_none()
-            && advice.has_saving
-            && advice.suggested_seconds != advice.effective_seconds
+        if advice.auto {
+            !just_switched && advice.auto_target() == 3600 && advice.effective_seconds == 300
+        } else {
+            advice.pending.is_none()
+                && advice.has_saving
+                && advice.suggested_seconds != advice.effective_seconds
+        }
     });
     repl_ui::CacheTip {
-        tip: engine_core::cache_advisor::session_tip(session_id, model),
+        tip: engine_core::cache_advisor::session_tip(session_id, model, just_switched),
         advice,
         actionable,
     }
@@ -3507,8 +3230,11 @@ fn apply_cache_ttl(
         }
         (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
         (TtlChoice::FiveMinutes, _) => "5m from the next request",
-        (TtlChoice::Auto, _) => {
-            "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
+        (TtlChoice::Auto, false) => {
+            "auto: follows this session's cache stats (to 5m at once, to 1h at the next cold start)"
+        }
+        (TtlChoice::Auto, true) => {
+            "auto: follows this session's cache stats, from the next request"
         }
     };
     match saved {
@@ -3517,20 +3243,60 @@ fn apply_cache_ttl(
     }
 }
 
+/// What a new unpinned session starts from: `1h, learned …` or `5m (nothing learned yet)`.
+fn ttl_default_label() -> String {
+    engine_core::cache_ttl::learned_default().map_or_else(
+        || "5m for new sessions (nothing learned yet)".to_owned(),
+        |learned| {
+            format!(
+                "{} for new sessions, learned from {}",
+                engine_core::cache_advisor::ttl_label(learned.ttl_seconds),
+                learned.session
+            )
+        },
+    )
+}
+
 /// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
-fn cache_ttl_status(session_id: &str) -> String {
-    use engine_core::cache_ttl::TtlChoice;
+fn cache_ttl_status(session_id: &str, model: &str) -> String {
+    use engine_core::cache_advisor::{ttl_label, MIN_INTERVALS};
     let status = engine_core::cache_ttl::status(session_id);
-    let now = status
-        .effective_seconds
-        .map_or("not sent yet", engine_core::cache_advisor::ttl_label);
+    let now = status.effective_seconds.map_or("not sent yet", ttl_label);
+    if status.auto {
+        let verdict = engine_core::cache_advisor::ttl_advice(session_id, model).map_or(
+            String::new(),
+            |advice| {
+                let target = advice.auto_target();
+                let heading = if target == advice.effective_seconds {
+                    String::new()
+                } else if target == 3600 {
+                    ", switching to 1h at the next cold start".to_owned()
+                } else {
+                    format!(", switching to {} at the next request", ttl_label(target))
+                };
+                if !advice.has_evidence {
+                    format!(
+                        ": collecting {}/{MIN_INTERVALS} reuse intervals{heading}",
+                        advice.intervals
+                    )
+                } else if advice.has_saving {
+                    format!(
+                        ": {} ≈{:.0}% cheaper here{heading}",
+                        ttl_label(advice.suggested_seconds),
+                        advice.saving_pct()
+                    )
+                } else {
+                    format!(": 5m and 1h within 10% here{heading}")
+                }
+            },
+        );
+        return format!(
+            "Prompt cache TTL: {now} · auto{verdict} · {}",
+            ttl_default_label()
+        );
+    }
     let pending = status.pending.map_or(String::new(), |pending| {
-        let (label, when) = match (pending.choice, pending.force_now) {
-            (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
-            (TtlChoice::OneHour, true) => ("1h", "from the next request"),
-            (TtlChoice::FiveMinutes, _) => ("5m", "from the next request"),
-            (TtlChoice::Auto, _) => ("auto", "from the next suitable request"),
-        };
+        let (label, when) = pending.describe();
         format!(" · pending {label} {when}")
     });
     format!("Prompt cache TTL: {now}{pending}")
@@ -3543,8 +3309,7 @@ fn run_repl_iocraft_dispatch(
     render::terminal_palette::initialize();
     cli.is_repl = true;
     // Banner + restored history: on resume the iocraft REPL must replay the
-    // session's messages to scrollback (same as the rustyline path), not just
-    // the banner — otherwise a resumed conversation looks empty. Both come from
+    // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from
     // one println in spawn_repl_ui, before raw mode.
     let banner = {
         let banner = cli.startup_banner();
@@ -3578,7 +3343,15 @@ fn run_repl_iocraft_dispatch(
     // handle so `input_rx` can be forwarded into the unified event channel.
     // The panel starts from whatever the session's filesystem has persisted —
     // its own, so a resumed session shows its todos and not the CLI's cwd.
-    let seed_todos = tools::todo_list(&cli.lifecycle.session_snapshot().fs_handle());
+    // ↑ recalls the session's earlier prompts, so a resumed session continues
+    // its own input history.
+    let session = cli.lifecycle.session_snapshot();
+    let seed_todos = tools::todo_list(&session.fs_handle());
+    let input_history = collect_session_prompt_history(&session)
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect();
+    drop(session);
     // The staging-area queue, shared between this coordinator loop and the UI
     // thread's `↑` handler: on empty-buffer `↑` the UI pops the newest human
     // queued message back into the input slot (skipping a2a/peer). Created
@@ -3595,13 +3368,23 @@ fn run_repl_iocraft_dispatch(
                 .dequeue_all_human()
         })
     };
-    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos, Some(dequeue_hook));
+    let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
+    let repl = repl_ui::spawn_repl_ui(
+        &permission_label,
+        &banner,
+        seed_todos,
+        input_history,
+        Some(dequeue_hook),
+        Arc::clone(&completions),
+    );
+    cli.completions = Some(completions);
+    cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
     }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
-    repl_ui_cmd.set_branch(workspace_head_label());
+    repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     // Route LiveCli output through iocraft's OutputSender so it goes
@@ -3611,6 +3394,7 @@ fn run_repl_iocraft_dispatch(
     // mailbox poller below: reading it back through the lock would have the
     // coordinator thread contend with every turn for a value that cannot change.
     let session_agent_name = cli.lifecycle.agent_name();
+    spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
     let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
@@ -3700,6 +3484,7 @@ fn run_repl_iocraft_dispatch(
             activity.observe_engine_state(engine_events::EngineState::Idle);
         })
         .expect("spawn REPL engine event bridge");
+    let prompt_outbox = cli.prompt_outbox.clone();
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
@@ -3726,7 +3511,17 @@ fn run_repl_iocraft_dispatch(
     // an inbox nothing is polling. `attach` reuses the session's selected
     // mailbox, including a pending binding that this receiver retries.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let mailbox_receiver = engine_host::peer::attach(&session_agent_name).spawn_receiver(
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
+    // Whether this namespace authenticated the senders it delivers.
+    let peer_verified = peer.mailbox().authenticates_senders();
+    let mailbox_receiver = peer.spawn_receiver(
         mailbox_abort.clone(),
         peer_turn_sink(
             coord_tx.clone(),
@@ -3745,18 +3540,15 @@ fn run_repl_iocraft_dispatch(
     let mut pending_slash_selection: Option<SlashSelectionHandler> = None;
 
     loop {
-        let event = match coord_rx.recv() {
-            Ok(evt) => evt,
-            Err(_) => {
-                mailbox_abort.abort();
-                let _ = commands.send(EngineCommand::Close);
-                cancel_pending_question_answer(&pending_question_answer);
-                repl_ui_cmd.clear_question();
-                if let Some(h) = runner_handle.take() {
-                    let _ = h.join();
-                }
-                break;
+        let Ok(event) = coord_rx.recv() else {
+            mailbox_abort.abort();
+            let _ = commands.send(EngineCommand::Close);
+            cancel_pending_question_answer(&pending_question_answer);
+            repl_ui_cmd.clear_question();
+            if let Some(h) = runner_handle.take() {
+                let _ = h.join();
             }
+            break;
         };
 
         // Expanded prompts can still contain an exit command. Give both input
@@ -3828,10 +3620,10 @@ fn run_repl_iocraft_dispatch(
                     for echo in &next.echoes {
                         match echo.source {
                             input_queue::QueuedKind::Human => {
-                                echo_submit_to_scrollback(&repl_output, &echo.display)
+                                echo_submit_to_scrollback(&repl_output, &echo.display);
                             }
-                            input_queue::QueuedKind::Peer => {
-                                echo_peer_to_scrollback(&repl_output, &echo.display)
+                            input_queue::QueuedKind::Peer | input_queue::QueuedKind::Scheduled => {
+                                echo_peer_to_scrollback(&repl_output, &echo.display);
                             }
                             input_queue::QueuedKind::Subagent
                             | input_queue::QueuedKind::Background => {
@@ -3851,7 +3643,6 @@ fn run_repl_iocraft_dispatch(
                         coord_tx.clone(),
                     ));
                 }
-                continue;
             }
             event @ (CoordinatorEvent::PeerMessage(..)
             | CoordinatorEvent::SubagentCompleted { .. }
@@ -3863,13 +3654,18 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
-                        let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
-                        (
-                            prompt.clone(),
-                            prompt,
-                            input_queue::QueuedKind::Peer,
-                            Some(ack),
-                        )
+                        // A scheduled job's message arrives through the same
+                        // inbox; only its origin differs.
+                        let kind = if msg.kind == runtime::agent_mailbox::kinds::SCHEDULED {
+                            input_queue::QueuedKind::Scheduled
+                        } else {
+                            input_queue::QueuedKind::Peer
+                        };
+                        let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
+                            &[msg],
+                            peer_verified,
+                        );
+                        (prompt.clone(), prompt, kind, Some(ack))
                     }
                     CoordinatorEvent::SubagentCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Subagent, None)
@@ -3931,7 +3727,6 @@ fn run_repl_iocraft_dispatch(
                         &repl_ui_cmd,
                     );
                 }
-                continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {
                 repl_ui::InputEvent::Exit => {
@@ -3942,10 +3737,7 @@ fn run_repl_iocraft_dispatch(
                     if let Some(h) = runner_handle.take() {
                         let _ = h.join();
                     }
-                    let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                    if let Err(e) = cli_lock.persist_session() {
-                        repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
-                    }
+                    // The shutdown below reports a failed final save.
                     break;
                 }
                 repl_ui::InputEvent::Abort if coord.lock().unwrap().has_pending_input() => {
@@ -3966,10 +3758,8 @@ fn run_repl_iocraft_dispatch(
                         let _ = commands.send(EngineCommand::Cancel);
                     }
                 }
-                repl_ui::InputEvent::StopBackgroundTask(id) => {
-                    let _ = commands.send(EngineCommand::BackgroundTask {
-                        action: engine_events::BackgroundTaskAction::Stop { id },
-                    });
+                repl_ui::InputEvent::BackgroundTask(action) => {
+                    let _ = commands.send(EngineCommand::BackgroundTask { action });
                 }
                 repl_ui::InputEvent::SetCacheTtl { choice, force_now } => {
                     let session_id = ttl_lifecycle.session_handle().id;
@@ -4028,6 +3818,12 @@ fn run_repl_iocraft_dispatch(
                     // turn. Keep the input/control dispatcher nonblocking.
                     let trimmed = text.trim();
                     let parsed = SlashCommand::parse(trimmed);
+                    // A command's report follows its own `❯` line in
+                    // scrollback, as a prompt's turn does. Text that is not a
+                    // command (`Ok(None)`) runs as a prompt and is echoed there.
+                    if !matches!(parsed, Ok(None)) {
+                        echo_submit_to_scrollback(&repl_output, &display);
+                    }
                     // Task inspection is local UI, so it remains available
                     // during work without taking the session lock.
                     if matches!(&parsed, Ok(Some(SlashCommand::Tasks { args: None }))) {
@@ -4040,7 +3836,7 @@ fn run_repl_iocraft_dispatch(
                         );
                         repl_output.println(&format!(
                             "{}A turn is running; finish or cancel before changing session settings.\n{controls}{RESET}",
-                            theme().muted_fg(),
+                            theme().fg_seq(TextRole::Secondary),
                         ));
                         continue;
                     }
@@ -4104,8 +3900,8 @@ fn run_repl_iocraft_dispatch(
                                     custom_input_hint: Some("or type a model name".to_string()),
                                     force_fuzzy_select: false,
                                     back_value: None,
+                                    initial_value: None,
                                 },
-                                models,
                                 move |model_name, cli, out| {
                                     if let Some(selection) = show_effort_selection(
                                         &effort_ui,
@@ -4120,7 +3916,7 @@ fn run_repl_iocraft_dispatch(
                                             if let Err(e) = cli_lock.persist_session() {
                                                 out.println(&format!(
                                                     "{}{e}{}",
-                                                    ansi_fg(theme().error),
+                                                    theme().fg_seq(TextRole::Error),
                                                     RESET
                                                 ));
                                             }
@@ -4128,7 +3924,7 @@ fn run_repl_iocraft_dispatch(
                                         Ok(false) => {}
                                         Err(e) => out.println(&format!(
                                             "{}{e}{}",
-                                            ansi_fg(theme().error),
+                                            theme().fg_seq(TextRole::Error),
                                             RESET
                                         )),
                                     }
@@ -4194,7 +3990,7 @@ fn run_repl_iocraft_dispatch(
                                     if let Err(e) = cli_lock.persist_session() {
                                         repl_output.println(&format!(
                                             "{}{e}{}",
-                                            ansi_fg(theme().error),
+                                            theme().fg_seq(TextRole::Error),
                                             RESET
                                         ));
                                     }
@@ -4202,7 +3998,7 @@ fn run_repl_iocraft_dispatch(
                                 Ok(false) => {}
                                 Err(e) => repl_output.println(&format!(
                                     "{}{e}{}",
-                                    ansi_fg(theme().error),
+                                    theme().fg_seq(TextRole::Error),
                                     RESET
                                 )),
                             }
@@ -4222,6 +4018,7 @@ fn run_repl_iocraft_dispatch(
                                     )
                             {
                                 repl_ui_cmd.begin_turn();
+                                cli_lock.refresh_completions();
                             }
                             repl_ui_cmd.set_cache_tip(cli_lock.cache_ttl_tip());
                             true
@@ -4230,7 +4027,7 @@ fn run_repl_iocraft_dispatch(
                         Err(error) => {
                             repl_output.println(&format!(
                                 "{}{error}{}",
-                                ansi_fg(theme().error),
+                                theme().fg_seq(TextRole::Error),
                                 RESET
                             ));
                             true
@@ -4246,6 +4043,7 @@ fn run_repl_iocraft_dispatch(
                     // in the queue overlay and echoed at the turn boundary when
                     // it actually flushes (see `drain_next`'s `echoes`).
                     if coord.lock().unwrap().has_idle_queue() {
+                        prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
                         coord.lock().unwrap().submit_during_turn(
                             input_queue::QueuedInput::human(text, display),
@@ -4253,6 +4051,7 @@ fn run_repl_iocraft_dispatch(
                         );
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     } else if !coord.lock().unwrap().is_running() {
+                        prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
                         echo_submit_to_scrollback(&repl_output, &display);
                         let next = coord
@@ -4276,6 +4075,7 @@ fn run_repl_iocraft_dispatch(
                             repl_output.println("Next-turn queue is disabled; use Enter to steer or /config set queue on while idle.");
                             continue;
                         }
+                        prompt_outbox.post(trimmed);
                         let delivery = {
                             let mut queue = coord.lock().unwrap();
                             if delivery == engine_events::InputDelivery::Steer && queue.is_paused()
@@ -4335,11 +4135,13 @@ fn run_repl_iocraft_dispatch(
     let _ = mailbox_receiver.join();
 
     // Persist the session before shutting down the REPL — the UI thread may
-    // still be alive and the shared CLI mutex must remain accessible.
-    {
-        let cli_lock = cli_shared.lock().expect("LiveCli mutex");
-        let _ = cli_lock.persist_session();
-    }
+    // still be alive and the shared CLI mutex must remain accessible. A failed
+    // save is reported after teardown, so the terminal is restored first.
+    let persisted = {
+        let mut cli_lock = cli_shared.lock().expect("LiveCli mutex");
+        cli_lock.record_prompt_history();
+        cli_lock.persist_before_shutdown()
+    };
     // Drop coordinator sender so bridge/poller threads see Disconnected,
     // which drops input_rx and lets the iocraft render loop exit.
     drop(coord_tx);
@@ -4349,14 +4151,22 @@ fn run_repl_iocraft_dispatch(
     // the thread after a bounded wait and process exit remains the fallback.
     (repl_join)();
 
+    // The cache panel retains the same lifecycle as the engine delegate.
+    // Release it before engine shutdown can drop the model client and drain
+    // its response recorders, rather than leaving them alive at process exit.
+    drop(ttl_lifecycle);
+
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.
-    let cli = match Arc::try_unwrap(cli_shared) {
-        Ok(m) => m.into_inner().unwrap_or_else(|e| e.into_inner()),
-        Err(_) => std::process::exit(0),
+    let Ok(cli) = Arc::try_unwrap(cli_shared) else {
+        persisted?;
+        std::process::exit(0)
     };
+    let cli = cli
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let duration_ms = session_start.elapsed().as_millis() as u64;
+    let duration_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let usage_tracker = cli.lifecycle.usage_snapshot();
     let usage = usage_tracker.cumulative_usage();
     let total_turns = usage_tracker.turns();
@@ -4370,22 +4180,19 @@ fn run_repl_iocraft_dispatch(
         );
         tracer.record_session_ended(
             total_turns,
-            usage.input_tokens as u64,
-            usage.output_tokens as u64,
+            u64::from(usage.input_tokens),
+            u64::from(usage.output_tokens),
             duration_ms,
         );
     }
 
     // Close through the engine seam before process exit so session-owned
     // background processes are killed and reaped, not left running.
-    let LiveCli {
-        engine_handle,
-        lifecycle,
-        ..
-    } = cli;
-    drop(lifecycle);
-    let _ = engine_handle.shutdown(Duration::from_secs(5));
+    cli.shutdown();
 
+    // An unsaved session exits through main's error report and status; its
+    // process exit also ends the render loop thread.
+    persisted?;
     // The iocraft render loop thread may still be alive (it blocks on
     // terminal events). Persistent state and engine teardown are complete.
     std::process::exit(0);
@@ -4452,6 +4259,7 @@ fn spawn_iocraft_turn(
         .name("repl-runner".into())
         .spawn(move || {
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
+            cli.record_prompt_history();
             match cli.run_turn_iocraft(
                 &next.prompt,
                 &output,
@@ -4466,12 +4274,42 @@ fn spawn_iocraft_turn(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                    output.println(&format!(
+                        "{}{error}{}",
+                        theme().fg_seq(TextRole::Error),
+                        RESET
+                    ));
                 }
             }
             let _ = done_tx.send(CoordinatorEvent::TurnComplete);
         })
         .expect("spawn repl-runner thread")
+}
+
+/// Typed prompts on their way to the session's prompt history, in the order
+/// they were typed. The input dispatcher cannot take the `LiveCli` lock while a
+/// turn holds it, so it posts each line here; `LiveCli` records them whenever
+/// it next holds the lock: before a turn, before a `!` command or `/history`,
+/// and before the final save.
+#[derive(Clone, Default)]
+struct PromptOutbox(Arc<Mutex<Vec<String>>>);
+
+impl PromptOutbox {
+    fn post(&self, prompt: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(prompt.to_owned());
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
 }
 
 /// The composition root above the seam. Holds ONLY the turn handle + the
@@ -4487,13 +4325,15 @@ struct LiveCli {
     /// the renderer's port to it. `Arc<dyn SessionLifecycle>` gives NO access
     /// to `run_turn` — the cut is compiler-enforced.
     lifecycle: Arc<dyn SessionLifecycle>,
-    prompt_history: Vec<PromptHistoryEntry>,
+    /// Typed prompts not yet in the session's prompt history. See
+    /// [`PromptOutbox`].
+    prompt_outbox: PromptOutbox,
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
-    /// Shared atomic queue mode for the async REPL. `/config set queue`
-    /// writes to this; the coordinator reads it each `submit_during_turn`.
-    /// `Some` ⇔ async REPL mode is active.
+    /// Shared atomic queue mode for the REPL. `/config set queue` writes to
+    /// this; the coordinator reads it each `submit_during_turn`.
+    /// `Some` ⇔ the interactive REPL is active.
     shared_queue_mode: Option<input_queue::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
@@ -4501,6 +4341,8 @@ struct LiveCli {
     /// `println!`. Set by the iocraft REPL dispatch so slash command output
     /// goes through `split_for_iocraft` and renders correctly in raw mode.
     iocraft_output: Option<repl_ui::OutputSender>,
+    /// What the iocraft REPL's Tab offers for slash-command arguments.
+    completions: Option<Arc<Mutex<commands::CompletionContext>>>,
 }
 
 fn run_acp_server(
@@ -4549,24 +4391,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
         "off" | "false" | "0" => Some(false),
         _ => None,
     }
-}
-
-/// Measure visible string width by stripping ANSI escape sequences.
-fn strip_ansi_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c == 'm' {
-                in_escape = false;
-            }
-        } else {
-            width += 1;
-        }
-    }
-    width
 }
 
 /// The renderer-side capture of one turn: the `TurnComplete` aggregate plus the
@@ -4625,8 +4449,8 @@ impl runtime::QuestionPrompter for NoopQuestionPrompter {
     }
 }
 
-/// Renderer-side question prompter for the SYNC REPL. Draws the question +
-/// numbered options and reads the choice via rustyline — a raw
+/// Renderer-side question prompter outside the REPL (one-shot runs). Draws the
+/// question + numbered options and reads the choice via rustyline — a raw
 /// `io::stdin().read_line` is unreliable under Windows ConPTY (it silently
 /// dropped stdin writes during the old plan-mode dialog); rustyline reads the
 /// console the same Windows-safe way the REPL prompt does. Answers both
@@ -4634,50 +4458,15 @@ impl runtime::QuestionPrompter for NoopQuestionPrompter {
 /// both cross the seam as `QuestionRequest`s.
 struct CliQuestionPrompter;
 
-thread_local! {
-    /// The sync REPL's line editor for the duration of the loop. Set by
-    /// `run_repl_loop` so a mid-turn dialog (write_plan approval) reads its
-    /// choice through the SAME rustyline editor that owns the terminal —
-    /// avoiding a throwaway second editor that perturbed terminal state on drop.
-    /// Thread-local (not a `LiveCli` field) because `LiveCli` must stay `Send`
-    /// for the iocraft path, while the sync REPL turn runs on the same thread
-    /// that owns the editor.
-    static SYNC_REPL_EDITOR: RefCell<Option<Rc<RefCell<input::LineEditor>>>> =
-        const { RefCell::new(None) };
-}
-
-/// Release the editor in ordinary stack cleanup, including errors before the
-/// prompt loop starts. Its capture worker must not be joined by TLS teardown.
-struct SyncReplEditorScope;
-
-impl Drop for SyncReplEditorScope {
-    #[inline]
-    fn drop(&mut self) {
-        SYNC_REPL_EDITOR.with(|cell| *cell.borrow_mut() = None);
-    }
-}
-
-/// Read one choice line through the sync REPL's shared editor, so mid-turn
-/// prompts (write_plan approval, tool-permission y/N) never spawn a second
-/// terminal owner — a throwaway `rustyline::Editor` / `dialoguer::Select`
-/// toggles raw-mode on drop underneath the main editor and perturbs its re-arm.
-/// Falls back to a scoped editor only outside the sync REPL (e.g. iocraft path
-/// or tests), where there is no shared editor to collide with.
+/// Read one choice line for a prompt outside the REPL's own input slot, such
+/// as a one-shot run's plan approval or tool-permission y/N.
 #[inline]
-fn prompt_choice_via_shared_editor(prompt: &str) -> Result<String, String> {
-    let shared = SYNC_REPL_EDITOR.with(|cell| cell.borrow().as_ref().map(Rc::clone));
-    if let Some(editor) = shared {
-        editor
-            .borrow_mut()
-            .prompt_choice(prompt)
-            .map_err(|e| e.to_string())
-    } else {
-        let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
-        editor
-            .readline(prompt)
-            .map(|line| line.trim().to_string())
-            .map_err(|e| e.to_string())
-    }
+fn prompt_choice_line(prompt: &str) -> Result<String, String> {
+    let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
+    editor
+        .readline(prompt)
+        .map(|line| line.trim().to_string())
+        .map_err(|e| e.to_string())
 }
 
 impl runtime::QuestionPrompter for CliQuestionPrompter {
@@ -4719,7 +4508,7 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             for (idx, option) in field.options.iter().enumerate() {
                 println!("  [{}] {}", idx + 1, option.label);
             }
-            let trimmed = prompt_choice_via_shared_editor("Your choice: ")?;
+            let trimmed = prompt_choice_line("Your choice: ")?;
             let trimmed = trimmed.as_str();
             // A 1-indexed digit picks the option's value; otherwise the raw text
             // (custom-input fields).
@@ -4743,10 +4532,30 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
     }
 }
 
+/// Renderer handles for a turn; silent consumers leave rendering disabled.
+#[derive(Clone, Copy)]
+struct TurnPresentation<'a> {
+    spinner_ref: Option<&'a render::SpinnerRef>,
+    output: Option<&'a repl_ui::OutputSender>,
+    ui: Option<&'a repl_ui::UiCommandSender>,
+    is_rendered: bool,
+}
+
 impl LiveCli {
-    /// True when the async REPL (queue mode) is active. In this mode the
-    /// render thread owns stdin via iocraft, so interactive widgets
-    /// (FuzzySelect, Select) cannot be used on the runner thread.
+    /// Both REPLs await the same engine teardown before the process can exit.
+    fn shutdown(self) {
+        let Self {
+            engine_handle,
+            lifecycle,
+            ..
+        } = self;
+        drop(lifecycle);
+        let _ = engine_handle.shutdown(Duration::from_secs(5));
+    }
+
+    /// True when the interactive REPL is active. Its render thread owns stdin
+    /// via iocraft, so interactive widgets (FuzzySelect, Select) cannot be
+    /// used on the runner thread.
     fn is_async_mode(&self) -> bool {
         self.shared_queue_mode.is_some()
     }
@@ -4773,17 +4582,13 @@ impl LiveCli {
     }
 
     fn new(
-        model: String,
-        enable_tools: bool,
+        model: &str,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
+        persisted: Option<(SessionHandle, Session)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // The engine always builds with tools enabled for the interactive
-        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
-        // seam doesn't model (SessionEngine is single-purpose here).
-        let _ = enable_tools;
         let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
         let cwd = env::current_dir()?;
         let sudocode_config =
@@ -4796,7 +4601,7 @@ impl LiveCli {
             runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
         });
 
-        let auth_resolved = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
+        let auth_resolved = resolve_auth_mode(model, auth_mode, &sudocode_config)?;
         tools::set_global_auth_mode(auth_resolved);
 
         // The one engine owns config + session + runtime SSOT (thinking config,
@@ -4804,21 +4609,40 @@ impl LiveCli {
         let mcp_servers = std::collections::BTreeMap::new();
         let engine = Arc::new(
             startup::measure("engine_build", || {
-                SessionEngine::build(
-                    &cwd,
-                    &mcp_servers,
-                    runtime::SystemPromptOverrides::default(),
-                    // The REPL always uses memory; the per-session switch is an
-                    // ACP-client knob (`_meta.sudocode.memory`).
-                    runtime::memory::MemoryMode::Enabled,
-                    system_prompt,
-                    model.clone(),
-                    Some(model),
-                    allowed_tools,
-                    Some(permission_mode),
-                    reasoning_effort,
-                    auth_mode,
-                )
+                if let Some((handle, mut session)) = persisted {
+                    session.mode = runtime::SessionMode::Interactive;
+                    SessionEngine::open_persisted(
+                        &cwd,
+                        handle,
+                        session,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model,
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                } else {
+                    SessionEngine::build(
+                        &cwd,
+                        &mcp_servers,
+                        runtime::SystemPromptOverrides::default(),
+                        // The REPL always uses memory; the per-session switch is an
+                        // ACP-client knob (`_meta.sudocode.memory`).
+                        runtime::memory::MemoryMode::Enabled,
+                        system_prompt,
+                        model,
+                        Some(model),
+                        allowed_tools,
+                        Some(permission_mode),
+                        reasoning_effort,
+                        auth_mode,
+                    )
+                }
             })
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
         );
@@ -4831,7 +4655,7 @@ impl LiveCli {
         // (same pattern the todo store uses). Skip if the caller already set it
         // (tests point it at a temp path).
         if std::env::var_os("SUDOCODE_PLAN_FILE").is_none() {
-            let session_id = lifecycle.session_snapshot().session_id;
+            let session_id = lifecycle.session_handle().id;
             let sanitized: String = session_id
                 .chars()
                 .map(|c| {
@@ -4858,18 +4682,19 @@ impl LiveCli {
                 VERSION,
                 cwd.to_string_lossy(),
                 mode,
-                &lifecycle.current_model(),
+                lifecycle.current_model(),
             );
         }
 
         Ok(Self {
             engine_handle,
             lifecycle,
-            prompt_history: Vec::new(),
+            prompt_outbox: PromptOutbox::default(),
             undone_tool_use_ids: std::collections::HashSet::new(),
             shared_queue_mode: None,
             is_repl: false,
             iocraft_output: None,
+            completions: None,
         })
     }
 
@@ -4913,20 +4738,7 @@ impl LiveCli {
                 .map(|r| r.base_url)
                 .unwrap_or_default();
 
-        let t = theme();
-        let logo_fg = ansi_fg(t.logo);
-        let accent_fg = ansi_fg(t.logo_accent);
-        let logo = format!(
-            "{logo_fg}\
-███████╗██╗   ██╗██████╗  ██████╗ \n\
-██╔════╝██║   ██║██╔══██╗██╔═══██╗\n\
-███████╗██║   ██║██║  ██║██║   ██║\n\
-╚════██║██║   ██║██║  ██║██║   ██║\n\
-███████║╚██████╔╝██████╔╝╚██████╔╝\n\
-╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}"
-        );
-
-        let lines = [
+        render::startup::banner(&[
             format!("  {DIM}Model{RESET}            {}", model),
             format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
             format!("  {DIM}Endpoint{RESET}         {}", endpoint),
@@ -4939,54 +4751,20 @@ impl LiveCli {
             format!("  {DIM}Directory{RESET}        {}", cwd),
             format!("  {DIM}Session{RESET}          {}", handle.id),
             format!("  {DIM}Auto-save{RESET}        {}", session_path),
-        ];
-
-        let max_width = lines.iter().map(|l| strip_ansi_width(l)).max().unwrap_or(0);
-        let box_width = max_width + 2; // 1 space padding on each side
-
-        let grey = t.border_fg();
-        let reset = RESET;
-
-        let top = format!("{grey}╭{}╮{reset}", "─".repeat(box_width));
-        let bottom = format!("{grey}╰{}╯{reset}", "─".repeat(box_width));
-
-        let boxed_lines: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                let visible_width = strip_ansi_width(line);
-                let padding = max_width - visible_width;
-                format!(
-                    "{grey}│{reset} {}{} {grey}│{reset}",
-                    line,
-                    " ".repeat(padding)
-                )
-            })
-            .collect();
-
-        format!(
-            "{}\n\n{}\n{}\n{}",
-            logo,
-            top,
-            boxed_lines.join("\n"),
-            bottom,
-        )
+        ])
     }
 
     /// Render the restored conversation history to a scrollback string, or an
-    /// empty string when there is none (a fresh session). Reuses the same
-    /// `render_messages` the rustyline REPL replays on resume, so both REPL
-    /// paths render the session SSOT identically — the iocraft path previously
-    /// printed only the banner, leaving a resumed session's history invisible.
+    /// empty string when there is none (a fresh session), through the shared
+    /// `render_messages`, so a resumed session's history stays visible.
     fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
             return String::new();
         }
-        let term_width = crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or(80);
+        let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
         let renderer = render::TerminalRenderer::new();
-        render_messages(&session.messages(), term_width, &renderer)
+        render_messages(session.messages(), term_width, &renderer)
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -5030,21 +4808,6 @@ impl LiveCli {
         })
     }
 
-    fn repl_completion_candidates(
-        &self,
-    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        let handle = self.lifecycle.session_handle();
-        Ok(slash_command_completion_candidates_with_sessions(
-            &self.lifecycle.current_model(),
-            self.lifecycle.available_models(),
-            Some(&handle.id),
-            list_managed_sessions()?
-                .into_iter()
-                .map(|session| session.id)
-                .collect(),
-        ))
-    }
-
     /// Drive one turn across the seam: send the prompt, pump events into the
     /// renderer, and answer permission / question requests using the supplied
     /// prompters (the SAME `CliPermissionPrompter` / `IocraftQuestionPrompter`
@@ -5056,14 +4819,17 @@ impl LiveCli {
     fn drive_turn(
         &self,
         input: &str,
-        spinner_ref: Option<&render::SpinnerRef>,
-        output: Option<&repl_ui::OutputSender>,
-        ui: Option<&repl_ui::UiCommandSender>,
-        render: bool,
+        presentation: TurnPresentation<'_>,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
         cancel_monitor: Option<&ReplTurnCancelMonitor>,
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+        let TurnPresentation {
+            spinner_ref,
+            output,
+            ui,
+            is_rendered,
+        } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
@@ -5074,7 +4840,7 @@ impl LiveCli {
         // never committed to durable scrollback, so `Running` cannot outlive
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
-            render.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
+            is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
         let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
@@ -5083,10 +4849,7 @@ impl LiveCli {
 
         let mut outcome = TurnOutcome::default();
         let mut prompt_replies = Vec::new();
-        loop {
-            let Ok(ev) = self.engine_handle.events.recv() else {
-                break;
-            };
+        while let Ok(ev) = self.engine_handle.events.recv() {
             // Collect the JSON-output data from the event stream (the old paths
             // read it off the finished turn; TurnComplete drops the message
             // vecs, so we re-derive here). `final_text` tracks the LAST assistant
@@ -5172,6 +4935,17 @@ impl LiveCli {
                         "output": output,
                         "is_error": is_error,
                     }));
+                }
+                EngineEvent::HostContextRequest { id } => {
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::HostContextAnswer {
+                            id: *id,
+                            context: Err(
+                                "No host context provider is configured for the terminal renderer"
+                                    .into(),
+                            ),
+                        })?;
                 }
                 EngineEvent::PromptCache(event) => {
                     outcome.prompt_cache_events.push(serde_json::json!({
@@ -5283,7 +5057,7 @@ impl LiveCli {
         self.run_turn_impl(input, false)
     }
 
-    /// Interactive-terminal entrypoint (sync REPL + one-shot text): install a
+    /// Interactive-terminal entrypoint for one-shot text: install a
     /// per-turn ESC / Ctrl-C key monitor that cancels the turn across the seam.
     /// The turn otherwise blocks on the engine with no key reader; the monitor
     /// is inert off a pipe, so non-interactive runs are unaffected (they cancel
@@ -5303,16 +5077,13 @@ impl LiveCli {
         let mut spinner = SpinnerHandle::new(
             render::activity::WORKING_LABEL,
             Some(model.as_str()),
-            TerminalRenderer::new().color_theme(),
             token_budget,
         );
         let spinner_ref = spinner.spinner_ref();
 
         let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
             if io::stdin().is_terminal() {
-                Box::new(CliPermissionPrompter::new(
-                    self.lifecycle.current_permission_mode(),
-                ))
+                Box::new(CliPermissionPrompter)
             } else {
                 Box::new(AutoDenyPermissionPrompter)
             };
@@ -5331,10 +5102,12 @@ impl LiveCli {
             .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
             input,
-            Some(&spinner_ref),
-            None,
-            None,
-            true,
+            TurnPresentation {
+                spinner_ref: Some(&spinner_ref),
+                output: None,
+                ui: None,
+                is_rendered: true,
+            },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
             cancel_monitor.as_ref(),
@@ -5373,6 +5146,37 @@ impl LiveCli {
             &self.lifecycle.session_handle().id,
             &self.lifecycle.current_model(),
         )
+    }
+
+    /// Refresh what Tab offers for slash-command arguments, at startup,
+    /// between turns and after a command changes the session or model. Models
+    /// come from what is already known (no discovery refresh); sessions are
+    /// listed only when Tab completes a session argument.
+    fn refresh_completions(&self) {
+        let Some(shared) = &self.completions else {
+            return;
+        };
+        let active = self.lifecycle.session_handle().id;
+        let sessions: commands::ValueList = Arc::new(move || {
+            let mut ids = vec![active.clone()];
+            ids.extend(
+                list_managed_sessions()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|session| session.id)
+                    .filter(|id| *id != active)
+                    .take(20),
+            );
+            ids
+        });
+        let context = commands::CompletionContext {
+            models: self.lifecycle.known_models(),
+            sessions: Some(sessions),
+            cwd: env::current_dir().unwrap_or_default(),
+        };
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context;
     }
 
     /// Show lifecycle usage in the dynamic status slot, or plain output.
@@ -5420,8 +5224,9 @@ impl LiveCli {
         if let Some(ui) = ui {
             ui.set_cache_tip(self.cache_ttl_tip());
             // A turn can switch branches (its tools run git), so refresh here.
-            ui.set_branch(workspace_head_label());
+            ui.set_workspace_position(workspace_position());
         }
+        self.refresh_completions();
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
             // status line is deliberately NOT echoed to scrollback: the
@@ -5464,10 +5269,12 @@ impl LiveCli {
 
         let outcome = self.drive_turn(
             input,
-            Some(&spinner_ref),
-            Some(output),
-            Some(&ui),
-            true,
+            TurnPresentation {
+                spinner_ref: Some(&spinner_ref),
+                output: Some(output),
+                ui: Some(ui),
+                is_rendered: true,
+            },
             &mut permission_prompter,
             &mut question_prompter,
             None,
@@ -5480,7 +5287,7 @@ impl LiveCli {
             Some(tc) if tc.cancelled => {
                 output.println(&format!(
                     "{}\u{23f9} Cancelled{}",
-                    ansi_fg(theme().error),
+                    theme().fg_seq(TextRole::Error),
                     RESET
                 ));
                 self.print_turn_status_line(&model, turn_start.elapsed(), Some(output), Some(ui));
@@ -5526,10 +5333,12 @@ impl LiveCli {
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
             input,
-            None,
-            None,
-            None,
-            false,
+            TurnPresentation {
+                spinner_ref: None,
+                output: None,
+                ui: None,
+                is_rendered: false,
+            },
             permission_prompter,
             &mut question_prompter,
             None,
@@ -5549,9 +5358,7 @@ impl LiveCli {
     /// `run_prompt_compact*` selection.
     fn compact_permission_prompter(&self) -> Box<dyn runtime::PermissionPrompter> {
         if io::stdin().is_terminal() {
-            Box::new(CliPermissionPrompter::new(
-                self.lifecycle.current_permission_mode(),
-            ))
+            Box::new(CliPermissionPrompter)
         } else {
             Box::new(AutoDenyPermissionPrompter)
         }
@@ -5598,8 +5405,7 @@ impl LiveCli {
         // prompter, even off a pipe — it prints the permission box and reads
         // the y/N approval from stdin (the mock parity harness feeds "y\n" and
         // asserts "Permission required" / "Approve this tool call?" on stdout).
-        let mut permission_prompter =
-            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let mut permission_prompter = CliPermissionPrompter;
         let outcome = self.run_noninteractive_turn(input, &mut permission_prompter)?;
         let tc = outcome
             .complete
@@ -5732,34 +5538,29 @@ impl LiveCli {
                 false
             }
             SlashCommand::Mcp { action, target } => {
-                match action.as_deref() {
-                    Some("reconnect") | Some("enable") | Some("disable") => {
-                        let action_str = action.as_deref().unwrap();
-                        let Some(server_name) = target.as_deref() else {
-                            self.out_println(format!("usage: /mcp {action_str} <server>"));
-                            return Ok(false);
-                        };
-                        match self.lifecycle.mcp_command(action_str, server_name) {
-                            Some(Ok(msg)) => self.out_println(msg),
-                            Some(Err(err)) => self.out_println(format!("Error: {err}")),
-                            None => self.out_println(
-                                "No MCP servers are running in this session.\n\
-                                 Hint: if you just added a server via `/mcp add-json`, \
-                                 restart scode to load it.",
-                            ),
-                        }
+                if let Some("reconnect" | "enable" | "disable") = action.as_deref() {
+                    let action_str = action.as_deref().unwrap();
+                    let Some(server_name) = target.as_deref() else {
+                        self.out_println(format!("usage: /mcp {action_str} <server>"));
+                        return Ok(false);
+                    };
+                    match self.lifecycle.mcp_command(action_str, server_name) {
+                        Some(Ok(msg)) => self.out_println(msg),
+                        Some(Err(err)) => self.out_println(format!("Error: {err}")),
+                        None => self.out_println(
+                            "No MCP servers are running in this session.\n\
+                             Hint: if you just added a server via `/mcp add-json`, \
+                             restart scode to load it.",
+                        ),
                     }
-                    _ => {
-                        let args = match (action.as_deref(), target.as_deref()) {
-                            (None, None) => None,
-                            (Some(action), None) => Some(action.to_string()),
-                            (Some(action), Some(target)) => Some(format!("{action} {target}")),
-                            (None, Some(target)) => Some(target.to_string()),
-                        };
-                        self.out_suspend(|| {
-                            Self::print_mcp(args.as_deref(), CliOutputFormat::Text)
-                        })??;
-                    }
+                } else {
+                    let args = match (action.as_deref(), target.as_deref()) {
+                        (None, None) => None,
+                        (Some(action), None) => Some(action.to_string()),
+                        (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                        (None, Some(target)) => Some(target.to_string()),
+                    };
+                    self.out_suspend(|| Self::print_mcp(args.as_deref(), CliOutputFormat::Text))??;
                 }
                 false
             }
@@ -5834,7 +5635,10 @@ impl LiveCli {
                 let session = self.lifecycle.session_snapshot();
                 let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
-                self.out_println(cache_ttl_status(&self.lifecycle.session_handle().id));
+                self.out_println(cache_ttl_status(
+                    &self.lifecycle.session_handle().id,
+                    &self.lifecycle.current_model(),
+                ));
                 false
             }
             SlashCommand::CacheTtl { value, now } => {
@@ -5848,7 +5652,10 @@ impl LiveCli {
                 };
                 match choice {
                     Some(choice) => self.out_println(apply_cache_ttl(&session_id, choice, now)),
-                    None => self.out_println(cache_ttl_status(&session_id)),
+                    None => self.out_println(cache_ttl_status(
+                        &session_id,
+                        &self.lifecycle.current_model(),
+                    )),
                 }
                 false
             }
@@ -5907,13 +5714,22 @@ impl LiveCli {
         self.lifecycle.persist().map_err(Into::into)
     }
 
+    /// A deleted Session is already retired; closing it must not save it again.
+    fn persist_before_shutdown(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self.lifecycle.persist() {
+            Err(error) if error == "session_deleted" => Ok(()),
+            result => result.map_err(Into::into),
+        }
+    }
+
     /// `!<command>` bash mode. Runs the command in the user's shell, prints
     /// the result under the echoed input, and appends the exchange to the
     /// transcript as user messages (CC's `<bash-input>` / `<bash-stdout>` /
     /// `<bash-stderr>` shape) so the model sees it on the next prompt. No
     /// model turn is started — the human ran the command, not the agent.
     fn run_bash_mode(&mut self, command: &str) {
-        self.record_prompt_history(&format!("! {command}"));
+        self.prompt_outbox.post(&format!("! {command}"));
+        self.record_prompt_history();
         let messages = match bash_mode::run(command) {
             Ok(output) => {
                 self.out_println(bash_mode::render_output_block(
@@ -5945,12 +5761,16 @@ impl LiveCli {
         if let Some(error) = push_error {
             self.out_println(format!(
                 "{}failed to record ! command in the transcript: {error}{}",
-                ansi_fg(theme().error),
+                theme().fg_seq(TextRole::Error),
                 RESET
             ));
         }
         if let Err(error) = self.persist_session() {
-            self.out_println(format!("{}{error}{}", ansi_fg(theme().error), RESET));
+            self.out_println(format!(
+                "{}{error}{}",
+                theme().fg_seq(TextRole::Error),
+                RESET
+            ));
         }
     }
 
@@ -5961,16 +5781,7 @@ impl LiveCli {
         let session = self.lifecycle.session_snapshot();
         let handle = self.lifecycle.session_handle();
         let mut context = status_context(Some(&handle.path)).expect("status context should load");
-        let mut peer = engine_host::peer::status(&self.lifecycle.agent_name());
-        // The synchronous REPL runs a received message only once the user
-        // hands the prompt back; say so rather than imply it runs on arrival.
-        if matches!(
-            input_queue::QueueMode::from_env(),
-            input_queue::QueueMode::Off
-        ) {
-            peer.delivery = "next_prompt";
-        }
-        context.peer = Some(peer);
+        context.peer = Some(engine_host::peer::status(&self.lifecycle.agent_name()));
         let report = format_status_report(
             &self.lifecycle.current_model(),
             StatusUsage {
@@ -5988,23 +5799,19 @@ impl LiveCli {
         self.out_suspend(|| print_with_pager(&report))
     }
 
-    fn record_prompt_history(&mut self, prompt: &str) {
-        let updated_at_ms = self.lifecycle.session_snapshot().updated_at_ms;
-        let timestamp_ms = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map_or(updated_at_ms, |duration| {
-                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-            });
-        let entry = PromptHistoryEntry {
-            timestamp_ms,
-            text: prompt.to_string(),
-        };
-        self.prompt_history.push(entry);
+    /// Record every posted prompt in the session's prompt history, in order.
+    fn record_prompt_history(&mut self) {
+        let prompts = self.prompt_outbox.take();
+        if prompts.is_empty() {
+            return;
+        }
         let mut push_error = None;
         self.lifecycle.with_session_mut(&mut |session| {
-            if let Err(error) = session.push_prompt_entry(prompt) {
-                push_error = Some(error.to_string());
+            for prompt in &prompts {
+                if let Err(error) = session.push_prompt_entry(prompt.as_str()) {
+                    push_error = Some(error.to_string());
+                    break;
+                }
             }
         });
         if let Some(error) = push_error {
@@ -6012,7 +5819,7 @@ impl LiveCli {
         }
     }
 
-    fn print_prompt_history(&self, count: Option<&str>) {
+    fn print_prompt_history(&mut self, count: Option<&str>) {
         let limit = match parse_history_count(count) {
             Ok(limit) => limit,
             Err(message) => {
@@ -6020,29 +5827,8 @@ impl LiveCli {
                 return;
             }
         };
-        let session = self.lifecycle.session_snapshot();
-        let session_entries = &session.prompt_history;
-        let entries = if session_entries.is_empty() {
-            if self.prompt_history.is_empty() {
-                collect_session_prompt_history(&session)
-            } else {
-                self.prompt_history
-                    .iter()
-                    .map(|entry| PromptHistoryEntry {
-                        timestamp_ms: entry.timestamp_ms,
-                        text: entry.text.clone(),
-                    })
-                    .collect()
-            }
-        } else {
-            session_entries
-                .iter()
-                .map(|entry| PromptHistoryEntry {
-                    timestamp_ms: entry.timestamp_ms,
-                    text: entry.text.clone(),
-                })
-                .collect()
-        };
+        self.record_prompt_history();
+        let entries = collect_session_prompt_history(&self.lifecycle.session_snapshot());
         self.out_println(render_prompt_history_report(&entries, limit));
     }
 
@@ -6317,18 +6103,6 @@ impl LiveCli {
         Ok(true)
     }
 
-    /// Resume a pre-resolved session (for `--resume` at startup). The engine
-    /// reloads it by reference and swaps it in.
-    fn replace_with_session(
-        &mut self,
-        _session: runtime::Session,
-        handle: SessionHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.lifecycle.resume_session(&handle.id)?;
-        self.undone_tool_use_ids.clear();
-        Ok(())
-    }
-
     fn handle_config_set(
         &mut self,
         key: &str,
@@ -6353,7 +6127,25 @@ impl LiveCli {
                         if on { "on" } else { "off" }
                     ));
                 } else {
-                    eprintln!("queue is only available in async REPL mode");
+                    eprintln!("queue is only available in the interactive REPL");
+                }
+                Ok(())
+            }
+            // Persisted like any setting, and applied to the running session.
+            "autoCompactEnabled" => {
+                let is_enabled = match value.trim().to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        eprintln!("Error: setting requires true or false");
+                        return Ok(());
+                    }
+                };
+                match self.lifecycle.set_auto_compaction(is_enabled) {
+                    Ok(()) => {
+                        self.out_println(format!("{DIM}autoCompactEnabled = {is_enabled}{RESET}"));
+                    }
+                    Err(err) => eprintln!("Error: {err}"),
                 }
                 Ok(())
             }
@@ -6370,16 +6162,6 @@ impl LiveCli {
                 Ok(())
             }
         }
-    }
-
-    fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        print_with_pager(&render_config_report(section)?);
-        Ok(())
-    }
-
-    fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
-        print_with_pager(&render_memory_report()?);
-        Ok(())
     }
 
     fn open_in_editor(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -6431,7 +6213,7 @@ impl LiveCli {
                 "\n> To use a different editor, set the $EDITOR or $VISUAL environment variable.",
             );
         } else {
-            msg.push_str(&format!(
+            let _ = std::fmt::Write::write_fmt(&mut msg, format_args!(
                 "\n> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
                 source, editor
             ));
@@ -6513,7 +6295,7 @@ impl LiveCli {
                 )?;
                 // Propagate ok:false → non-zero exit so automation callers
                 // can rely on exit code instead of inspecting the envelope.
-                let is_error = value.get("ok").and_then(|v| v.as_bool()) == Some(false);
+                let is_error = value.get("ok").and_then(serde_json::Value::as_bool) == Some(false);
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 if is_error {
                     std::process::exit(1);
@@ -6773,11 +6555,11 @@ impl LiveCli {
                     return Ok(false);
                 }
                 if self.is_async_mode() {
-                    // In async (iocraft) mode the render loop owns the TTY;
-                    // a blocking `read_line` prompt on this thread deadlocks
-                    // with it — see issue #577. Require `--force` instead.
+                    // The REPL's render loop owns the TTY; a blocking
+                    // `read_line` prompt on this thread deadlocks with it —
+                    // see issue #577. Require `--force` instead.
                     self.out_println(format!(
-                        "delete: interactive confirmation is not available in the async REPL.\nRun `/session delete {} --force` to skip confirmation.",
+                        "delete: interactive confirmation is not available in the REPL.\nRun `/session delete {} --force` to skip confirmation.",
                         handle.id
                     ));
                     return Ok(false);
@@ -6919,11 +6701,11 @@ impl LiveCli {
     }
 }
 
-/// The footer's workspace label: the branch, or the short commit when detached.
-fn workspace_head_label() -> Option<String> {
+/// The footer's workspace position: `repo ⎇ branch`.
+fn workspace_position() -> Option<String> {
     env::current_dir()
         .ok()
-        .and_then(|cwd| resolve_git_head_label_for(&cwd))
+        .and_then(|cwd| resolve_git_position_for(&cwd))
 }
 
 fn print_skills_for_outcome(
@@ -6983,238 +6765,8 @@ fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     build_system_prompt_for(&env::current_dir()?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InternalPromptProgressState {
-    pub(crate) command_label: &'static str,
-    pub(crate) task_label: String,
-    pub(crate) step: usize,
-    pub(crate) phase: String,
-    pub(crate) detail: Option<String>,
-    pub(crate) saw_final_text: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InternalPromptProgressEvent {
-    Started,
-    Update,
-    Heartbeat,
-    Complete,
-    Failed,
-}
-
-#[derive(Debug)]
-struct InternalPromptProgressShared {
-    state: Mutex<InternalPromptProgressState>,
-    output_lock: Mutex<()>,
-    started_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-struct InternalPromptProgressReporter {
-    shared: Arc<InternalPromptProgressShared>,
-}
-
-#[derive(Debug)]
-struct InternalPromptProgressRun {
-    reporter: InternalPromptProgressReporter,
-    heartbeat_stop: Option<mpsc::Sender<()>>,
-    heartbeat_handle: Option<thread::JoinHandle<()>>,
-}
-
-impl InternalPromptProgressReporter {
-    fn ultraplan(task: &str) -> Self {
-        Self {
-            shared: Arc::new(InternalPromptProgressShared {
-                state: Mutex::new(InternalPromptProgressState {
-                    command_label: "Ultraplan",
-                    task_label: task.to_string(),
-                    step: 0,
-                    phase: "planning started".to_string(),
-                    detail: Some(format!("task: {task}")),
-                    saw_final_text: false,
-                }),
-                output_lock: Mutex::new(()),
-                started_at: Instant::now(),
-            }),
-        }
-    }
-
-    fn emit(&self, event: InternalPromptProgressEvent, error: Option<&str>) {
-        let snapshot = self.snapshot();
-        let line = format_internal_prompt_progress_line(event, &snapshot, self.elapsed(), error);
-        self.write_line(&line);
-    }
-
-    fn mark_model_phase(&self) {
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            state.step += 1;
-            state.phase = if state.step == 1 {
-                "analyzing request".to_string()
-            } else {
-                "reviewing findings".to_string()
-            };
-            state.detail = Some(format!("task: {}", state.task_label));
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn mark_tool_phase(&self, name: &str, input: &str) {
-        let detail = describe_tool_progress(name, input);
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            state.step += 1;
-            state.phase = format!("running {name}");
-            state.detail = Some(detail);
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn mark_text_phase(&self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let detail = truncate_for_summary(first_visible_line(trimmed), 120);
-        let snapshot = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("internal prompt progress state poisoned");
-            if state.saw_final_text {
-                return;
-            }
-            state.saw_final_text = true;
-            state.step += 1;
-            state.phase = "drafting final plan".to_string();
-            state.detail = (!detail.is_empty()).then_some(detail);
-            state.clone()
-        };
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Update,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn emit_heartbeat(&self) {
-        let snapshot = self.snapshot();
-        self.write_line(&format_internal_prompt_progress_line(
-            InternalPromptProgressEvent::Heartbeat,
-            &snapshot,
-            self.elapsed(),
-            None,
-        ));
-    }
-
-    fn snapshot(&self) -> InternalPromptProgressState {
-        self.shared
-            .state
-            .lock()
-            .expect("internal prompt progress state poisoned")
-            .clone()
-    }
-
-    fn elapsed(&self) -> Duration {
-        self.shared.started_at.elapsed()
-    }
-
-    fn write_line(&self, line: &str) {
-        let _guard = self
-            .shared
-            .output_lock
-            .lock()
-            .expect("internal prompt progress output lock poisoned");
-        let mut stdout = io::stdout();
-        let _ = writeln!(stdout, "{line}");
-        let _ = stdout.flush();
-    }
-}
-
-impl InternalPromptProgressRun {
-    fn start_ultraplan(task: &str) -> Self {
-        let reporter = InternalPromptProgressReporter::ultraplan(task);
-        reporter.emit(InternalPromptProgressEvent::Started, None);
-
-        let (heartbeat_stop, heartbeat_rx) = mpsc::channel();
-        let heartbeat_reporter = reporter.clone();
-        let heartbeat_handle = thread::spawn(move || loop {
-            match heartbeat_rx.recv_timeout(INTERNAL_PROGRESS_HEARTBEAT_INTERVAL) {
-                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => heartbeat_reporter.emit_heartbeat(),
-            }
-        });
-
-        Self {
-            reporter,
-            heartbeat_stop: Some(heartbeat_stop),
-            heartbeat_handle: Some(heartbeat_handle),
-        }
-    }
-
-    fn reporter(&self) -> InternalPromptProgressReporter {
-        self.reporter.clone()
-    }
-
-    fn finish_success(&mut self) {
-        self.stop_heartbeat();
-        self.reporter
-            .emit(InternalPromptProgressEvent::Complete, None);
-    }
-
-    fn finish_failure(&mut self, error: &str) {
-        self.stop_heartbeat();
-        self.reporter
-            .emit(InternalPromptProgressEvent::Failed, Some(error));
-    }
-
-    fn stop_heartbeat(&mut self) {
-        if let Some(sender) = self.heartbeat_stop.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.heartbeat_handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for InternalPromptProgressRun {
-    fn drop(&mut self) {
-        self.stop_heartbeat();
-    }
-}
-
-struct CliPermissionPrompter {
-    current_mode: PermissionMode,
-}
-
-impl CliPermissionPrompter {
-    fn new(current_mode: PermissionMode) -> Self {
-        Self { current_mode }
-    }
-}
+/// Asks the person at the terminal; the request carries the current mode.
+struct CliPermissionPrompter;
 
 impl runtime::PermissionPrompter for CliPermissionPrompter {
     fn decide(
@@ -7258,10 +6810,8 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
             };
         }
 
-        // Interactive approval: read y/N through the shared REPL editor so this
-        // mid-turn prompt does not spawn a second terminal owner (dialoguer's
-        // Select opened its own crossterm raw session, the same perturbation the
-        // write_plan dialog had). "1"/allow-ish answers allow; anything else denies.
+        // Interactive one-shot approval: one scoped line read, not a second
+        // terminal UI. "1"/allow-ish answers allow; anything else denies.
         println!("  [1] Allow once");
         println!("  [2] Deny");
         let deny = || runtime::PermissionPromptDecision::Deny {
@@ -7270,7 +6820,7 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
                 request.tool_name
             ),
         };
-        match prompt_choice_via_shared_editor("Approve this tool call? [1] Allow / [2] Deny: ") {
+        match prompt_choice_line("Approve this tool call? [1] Allow / [2] Deny: ") {
             Ok(answer) => {
                 let a = answer.trim().to_ascii_lowercase();
                 if matches!(a.as_str(), "1" | "y" | "yes" | "allow") {
@@ -7417,113 +6967,6 @@ pub(crate) const STUB_COMMANDS: &[&str] = &[
     "agent",
 ];
 
-fn slash_command_completion_candidates_with_sessions(
-    model: &str,
-    available_models: Vec<String>,
-    active_session_id: Option<&str>,
-    recent_session_ids: Vec<String>,
-) -> Vec<(String, String)> {
-    let mut completions = BTreeMap::new();
-
-    for spec in slash_command_specs() {
-        if STUB_COMMANDS.contains(&spec.name) {
-            continue;
-        }
-        completions.insert(format!("/{}", spec.name), spec.summary.to_string());
-        for alias in spec.aliases {
-            if !STUB_COMMANDS.contains(alias) {
-                completions.insert(format!("/{alias}"), spec.summary.to_string());
-            }
-        }
-    }
-
-    for candidate in [
-        "/bughunter ",
-        "/clear --confirm",
-        "/config ",
-        "/config env",
-        "/config hooks",
-        "/config model",
-        "/config plugins",
-        "/context all",
-        "/mcp ",
-        "/mcp list",
-        "/mcp show ",
-        "/export ",
-        "/issue ",
-        "/model ",
-        "/permissions ",
-        "/permissions read-only",
-        "/permissions workspace-write",
-        "/permissions danger-full-access",
-        "/auth ",
-        "/auth subscription",
-        "/auth proxy",
-        "/auth api-key",
-        "/plugin list",
-        "/plugin install ",
-        "/plugin enable ",
-        "/plugin disable ",
-        "/plugin uninstall ",
-        "/plugin update ",
-        "/plugins list",
-        "/pr ",
-        "/resume ",
-        "/session list",
-        "/session switch ",
-        "/session fork ",
-        "/teleport ",
-        "/ultraplan ",
-        "/agents help",
-        "/mcp help",
-        "/skills help",
-    ] {
-        completions
-            .entry(candidate.to_string())
-            .or_insert_with(String::new);
-    }
-
-    // Reuse the live session's account and endpoint for discovery.
-    for id in available_models {
-        completions
-            .entry(format!("/model {id}"))
-            .or_insert_with(String::new);
-    }
-
-    if !model.trim().is_empty() {
-        completions
-            .entry(format!("/model {}", resolve_model_alias_with_config(model)))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/model {model}"))
-            .or_insert_with(String::new);
-    }
-
-    if let Some(active_session_id) = active_session_id.filter(|value| !value.trim().is_empty()) {
-        completions
-            .entry(format!("/resume {active_session_id}"))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/session switch {active_session_id}"))
-            .or_insert_with(String::new);
-    }
-
-    for session_id in recent_session_ids
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .take(10)
-    {
-        completions
-            .entry(format!("/resume {session_id}"))
-            .or_insert_with(String::new);
-        completions
-            .entry(format!("/session switch {session_id}"))
-            .or_insert_with(String::new);
-    }
-
-    completions.into_iter().collect()
-}
-
 #[cfg(test)]
 mod wait_notice_tests {
     use super::*;
@@ -7621,6 +7064,7 @@ mod wait_notice_tests {
 #[cfg(test)]
 mod auth_mode_tests {
     use super::*;
+    use engine_host::config::resolve_model_switch_auth_mode;
     use std::collections::BTreeMap;
 
     fn connection(base_url: &str) -> engine_core::ProviderConnectionConfig {

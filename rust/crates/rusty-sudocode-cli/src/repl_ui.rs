@@ -5,6 +5,16 @@
 //! with spinner overlay.  The coordinator thread reads `InputEvent`s from
 //! the returned `ReplHandle` and dispatches turns.
 //!
+//! # Terminal ownership
+//!
+//! The host terminal owns committed history, scrolling and selection. All
+//! runtime output reaches iocraft through `write_iocraft_output`; iocraft
+//! commits that batch before placing the next live editor and its cursor.
+//! The live UI holds only current chrome and unfinished output. Prompt shading
+//! changes presentation without adding a transcript store or scroll position.
+//! A pinned composer while browsing history requires a separate host capability;
+//! capturing wheel input in this main-buffer view would create two scroll owners.
+//!
 //! # ChromeSlot pattern
 //!
 //! The REPL chrome uses named slots with explicit content ownership.
@@ -22,13 +32,13 @@
 //! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
+use crate::render::TextRole;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::render::activity::{ActivityState, ToolActivity};
-use commands::suggest_slash_commands;
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
@@ -42,8 +52,9 @@ mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{row_text, AnsiText, RichText};
+use ansi_text::{row_text, RichText};
 use choice_text::ChoiceText;
+pub(crate) use footer::StatusSource;
 use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
 pub(crate) mod prose_preview;
@@ -61,7 +72,7 @@ use crate::stderr_capture as stderr_redirect;
 enum StatusSlot {
     /// Running model, tool, or retry activity; input panels own waiting states.
     Active(String),
-    /// Static task conclusion; shares the footer's event-fed task projection.
+    /// Task conclusion; shares the footer's event-fed task projection.
     Background {
         full: Arc<StyledText>,
         summary: Arc<StyledText>,
@@ -107,9 +118,36 @@ pub struct QuestionPromptView {
     /// When true, always use FuzzySelect regardless of option count.
     /// Used for config picker and other lists that benefit from search.
     pub force_fuzzy_select: bool,
-    /// When set, Left arrow submits this value as the answer (← Back).
-    /// Right arrow always submits the current selection (same as Enter).
+    /// When set, Left arrow (or Shift+Tab) submits this value as the answer
+    /// (← Back).
     pub back_value: Option<String>,
+    /// An earlier answer to restore when the user comes back to this
+    /// question: the option the cursor starts on, or typed text to refill.
+    pub initial_value: Option<String>,
+}
+
+/// The answer a question sends when the user goes back from it.
+pub const QUESTION_BACK: &str = "\x00__back__";
+
+impl QuestionPromptView {
+    /// The earlier answer's option when there is one, else the recommended one.
+    fn initial_cursor(&self) -> usize {
+        self.initial_option()
+            .or_else(|| self.options.iter().position(|o| o.recommended))
+            .unwrap_or(0)
+    }
+
+    fn initial_option(&self) -> Option<usize> {
+        let value = self.initial_value.as_deref()?;
+        self.options.iter().position(|o| o.value == value)
+    }
+
+    /// An earlier answer that was typed rather than picked from the options.
+    fn initial_text(&self) -> Option<&str> {
+        self.initial_value
+            .as_deref()
+            .filter(|_| self.initial_option().is_none())
+    }
 }
 
 /// ChromeSlot: primary interaction area between the two separators.
@@ -141,19 +179,24 @@ struct FuzzySelectState {
 impl FuzzySelectState {
     fn new(question: QuestionPromptView) -> Self {
         let filtered: Vec<usize> = (0..question.options.len()).collect();
-        let cursor = question
-            .options
-            .iter()
-            .position(|o| o.recommended)
-            .unwrap_or(0);
+        let cursor = question.initial_cursor();
         let scroll = cursor.saturating_sub(FUZZY_WINDOW_SIZE / 2);
-        Self {
+        let filter = question
+            .initial_text()
+            .filter(|_| question.allow_custom_input)
+            .unwrap_or_default()
+            .to_string();
+        let mut state = Self {
             question,
-            filter: String::new(),
+            filter,
             filtered,
             cursor,
             scroll,
+        };
+        if !state.filter.is_empty() {
+            state.apply_filter();
         }
+        state
     }
 
     fn apply_filter(&mut self) {
@@ -187,7 +230,7 @@ impl FuzzySelectState {
     }
 
     fn selected_value(&self) -> Option<String> {
-        self.filtered.get(self.cursor).map(|&i| (i + 1).to_string())
+        self.selected_option().map(|option| option.value.clone())
     }
 
     fn selected_option(&self) -> Option<&QuestionOptionView> {
@@ -299,8 +342,10 @@ pub enum UiCommand {
     },
     SetTip(engine_core::Tip),
     SetCacheTip(CacheTip),
-    /// The workspace's branch, or short commit when detached, for the footer.
-    SetBranch(Option<String>),
+    /// A persistent tip owned by `source`; `None` clears it.
+    SetStatusTip(StatusSource, Option<engine_core::Tip>),
+    /// Where the workspace is, `repo ⎇ branch`, for the footer.
+    SetWorkspacePosition(Option<String>),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -367,13 +412,6 @@ impl UiCommandSender {
         });
     }
 
-    pub fn show_input_hint(&self, text: &str) {
-        self.set_tip(engine_core::Tip {
-            priority: engine_core::TipPriority::Normal,
-            message: text.to_string(),
-        });
-    }
-
     pub(crate) fn set_tip(&self, tip: engine_core::Tip) {
         let _ = self.tx.send(UiCommand::SetTip(tip));
     }
@@ -386,8 +424,12 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
     }
 
-    pub(crate) fn set_branch(&self, label: Option<String>) {
-        let _ = self.tx.send(UiCommand::SetBranch(label));
+    pub(crate) fn set_status_tip(&self, source: StatusSource, tip: Option<engine_core::Tip>) {
+        let _ = self.tx.send(UiCommand::SetStatusTip(source, tip));
+    }
+
+    pub(crate) fn set_workspace_position(&self, label: Option<String>) {
+        let _ = self.tx.send(UiCommand::SetWorkspacePosition(label));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -440,8 +482,9 @@ fn submit_dialpad_selection(
     selected_index: usize,
     input_tx: &SyncSender<InputEvent>,
 ) {
-    let answer = (selected_index + 1).to_string();
-    let _ = input_tx.send(InputEvent::QuestionAnswer(answer));
+    if let Some(option) = question.options.get(selected_index) {
+        let _ = input_tx.send(InputEvent::QuestionAnswer(option.value.clone()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -588,21 +631,18 @@ fn expand_paste_inner(
             Some((id_end + close + 1, real_text))
         });
 
-        match matched {
-            Some((consumed_after_prefix, real_text)) => {
-                if let Some((before, after)) = wrap {
-                    result.push_str(before);
-                    result.push_str(real_text);
-                    result.push_str(after);
-                } else {
-                    result.push_str(real_text);
-                }
-                rest = &after_prefix[consumed_after_prefix..];
+        if let Some((consumed_after_prefix, real_text)) = matched {
+            if let Some((before, after)) = wrap {
+                result.push_str(before);
+                result.push_str(real_text);
+                result.push_str(after);
+            } else {
+                result.push_str(real_text);
             }
-            None => {
-                result.push_str(placeholder_prefix);
-                rest = after_prefix;
-            }
+            rest = &after_prefix[consumed_after_prefix..];
+        } else {
+            result.push_str(placeholder_prefix);
+            rest = after_prefix;
         }
     }
     result.push_str(rest);
@@ -627,23 +667,7 @@ fn expand_paste_for_display(input: &str, store: &std::collections::HashMap<u32, 
     )
 }
 
-fn enter_key_event_for_value(
-    question: Option<&QuestionPromptView>,
-    selected_index: usize,
-    value: &str,
-) -> Option<InputEvent> {
-    if let Some(question) = question {
-        if question.options.is_empty() {
-            return (!value.trim().is_empty())
-                .then(|| InputEvent::QuestionAnswer(value.to_string()));
-        }
-        if value.trim().is_empty() {
-            let selected = selected_index.min(question.options.len().saturating_sub(1));
-            return Some(InputEvent::QuestionAnswer((selected + 1).to_string()));
-        }
-        return Some(InputEvent::QuestionAnswer(value.to_string()));
-    }
-
+fn enter_key_event_for_value(value: &str) -> Option<InputEvent> {
     if value.trim().is_empty() {
         return None;
     }
@@ -722,7 +746,7 @@ fn format_question_panel(
                 .unwrap_or("type your own answer");
             if on_row {
                 // Show a caret so it reads as an active field once selected.
-                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint),)
+                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint))
             } else {
                 choice.muted(hint)
             }
@@ -736,10 +760,12 @@ fn format_question_panel(
             choice.prefix(&format!("{selector} [+] "))
         ));
     }
-    let arrow_hint = if question.back_value.is_some() {
+    let arrow_hint = if question.back_value.is_none() {
+        ""
+    } else if question.options.iter().any(|o| o.is_navigable) {
         "\u{2190}\u{2192} back/open \u{00b7} "
     } else {
-        ""
+        "\u{2190} back \u{00b7} "
     };
     let custom_hint = if question.allow_custom_input {
         " \u{00b7} type to enter your own"
@@ -761,6 +787,8 @@ fn format_question_panel(
 /// (which need a trailing newline) from raw byte chunks (which already
 /// include their own newlines from the markdown renderer).
 enum OutputMsg {
+    /// User echo formatted identically for live output and session replay.
+    UserPrompt(String),
     /// One event's stable history and replacement live prose, in order.
     AssistantUpdate {
         committed: String,
@@ -839,6 +867,9 @@ pub struct OutputSender {
 }
 
 impl OutputSender {
+    pub(crate) fn user_prompt(&self, display: &str) {
+        let _ = self.tx.send(OutputMsg::UserPrompt(display.to_string()));
+    }
     pub(crate) fn tool_progress(&self, text: Option<String>) {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
     }
@@ -920,10 +951,12 @@ pub enum InputEvent {
         text: String,
         display: String,
     },
+    /// An option value, literal custom text, or QUESTION_BACK. The input view
+    /// already resolves digit shortcuts; consumers must preserve this value.
     QuestionAnswer(String),
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
-    StopBackgroundTask(String),
+    BackgroundTask(engine_events::BackgroundTaskAction),
     /// A prompt-cache TTL chosen in the TTL panel.
     SetCacheTtl {
         choice: engine_core::cache_ttl::TtlChoice,
@@ -957,26 +990,6 @@ pub struct ReplHandle {
 }
 
 impl ReplHandle {
-    /// Wait for the iocraft render loop thread to exit, with a timeout.
-    /// If the thread doesn't exit within 500ms (e.g. Windows PTY
-    /// interaction), abandon it — the process exit will clean up.
-    pub fn join(self) {
-        // Drop channels so the render loop sees Disconnected and exits.
-        drop(self.output);
-        drop(self.ui);
-        drop(self.input_rx);
-        if let Some(h) = self.ui_thread {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-            while !h.is_finished() {
-                if std::time::Instant::now() >= deadline {
-                    return; // Abandon — process exit will clean up.
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = h.join();
-        }
-    }
-
     /// Decompose into parts for the coordinator event channel bridge.
     /// The returned join closure replaces `self.join()` — call it after
     /// the coordinator loop exits.
@@ -1010,27 +1023,6 @@ impl ReplHandle {
     }
 }
 
-/// Strip ANSI escape sequences (ESC[...m) to count visible characters.
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Consume '[' then everything up to and including the terminating letter.
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 // ── PendingSlot — in-flight tools and queued messages ─────────────────
 
 /// One pending item awaiting the user's eye at a turn boundary: either an
@@ -1059,8 +1051,23 @@ pub enum PendingItem {
     },
 }
 
+/// Half of a running card's frame pulse, so one breath takes about a second:
+/// slow enough to read as breathing rather than blinking.
+const PULSE_HALF_PERIOD_MS: u128 = 480;
+
+/// Whether running cards' frames are at the quiet point of their pulse now.
+/// Wall-clock based, so event-driven redraws never speed it up. The 80 ms
+/// Running tick samples it, and the canvas diff writes only the frame cells
+/// that changed colour.
+fn is_pulse_low_now() -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .is_ok_and(|now| now.as_millis() / PULSE_HALF_PERIOD_MS % 2 == 1)
+}
+
 /// Render the pending overlay: in-flight tool cards and queued messages in one
-/// ordered list, joined into one multi-line string.
+/// ordered list, joined into one multi-line string. `is_pulse_low` is the
+/// running cards' frame pulse phase.
 ///
 /// Queued messages take priority in the height budget — they are the thing the
 /// user is waiting to see (a queued input, an inbound A2A), and each is one
@@ -1072,7 +1079,12 @@ pub enum PendingItem {
 /// engine commits finished tool cards; the coordinator echoes flushed messages).
 /// The layout owner budgets the resulting projection alongside all other slots.
 /// `max_lines` bounds full tool cards, not the terminal height.
-fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: usize) -> String {
+fn render_pending_overlay(
+    items: &[PendingItem],
+    max_lines: usize,
+    term_width: usize,
+    is_pulse_low: bool,
+) -> String {
     use crate::render::{DIM, RESET};
 
     if items.is_empty() {
@@ -1098,6 +1110,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                     &card.content,
                     card.status,
                     term_width,
+                    is_pulse_low,
                 )
                 .lines()
                 .map(str::to_string)
@@ -1124,7 +1137,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                     *delivery == engine_events::InputDelivery::Steer,
                     term_width,
                     support,
-                    theme,
+                    *theme,
                 ));
             }
             PendingItem::Tool(_) => {
@@ -1171,8 +1184,8 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
     }
 
     let t = theme();
-    let success = ansi_fg(t.success);
-    let info = ansi_fg(t.info());
+    let success = t.fg_seq(TextRole::Success);
+    let info = ansi_fg(t.color(crate::render::TextRole::Info));
 
     let completed_count = todos
         .iter()
@@ -1182,7 +1195,10 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
         .iter()
         .filter(|t| t.status == runtime::TodoStatus::InProgress)
         .count();
-    let open_count = todos.len() - completed_count;
+    let open_count = todos
+        .iter()
+        .filter(|t| t.status == runtime::TodoStatus::Pending)
+        .count();
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
@@ -1293,6 +1309,12 @@ struct ReplContext {
     /// the queued messages. Same `Arc<Mutex>` rationale as `todo_items` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
+    /// Earlier prompts `↑` walks before anything typed in this process.
+    input_history: Arc<Vec<String>>,
+    /// Runtime values Tab offers for slash-command arguments (models, session
+    /// ids, the working directory). The coordinator refreshes it between turns,
+    /// so a key press only filters what is already here.
+    completions: Arc<Mutex<commands::CompletionContext>>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1322,6 +1344,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
+    let input_history = Arc::clone(&ctx.input_history);
+    let completions = Arc::clone(&ctx.completions);
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
     let tasks_for_events = Arc::clone(&ctx.tasks);
@@ -1336,6 +1360,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
+    let mut background_frame = hooks.use_state(|| 0usize);
+    let mut background_animation = hooks.use_ref_default::<bool>();
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
     let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
@@ -1343,7 +1369,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
-    let history = hooks.use_state(Vec::<String>::new);
+    let history = hooks.use_state(|| input_history.to_vec());
     let mut history_cursor = hooks.use_state(|| None::<usize>);
     let saved_input = hooks.use_state(String::new);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
@@ -1359,7 +1385,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
-    let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
+    let mut paste_store = hooks.use_state(std::collections::HashMap::<u32, String>::new);
     let mut next_paste_id = hooks.use_state(|| 1u32);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
@@ -1369,10 +1395,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // task details when OpenTasks is applied between the two event consumers.
     // Clone for the terminal event handler.
     let input_tx_for_events = input_tx.clone();
-    let stdout_for_events = stdout.clone();
+    let _stdout_for_events = stdout.clone();
 
     hooks.use_terminal_events({
-        let pending_for_keys = Arc::clone(&pending);
+        let _pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
@@ -1386,7 +1412,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let question = match &current_slot {
                         InputSlot::DialPad(question) => Some(question),
                         InputSlot::FuzzySelect(state) => Some(&state.question),
-                        _ => None,
+                        InputSlot::TextInput => None,
                     };
                     if let Some(question) = question.filter(|q| q.description.is_some()) {
                         let document = prompt_text::render_document(
@@ -1400,9 +1426,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
-                if (!input_reviewable.get() || !input_frame.is_current())
-                    && code != KeyCode::Esc
-                    && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+                if !(code == KeyCode::Esc
+                    || input_reviewable.get() && input_frame.is_current()
+                    || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
                 }
@@ -1420,18 +1446,26 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // same handler below, including double Ctrl+C to exit.
                     if focus != TaskFocus::Input && !is_cancel {
                         match (focus, code) {
+                            (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Scheduled => {
+                                browser.scheduled_key(code);
+                            }
+                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(),
                             (TaskFocus::Footer, KeyCode::Enter | KeyCode::Down) => browser.open(),
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
                             (TaskFocus::List, KeyCode::Down) => browser.move_selection(true),
                             (TaskFocus::List, KeyCode::Up) => browser.move_selection(false),
-                            (TaskFocus::List, KeyCode::Enter) => browser.detail(),
+                            (TaskFocus::List, KeyCode::Enter) => {
+                                if let Some(id) = browser.detail() {
+                                    let _ = input_tx_for_events.send(InputEvent::BackgroundTask(engine_events::BackgroundTaskAction::Inspect { id }));
+                                }
+                            }
                             (TaskFocus::List, KeyCode::Esc) => browser.close(),
                             (TaskFocus::Detail, KeyCode::Esc) if modifiers.contains(KeyModifiers::ALT) => browser.close(),
                             (TaskFocus::Detail, KeyCode::Esc) => browser.open(),
                             (TaskFocus::Detail, KeyCode::Up | KeyCode::PageUp) => browser.scroll(true, if code == KeyCode::PageUp { 10 } else { 1 }),
                             (TaskFocus::Detail, KeyCode::Down | KeyCode::PageDown) => browser.scroll(false, if code == KeyCode::PageDown { 10 } else { 1 }),
                             (TaskFocus::List | TaskFocus::Detail, KeyCode::Char('k')) => {
-                                if let Some(id) = browser.stop_id() { let _ = input_tx_for_events.send(InputEvent::StopBackgroundTask(id)); }
+                                if let Some(id) = browser.stop_id() { let _ = input_tx_for_events.send(InputEvent::BackgroundTask(engine_events::BackgroundTaskAction::Stop { id })); }
                             }
                             (TaskFocus::Footer, KeyCode::Char(_)) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                                 browser.close();
@@ -1565,13 +1599,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             fs.move_down();
                         }
                     }
-                    // ── Left — submit back_value (tree navigation) ────
-                    KeyCode::Left if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) => {
+                    // ── Left / Shift+Tab — submit back_value ───────────
+                    KeyCode::Left | KeyCode::BackTab if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) => {
                         let back = match &current_slot {
                             InputSlot::DialPad(q) | InputSlot::FuzzySelect(FuzzySelectState { question: q, .. }) => {
                                 q.back_value.clone()
                             }
-                            _ => None,
+                            InputSlot::TextInput => None,
                         };
                         if let Some(val) = back {
                             let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(val));
@@ -1736,7 +1770,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 tab_index.set(idx);
                                 input_value.set(candidates[idx].clone());
                             } else {
-                                let suggestions = suggest_slash_commands(&val, 10);
+                                let suggestions = commands::complete_slash_input(
+                                    &val,
+                                    &completions
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
                                 if !suggestions.is_empty() {
                                     input_value.set(suggestions[0].clone());
                                     tab_candidates.set(suggestions);
@@ -1805,6 +1844,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut todo_hide_deadline: Option<Instant> = None;
         let mut stderr_text = Utf8Stream::default();
         let mut task_clock_tick = Instant::now();
+        let mut background_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
             let mut is_preview_changed = false;
@@ -1828,6 +1868,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
+                        Ok(OutputMsg::UserPrompt(display)) => {
+                            let mut text = crate::cli::format::format_input_echo(&display, crate::render::query_terminal_width()).0;
+                            crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
+                            (text, false)
+                        }
                         Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
                             prose_preview_for_future
                                 .lock()
@@ -1883,7 +1928,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // A request's immutable description belongs to
                             // history. Only its first field presents it; the
                             // live slot owns the current field's controls.
-                            if question.index == 0 {
+                            // A revisited question was answered, so its
+                            // description is already in history.
+                            if question.index == 0 && question.initial_value.is_none() {
                                 if let Some(description) = &question.description {
                                     let document = prompt_text::render_document(
                                         description,
@@ -1902,13 +1949,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             {
                                 InputSlot::FuzzySelect(FuzzySelectState::new(question))
                             } else {
-                                let initial = question
-                                    .options
-                                    .iter()
-                                    .position(|o| o.recommended)
-                                    .unwrap_or(0);
-                                dialpad_cursor.set(initial);
-                                dialpad_input.set(String::new());
+                                let cursor = if question.allow_custom_input && question.initial_text().is_some() {
+                                    question.options.len()
+                                } else {
+                                    question.initial_cursor()
+                                };
+                                dialpad_cursor.set(cursor);
+                                dialpad_input.set(question.initial_text().unwrap_or_default().to_string());
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -1923,17 +1970,34 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::SetTip(tip)) => footer_tips.write().set(tip),
                         Ok(UiCommand::SetCacheTip(view)) => {
-                            footer_tips.write().cache(view.tip);
+                            footer_tips.write().status(StatusSource::Cache, view.tip);
                             tasks_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .set_cache_advice(view.advice, view.actionable);
                             frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::SetBranch(label)) => footer_tips.write().branch(label),
-                        Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
+                        Ok(UiCommand::SetWorkspacePosition(label)) => {
+                            footer_tips.write().position(label);
+                        }
+                        Ok(UiCommand::SetStatusTip(source, tip)) => {
+                            footer_tips.write().status(source, tip);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
+                        Ok(UiCommand::BeginTurn) => {
+                            footer_tips.write().begin_turn();
+                            tasks_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .turn_began();
+                        }
                         Ok(UiCommand::SetTurnResult { text, turn }) => {
                             turn_result.set(Some((turn, text)));
+                            // A fire or another process may have changed the jobs.
+                            tasks_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .refresh_scheduled();
                         }
                         Ok(UiCommand::UpdateTodos(todos)) => {
                             if let Ok(mut items) = todo_items_for_future.lock() {
@@ -2051,11 +2115,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 footer_hint.set(None);
             }
 
-            // One lifecycle snapshot drives the status and footer. Animate
-            // only Running; waiting hides the row, Idle changes no UI state.
+            // One lifecycle snapshot drives the status and footer. Foreground
+            // activity owns the fast cadence; visible background work reuses
+            // this clock at 400ms. It never records model/task progress.
             // Identical idle State::set calls starve keyboard delivery in iocraft.
             let idx = frame.get();
             let state = spinner_for_future.engine_state();
+            if state == EngineState::Idle && background_animation.get() {
+                if background_tick.elapsed() >= Duration::from_millis(400) {
+                    background_frame.set(background_frame.get().wrapping_add(1));
+                    background_tick = Instant::now();
+                }
+            } else {
+                background_tick = Instant::now();
+            }
             if state == EngineState::Running || is_preview_changed {
                 frame.set(idx.wrapping_add(1));
             }
@@ -2107,12 +2180,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Output-only task events do not invalidate these bounded static strings.
+    // Task events and the slow icon frame invalidate only this bounded row.
     // Both surfaces consume the browser's existing event projection, even idle.
     let completed_turn = turn_result.read().as_ref().map(|(turn, _)| *turn);
+    let background_animates = browser.summary().animates_status();
     let background_status = hooks.use_memo(
-        || browser.summary().status_lines(w, completed_turn),
-        (browser.summary(), w, completed_turn),
+        || {
+            browser
+                .summary()
+                .status_lines(w, completed_turn, background_frame.get())
+        },
+        (browser.summary(), w, completed_turn, background_frame.get()),
     );
 
     // StatusSlot: Foreground > Background > TurnResult > Empty
@@ -2136,7 +2214,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Format with the same iocraft width snapshot as the other chrome,
         // including the very first frame after a resize.
         StatusSlot::Active(spinner.render_frame(frame.get(), activity_state, tools, w))
-    } else if activity_state == EngineState::AwaitingInput {
+    } else if matches!(activity_state, EngineState::AwaitingInput(_)) {
         // The existing question/approval panel owns this interaction. No
         // animation or duplicate waiting instruction above InputSlot.
         StatusSlot::Empty
@@ -2178,12 +2256,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    let controls = if turn_active {
-        Some(running_input_controls(pending_input))
+    // The keys for the current state follow the workspace position. Only turn
+    // and queue state choose them — never typing — so the footer changes when
+    // a turn starts or ends, as the rest of the screen does, and keystrokes
+    // never redraw it. While queued input exists, Esc flushes it.
+    let keys = if turn_active {
+        running_input_controls(pending_input)
     } else if pending_input {
-        Some("Enter send · Esc flush · ↑ edit queued")
+        "Enter send · Esc flush · ↑ edit queued"
+    } else if submitted {
+        "/help"
     } else {
-        None
+        "Type /help for commands"
     };
     let explicit_hint = footer_hint.read().clone();
     let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
@@ -2193,13 +2277,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tips = footer_tips.read();
         let hints = FooterHints {
             transient: native_hint,
-            controls,
+            keys,
         };
         hooks.use_memo(
             || {
-                let render = |permission| {
-                    Arc::new(tips.render(permission, &browser, submitted, turn_active, hints, w))
-                };
+                let render =
+                    |permission| Arc::new(tips.render(permission, &browser, turn_active, hints, w));
                 (render(&perm), render("compact · enlarge to expand"))
             },
             (
@@ -2208,7 +2291,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 browser.footer_label(false),
                 browser.footer_label(true),
                 browser.focus,
-                submitted,
                 turn_active,
                 hints,
                 w,
@@ -2251,18 +2333,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     // Decode semantic initial styles before measurement. Painting consumes the
     // same spans, so explicit resets never acquire a parent fallback color.
-    let chrome_has_color =
-        crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
     let chrome_theme = crate::render::theme();
-    let chrome_style = |color| crossterm::style::ContentStyle {
-        foreground_color: chrome_has_color.then_some(color),
-        ..crossterm::style::ContentStyle::default()
-    };
-    let chrome_border = chrome_has_color
-        .then_some(chrome_theme.border)
+    let chrome_border = chrome_theme
+        .style(TextRole::Border)
+        .foreground_color
         .and_then(ansi_text::ui_color);
-    let chrome_muted = chrome_style(chrome_theme.muted);
-    let question_style = chrome_style(chrome_theme.primary);
+    let question_style = chrome_theme.style(TextRole::Brand);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
@@ -2333,7 +2409,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         [
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(render_pending_overlay(&pending_items, 10, w)),
+                full: ansi(render_pending_overlay(
+                    &pending_items,
+                    10,
+                    w,
+                    activity_state == EngineState::Running && is_pulse_low_now(),
+                )),
                 summary: ansi(pending_summary),
             },
             Slot {
@@ -2372,6 +2453,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         &mut measured,
     );
+    // Do not wake the canvas when the allocator has hidden this row/icon or
+    // a question owns input. This presentation flag derives from the same
+    // task summary; it is neither a task registry nor an engine lifecycle.
+    *background_animation.write() = background_animates
+        && matches!(status_slot, StatusSlot::Background { .. })
+        && matches!(current_input_slot, InputSlot::TextInput)
+        && layout.status.rows > 0
+        && layout
+            .status
+            .content
+            .text
+            .starts_with(crate::render::activity::spinner_frame(
+                background_frame.get(),
+            ));
     if task_panel.is_some() {
         // The browser chooses its visible rows from the shared allocation.
         // Its lazy output cache survives both projections; fixed controls are
@@ -2426,6 +2521,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .as_ref()
         .map_or(0, |text| text.text.lines().count());
     let slot_width = Size::Length(u32::from(term_width));
+    // Styling changes the existing editor, never the owner of terminal history.
+    let shaded_prompts =
+        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
+    let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
+    let input_background = prompt_style
+        .and_then(|style| style.background_color)
+        .and_then(ansi_text::ui_color);
+    let input_foreground = prompt_style
+        .and_then(|style| style.foreground_color)
+        .and_then(ansi_text::ui_color);
     // Present an empty live frame before exiting. iocraft otherwise retains
     // its last canvas, leaving status/todos above the next resumed session.
     // The ordinary history writer has already committed conversation output.
@@ -2447,20 +2552,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // fallback for terminal-foreground counts or descriptions.
             #(row_text("todo", layout.todo.content, layout.todo.rows))
             #((layout.separators > 0).then(|| element! {
-                View(height: row_height(layout.separators), flex_shrink: 0.0) {
-                    Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap)
+                View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
+                    #((!shaded_prompts).then(|| element! { Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
                 View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.warning).and_then(ansi_text::ui_color))
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_theme.style(TextRole::Warning).foreground_color.and_then(ansi_text::ui_color))
                 }
             }))
             #(row_text("heading", heading, visible.heading))
             #(row_text("controls", controls, visible.controls))
             // The editor stays mounted even with zero allocated rows so a
             // shrink/grow cannot discard its cursor, draft or edit ownership.
-            View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: input_background) {
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
@@ -2478,8 +2583,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: prompt_label)
-                        Text(content: filter_display)
+                        Text(content: prompt_label, color: input_foreground)
+                        Text(content: filter_display, color: input_foreground)
                     }
                 }
             } else {
@@ -2518,7 +2623,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if (*code == KeyCode::Enter && !modifiers.contains(KeyModifiers::SHIFT))
                                 || (*code == KeyCode::Tab && !modifiers.contains(KeyModifiers::CONTROL)
                                     && !current.starts_with('/')) => {
-                            if let Some(event) = enter_key_event_for_value(None, 0, current) {
+                            if let Some(event) = enter_key_event_for_value(current) {
                                 if !*has_submitted.read() { has_submitted.set(true); }
                                 let event = match event {
                                     InputEvent::Exit => { should_exit.set(true); InputEvent::Exit }
@@ -2608,8 +2713,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 });
                 element! {
                     View(flex_direction: FlexDirection::Row, height: 100pct, width: 100pct) {
-                        View(width: 2, flex_shrink: 0.0) { Text(content: prompt_label) }
+                        View(width: 2, flex_shrink: 0.0) { Text(content: prompt_label, color: input_foreground) }
                         TextInput(
+                            color: input_foreground,
                             value: val,
                             has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer | TaskFocus::Tip),
                             multiline: true,
@@ -2625,8 +2731,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             // Separator
             #((layout.separators > 0).then(|| element! {
-                View(height: row_height(layout.separators), flex_shrink: 0.0) {
-                    Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap)
+                View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
+                    #((!shaded_prompts).then(|| element! { Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             // FooterSlot
@@ -2653,7 +2759,9 @@ pub fn spawn_repl_ui(
     permission_mode: &str,
     startup_banner: &str,
     todo_items: Vec<runtime::Todo>,
+    input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
+    completions: Arc<Mutex<commands::CompletionContext>>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2664,7 +2772,11 @@ pub fn spawn_repl_ui(
         Arc::new(Mutex::new(None));
 
     let ctx = ReplContext {
-        tasks: Arc::new(Mutex::new(TaskBrowser::default())),
+        tasks: Arc::new(Mutex::new({
+            let mut browser = TaskBrowser::default();
+            browser.refresh_scheduled();
+            browser
+        })),
         prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
@@ -2675,6 +2787,8 @@ pub fn spawn_repl_ui(
         stderr_redir: Arc::clone(&stderr_redir),
         todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
+        input_history: Arc::new(input_history),
+        completions,
         dequeue_hook,
     };
 
@@ -2694,16 +2808,12 @@ pub fn spawn_repl_ui(
                 *guard = stderr_redirect::StderrRedirect::activate();
             }
 
-            smol::block_on(
-                element! {
-                    ContextProvider(value: Context::owned(ctx)) {
-                        ReplApp
-                    }
+            let mut app = element! {
+                ContextProvider(value: Context::owned(ctx)) {
+                    ReplApp
                 }
-                .render_loop()
-                .ignore_ctrl_c(),
-            )
-            .expect("iocraft render_loop failed");
+            };
+            smol::block_on(app.render_loop().ignore_ctrl_c()).expect("iocraft render_loop failed");
         })
         .expect("spawn repl-ui thread");
     // Small delay to let the render loop enter raw mode before the
@@ -2722,6 +2832,7 @@ pub fn spawn_repl_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commands::suggest_slash_commands;
 
     fn tool_card(id: &str, name: &str) -> ToolCard {
         ToolCard::new(id.to_string(), name, "{}")
@@ -2749,7 +2860,7 @@ mod tests {
 
     #[test]
     fn pending_overlay_empty_when_nothing_pending() {
-        assert_eq!(render_pending_overlay(&[], 40, 80), "");
+        assert_eq!(render_pending_overlay(&[], 40, 80, false), "");
     }
 
     #[test]
@@ -2758,6 +2869,7 @@ mod tests {
             &[PendingItem::Tool(tool_card("1", "bash"))],
             0,
             80,
+            false,
         ));
         assert!(plain.contains("+1 more tools"), "{plain}");
     }
@@ -2768,8 +2880,8 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
-        // Each running call is a Running L-frame card (╭─ header … ╰─).
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80, false));
+        // Each in-flight call is an open L-frame card (╭─ header … ╎).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
         // label the completed scrollback card resolves, so a tool never
@@ -2792,7 +2904,7 @@ mod tests {
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80, false));
         let bash_at = plain.find("Bash").expect("bash card");
         let msg_at = plain.find("Message from mac-ai").expect("queued message");
         let read_at = plain.find("Read").expect("read card");
@@ -2806,18 +2918,18 @@ mod tests {
     #[test]
     fn pending_overlay_collapses_overflow_beyond_height_budget() {
         // The full projection has a ten-line card budget. Each card is 3 lines
-        // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
+        // (╭─ / │ / ╎ — bash with a "{}" input has a $ body line), so ~3 cards
         // fit and the rest collapse into a "+N more pending" line.
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
             .collect();
-        let plain = strip_ansi(&render_pending_overlay(&items, 10, 80));
+        let plain = strip_ansi(&render_pending_overlay(&items, 10, 80, false));
         assert!(
             plain.contains("more tools"),
             "expected overflow summary: {plain}"
         );
         let shown = plain.matches("╭─").count();
-        assert!(shown >= 1 && shown < 8, "shown={shown}: {plain}");
+        assert!((1..8).contains(&shown), "shown={shown}: {plain}");
     }
 
     fn question_with_options() -> QuestionPromptView {
@@ -2848,49 +2960,18 @@ mod tests {
             custom_input_hint: None,
             force_fuzzy_select: false,
             back_value: None,
+            initial_value: None,
         }
-    }
-
-    #[test]
-    fn enter_in_question_mode_routes_answer_instead_of_prompt() {
-        let question = QuestionPromptView {
-            presentation: runtime::QuestionPresentation::Question,
-            title: None,
-            description: None,
-            index: 0,
-            total: 1,
-            prompt: "Paste content".to_string(),
-            options: vec![],
-            allow_custom_input: true,
-            custom_input_hint: None,
-            force_fuzzy_select: false,
-            back_value: None,
-        };
-
-        assert_eq!(
-            enter_key_event_for_value(Some(&question), 0, "answer"),
-            Some(InputEvent::QuestionAnswer("answer".to_string()))
-        );
     }
 
     #[test]
     fn enter_in_normal_mode_routes_submit() {
         assert_eq!(
-            enter_key_event_for_value(None, 0, "hello"),
+            enter_key_event_for_value("hello"),
             Some(InputEvent::Submit {
                 text: "hello".to_string(),
                 display: "hello".to_string(),
             })
-        );
-    }
-
-    #[test]
-    fn enter_in_option_question_confirms_selected_option() {
-        let question = question_with_options();
-
-        assert_eq!(
-            enter_key_event_for_value(Some(&question), 1, ""),
-            Some(InputEvent::QuestionAnswer("2".to_string()))
         );
     }
 
@@ -2956,33 +3037,27 @@ mod tests {
 
     #[test]
     fn exit_command_routes_as_exit_event() {
-        assert_eq!(
-            enter_key_event_for_value(None, 0, "/exit"),
-            Some(InputEvent::Exit)
-        );
-        assert_eq!(
-            enter_key_event_for_value(None, 0, "/quit"),
-            Some(InputEvent::Exit)
-        );
+        assert_eq!(enter_key_event_for_value("/exit"), Some(InputEvent::Exit));
+        assert_eq!(enter_key_event_for_value("/quit"), Some(InputEvent::Exit));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert_eq!(enter_key_event_for_value(None, 0, ""), None);
-        assert_eq!(enter_key_event_for_value(None, 0, "   "), None);
+        assert_eq!(enter_key_event_for_value(""), None);
+        assert_eq!(enter_key_event_for_value("   "), None);
     }
 
     #[test]
     fn slash_commands_route_as_submit() {
         assert_eq!(
-            enter_key_event_for_value(None, 0, "/status"),
+            enter_key_event_for_value("/status"),
             Some(InputEvent::Submit {
                 text: "/status".to_string(),
                 display: "/status".to_string(),
             })
         );
         assert_eq!(
-            enter_key_event_for_value(None, 0, "/cost"),
+            enter_key_event_for_value("/cost"),
             Some(InputEvent::Submit {
                 text: "/cost".to_string(),
                 display: "/cost".to_string(),

@@ -2,7 +2,7 @@
 
 End-to-end tests for the standalone-`scode` ↔ nexus A2A path: a terminal `scode`
 dials a real `nexusd-cluster` as a plain gRPC client and sends/receives over the
-replicated `/agents/<name>/chat-with-me` DT_STREAM (`NEXUS_A2A_*` env; off by
+replicated `/conversations/<id>/transcript` DT_STREAM each pair shares (`NEXUS_A2A_*` env; off by
 default). The transport lives in `runtime::mailbox` +
 `nexus-vfs-client`; the send half feeds `CliToolExecutor` via the same
 `handle_send_message` the co-host uses.
@@ -11,9 +11,11 @@ default). The transport lives in `runtime::mailbox` +
 
 | Layer | Command | LLM? |
 |---|---|---|
-| Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
+| Managed scode subprocess | `e2e/nexus-a2a/run-managed-subprocess.sh` | scripted by default |
+| In-process cohost | `e2e/nexus-a2a/run-cohost.sh` | scripted by default |
 | Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
+| Offline message before first receiver start | `bash e2e/nexus-a2a/run-live-offline.sh` | funded, real model |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
 The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
@@ -21,6 +23,51 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 `Mailbox::send` + `Mailbox::poll` through a real gRPC server and a real
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
+
+The seven independent reader/stall/receiver-seat fault cases run with the
+repository's checksum-pinned nextest runner. They overlap the independent CLI
+journeys after restart, with one serial CLI lane and at most three fault workers
+(at most four test cases at once). `SCODE_ACCEPTANCE_TEST_THREADS=1` runs the CLI
+lane and fault batch serially; caps of two or three reserve one worker for CLI.
+Before either lane starts, Cargo prepares the same pinned test binaries and the
+seven-case inventory. Execution uses nextest's build metadata, so a CLI build
+holding Cargo's target lock cannot delay the real lease clocks. The fresh handoff
+binds source file contents, binary and metadata hashes, manifest and exact cases;
+drift is refused before execution and checked again before a successful result.
+Preparation and execution times are recorded separately and included in the total.
+Compiler settings supplied by the caller, including unset Cargo defaults, survive
+the shared executor boundary; owned desktop checks still explicitly use one job.
+They keep their original real daemon, lease clocks, assertions and deadlines;
+daemon restart and SIGSTOP remain serial. The batch requires all seven ignored
+case names before execution and all seven successful JUnit results afterward.
+Retries are disabled. The first failure cancels this independent batch and the
+other CLI/fault lane through the shared process supervisor. Both lanes must pass
+before the later SIGSTOP probe; the outer harness still closes its owned private
+daemon. Cancelled cases are
+not passes. This path requires Python 3 and `psutil`, like the acceptance tooling;
+the queue installs `psutil==7.2.2` explicitly before starting either lane.
+`mailbox_faults_acceptance.py --output FRESH_DIRECTORY` exercises the executor
+using real Cargo/native control processes, including both failure directions,
+bounded overlap, a real held Cargo lock, caller compiler defaults, explicit
+single-worker serialization, invalid inventory/caps and changed prepared inputs.
+Stage logs and command receipts are retained under the existing fault artifact's
+`stages/` directory. An existing output directory is refused before either lane
+starts, preserving previous evidence. These controls add no product daemon coverage.
+Harness-only edits are validated by the real Linux queue journey and the
+author's realistic harness acceptance. They omit unrelated native workspace
+Cargo/PTY reruns; mixed Rust changes still require those native suites.
+The shared supervisor and command executor are registered as daemon CI inputs,
+so edits to those newly consumed modules also retain real caller acceptance.
+
+The funded offline script uses a private `SUDO_CODE_CONFIG_HOME` containing the
+normal proxy configuration, `SCODE_LIVE_AUTH_PROFILE`, and `SCODE_LIVE_MODEL`.
+It starts the pinned daemon with mTLS, waits for its writable data plane, and
+runs the existing two-CLI PTY journey. The sender's real model stores the exact
+message before the receiver first starts; the receiver's real model consumes
+it and commits its durable reader position. A skipped journey fails this script.
+The live API CI job runs it on main and on authorized workflow dispatches.
+Participant fixtures share one live-test permit while keeping separate homes,
+configuration and workspaces, so independent tests remain serialized.
 
 The same harness runs `fs_record_log` against four independent mTLS clients,
 appends 32 large JSON records to a new WAL with unlimited retention, restarts
@@ -69,6 +116,26 @@ SUDOROUTER_API_KEY=sk-…funded… SCODE_BIN=$(pwd)/rust/target/debug/scode \
 
 ## Notes / gotchas
 
+### Managed subprocess acceptance
+
+`run-managed-subprocess.sh` asks the real `ManagedAgentService` to launch this
+checkout's scode executable with `acp`. It uses a session credential and the
+same managed ACP endpoint as an in-process host. The workflow verifies an
+actual OS PID, a fresh file read, cancellation of a running shell without
+terminating scode, managed shutdown and OS process exit. It then starts a new
+process, loads the saved ACP conversation, checks that the next model request
+includes the original assistant answer and reads the changed file. An empty
+test selection fails the harness.
+
+The workflow uses the shared Rust test controller and runs from the existing
+CLI A2A CI harness (`run.sh`), including CLI-only changes. It uses the pinned
+cluster daemon and does not build the independent cohost package.
+`NEXUS_A2A_MODEL_LIVE=1` runs the same assertions against
+the explicitly configured real provider. The subprocess gets an isolated home,
+configuration and workspace. Its provider and file tools use standalone scode
+configuration; this case does not claim that it adopted the cohost's VFS model
+mount or its control-plane `resume_session_id` capability.
+
 ### Model routing acceptance
 
 `run-cohost.sh` builds this checkout's daemon, boots it with mTLS, provisions
@@ -108,7 +175,7 @@ command exercises a live checkpoint through a real kernel model mount and
 then refuses the next checkpoint by revoking that route. It covers the co-host
 compaction client; the managed-agent mailbox has no `/compact` command.
 
-**Driving a live `scode` needs a PTY, not a pipe.** `printf 'prompt\n' | scode`
+**Driving the native scode REPL needs a PTY.** `printf 'prompt\n' | scode`
 answers and exits — fine for one shot, and `--print` is the supported form of
 it. A *persistent* receiver is the other half of a duet, and feeding it through
 a pipe or a FIFO does not work: the REPL reads keys from the terminal, so the
@@ -116,6 +183,8 @@ line is never consumed, while the process stays alive looking idle. The A2A
 receiver in that process still runs — its cursor advances — so the session looks
 healthy and simply ignores you. Drive it through a PTY (`pty-expect`, as
 `tests/pty_agent_duet.rs` does).
+`scode acp` is a separate server entry: ACP clients drive it over protocol
+pipes, without a terminal or a PTY.
 
 **A receive cursor can outlive the stream it recorded.** `a2a-cursor-<agent>`
 lives in the config home and survives a rebuilt cluster or a fresh data dir. A

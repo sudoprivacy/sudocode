@@ -20,9 +20,10 @@ use engine_events::{
 use crate::cli::format::{
     format_auto_compaction_notice, format_compaction_notice, format_tool_result,
 };
+use crate::render::styled_text::StyledText;
 use crate::render::{
-    layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
-    SpinnerRef, TerminalRenderer, DIM, RESET,
+    layout_policy::LayoutPolicy, query_terminal_width, theme, MarkdownStreamState,
+    ResponseGlyphState, SpinnerRef, TerminalRenderer, TextRole, DIM, RESET,
 };
 use crate::repl_ui::prose_preview::{
     PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
@@ -117,7 +118,7 @@ impl EngineEventRenderer {
         }
     }
 
-    fn apply_response(&mut self, text: &str) -> String {
+    fn apply_response(&mut self, text: &StyledText) -> String {
         self.glyph.set_width(query_terminal_width());
         self.glyph.apply(text)
     }
@@ -146,8 +147,8 @@ impl EngineEventRenderer {
         self.block = Some(block);
     }
 
-    fn write_response(&mut self, text: &str, block: OutputBlock) {
-        if !text.is_empty() {
+    fn write_response(&mut self, text: &StyledText, block: OutputBlock) {
+        if !text.text.is_empty() {
             self.start_block(block);
             let prefixed = self.apply_response(text);
             self.write_out(&prefixed);
@@ -224,8 +225,8 @@ impl EngineEventRenderer {
     /// Show that the transport is retrying a failed request.
     ///
     /// The line is unconditional. A status-line phase alone would be invisible
-    /// on the paths that have no phase to set — the rustyline REPL and
-    /// `--print` both hold a spinner whose `phase` is `None` — and "the
+    /// on the paths that have no phase to set — `--print` holds a spinner
+    /// whose `phase` is `None` — and "the
     /// indicator exists but not where you are looking" is how this stopped
     /// being visible in the first place. Where a phase IS available (iocraft)
     /// it is set too, so a long backoff also reads on the live status line
@@ -264,7 +265,7 @@ impl EngineEventRenderer {
     fn flush_thinking_lines(&mut self) {
         while let Some(newline) = self.thinking_pending.find('\n') {
             let line: String = self.thinking_pending.drain(..=newline).collect();
-            let rendered = render_thinking_line(&line);
+            let rendered = crate::cli::format::reasoning::line(&line);
             self.write_response(&rendered, OutputBlock::Reasoning);
         }
     }
@@ -285,10 +286,11 @@ impl EngineEventRenderer {
             // dropped. `flush_thinking_lines` only emits up to the last newline;
             // the remainder lives in `thinking_pending` until here.
             if !self.thinking_pending.is_empty() {
-                let rendered = render_thinking_line(&self.thinking_pending);
+                let rendered = crate::cli::format::reasoning::line(&self.thinking_pending);
                 self.thinking_pending.clear();
                 self.write_response(&rendered, OutputBlock::Reasoning);
             }
+            self.glyph.end_reasoning();
             // Close partial lines before a legacy spinner pause clears its
             // current row. The next block observes this gap instead of adding
             // a second one.
@@ -362,7 +364,7 @@ impl EngineEventRenderer {
                 self.end_thinking();
                 if !text.is_empty() {
                     if let Some(s) = &self.spinner {
-                        s.add_response_bytes(text.len() as u32);
+                        s.add_response_bytes(u32::try_from(text.len()).unwrap_or(u32::MAX));
                     }
                     if let Some(rendered) = self.markdown.push(&self.renderer, &text) {
                         self.pause_spinner();
@@ -373,7 +375,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::ThinkingDelta { text } => {
                 if let Some(s) = &self.spinner {
-                    s.add_response_bytes(text.len() as u32);
+                    s.add_response_bytes(u32::try_from(text.len()).unwrap_or(u32::MAX));
                 }
                 if !self.thinking_active {
                     self.flush_markdown();
@@ -406,7 +408,7 @@ impl EngineEventRenderer {
                         // 0. Reasoning is written at line boundaries and has the
                         // same protection.
                         self.pause_spinner();
-                        self.write_response(&crate::cli::format::thinking_header(), OutputBlock::Reasoning);
+                        self.glyph.begin_reasoning();
                         self.thinking_printed = true;
                     }
                     self.thinking_pending.push_str(&text);
@@ -414,7 +416,7 @@ impl EngineEventRenderer {
                 }
                 RenderOutcome::Continue
             }
-            EngineEvent::ToolCall { id, name, input } => {
+            EngineEvent::ToolCall { id, name: _, input } => {
                 self.finish_response();
                 // Remember the arguments so the completed card can show what was
                 // requested — the ToolResult event/payload does not echo the
@@ -501,7 +503,7 @@ impl EngineEventRenderer {
                 // reasoning closes its dim block rather than letting the error
                 // line inherit the dim attribute.
                 self.finish_response();
-                self.write_block(&message, OutputBlock::Notice);
+                self.write_block(&theme().style(TextRole::Error).apply(&message).to_string(), OutputBlock::Notice);
                 self.finish_turn();
                 RenderOutcome::Done
             }
@@ -542,6 +544,7 @@ impl EngineEventRenderer {
             // No transcript output: the REPL event bridge projects lifecycle
             // into live chrome; deltas above update response progress and phase.
             EngineEvent::PermissionDenied { .. }
+            | EngineEvent::HostContextRequest { .. }
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
             | EngineEvent::InputState(_)
@@ -582,6 +585,17 @@ impl Drop for EngineEventRenderer {
 /// `make_mcp_progress_callback`: the executor now reports structured data
 /// (`ToolProgressEvent`) and the ANSI/glyph formatting lives here, above the
 /// seam. External output is text, never terminal cursor or screen control.
+fn format_progress_kilobytes(bytes: usize) -> String {
+    let scaled = (bytes as u128) * 10;
+    let mut tenths = scaled / 1024;
+    let remainder = scaled % 1024;
+    // Match decimal formatting's ties-to-even rule without a lossy float cast.
+    if remainder > 512 || (remainder == 512 && !tenths.is_multiple_of(2)) {
+        tenths += 1;
+    }
+    format!("{}.{} KB", tenths / 10, tenths % 10)
+}
+
 fn format_tool_progress(progress: &ToolProgressEvent) -> String {
     use crate::render::text_layout::single_line as summary;
     match progress {
@@ -591,7 +605,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
             total_bytes,
         } => {
             let bytes_display = if *total_bytes >= 1024 {
-                format!("{:.1} KB", *total_bytes as f64 / 1024.0)
+                format_progress_kilobytes(*total_bytes)
             } else {
                 format!("{total_bytes} B")
             };
@@ -690,23 +704,9 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
     )
 }
 
-/// Render one complete thinking line for the transcript: dim prose, but a
-/// blank line emitted raw. Dimming is applied once per line here — the single
-/// place that decides it — instead of once per streamed delta, which is what
-/// turned reasoning into a stream of `\x1b[2m…\x1b[0m` fragments. A whitespace-
-/// only line has no text to tint, so wrapping it would only add escape noise.
-fn render_thinking_line(line: &str) -> String {
-    if line.trim().is_empty() {
-        line.to_string()
-    } else {
-        crate::cli::format::dim_thinking(line)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{format_hook_progress, render_thinking_line};
-    use crate::render::{DIM, RESET};
+    use super::format_hook_progress;
     use engine_events::HookProgressEvent;
     use runtime::HookEvent;
 
@@ -797,26 +797,5 @@ mod tests {
         };
         let line = format_hook_progress(&event);
         assert!(!line.ends_with('\n'), "unexpected newline in {line:?}");
-    }
-
-    /// A non-empty reasoning line is dimmed exactly once — one `DIM…RESET` pair
-    /// for the whole line, which is the fix for the per-delta fragmentation that
-    /// wrapped every streamed chunk in its own escape pair.
-    #[test]
-    fn a_reasoning_line_is_dimmed_once_as_a_whole() {
-        let rendered = render_thinking_line("checking 17 is prime\n");
-        assert_eq!(rendered, format!("{DIM}checking 17 is prime\n{RESET}"));
-        assert_eq!(rendered.matches(DIM).count(), 1, "one dim open per line");
-        assert_eq!(rendered.matches(RESET).count(), 1, "one reset per line");
-    }
-
-    /// A blank separator line between reasoning paragraphs is emitted raw: it
-    /// has no text to tint, so wrapping it would only add escape noise to the
-    /// scrollback the user copies out.
-    #[test]
-    fn a_blank_reasoning_line_is_emitted_without_escapes() {
-        let rendered = render_thinking_line("  \n");
-        assert_eq!(rendered, "  \n");
-        assert!(!rendered.contains(DIM), "blank line carries no dim escape");
     }
 }

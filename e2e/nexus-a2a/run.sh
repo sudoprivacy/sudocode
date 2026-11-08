@@ -123,7 +123,7 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RECORD_LOG_RECEIPT="$(native_path "$RECORD_RECEIPT")" \
   "${RECORD_TEST[@]}" live_record_log_commits_large_frames_from_independent_clients -- --ignored --nocapture
 
-echo "== [deterministic] runtime resume inherits the written prefix while a native tool runs =="
+echo "== [deterministic] runtime resume inherits the completed turn while a native tool runs =="
 cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history -- --nocapture
 HISTORY_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_history_records)
 HISTORY_RECEIPT="$AUTHON_DATA_DIR/shared-history.json"
@@ -135,7 +135,7 @@ RUNTIME_HISTORY_RECEIPT="$AUTHON_DATA_DIR/runtime-history.json"
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_RUNTIME_HISTORY_RECEIPT="$(native_path "$RUNTIME_HISTORY_RECEIPT")" \
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test shared_runtime_history \
-    live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result -- --ignored --nocapture
+    live_runtime_resume_inherits_completed_turn_and_keeps_native_tool_result -- --ignored --nocapture
 
 if [ "$(uname -s)" = Linux ]; then
   echo "== [deterministic] native failed flush requires a durable read barrier =="
@@ -180,95 +180,13 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
 # because of. This runs two real binaries: one calls the tool, the other's REPL
 # is parked on its inbox. Mock model, so no key is needed; set
 # SCODE_TEST_BACKEND=live to have a real model choose the call instead.
-echo "== [deterministic] two scode processes, one daemon =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "team-lead")" \
-  NEXUS_A2A_TEST_SENDER_CREDENTIAL="$(authon_mint "duet-sender")" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test pty_agent_duet -- --nocapture
-
-echo "== [deterministic] ACP close joins an acquired receiver before replying =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "acp-close-receiver")" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_a2a_receive live_session_close_releases_an_acquired_receiver_seat_before_reply \
-  -- --ignored --nocapture
-
-echo "== [deterministic] a real receiver lease handoff preserves terminal drafts =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "receiver-draft-probe")" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test pty_node_record live_node_lease_loss_preserves_editable_draft \
-  -- --ignored --exact --test-threads=1 --nocapture
-
-echo "== [deterministic] direct ACP uses no model; pause and lost reply use real mTLS =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  NEXUS_A2A_TEST_DIRECT_CREDENTIAL="$(authon_mint "direct-acp-probe")" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_integration live_direct_a2a_ -- --ignored --test-threads=1 --nocapture
-
-# The path an ACP client drives with no model turn: `_sudocode/a2a/send` runs
-# the session's own `send` tool. The node must stamp the session's
-# authenticated identity on exactly one append, and a call cancelled after its
-# append must answer "outcome unknown" without resending. The test skips
-# without its credentials, so a skip here is a harness bug, not a pass.
-echo "== [deterministic] an ACP client's direct send through the node =="
-direct_out="$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_TEST_DIRECT_SENDER_CREDENTIAL="$DIRECT_SENDER_BUNDLE" \
-  NEXUS_A2A_TEST_DIRECT_RECEIVER_CREDENTIAL="$DIRECT_RECEIVER_BUNDLE" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_integration direct_a2a_through_a_node -- --nocapture 2>&1)" \
-  || { printf '%s\n' "$direct_out"; daemon_logs; exit 1; }
-printf '%s\n' "$direct_out"
-if printf '%s' "$direct_out" | grep -q 'SKIP(nexus)'; then
-  echo "!! the direct-send test skipped under the harness" >&2
-  exit 1
-fi
-
-echo "== [deterministic] a silent connection errors, then recovers =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
-
-echo "== [deterministic] an unminted session recovers its original node receiver =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  NEXUS_A2A_TEST_PENDING_CREDENTIAL="$(authon_mint "pending-node-actor")" \
-  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_integration live_pending_node_recovers_send_and_the_original_receiver \
-  -- --ignored --test-threads=1 --nocapture
-
-# The baseline lease path against the node's real lease table: one renewal of a
-# conversation reader's lock is failed by a test-only wrapper (INJECTED, it never
-# reaches the node). The commit must be refused, the durable read position left
-# alone, and the reader re-acquired so the batch is redelivered and committed.
-echo "== [deterministic] a failed reader renewal refuses the commit; the reader re-acquires =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset -- --ignored --nocapture
-
-# A stalled batch is recorded by the step that stopped it: a lease lost
-# mid-batch (INJECTED worker renewal failure) is LeaseLost, a consumer that
-# refused under a held lease is ConsumerRefused.
-echo "== [deterministic] a stalled batch records the step that stopped it =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_stall_from_lease_lost_mid_batch_is_recorded_as_lease_lost -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_refusal_under_a_held_lease_is_recorded_as_consumer_refused -- --ignored --nocapture
-
-# A lease whose renewal never answers lapses on its own (INJECTED: the renewal
-# is held in flight), and its stall carries the lapse; a commit refused by its
-# register write (INJECTED, with the lease lost meanwhile) carries no lease loss.
-echo "== [deterministic] a stall carries the loss that caused it, captured when it happened =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_commit_refused_by_its_register_write_records_no_lease_loss -- --ignored --nocapture
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_retry_diagnostics_distinguish_commit_lapse_from_register_io -- --ignored --nocapture
-# The receiver seat trusts only fresh renewals: a late reply, a partition and a
-# slow-but-successful renewal are injected by the test-only wrapper; the node's
-# TTL is what any takeover waits on.
-echo "== [deterministic] the receiver seat trusts only fresh renewals =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  "${CARGO_TEST[@]}" live_receiver_seat_trusts_only_fresh_renewals -- --ignored --nocapture
+echo "== [deterministic] independent CLI journeys and mailbox lease faults =="
+PYTHON_BIN="$(python3_bin)"
+MAILBOX_FAULT_OUTPUT="${NEXUS_A2A_FAULT_OUTPUT:-$AUTHON_DATA_DIR/mailbox-faults}"
+export AUTHON_DATA_DIR AUTHON_PORT AUTHON_ZONE AUTHON_NEXUSD_BIN RUST_DIR ENDPOINT
+export CLIENT_BUNDLE DIRECT_SENDER_BUNDLE DIRECT_RECEIVER_BUNDLE
+"$PYTHON_BIN" ./cli_mailbox_stages.py --manifest "$(native_path "$RUST_DIR/Cargo.toml")" \
+  --output "$(native_path "$MAILBOX_FAULT_OUTPUT")"
 
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #
@@ -338,5 +256,10 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
 else
   echo "== [skip] LLM duet - set SUDOROUTER_API_KEY + SCODE_BIN to enable =="
 fi
+
+# The independent process belongs to CLI acceptance. Keep this out of the
+# cohost/search build so CLI-only changes still exercise managed ACP hosting.
+authon_stop
+bash ./run-managed-subprocess.sh
 
 echo "E2E OK"

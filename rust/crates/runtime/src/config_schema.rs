@@ -16,6 +16,7 @@ pub enum FieldType {
 
 impl FieldType {
     /// Human-readable label for error messages.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::String => "a string",
@@ -27,6 +28,7 @@ impl FieldType {
     }
 
     /// Check whether a JSON value conforms to this type.
+    #[must_use]
     pub fn matches(self, value: &crate::json::JsonValue) -> bool {
         match self {
             Self::String => value.as_str().is_some(),
@@ -62,6 +64,10 @@ pub struct FieldSchema {
     pub deprecated_replacement: &'static str,
     /// Child fields for Object types — enables tree navigation in the UI.
     pub children: Option<&'static [FieldSchema]>,
+    /// A Claude Code setting scode tolerates in a settings file but does not
+    /// implement. `/config set` refuses it and the config browser hides it, so
+    /// nothing offers a setting that changes nothing.
+    pub is_compat_only: bool,
 }
 
 impl FieldSchema {
@@ -76,6 +82,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: None,
+            is_compat_only: false,
         }
     }
 
@@ -94,6 +101,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: None,
+            is_compat_only: false,
         }
     }
 
@@ -112,6 +120,7 @@ impl FieldSchema {
             is_deprecated: false,
             deprecated_replacement: "",
             children: Some(children),
+            is_compat_only: false,
         }
     }
 
@@ -130,6 +139,15 @@ impl FieldSchema {
             is_deprecated: true,
             deprecated_replacement: replacement,
             children: None,
+            is_compat_only: false,
+        }
+    }
+
+    /// Mark a tolerated Claude Code setting that scode does not implement.
+    const fn compat_only(self) -> Self {
+        Self {
+            is_compat_only: true,
+            ..self
         }
     }
 }
@@ -323,55 +341,33 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     // configuration down with it, silently, back to defaults. These thirteen
     // were settable and unlisted, so setting any of them disabled the file that
     // was just written.
-    FieldSchema::leaf("theme", FieldType::String, "Colour theme"),
-    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, "Line-editing mode"),
-    FieldSchema::leaf("language", FieldType::String, "Preferred response language"),
-    FieldSchema::leaf("verbose", FieldType::Bool, "Verbose output"),
-    FieldSchema::leaf(
-        "preferredNotifChannel",
-        FieldType::String,
-        "Where turn-completion notifications go",
+    FieldSchema::enumerated(
+        "theme",
+        THEME_OPTIONS,
+        "Terminal background the colours suit (auto: detect)",
     ),
+    FieldSchema::leaf("language", FieldType::String, "Language replies use"),
     FieldSchema::leaf(
         "autoCompactEnabled",
         FieldType::Bool,
-        "Compact the session automatically as it approaches the context limit",
+        "Compact the session automatically as it approaches the context limit (default: true)",
     ),
-    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, "Enable auto-dream"),
-    FieldSchema::leaf(
-        "fileCheckpointingEnabled",
-        FieldType::Bool,
-        "Checkpoint files before a tool edits them",
-    ),
-    FieldSchema::leaf(
-        "showTurnDuration",
-        FieldType::Bool,
-        "Show each turn's duration",
-    ),
-    FieldSchema::leaf(
-        "terminalProgressBarEnabled",
-        FieldType::Bool,
-        "Show the terminal progress bar",
-    ),
-    FieldSchema::leaf(
-        "todoFeatureEnabled",
-        FieldType::Bool,
-        "Enable the todo list",
-    ),
-    FieldSchema::leaf(
-        "alwaysThinkingEnabled",
-        FieldType::Bool,
-        "Always request extended thinking",
-    ),
+    FieldSchema::deprecated("alwaysThinkingEnabled", FieldType::Bool, "thinking"),
+    // Claude Code settings scode does not implement. Earlier scode versions
+    // wrote them through `/config set`, so files may still carry them.
+    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, IGNORED).compat_only(),
+    FieldSchema::leaf("verbose", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("preferredNotifChannel", FieldType::String, IGNORED).compat_only(),
+    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("fileCheckpointingEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("showTurnDuration", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("terminalProgressBarEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::leaf("todoFeatureEnabled", FieldType::Bool, IGNORED).compat_only(),
+    FieldSchema::enumerated("teammateMode", TEAMMATE_MODE_OPTIONS, IGNORED).compat_only(),
     FieldSchema::enumerated(
         "effortLevel",
         &["auto", "low", "medium", "high", "xhigh", "max"],
         "Reasoning effort (max applies only to the current session)",
-    ),
-    FieldSchema::enumerated(
-        "teammateMode",
-        TEAMMATE_MODE_OPTIONS,
-        "How a teammate agent is run",
     ),
     // This session's mailbox identity — the name peers address and the receiver
     // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
@@ -379,6 +375,9 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
 ];
 
+const IGNORED: &str = "Claude Code setting; scode ignores it";
+/// Shared with the `config` tool so a set accepts exactly what this offers.
+pub const THEME_OPTIONS: &[&str] = &["auto", "dark", "light"];
 const EDITOR_MODE_OPTIONS: &[&str] = &["default", "vim", "emacs"];
 
 const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
@@ -389,6 +388,11 @@ const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 /// there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
+        "promptViewport",
+        FieldType::Bool,
+        "Experimental shaded prompts using native inline history",
+    ),
+    FieldSchema::leaf(
         "peerDescriptions",
         FieldType::Bool,
         "Publish persistent peer descriptions with existing compaction calls",
@@ -397,11 +401,6 @@ const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
         "sharedSessionHistory",
         FieldType::Bool,
         "Independent runtime continuations from completed session turns",
-    ),
-    FieldSchema::leaf(
-        "cacheTtlAdvisor",
-        FieldType::Bool,
-        "Record request timing and recommend TTL at context boundaries without changing requests",
     ),
     FieldSchema::leaf(
         "coordinatorMode",
@@ -428,7 +427,7 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf(
         "cache_ttl_1h",
         FieldType::Bool,
-        "Hold Anthropic prompt caches for 1h instead of 5m, for any auth mode. Unset follows the auth mode: 1h on a subscription, 5m on an API key. Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price; scode applies it at the next cold point (idle past the TTL, compaction, resume). Switching to 5m keeps the cache",
+        "Pin Anthropic prompt caches to 1h (true) or 5m (false), for any auth mode. Unset is automatic: each session starts from the auth mode's default (1h on a subscription, 5m on an API key) and moves to the cheaper TTL once its own cache history shows one. Switching to 1h mid-conversation rewrites the cached prefix once at the 1h write price, so scode applies it at the next cold point (idle past the TTL, compaction, resume); switching to 5m keeps the cache",
     ),
     FieldSchema::object(
         "web_search",
@@ -444,11 +443,13 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
 // ── lookup helpers ──────────────────────────────────────────────────
 
 /// Find a field schema by key in a flat schema slice.
+#[must_use]
 pub fn find_field<'a>(schema: &'a [FieldSchema], key: &str) -> Option<&'a FieldSchema> {
     schema.iter().find(|f| f.key == key)
 }
 
 /// Collect all non-deprecated key names from a schema slice.
+#[must_use]
 pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
     schema
         .iter()
@@ -457,7 +458,14 @@ pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Whether `key` is a tolerated settings key that scode does not implement.
+#[must_use]
+pub fn is_compat_only_setting(key: &str) -> bool {
+    find_field(SETTINGS_SCHEMA, key).is_some_and(|field| field.is_compat_only)
+}
+
 /// Collect deprecated field entries from a schema slice.
+#[must_use]
 pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
     schema.iter().filter(|f| f.is_deprecated).collect()
 }
@@ -467,19 +475,20 @@ pub fn deprecated_fields(schema: &[FieldSchema]) -> Vec<&FieldSchema> {
 pub enum ConfigInputKind {
     /// Toggle immediately, no UI needed.
     BoolToggle,
-    /// Show DialPad with the given static options.
+    /// Show `DialPad` with the given static options.
     Enum(Vec<String>),
-    /// Show FuzzySelect — options fetched dynamically at runtime.
+    /// Show `FuzzySelect` — options fetched dynamically at runtime.
     DynamicList,
-    /// Show TextInput.
+    /// Show `TextInput`.
     Text,
-    /// Show TextInput for number entry.
+    /// Show `TextInput` for number entry.
     NumberInput,
     /// Open in $EDITOR (complex object/array).
     Editor,
 }
 
 /// Resolve the appropriate input kind for a field schema.
+#[must_use]
 pub fn resolve_input_kind(schema: &FieldSchema) -> ConfigInputKind {
     if schema.field_type == FieldType::Bool {
         return ConfigInputKind::BoolToggle;
@@ -614,6 +623,40 @@ mod tests {
         let keys: Vec<&str> = OAUTH_CHILDREN.iter().map(|f| f.key).collect();
         for key in &expected {
             assert!(keys.contains(key), "OAUTH_CHILDREN missing: {key}");
+        }
+    }
+
+    /// Every ignored Claude Code key stays tolerated in a file, and nothing
+    /// scode reads is marked ignored.
+    #[test]
+    fn compat_only_settings_are_tolerated_but_marked() {
+        let ignored: Vec<_> = SETTINGS_SCHEMA
+            .iter()
+            .filter(|field| field.is_compat_only)
+            .map(|field| field.key)
+            .collect();
+        assert_eq!(
+            ignored,
+            [
+                "editorMode",
+                "verbose",
+                "preferredNotifChannel",
+                "autoDreamEnabled",
+                "fileCheckpointingEnabled",
+                "showTurnDuration",
+                "terminalProgressBarEnabled",
+                "todoFeatureEnabled",
+                "teammateMode",
+            ]
+        );
+        for key in [
+            "theme",
+            "language",
+            "autoCompactEnabled",
+            "thinking",
+            "effortLevel",
+        ] {
+            assert!(!is_compat_only_setting(key), "{key} has a reader");
         }
     }
 

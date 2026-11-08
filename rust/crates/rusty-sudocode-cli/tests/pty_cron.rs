@@ -1,4 +1,4 @@
-//! Behavioral PTY (ConPTY) tests for `scode cron` — real user journeys a
+//! Behavioral PTY (`ConPTY`) tests for `scode cron` — real user journeys a
 //! human runs at a terminal: schedule a task, see it listed + persisted,
 //! toggle it, fire it and watch the agent actually run, expire a one-shot.
 //! 3+ causal steps per test.
@@ -97,15 +97,16 @@ impl CronEnv {
         if matches!(disable_cron_tools, Some(false)) {
             command.push_str(" -u SUDOCODE_DISABLE_CRON_TOOLS");
         }
-        command.push_str(&format!(
-            " SUDO_CODE_CONFIG_HOME={config_home} HOME={home} NO_COLOR=1 TERM=xterm"
-        ));
+        let _ = std::fmt::Write::write_fmt(
+            &mut command,
+            format_args!(" SUDO_CODE_CONFIG_HOME={config_home} HOME={home} NO_COLOR=1 TERM=xterm"),
+        );
         if matches!(disable_cron_tools, Some(true)) {
             command.push_str(" SUDOCODE_DISABLE_CRON_TOOLS=1");
         }
-        command.push_str(&format!(" {scode}"));
+        let _ = std::fmt::Write::write_fmt(&mut command, format_args!(" {scode}"));
         for arg in args {
-            command.push_str(&format!(" {}", shell_quote(arg)));
+            let _ = std::fmt::Write::write_fmt(&mut command, format_args!(" {}", shell_quote(arg)));
         }
 
         let sh = common::resolve_sh();
@@ -205,6 +206,46 @@ fn add_then_list_and_persist() {
     );
     assert!(json.contains("\"kind\": \"cron\""));
     assert!(json.contains("\"next_run_at\":"), "next-run seeded: {json}");
+}
+
+#[test]
+fn add_to_an_agent_with_a_delivery_mode() {
+    let env = CronEnv::new("agent-delivery");
+    env.cron(&[
+        "add",
+        "--every",
+        "600",
+        "--prompt",
+        "check the build",
+        "--agent",
+        "worker",
+        "--delivery",
+        "steer",
+    ])
+    .expect("created")
+    .unwrap();
+    let json = env.crons_json();
+    assert!(json.contains("\"type\": \"agent\""), "{json}");
+    assert!(json.contains("\"name\": \"worker\""), "{json}");
+    assert!(json.contains("\"delivery\": \"steer\""), "{json}");
+    assert!(json.contains("\"created_by\": \"user\""), "{json}");
+
+    let mut s = env.cron(&[
+        "add",
+        "--every",
+        "600",
+        "--prompt",
+        "x",
+        "--delivery",
+        "now",
+    ]);
+    s.expect("--delivery must be queue or steer").unwrap();
+    drop(s);
+    assert_eq!(
+        env.crons_json().matches("\"cron_id\"").count(),
+        1,
+        "bad flag must not persist"
+    );
 }
 
 #[test]
@@ -352,7 +393,7 @@ fn repl_cron_slash_add_and_list() {
     s.send("/cron add --every 3600 --prompt \"repl scheduled task\" --name viaslash\r")
         .expect("send /cron add");
     s.expect("created").expect("cron created via /cron");
-    s.expect("❯").expect("prompt after add");
+    common::expect_input_line_cleared(&s, common::DEFAULT_TIMEOUT, "prompt after add");
     s.send("/exit\r").expect("send /exit");
     drop(s);
     // The store proves the full slash path end-to-end: parse+dispatch reached
@@ -370,7 +411,7 @@ fn repl_cron_slash_add_and_list() {
     assert!(json.contains("\"kind\": \"every\""), "kind parsed: {json}");
 }
 
-/// A host that owns scheduling (sudowork) sets SUDOCODE_DISABLE_CRON_TOOLS so
+/// A host that owns scheduling (sudowork) sets `SUDOCODE_DISABLE_CRON_TOOLS` so
 /// the agent can't "schedule" a task that would persist but never fire — an
 /// orphan. Contrast proves the gate is load-bearing: same prompt, tool absent
 /// vs present.

@@ -203,13 +203,3 @@ impl ChildImp {
 		}
 	}
 }
-
-pub trait UnixChildExt {
-	fn signal(&self, sig: Signal) -> Result<()>;
-}
-
-impl UnixChildExt for ChildImp {
-	fn signal(&self, sig: Signal) -> Result<()> {
-		self.signal_imp(sig)
-	}
-}

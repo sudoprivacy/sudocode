@@ -5,9 +5,11 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use codex_mermaid::{RenderError, Role};
-use crossterm::style::Stylize;
 
-use super::{CodeBlockKind, ColorTheme, Event, Options, Parser, Tag, TagEnd};
+use super::{
+    styled_text::StyledText, CodeBlockKind, ColorSupport, ColorTheme, Event, Options, Parser, Tag,
+    TagEnd, TextRole,
+};
 
 pub(super) fn is_mermaid(info: &str) -> bool {
     info.split([',', ' ', '\t']).next() == Some("mermaid")
@@ -82,18 +84,20 @@ pub(super) fn stream_boundary(source: &str, boundary: Option<usize>) -> Option<u
 pub(super) fn render(
     source: &str,
     width: usize,
-    theme: &ColorTheme,
-) -> Result<String, RenderError> {
-    let mut output = String::new();
+    theme: ColorTheme,
+    support: ColorSupport,
+) -> Result<StyledText, RenderError> {
+    let mut output = StyledText::default();
     for line in codex_mermaid::render_spans(source, width)? {
         for span in line {
-            match span.role {
-                Role::Node => output.push_str(&span.text.with(theme.primary).to_string()),
-                Role::Edge => output.push_str(&span.text.with(theme.border).to_string()),
-                Role::Text => output.push_str(&span.text),
-            }
+            let role = match span.role {
+                Role::Node => TextRole::DiagramNode,
+                Role::Edge => TextRole::DiagramEdge,
+                Role::Text => TextRole::Body,
+            };
+            output.push(theme.style_for(role, support), &span.text);
         }
-        output.push('\n');
+        output.plain("\n");
     }
     Ok(output)
 }

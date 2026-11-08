@@ -1,7 +1,8 @@
 # Agent Communication Protocol
 
-`scode` speaks the **Agent Communication Protocol (ACP)** natively, in two
-transports that share a single handler chain.
+`scode acp` starts an **Agent Client Protocol (ACP) server**. Editors,
+Sudowork, and other frontends act as its clients. The stdio and WebSocket
+transports use the same request handler and agent engine.
 
 ## TypeScript client and MCP bridge
 
@@ -28,6 +29,69 @@ scode acp serve --port 8080
 
 Both transports share streaming, tool use, elicitation, and permission
 prompting.
+
+### Server composition
+
+```mermaid
+flowchart TB
+    Client["ACP client: editor or Sudowork"] --> Transport
+    subgraph Server["One scode ACP server process"]
+        Transport["stdio or WebSocket adapter"] --> Handler["Shared ACP request handler"]
+        Handler --> Engine["engine-core → SessionEngine"]
+    end
+```
+
+The adapter calls the handler directly in Rust; there is no additional socket
+or server between them. Pipes and WebSockets connect the external client to
+this server.
+
+Nexus cohost reuses the same handler over its managed ACP transport
+(`SessionMailbox`), inside the Nexus process. This transport uses Nexus A2A
+conversation records for protocol messages; those frames are distinct from peer
+text delivered to the model. Cohost prepares a hosted engine rather than
+launching `scode acp` inside itself. Transport adapters own their shutdown rules:
+stdin EOF ends a standalone stdio server process; closing a cohost mailbox ends
+that managed session.
+
+The native `scode` terminal UI consumes `engine-core` commands and events
+directly. It shares the engine with ACP without sending terminal input through
+an ACP client/server round trip.
+
+### Managed hosting
+
+Nexus `ManagedAgentService` supports two placements through the same managed
+session endpoint:
+
+| Placement | Start request | ACP connection |
+| --- | --- | --- |
+| Engine inside `nexusd-cohost` | `managed_agent.start_session_v1` without `spawn_spec` | The shared handler reads the managed session transport directly. |
+| Independent scode process | The same method with `spawn_spec.cmd` naming scode and `spawn_spec.args` including `acp` | The service bridges the child's private ACP stdio to the same managed session transport. |
+
+The controller uses the returned `session_endpoint` for ACP initialization,
+session creation/loading, prompts, notifications and turn cancellation. The
+child's stdio belongs to that protocol; it is not a terminal stream. An ACP
+frontend connects through its Nexus transport adapter and provides its own UI,
+so this placement needs no PTY, terminal forwarding or scrollback replay service.
+
+Keep process and conversation identities separate:
+
+- The managed response's `session_id` is the handle for
+  `managed_agent.get_session_v1` and `managed_agent.cancel_v1`.
+  `os_pid`, when supplied, identifies the actual child process.
+- ACP `sessionId` identifies the engine conversation. Cancel a turn with the
+  `session/cancel` notification; this leaves the process available for further
+  requests. Ending the managed session terminates its host and retires the
+  management handle. Retain the ACP conversation ID separately for recovery.
+- Independent scode recovery uses ACP `session/load` with the saved conversation
+  ID and its available session store. It restores model context without replaying
+  earlier chat updates to the client. The current Nexus subprocess contract
+  does not accept the cohost-only `start_session_v1.resume_session_id` field.
+
+`spawn_spec.env` replaces the child's environment. The caller supplies its
+required executable search path, home, scode configuration root and provider
+configuration; it must not assume the daemon's environment is inherited.
+This placement retains standalone scode's host filesystem and provider setup;
+it does not implicitly adopt the cohost's kernel filesystem or model mount.
 
 ## Use cases
 
@@ -64,6 +128,15 @@ session and independent across sessions:
   on hook workers, so sessions in different directories can run concurrently.
   Setup and legacy slash operations that use the process working directory
   acquire a directory lease while they run.
+
+Managed cohost activity comes from the shared engine event stream, including
+direct A2A calls and management turns. Nexus reports `ready` when no foreground
+operation is in flight, `busy` while one is executing, and `awaiting_input` with
+reason `permission` or `question` while a prompt owns input. Waiting for input
+does not imply that independent tools have stopped. Likewise, `ready` does not
+imply that the session's background tasks have finished; their shared task
+registry owns that lifecycle. These states follow operation and prompt events,
+not output silence or spinner timing.
 
 ### Session-owned input delivery
 
@@ -182,7 +255,10 @@ python crates/rusty-sudocode-cli/tests/live/tool_pause.py --evidence /tmp/pause-
 `_scode/ask_user_question` keeps `description` as a string and supplies optional
 `descriptionFormat` (`"plain"` or `"markdown"`) when a description is present.
 Clients can render model questions and plan reviews as Markdown while keeping
-configuration and permission text literal.
+configuration and permission text literal. The engine resolves question defaults
+before sending this request; clients consume each field's `allowCustomInput`.
+The model input contract and terminal behavior are described in
+[interactive question behavior](usage.md#interactive-repl).
 
 Plan approval runs through this same question exchange even when the engine
 has no terminal. Selecting “Clear context & execute” continues inside the
@@ -213,9 +289,28 @@ The `Live Bash process tree` CI job runs this workflow on Linux and Windows for
 main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
 
 Incoming peer `user_message_chunk` notifications carry
-`_meta.sudocode.a2a` with `from`, `kind`, and the optional sender-supplied
-`summary`. The full summary also accompanies the body in the persisted model
+`_meta.sudocode.a2a` with `from`, `kind`, `verified`, and the optional
+sender-supplied `summary`. `verified` is true only when the session's mailbox
+authenticates every writer: a node session's certificate-only mTLS connection,
+or a co-host whose daemon arms the stamping hook. A same-machine pair root does
+not, so its `from` is self-reported. The model input marks verified senders
+with `verified="true"` on the `<mailbox-message>` block; a sender cannot set it. The full summary also accompanies the body in the persisted model
 input. Clients can use this metadata for their own message presentation.
+
+### Client-owned peer input (`clientCapabilities._meta.sudocode.peerInput`)
+
+A client that is itself the agent its peers address declares
+`clientCapabilities._meta.sudocode.peerInput = { "version": 1 }`; scode echoes
+it in `initialize.result._meta.sudocode.peerInput`. A peer message for one of
+its sessions then arrives as the extension notification
+`_sudocode/session/peer_message` with `{ "sessionId", "text", "body",
+"sudocode": { "a2a": { "from", "kind", "verified", "summary"? } } }`, where `text` is the
+same `<mailbox-message>` wrapper a session model reads. It starts no turn of
+the scode session, so one message has one respondent. The mailbox cursor
+advances once the notification is written to the transport; a closed client
+leaves the message unread for the next delivery. A client that needs this mode
+refuses a scode that does not echo it, because that scode would also answer
+the peer itself. Managed (hosted) sessions do not offer it.
 
 ### Direct A2A requests
 
@@ -318,6 +413,43 @@ hook withholds a reply while the node already holds the message. Their model
 endpoint refuses every inference request and must record zero calls. This is
 not a cross-host idle callback or production deployment acceptance.
 
+### Runtime status (extension v1)
+
+`initialize.result._meta.sudocode.runtimeStatus.version = 1`
+advertises `_sudocode/session/status`. Send `{ "sessionId": "..." }` for a
+session on this ACP connection. The response contains:
+
+```json
+{
+  "foreground": { "state": "awaiting_input", "waiting_for": "question" },
+  "background": {
+    "terminals": 0,
+    "agents": 0,
+    "execution_unconfirmed": 0,
+    "tool_operations": 1
+  }
+}
+```
+
+Foreground states are `idle`, `running`, and `awaiting_input`. `waiting_for` is
+present only for `awaiting_input`, with `permission` or `question`. The snapshot
+comes from the engine's lifecycle events. It remains queryable during a model
+request, direct tool call, or unanswered input request and starts no model turn.
+Cancellation releases input ownership immediately; foreground work may remain
+`running` while the cancelled turn or its tools finish stopping.
+Background counts come from the session task registry without copying outputs
+or changing task subscriptions. Terminal and Agent counts include only
+background-marked running/stopping tasks. `execution_unconfirmed` counts those
+background records separately; `tool_operations` counts actual worker leases,
+including workers whose caller has already been cancelled.
+
+This describes the selected engine, not a global online/offline decision.
+Several engines may share a SID. The runtime host must retain its instance
+identity and authorization when routing this request. A missing session is an
+error. Disconnects or unsupported hosts do not establish that an Agent is
+offline. Counts and foreground state are observations of independently moving
+work, not a grant of human control; use the pause/fence protocol for takeover.
+
 ### Closing a peer session
 
 When the last session for an agent closes, the server stops and joins that
@@ -327,6 +459,79 @@ waits for a retiring worker rather than treating its stop signal as completed
 cleanup. The join includes the worker's lock-release attempts; a failed remote
 unlock can still require backend TTL recovery. This changes no lease, cursor,
 delivery acknowledgement or retry policy.
+
+### Execution-time host context
+
+`initialize` advertises `_meta.sudocode.hostContext = {"version":1}`. A trusted
+controller can require it for one session by supplying the same `hostContext`
+object in `session/new` or `session/load`. Absent means the existing fixed prompt
+behavior. Unsupported versions and malformed values are rejected.
+
+Before each actual model turn, including automatically resumed queued inputs,
+the engine emits a request over its existing command/event boundary. ACP maps it
+to `_sudocode/session/host_context` with `{"sessionId":"..."}`. The controller
+returns `{"appendSystemPrompt":"exact current context"}`. The controller owns
+source selection and authorization; the model cannot select a provider or grant
+access through this request. This interface performs no model summarization.
+
+The response field retains its v1 name for compatibility. With this capability,
+the initial caller append on `session/new` or `session/load` is superseded before
+model work. The resolved snapshot is then a native harness record at the current
+conversation tail. It does not replace the fixed provider system prompt or
+rewrite earlier messages, so a changed revision preserves the reusable request
+prefix. Ordinary caller appends without this capability keep their existing
+semantics. The session, model, memory mode and execution policy are preserved.
+Byte-identical snapshots do not append duplicates or rebuild the runtime. The
+latest exact snapshot survives compaction without pinning the old prefix or
+relying on an LLM summary to preserve it. A failed, disconnected, malformed, empty or timed
+out response fails the turn before model work; it never falls back to a stale
+append. The provider has a 30-second response budget and cancellation releases
+its pending request. Slash and shell management commands do not call the provider.
+Host context uses the same request ID allocator, cancellation lock and request
+lease as permissions and questions. It stays queryable as foreground `running`
+while waiting for the machine response; only human prompts claim `awaiting_input`.
+An answer for a cancelled request cannot satisfy a later turn's request.
+The question bridge is installed after context and image preparation, so runtime
+rebuilding preserves interactive questions and their human-input status.
+CLI and managed cohost sessions use this same execution boundary. A managed
+runtime opens once through its controller; restoration uses
+`managed_agent.start_session_v1` with its durable session ID. Context refresh does
+not require reopening the runtime.
+The cohost mailbox acceptance enables the provider when opening a fresh managed
+instance, resolves two different contexts, answers a question after each refresh,
+and checks both Nexus process state and ACP status against captured model requests.
+Context stays fixed during a turn, including in-turn steering. The following
+turn resolves anew. The provider mode is transport state, so controllers must
+negotiate it again when restoring a session.
+
+Provider cache checkpoint metadata can move as the conversation grows. The
+process regression compares the unchanged system prompt, message roles and all
+content fields, excluding only content-block `cache_control` markers. That
+establishes preserved model input, not a live cache hit; provider usage and the
+native cache ledger remain the evidence for actual reuse and cost.
+
+The live `acp_live_smoke` case
+`live_host_context_survives_revision_compaction_and_resume` exercises the actual
+CLI and provider with isolated project facts: revision A, revision B, unchanged
+B, explicit model compaction, B after compaction, and revision C after resume.
+It checks exact model answers and the persisted snapshot, and removes its
+temporary credentials and history. This is engine acceptance; the controller
+must separately verify authorization and bindings against a real project.
+
+The shared native release profile also drives the actual CLI with a pinned Sudograph
+compiler installed in a dedicated Python environment. Two turns around a model
+edit must receive the exact compiled context for their respective revisions;
+the graph must expose the same new revision. Captured provider requests must
+retain the exact current snapshot at the conversation tail and preserve both
+the system and earlier history prefixes. A synthetic host denial must prevent
+another model request. The loopback provider returns
+fixed responses: this checks the compiler/engine contract, not model reasoning,
+production host authorization or Sudowork's UI. Evidence retains the executable
+checksum, compiler identity, revisions, request bodies and ACP diagnostics.
+`e2e/compiler-context/source.json` owns the compiler revision for both local and
+complementary native CI acceptance. `e2e/compiler-context/run.py` runs the same
+check locally with engine and evidence-directory arguments; an optional existing
+source checkout must match that clean pinned revision. It does not rebuild Rust.
 
 ### Per-session system prompt (`_meta.sudocode.*`)
 
@@ -834,6 +1039,15 @@ from version/session/tool/agent; payload freezes before the first send. Publicat
 is the deduplication cutoff: a later explicit read cannot retract an in-flight
 receipt. This does not promise exactly-once model execution.
 
+`completed` means the child turn ended; it does not guarantee a final answer.
+If a provider ends after tool use without final text, the notification explicitly
+says no final assistant response was produced and references the saved child
+transcript when available. `pid_output` keeps `result` absent, reports
+`result_status: "empty"`, and exposes `session_file` only after a successful
+save. Tool output and earlier progress text are never relabeled as a final
+answer. Normal results report `result_status: "available"`; unfinished retrieval
+reports `"pending"`.
+
 The controller replies only after committing its durable receipt:
 `{"completionId":"…","disposition":"stored"}`. A previously verified binding
 whose session has been deleted may instead reply
@@ -853,7 +1067,16 @@ report `completion_journal_capacity` rather than silently dropping work.
 transcript and registered child manifests. It does **not** load engines, MCP or
 plugins, restart children, scan unrelated cwd results, or run a model. It binds
 pending deliveries and returns `{watermark,waiting,pending,unresolved,settled,
-blocked,contextRef}`. Missing terminal evidence is `execution_unconfirmed`;
+blocked,contextRef,unsettledByTrace}`. `unsettledByTrace` maps each registered
+origin trace to whether it still owns unsettled, unsuppressed background delivery,
+including blocked sources. Verified synchronous or fully settled traces map to `false`. A blocked source
+without background-handoff evidence (including an older failed journal) remains
+unknown. An absent key never proves settlement. It is an additive
+field, absent on older agents. Controllers combine it with their own pending
+receipts and continuation state; ACK means stored, not continuation finished.
+Auto-background handoff remains recorded if the parent fails: a later human
+turn cannot erase the child's unsettled ownership or authorize its publication.
+Missing terminal evidence is `execution_unconfirmed`;
 uncommitted parent evidence is `source_context_unconfirmed`. After an interrupted
 parent, a new explicit human turn may proceed, but cannot retroactively publish
 that parent's unproven completions.
@@ -902,6 +1125,10 @@ The durable terminal snapshot keeps a UTF-8 output tail of at most 24 KiB. The
 entire encoded terminal completion is bounded to 64 KiB, including XML escaping,
 JSON escaping, identity and metadata. Rendering truncates only output text and
 sets `outputTruncated`; frozen payloads and IDs are stable on retry.
+The model-facing message includes a `<terminal>` element with XML-escaped JSON
+of that same terminal metadata (`shell`, `scope`, nullable `exitCode`/`signal`,
+`termination`, `outputTruncated`), separate from `<result>` output. Any additional
+notification truncation updates both copies of `outputTruncated` before freezing.
 
 All control operations require the original absolute `cwd` and `sessionId`.
 `_sudocode/task/replay {sessionId,cwd}` without `storageRef` is a read-only binding

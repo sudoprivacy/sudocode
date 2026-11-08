@@ -1,0 +1,49 @@
+name: Publish local acceptance
+run-name: Local acceptance publish ${{ github.event.workflow_run.head_sha || inputs.head }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Exact open PR number whose author acceptance just completed
+        required: true
+        type: string
+      head:
+        description: Frozen PR source SHA; does not select executable code
+        required: true
+        type: string
+  workflow_run:
+    workflows: [Local and cross-platform acceptance]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  publish:
+    name: Publish verified local and cross-platform acceptance
+    if: github.event_name == 'workflow_dispatch' || ((github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group') && github.event.workflow_run.conclusion != 'skipped')
+    # Keep this read-only verification/publication off the busy Linux pool.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # Privileged publication uses default-branch code, never candidate code.
+      # The candidate's workflow cannot approve its own changed gate/runner.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Independently verify the head, signature, policy and completed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/local-acceptance/publish.py

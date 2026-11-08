@@ -2,7 +2,7 @@
 //!
 //! Provides transport-agnostic send/receive for inter-agent messaging.
 //! The `FsBackend` determines framing:
-//! - DT_STREAM backends (kernel, nexus-vfs): each `append` is one framed
+//! - `DT_STREAM` backends (kernel, nexus-vfs): each `append` is one framed
 //!   write, each `tail_read` returns one frame.
 //! - File backends (StdFs): JSONL — newline-delimited JSON per `append`,
 //!   `tail_read` returns raw bytes split by newline on read.
@@ -40,12 +40,6 @@ pub use a2a::is_conversation_transcript_path;
 /// mean. So this constant belongs to scode and lives with the convention that
 /// uses it.
 pub const A2A_INBOX_BASE: &str = "/agents";
-
-/// Directory a local JSONL inbox lives under, relative to the workspace root.
-///
-/// Owned by [`crate::agent_mailbox`] — it builds every path under this — and
-/// re-exported here so the convention reads as one thing in one place.
-pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
 
 /// The shared root under which same-machine standalone `scode` processes keep
 /// their mailboxes, so two started in different folders can address each other.
@@ -92,10 +86,10 @@ pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Pa
     if full.is_empty() {
         return basename;
     }
-    let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
+    let mut hash: u64 = 1_469_598_103_934_665_603; // FNV-1a offset basis
     for byte in full.as_bytes() {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
     }
     format!("{basename}-{:06x}", hash & 0xff_ffff)
 }
@@ -133,7 +127,7 @@ fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
 ///   its parent scode and different scodes do not cross-talk.
 ///
 /// Framing is the backend's concern, not the path's: `StdFsBackend` writes
-/// newline-delimited JSON at these paths, a DT_STREAM backend writes frames.
+/// newline-delimited JSON at these paths, a `DT_STREAM` backend writes frames.
 ///
 /// This used to be an enum whose second variant, `SharedStream`, described the
 /// co-host's single stream that both parties read and write while filtering
@@ -197,7 +191,7 @@ impl InboxConvention {
         ))
     }
 
-    /// `agent`'s chat-list entry for its conversation with `peer` — the DT_LINK
+    /// `agent`'s chat-list entry for its conversation with `peer` — the `DT_LINK`
     /// that makes `readdir` on the agent's presence list its conversations.
     ///
     /// The leaf is the PEER's name, not the cid: a BLAKE3 digest is one-way, so
@@ -238,6 +232,21 @@ pub(crate) enum MailboxBackend {
     Resolving(Arc<BackendResolver>),
 }
 
+/// The whole time an append-error check may take, its waits included.
+const RECONCILE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+/// The longest single wait for a late commit within that deadline.
+const RECONCILE_WAIT_MS: u64 = 1_000;
+/// How much of the conversation an append-error check may read.
+const RECONCILE_MAX_BYTES: usize = 8 << 20;
+
+/// The envelopes in one `tail_read` chunk: a single frame, or JSONL lines.
+fn envelopes_in(data: &[u8]) -> Vec<MailboxEnvelope> {
+    MailboxEnvelope::from_bytes(data).map_or_else(
+        || crate::agent_mailbox::parse_envelope_lines(data),
+        |envelope| vec![envelope],
+    )
+}
+
 impl MailboxBackend {
     #[inline]
     pub(crate) fn resolve(&self) -> Result<Arc<dyn FsBackend>, String> {
@@ -252,7 +261,7 @@ impl MailboxBackend {
 ///
 /// Wraps an [`FsBackend`] + path convention, providing send/receive that
 /// works identically whether the underlying transport is a local JSONL
-/// file or a nexus DT_STREAM.
+/// file or a nexus `DT_STREAM`.
 pub struct Mailbox {
     backend: MailboxBackend,
     self_id: String,
@@ -266,15 +275,10 @@ pub struct Mailbox {
     /// identity nothing deletes, whereas `is_append_stream` changes its answer
     /// the moment a stream is created.
     provisioned: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// How many envelopes this mailbox has sent.
-    ///
-    /// Not a metric for its own sake: the co-host loop needs it to tell "the agent
-    /// answered its peer" from "the agent answered into the void". Silence is a legal
-    /// reply there — the loop deliberately does not forward a turn's text, or two
-    /// agents bounce output at each other forever — so a turn that PRODUCED text and
-    /// sent nothing is the one shape worth reporting, and this counter is what makes
-    /// that detectable from outside a turn.
-    sends: std::sync::atomic::AtomicU64,
+    /// Whether every writer this mailbox reads was authenticated by its
+    /// transport, so a frame's `from` is the writer's identity rather than its
+    /// claim. Set by the constructor that knows: never by a sender.
+    authenticated_senders: bool,
 }
 
 impl Mailbox {
@@ -289,15 +293,26 @@ impl Mailbox {
             self_id,
             convention,
             provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
-            sends: std::sync::atomic::AtomicU64::new(0),
+            authenticated_senders: false,
         }
     }
 
-    /// Envelopes sent through this mailbox so far. See the field's docstring for the
-    /// one caller that needs it.
+    /// Declare that the transport behind this mailbox authenticates every
+    /// writer, so each frame's `from` is the writer's identity. Only the host
+    /// that built the transport knows this: a node's certificate-only mTLS
+    /// connection, or a co-host whose daemon arms the stamping hook.
     #[must_use]
-    pub fn sends_so_far(&self) -> u64 {
-        self.sends.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn with_authenticated_senders(mut self, authenticated: bool) -> Self {
+        self.authenticated_senders = authenticated;
+        self
+    }
+
+    /// Whether a message read here has a verified sender (see
+    /// [`Self::with_authenticated_senders`]).
+    #[must_use]
+    #[inline]
+    pub fn authenticates_senders(&self) -> bool {
+        self.authenticated_senders
     }
 
     /// A mailbox addressing the daemon's own path space: `self_id`'s
@@ -405,7 +420,7 @@ impl Mailbox {
         Ok(())
     }
 
-    /// Whether the backend frames appends at `path` itself (a DT_STREAM record
+    /// Whether the backend frames appends at `path` itself (a `DT_STREAM` record
     /// per append) rather than leaving framing to us (a JSONL line per append).
     ///
     /// Classification comes from the backend's current entry type. Errors
@@ -467,6 +482,9 @@ impl Mailbox {
             agent.into(),
             InboxConvention::new(String::new()),
         )
+        // The certificate is the credential: the daemon authenticated every
+        // writer and its stamping hook wrote each `from`.
+        .with_authenticated_senders(true)
     }
 
     #[must_use]
@@ -668,15 +686,15 @@ impl Mailbox {
     /// identity, so it cannot be forged; under auth-off it is used as-is.
     /// Nothing above this layer should treat it as proof of origin.
     ///
-    /// A DT_STREAM backend frames the append itself, so the envelope goes
+    /// A `DT_STREAM` backend frames the append itself, so the envelope goes
     /// through the backend. JSONL has no framing of its own — a message is a
     /// line — and that branch goes through
-    /// [`crate::agent_mailbox::append_envelope`], which is the one writer of
-    /// this format.
+    /// [`crate::agent_mailbox::append_envelope_via`], which is the one writer
+    /// of this format.
     ///
     /// It used to be two: this method built the line itself (timestamp,
     /// recipient, serialize, newline, create the directory) while
-    /// `coordinator_notification` called `append_envelope`, so the same format
+    /// `coordinator_notification` called a separate appender, so the same format
     /// had two implementations that could drift apart. One of them also holds a
     /// write lock the other did not — `write_all` may in principle issue
     /// several `write` calls for one buffer, and the reader skips a line it
@@ -687,14 +705,8 @@ impl Mailbox {
     /// load-bearing; the reason for going through one writer is that the format
     /// has one definition.
     pub fn send(&self, mut envelope: MailboxEnvelope) -> Result<(), String> {
-        // Counted on ENTRY, not on success: the question this answers is "did the
-        // agent try to answer its peer", and a send that failed is still an agent
-        // that meant to speak. Counting only successes would report a delivery
-        // failure as the model's silence.
-        self.sends
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if envelope.from.is_empty() {
-            envelope.from = self.self_id.clone();
+            envelope.from.clone_from(&self.self_id);
         }
         // Stamp here, above the convention split, because a receiver needs it on
         // BOTH paths and only the JSONL branch used to provide it: the framed
@@ -705,9 +717,14 @@ impl Mailbox {
         // send time is what distinguishes "these same bytes again" from "my peer
         // said that a second time". Guarded on 0 so a caller that supplies its
         // own time (a relay preserving the original) keeps it, which is also why
-        // `append_envelope_to_path`'s identical guard stays a no-op after this.
+        // `append_envelope_via`'s identical guard stays a no-op after this.
         if envelope.timestamp == 0 {
             envelope.timestamp = crate::agent_mailbox::now_secs();
+        }
+        // This logical send's identity (see `MailboxEnvelope::send_id`),
+        // guarded like the timestamp so a retransmission keeps it.
+        if envelope.send_id.is_none() {
+            envelope.send_id = Some(uuid::Uuid::new_v4().to_string());
         }
         let path = self.transcript_path(&envelope.to);
 
@@ -718,11 +735,20 @@ impl Mailbox {
         self.ensure_provisioned(&envelope.to)?;
 
         if self.backend_frames(&path)? {
-            return self
-                .backend
-                .resolve()?
-                .append(&path, &envelope.to_bytes())
-                .map_err(|e| format!("mailbox send to {path}: {e}"));
+            let backend = self.backend.resolve()?;
+            let bytes = envelope.to_bytes();
+            return match backend.append(&path, &bytes) {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+                    ) =>
+                {
+                    Err(format!("mailbox send to {path}: {error}"))
+                }
+                Err(error) => self.reconcile_append(backend.as_ref(), &path, &envelope, &error),
+            };
         }
 
         // Non-framed transcript: a message is one JSONL line at the
@@ -742,6 +768,79 @@ impl Mailbox {
         crate::agent_mailbox::append_envelope_via(self.backend.resolve()?.as_ref(), &path, envelope)
     }
 
+    /// Settle an append that returned an error but may have committed.
+    ///
+    /// A replicated append that times out can still commit after the error,
+    /// and a sender told "failed" resends, so its peer gets the message
+    /// twice. Only this send's identity proves that it landed: two sends of
+    /// the same words in the same second are byte-identical, so matching bytes
+    /// would report a send that wrote nothing as delivered. The check reads
+    /// the conversation from this agent's read position under one deadline
+    /// and one byte budget. Not finding the message proves nothing (the commit
+    /// may still land), so every way the check can end without finding it
+    /// says the outcome is unconfirmed, never that nothing was sent.
+    fn reconcile_append(
+        &self,
+        backend: &dyn FsBackend,
+        path: &str,
+        sent: &MailboxEnvelope,
+        error: &std::io::Error,
+    ) -> Result<(), String> {
+        // `send` set it; an unset one matches nothing and ends unconfirmed.
+        let send_id = sent.send_id.as_deref().unwrap_or_default();
+        let unconfirmed = |why: &str| {
+            Err(format!(
+                "delivery unconfirmed: append to {path} failed ({error}); {why}, but a timed-out \
+                 append can still commit, so check the conversation before resending"
+            ))
+        };
+        let deadline = std::time::Instant::now() + RECONCILE_DEADLINE;
+        let mut cursor = self.read_position(&sent.to).ok().flatten().unwrap_or(0);
+        let mut scanned = 0usize;
+        let mut wait_ms = 0;
+        loop {
+            let (data, next, eof) = match backend.tail_read(path, cursor, wait_ms) {
+                Ok(read) => read,
+                Err(read_error) => {
+                    return Err(format!(
+                        "delivery unknown: append to {path} failed ({error}) and the \
+                         conversation could not be read to check ({read_error})"
+                    ));
+                }
+            };
+            scanned += data.len();
+            if envelopes_in(&data)
+                .iter()
+                .any(|env| env.send_id.as_deref() == Some(send_id) && env.from == sent.from)
+            {
+                tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
+                return Ok(());
+            }
+            let advanced = next > cursor;
+            if advanced {
+                cursor = next;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return unconfirmed("the message was not in the conversation when checked");
+            }
+            if scanned >= RECONCILE_MAX_BYTES {
+                return unconfirmed(
+                    "the check stopped at its size limit before finding the message",
+                );
+            }
+            // Drain what is there without waiting; once caught up, wait for a
+            // late commit until the deadline.
+            wait_ms = if eof || !advanced {
+                u64::try_from(left.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(RECONCILE_WAIT_MS)
+            } else {
+                0
+            };
+        }
+    }
+
     /// Read new messages from own inbox starting at `cursor`.
     ///
     /// Returns `(messages, next_cursor)`. The caller persists `next_cursor`
@@ -752,7 +851,7 @@ impl Mailbox {
     ///
     /// ## Why a blocking read rather than a watch
     ///
-    /// On a DT_STREAM backend the server parks up to `block_ms` on the
+    /// On a `DT_STREAM` backend the server parks up to `block_ms` on the
     /// stream's per-path condvar and wakes sub-millisecond on the next write —
     /// node-local or a peer's replicated append — so an idle receiver costs one
     /// parked RPC instead of a `sleep` loop.
@@ -784,6 +883,17 @@ impl Mailbox {
         Ok((messages, next))
     }
 
+    /// Whether `env` is for this reader rather than an echo of its own write.
+    ///
+    /// Our own writes are skipped so a conversation never echoes back to us.
+    /// The one exception is a scheduled message addressed to us: a job an agent
+    /// schedules for itself is written under its own name into its
+    /// conversation with itself, and must still arrive.
+    fn is_delivery(&self, env: &MailboxEnvelope) -> bool {
+        env.from != self.self_id
+            || (env.kind == crate::agent_mailbox::kinds::SCHEDULED && env.to == self.self_id)
+    }
+
     /// Drain backend-owned chunks without a separate type lookup. A chunk is
     /// either a complete envelope frame or a batch of JSONL envelope records.
     fn poll_tail(
@@ -804,12 +914,8 @@ impl Mailbox {
             if eof {
                 break;
             }
-            let envelopes = MailboxEnvelope::from_bytes(&data).map_or_else(
-                || crate::agent_mailbox::parse_envelope_lines(&data),
-                |envelope| vec![envelope],
-            );
-            for env in envelopes {
-                if !env.from.is_empty() && env.from != self.self_id && !env.body.is_empty() {
+            for env in envelopes_in(&data) {
+                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
                     out.push(env);
                 }
             }
@@ -928,6 +1034,7 @@ impl Mailbox {
         let mb = Arc::clone(self);
         Arc::new(move |to: &str, body: &str| {
             let env = MailboxEnvelope {
+                send_id: None,
                 delivery: crate::turn_input::InputDelivery::Steer,
                 from: mb.self_id.clone(),
                 to: to.to_string(),
@@ -950,16 +1057,10 @@ impl Mailbox {
 /// overwrite a newer holder's position.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderRegister {
-    /// The instance tailing this conversation for this agent, empty if the seat
-    /// is free. Deliberately NOT the agent name: two instances of the SAME
-    /// agent are exactly what this has to tell apart.
+    /// Identity of the claim that committed this record. The backend lock
+    /// controls current runtime ownership; this value identifies durable writes.
     #[serde(default)]
-    /// The claim that failed to advance, empty when no reader was held (see
-    /// [`DeliveryStall::ClaimFailed`]).
     pub holder: String,
-    /// Legacy diagnostic deadline; the backend lock controls ownership.
-    #[serde(default)]
-    pub lease_expires_at: u64,
     /// Offset past the last envelope this agent has taken responsibility for.
     #[serde(default)]
     pub read_offset: u64,
@@ -1040,21 +1141,9 @@ fn sleep_unless_aborted(abort: &crate::HookAbortSignal, ms: u64) {
     }
 }
 
-/// A process-and-machine-unique id for one receiver instance.
-///
-/// Uniqueness is the whole requirement: two instances of the same agent must
-/// never mint the same holder, or each reads the other's claim as its own and
-/// both tail the conversation. A pid repeats across machines and a counter
-/// repeats across processes, so both are mixed with a nanosecond clock read.
-/// The clock is entropy here and nothing else — the lease compares deadlines,
-/// never these.
-fn instance_id() -> String {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}-{nanos}-{seq}", std::process::id())
+/// A fresh claim identity, independent of clocks, devices and OS PID reuse.
+fn claim_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// A durable cursor guarded by the backend's atomic exclusive lock.
@@ -1081,12 +1170,8 @@ impl ConversationReader {
         else {
             return Ok(None);
         };
-        let Some((cursor, offset)) = crate::cursor_fence::RegisterCursor::claim(
-            backend,
-            self.path,
-            self.holder,
-            now_ms() + READER_LEASE_MS,
-        )?
+        let Some((cursor, offset)) =
+            crate::cursor_fence::RegisterCursor::claim(backend, self.path, self.holder)?
         else {
             return Ok(None);
         };
@@ -1430,7 +1515,7 @@ impl OwnedReader {
         // The lease held. A write that fails now is the register's failure,
         // even if the lease is lost while it is in flight.
         self.cursor
-            .commit(offset, now_ms() + READER_LEASE_MS)
+            .commit(offset)
             .map_err(|message| CommitRefusal {
                 loss: None,
                 message,
@@ -1500,7 +1585,7 @@ impl Mailbox {
                 .convention
                 .reader_path(&self.self_id, peer, &self.self_id),
             backend: self.backend.clone(),
-            holder: instance_id(),
+            holder: claim_id(),
             agent: self.self_id.clone(),
         }
     }
@@ -1562,9 +1647,8 @@ pub struct PeerStatus {
     /// `"receiving"`, `"standby"`, `"unavailable"`, or `"none"` when this
     /// process runs no receiver for the agent.
     pub receiver: &'static str,
-    /// When a received message runs: `"automatic"` as soon as the session is
-    /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
-    /// user hands the prompt back.
+    /// When a received message runs: `"automatic"`, as soon as the session is
+    /// idle, on every host.
     pub delivery: &'static str,
     /// What keeps a resumed holder from moving a read position back:
     /// `"fenced"`, `"fenced_cas"` or `"at_least_once"` (see
@@ -1576,6 +1660,59 @@ pub struct PeerStatus {
     /// Most recent background receiver failure in this process. Historical:
     /// receiving can recover while this diagnostic remains inspectable.
     pub last_receiver_error: Option<String>,
+    /// Whether receiving works now, unlike the historical error above.
+    pub health: ReceiverHealth,
+}
+
+/// The current condition of an agent's receivers, read from the same
+/// [`telemetry::RetryDiagnostics`] that observes their failures.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReceiverHealth {
+    /// `"fail"` when the node binding cannot be used, `"warn"` when an outage
+    /// has outlasted the grace period, otherwise `"ok"`. A shorter outage is
+    /// reported below but stays `"ok"`: most recover on the next retry.
+    pub level: &'static str,
+    /// Whole seconds since the unrecovered outage began.
+    pub outage_secs: Option<u64>,
+    /// Each scope still failing, with its latest detail.
+    pub failing: Vec<(String, String)>,
+}
+
+/// How long an outage may last before it is reported as `"warn"`.
+fn degraded_grace() -> std::time::Duration {
+    std::env::var("SUDOCODE_A2A_DEGRADED_GRACE_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis,
+        )
+}
+
+/// `agent`'s receiver health in this process. `binding_failed` is the node
+/// binding's own error, which no retry here can repair.
+#[must_use]
+pub fn receiver_health(agent: &str, binding_failed: bool) -> ReceiverHealth {
+    let outage = receiver_states().get(agent).and_then(|observed| {
+        observed
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostics| diagnostics.outage())
+            .min_by_key(|outage| outage.since)
+    });
+    let elapsed = outage.as_ref().map(|outage| outage.since.elapsed());
+    let level = if binding_failed {
+        "fail"
+    } else if elapsed.is_some_and(|elapsed| elapsed >= degraded_grace()) {
+        "warn"
+    } else {
+        "ok"
+    };
+    ReceiverHealth {
+        level,
+        outage_secs: elapsed.map(|elapsed| elapsed.as_secs()),
+        failing: outage.map(|outage| outage.scopes).unwrap_or_default(),
+    }
 }
 
 /// The cursor guarantee each agent's readers got in this process, as decided
@@ -1607,6 +1744,8 @@ pub fn cursor_guarantee(agent: &str) -> Option<crate::cursor_fence::CursorGuaran
 #[derive(Default)]
 struct ReceiverObservation {
     last_error: Option<String>,
+    /// Each running receiver's failure observer, for [`receiver_health`].
+    diagnostics: Vec<Arc<telemetry::RetryDiagnostics>>,
     unavailable: usize,
     standby: usize,
     receiving: usize,
@@ -1688,9 +1827,23 @@ fn observe_receiver_failure(
 struct ReceiverStateEntry {
     agent: String,
     state: Option<ReceiverState>,
+    diagnostics: Arc<telemetry::RetryDiagnostics>,
 }
 
 impl ReceiverStateEntry {
+    fn new(agent: String, diagnostics: Arc<telemetry::RetryDiagnostics>) -> Self {
+        receiver_states()
+            .entry(agent.clone())
+            .or_default()
+            .diagnostics
+            .push(Arc::clone(&diagnostics));
+        Self {
+            agent,
+            state: None,
+            diagnostics,
+        }
+    }
+
     fn set(&mut self, state: ReceiverState) {
         if self.state == Some(state) {
             return;
@@ -1711,7 +1864,14 @@ impl Drop for ReceiverStateEntry {
             if let Some(previous) = self.state {
                 *counts.count_mut(previous) -= 1;
             }
-            if counts.unavailable == 0 && counts.standby == 0 && counts.receiving == 0 {
+            counts
+                .diagnostics
+                .retain(|diagnostics| !Arc::ptr_eq(diagnostics, &self.diagnostics));
+            if counts.unavailable == 0
+                && counts.standby == 0
+                && counts.receiving == 0
+                && counts.diagnostics.is_empty()
+            {
                 states.remove(&self.agent);
             }
         }
@@ -1736,7 +1896,7 @@ impl Drop for ReceiverStateEntry {
 ///
 /// Event-driven, not polling, wherever the backend can be: each tail parks
 /// inside [`Mailbox::poll_conversation`] until the backend reports new data or
-/// `block_ms` elapses. A DT_STREAM backend parks on a condvar the kernel
+/// `block_ms` elapses. A `DT_STREAM` backend parks on a condvar the kernel
 /// signals (including from a peer's replicated append); `StdFsBackend` has no
 /// such primitive and falls back to a bounded size poll. Discovery is the one
 /// genuine poll, for the reason on [`CONVERSATION_DISCOVERY_MS`].
@@ -1799,10 +1959,6 @@ pub fn spawn_inbox_poller_with_notices(
             // retrying the same mailbox, including its presence announcement,
             // before claiming the receiver seat. No second receiver is needed.
             let mut announced = false;
-            let mut state = ReceiverStateEntry {
-                agent: mailbox.self_id().to_string(),
-                state: None,
-            };
             let diagnostics = Arc::new(
                 telemetry::RetryDiagnostics::new(
                     label,
@@ -1812,6 +1968,8 @@ pub fn spawn_inbox_poller_with_notices(
                 )
                 .with_notices(notices),
             );
+            let mut state =
+                ReceiverStateEntry::new(mailbox.self_id().to_string(), Arc::clone(&diagnostics));
             while !abort.is_aborted() {
                 state.set(ReceiverState::Unavailable);
                 if !announced {
@@ -2145,140 +2303,156 @@ fn spawn_conversation_tail(
     abort: crate::HookAbortSignal,
     sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
 ) -> std::thread::JoinHandle<()> {
+    let tail = ConversationTail {
+        mailbox,
+        peer,
+        block_ms,
+        diagnostics,
+        abort,
+        sink,
+    };
     std::thread::Builder::new()
-        .name(format!("{}-tail", diagnostics.component()))
-        .spawn(move || {
-            let scope = format!("conversation with {peer}");
-            while !abort.is_aborted() {
-                let mut reader = match mailbox.conversation_reader(&peer).acquire() {
-                    Ok(Some(reader)) => reader,
-                    Ok(None) => {
-                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
-                        continue;
-                    }
-                    Err(e) => {
+        .name(format!("{}-tail", tail.diagnostics.component()))
+        .spawn(move || tail.run())
+        .expect("spawn conversation tail thread")
+}
+
+struct ConversationTail {
+    mailbox: Arc<Mailbox>,
+    peer: String,
+    block_ms: u64,
+    diagnostics: Arc<telemetry::RetryDiagnostics>,
+    abort: crate::HookAbortSignal,
+    sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+}
+
+impl ConversationTail {
+    fn run(&self) {
+        let mailbox = self.mailbox.as_ref();
+        let peer = self.peer.as_str();
+        let block_ms = self.block_ms;
+        let diagnostics = self.diagnostics.as_ref();
+        let abort = &self.abort;
+        let scope = format!("conversation with {peer}");
+        while !abort.is_aborted() {
+            let mut reader = match mailbox.conversation_reader(peer).acquire() {
+                Ok(Some(reader)) => reader,
+                Ok(None) => {
+                    sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
+                    continue;
+                }
+                Err(e) => {
+                    DeliveryEvent::new(peer, "", None, None, DeliveryStall::ClaimFailed, None, 0)
+                        .observe(mailbox, diagnostics, &scope, Some(&e));
+                    sleep_unless_aborted(abort, block_ms.max(1));
+                    continue;
+                }
+            };
+            self.poll_reader(&mut reader, &scope);
+            if let Some(loss) = reader.lease.loss() {
+                report_receiver_error(
+                    mailbox,
+                    diagnostics.component(),
+                    format!("reader for {peer} lost: {loss}"),
+                );
+            }
+        }
+    }
+    fn poll_reader(&self, reader: &mut OwnedReader, scope: &str) {
+        let mailbox = self.mailbox.as_ref();
+        let peer = self.peer.as_str();
+        let block_ms = self.block_ms;
+        let diagnostics = self.diagnostics.as_ref();
+        let abort = &self.abort;
+        let sink = self.sink.as_ref();
+        let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+        let mut stall_repeats = 0_u32;
+        while !abort.is_aborted() && reader.is_valid() {
+            let (msgs, next) = match mailbox.poll_conversation(peer, reader.offset, block_ms) {
+                Ok(batch) => batch,
+                Err(e) => {
+                    DeliveryEvent::new(
+                        peer,
+                        reader.cursor.holder(),
+                        Some(reader.offset),
+                        None,
+                        DeliveryStall::PollFailed,
+                        None,
+                        0,
+                    )
+                    .observe(mailbox, diagnostics, scope, Some(&e));
+                    sleep_unless_aborted(abort, block_ms.max(1));
+                    continue;
+                }
+            };
+            let mut lease_lost = false;
+            if msgs.iter().all(|m| {
+                // Record which step failed as it happens. Asking
+                // `is_valid()` again afterwards would be a second
+                // question with a window between: a sink that refused
+                // under a held lease, followed by the lease lapsing
+                // before the check, would be filed as `LeaseLost` when
+                // the consumer was the actual cause.
+                if !reader.is_valid() {
+                    lease_lost = true;
+                    return false;
+                }
+                sink(m)
+            }) {
+                retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                stall_repeats = 0;
+                if next > reader.offset {
+                    if let Err(e) = reader.commit(next) {
                         DeliveryEvent::new(
-                            &peer,
-                            "",
-                            None,
-                            None,
-                            DeliveryStall::ClaimFailed,
-                            None,
+                            peer,
+                            reader.cursor.holder(),
+                            Some(reader.offset),
+                            Some(next),
+                            DeliveryStall::CommitRefused,
+                            e.loss,
                             0,
                         )
-                        .observe(&mailbox, &diagnostics, &scope, Some(&e));
-                        sleep_unless_aborted(&abort, block_ms.max(1));
-                        continue;
+                        .observe(
+                            mailbox,
+                            diagnostics,
+                            scope,
+                            Some(&e.message),
+                        );
+                        break;
                     }
-                };
-                let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
-                let mut stall_repeats = 0_u32;
-                while !abort.is_aborted() && reader.is_valid() {
-                    let (msgs, next) =
-                        match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
-                            Ok(batch) => batch,
-                            Err(e) => {
-                                DeliveryEvent::new(
-                                    &peer,
-                                    reader.cursor.holder(),
-                                    Some(reader.offset),
-                                    None,
-                                    DeliveryStall::PollFailed,
-                                    None,
-                                    0,
-                                )
-                                .observe(
-                                    &mailbox,
-                                    &diagnostics,
-                                    &scope,
-                                    Some(&e),
-                                );
-                                sleep_unless_aborted(&abort, block_ms.max(1));
-                                continue;
-                            }
-                        };
-                    let mut lease_lost = false;
-                    if msgs.iter().all(|m| {
-                        // Record which step failed as it happens. Asking
-                        // `is_valid()` again afterwards would be a second
-                        // question with a window between: a sink that refused
-                        // under a held lease, followed by the lease lapsing
-                        // before the check, would be filed as `LeaseLost` when
-                        // the consumer was the actual cause.
-                        if !reader.is_valid() {
-                            lease_lost = true;
-                            return false;
-                        }
-                        sink(m)
-                    }) {
-                        retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
-                        stall_repeats = 0;
-                        if next > reader.offset {
-                            if let Err(e) = reader.commit(next) {
-                                DeliveryEvent::new(
-                                    &peer,
-                                    reader.cursor.holder(),
-                                    Some(reader.offset),
-                                    Some(next),
-                                    DeliveryStall::CommitRefused,
-                                    e.loss,
-                                    0,
-                                )
-                                .observe(
-                                    &mailbox,
-                                    &diagnostics,
-                                    &scope,
-                                    Some(&e.message),
-                                );
-                                break;
-                            }
-                        }
+                }
+            } else {
+                // The batch is re-read from this same offset, so every
+                // message in it is handed over again. Recorded: this is
+                // the path that produces a byte-identical redelivery,
+                // and it used to leave no trace whatsoever.
+                if !msgs.is_empty() {
+                    stall_repeats = stall_repeats.saturating_add(1);
+                    // Which step actually failed, captured above rather
+                    // than re-derived here. Only a lost lease carries
+                    // the lease's loss; see `DeliveryEvent::loss`.
+                    let (stall, loss) = if lease_lost {
+                        (DeliveryStall::LeaseLost, reader.lease.loss())
                     } else {
-                        // The batch is re-read from this same offset, so every
-                        // message in it is handed over again. Recorded: this is
-                        // the path that produces a byte-identical redelivery,
-                        // and it used to leave no trace whatsoever.
-                        if !msgs.is_empty() {
-                            stall_repeats = stall_repeats.saturating_add(1);
-                            // Which step actually failed, captured above rather
-                            // than re-derived here. Only a lost lease carries
-                            // the lease's loss; see `DeliveryEvent::loss`.
-                            let (stall, loss) = if lease_lost {
-                                (DeliveryStall::LeaseLost, reader.lease.loss())
-                            } else {
-                                (DeliveryStall::ConsumerRefused, None)
-                            };
-                            DeliveryEvent::new(
-                                &peer,
-                                reader.cursor.holder(),
-                                Some(reader.offset),
-                                Some(next),
-                                stall,
-                                loss,
-                                stall_repeats,
-                            )
-                            .observe(
-                                &mailbox,
-                                &diagnostics,
-                                &scope,
-                                None,
-                            );
-                        }
-                        sleep_unless_aborted(&abort, retry_delay_ms);
-                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
-                    }
-                    diagnostics.succeeded(&scope);
+                        (DeliveryStall::ConsumerRefused, None)
+                    };
+                    DeliveryEvent::new(
+                        peer,
+                        reader.cursor.holder(),
+                        Some(reader.offset),
+                        Some(next),
+                        stall,
+                        loss,
+                        stall_repeats,
+                    )
+                    .observe(mailbox, diagnostics, scope, None);
                 }
-                if let Some(loss) = reader.lease.loss() {
-                    report_receiver_error(
-                        &mailbox,
-                        diagnostics.component(),
-                        format!("reader for {peer} lost: {loss}"),
-                    );
-                }
+                sleep_unless_aborted(abort, retry_delay_ms);
+                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
             }
-        })
-        .expect("spawn conversation tail thread")
+            diagnostics.succeeded(scope);
+        }
+    }
 }
 
 /// [`spawn_inbox_poller`] over a workspace-local root.
@@ -2288,12 +2462,12 @@ fn spawn_conversation_tail(
 /// it lives in the conversation, beside the transcript it describes, under both
 /// backends alike.
 pub fn spawn_local_poller(
-    workspace_root: std::path::PathBuf,
+    workspace_root: &std::path::Path,
     self_id: String,
     abort: crate::HookAbortSignal,
     sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> std::thread::JoinHandle<()> {
-    let mailbox = Arc::new(Mailbox::workspace_local(&workspace_root, self_id));
+    let mailbox = Arc::new(Mailbox::workspace_local(workspace_root, self_id));
     spawn_inbox_poller(mailbox, LOCAL_POLL_BLOCK_MS, "local-inbox", abort, sink)
 }
 
@@ -2357,8 +2531,8 @@ impl Drop for MailboxScope {
 ///
 /// Two levels, and the second is the contract rather than a fallback: a session
 /// hands its peer mailbox to its dispatcher, which scopes the thread running the
-/// tool; a caller with no session scope (a sub-agent, a test) delivers to
-/// `.sudocode-inbox/` in its workspace through this same call. Being one code
+/// tool; a caller with no session scope (a sub-agent, a test) delivers to the
+/// conversation transcript in its workspace through this same call. Being one code
 /// path is what stops the two drifting.
 ///
 /// The fallback's identity is derived rather than left empty: a conversation is
@@ -2383,8 +2557,7 @@ mod tests {
     fn temp_workspace(label: &str) -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let path = std::env::temp_dir().join(format!(
             "mailbox-unified-{label}-{nanos}-{}",
             std::process::id()
@@ -2403,6 +2576,7 @@ mod tests {
 
     fn note(from: &str, to: &str, body: &str) -> MailboxEnvelope {
         MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: from.to_string(),
             to: to.to_string(),
@@ -2445,13 +2619,12 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let abort = crate::HookAbortSignal::new();
         let sink_attempts = Arc::clone(&attempts);
-        let poller =
-            spawn_local_poller(ws_path.clone(), "me".to_string(), abort.clone(), move |m| {
-                let mut log = sink_attempts.lock().unwrap();
-                let first_time = !log.contains(&m.body);
-                log.push(m.body.clone());
-                !first_time
-            });
+        let poller = spawn_local_poller(&ws_path, "me".to_string(), abort.clone(), move |m| {
+            let mut log = sink_attempts.lock().unwrap();
+            let first_time = !log.contains(&m.body);
+            log.push(m.body.clone());
+            !first_time
+        });
         peer.send(note("peer", "me", "needs-two-tries"))
             .expect("send");
         wait_until("the refused message to come back", || {
@@ -2500,11 +2673,10 @@ mod tests {
 
         let abort = crate::HookAbortSignal::new();
         let sink_seen = Arc::clone(&seen);
-        let first =
-            spawn_local_poller(ws_path.clone(), "me".to_string(), abort.clone(), move |m| {
-                sink_seen.lock().unwrap().push(m.body.clone());
-                true
-            });
+        let first = spawn_local_poller(&ws_path, "me".to_string(), abort.clone(), move |m| {
+            sink_seen.lock().unwrap().push(m.body.clone());
+            true
+        });
         wait_until("the conversation this receiver has never read", || {
             seen.lock().unwrap().len() == 2
         });
@@ -2516,15 +2688,10 @@ mod tests {
 
         let abort2 = crate::HookAbortSignal::new();
         let sink_seen = Arc::clone(&seen);
-        let second = spawn_local_poller(
-            ws_path.clone(),
-            "me".to_string(),
-            abort2.clone(),
-            move |m| {
-                sink_seen.lock().unwrap().push(m.body.clone());
-                true
-            },
-        );
+        let second = spawn_local_poller(&ws_path, "me".to_string(), abort2.clone(), move |m| {
+            sink_seen.lock().unwrap().push(m.body.clone());
+            true
+        });
         wait_until("offline-1 after the restart", || {
             seen.lock().unwrap().len() == 3
         });
@@ -2551,6 +2718,7 @@ mod tests {
         let mb = local_mailbox(&ws, "team-lead");
 
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "team-lead".to_string(),
             to: "worker".to_string(),
@@ -2580,6 +2748,7 @@ mod tests {
         // Both land in the SAME transcript — that is the point of a shared
         // conversation. Each side tells its own appends apart by `from`.
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-a".to_string(),
             to: "agent-b".to_string(),
@@ -2592,6 +2761,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-b".to_string(),
             to: "agent-b".to_string(),
@@ -2611,6 +2781,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// A job an agent schedules for itself is a write under its own name into
+    /// its conversation with itself. It must arrive; nothing else of its own
+    /// may echo back, including a scheduled message it sent someone else.
+    #[test]
+    fn a_scheduled_message_to_self_arrives_and_nothing_else_echoes() {
+        let ws = temp_workspace("scheduled-self");
+        let mb = local_mailbox(&ws, "agent-a");
+        let scheduled = |to: &str, body: &str| MailboxEnvelope {
+            kind: crate::agent_mailbox::kinds::SCHEDULED.to_string(),
+            ..note("agent-a", to, body)
+        };
+        mb.send(scheduled("agent-a", "reminder for me")).unwrap();
+        mb.send(note("agent-a", "agent-a", "plain note to self"))
+            .unwrap();
+        mb.send(scheduled("agent-b", "reminder for b")).unwrap();
+
+        let (own, _) = mb.poll_conversation("agent-a", 0, 0).unwrap();
+        let bodies: Vec<_> = own.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["reminder for me"]);
+        let (with_b, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
+        assert!(
+            with_b.is_empty(),
+            "a scheduled message to b is b's, not an echo"
+        );
+
+        let b = local_mailbox(&ws, "agent-b");
+        let (for_b, _) = b.poll_conversation("agent-a", 0, 0).unwrap();
+        assert_eq!(for_b.len(), 1);
+        assert_eq!(for_b[0].body, "reminder for b");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn read_all_returns_all_messages() {
         let ws = temp_workspace("read-all");
@@ -2618,6 +2821,7 @@ mod tests {
 
         for i in 0..3 {
             mb.send(MailboxEnvelope {
+                send_id: None,
                 delivery: crate::turn_input::InputDelivery::Steer,
                 from: format!("agent-{i}"),
                 to: "worker".to_string(),
@@ -2643,6 +2847,7 @@ mod tests {
         let mb = local_mailbox(&ws, "coordinator");
 
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
@@ -2655,6 +2860,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "beta".to_string(),
@@ -2686,6 +2892,7 @@ mod tests {
         let ws = temp_workspace("list-recip-shape");
         let mb = local_mailbox(&ws, "coordinator");
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
@@ -2852,7 +3059,7 @@ mod tests {
         let abort_clone = abort.clone();
 
         let _handle = super::spawn_local_poller(
-            std::path::PathBuf::from(&ws),
+            &std::path::PathBuf::from(&ws),
             "team-lead".to_string(),
             abort_clone,
             move |msg| {
@@ -2870,6 +3077,7 @@ mod tests {
         // Write a message from a sub-agent to team-lead.
         let mb = local_mailbox(&ws, "sub-agent-1");
         mb.send(MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "sub-agent-1".to_string(),
             to: "team-lead".to_string(),

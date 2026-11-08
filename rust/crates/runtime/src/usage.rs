@@ -173,12 +173,12 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
 }
 
 impl TokenUsage {
-    /// Aggregates another TokenUsage's token counters into this one using saturating_add.
+    /// Aggregates another `TokenUsage`'s token counters into this one using `saturating_add`.
     pub fn add_assign_usage(&mut self, other: Self) {
         self.add_assign_token_counts(other);
     }
 
-    /// Aggregates another TokenUsage's token counters into this one using saturating_add.
+    /// Aggregates another `TokenUsage`'s token counters into this one using `saturating_add`.
     pub fn add_assign_token_counts(&mut self, other: Self) {
         let reported_total = (self.reported_total_tokens.is_some()
             || other.reported_total_tokens.is_some())
@@ -852,7 +852,7 @@ mod tests {
                 cost_units: Some(100),
                 cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
-            pre_compact_discovered_tools: Default::default(),
+            pre_compact_discovered_tools: std::collections::BTreeSet::default(),
         });
         session.messages = vec![ConversationMessage {
             history: None,
@@ -892,7 +892,7 @@ mod tests {
         // rebuilt on resume must report the last turn's duration as latest and
         // the sum as cumulative (the status line's `+Ns Σs`).
         let mut session = Session::new();
-        let mut turn = |ms: u64| ConversationMessage {
+        let turn = |ms: u64| ConversationMessage {
             history: None,
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text {

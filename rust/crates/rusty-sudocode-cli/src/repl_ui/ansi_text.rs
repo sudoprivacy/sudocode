@@ -1,6 +1,10 @@
 mod adapter;
 
-pub(super) use adapter::{ui_color, AnsiText, RichText};
+#[cfg(test)]
+use crate::render::TextRole;
+#[cfg(test)]
+use adapter::AnsiText;
+pub(super) use adapter::{ui_color, RichText};
 
 use crate::render::styled_text::StyledText;
 #[cfg(test)]
@@ -96,13 +100,13 @@ mod tests {
             ColorSupport::NoColor,
         ] {
             let renderer = TerminalRenderer::new().with_color_support(support);
-            let rendered =
+            let formatted_text =
                 renderer.render_markdown_with_width("PlainBefore ~~ThemeStrike~~ PlainAfter", 100);
-            let text = StyledText::from_ansi(&rendered);
+            let text = StyledText::from_ansi(&formatted_text);
             assert_eq!(text.text.trim_end(), "PlainBefore ThemeStrike PlainAfter");
             let spans = contents(&text);
             if support == ColorSupport::NoColor {
-                assert!(!rendered.contains('\x1b'));
+                assert!(!formatted_text.contains('\x1b'));
             } else {
                 let strike = text
                     .spans(0..text.text.len())
@@ -150,6 +154,7 @@ mod tests {
                     }],
                     40,
                     width,
+                    false,
                 );
                 let canvas = element! { AnsiText(content: overlay) }.render(Some(width));
                 let mut wire = Vec::new();
@@ -162,7 +167,7 @@ mod tests {
                     let label_color = (span.text.starts_with('↳')
                         && crate::render::ColorSupport::detect()
                             != crate::render::ColorSupport::NoColor)
-                        .then(|| ui_color(crate::render::theme().muted))
+                        .then(|| ui_color(crate::render::theme().color(TextRole::Secondary)))
                         .flatten();
                     assert_eq!(span.color, label_color);
                     assert_eq!(span.weight, Weight::Normal);

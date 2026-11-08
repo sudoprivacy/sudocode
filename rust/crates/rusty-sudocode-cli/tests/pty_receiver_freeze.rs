@@ -137,7 +137,7 @@ fn a_frozen_receiver_keeps_its_lease_so_a_second_one_cannot_take_over() {
 /// which a bare `Screen::contents` fn item cannot satisfy.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn screen_dump(sess: &pty_expect::PtySession) -> String {
-    sess.render(|screen| screen.contents())
+    sess.render(common::screen_contents)
 }
 
 fn spawn_receiver(env: &TestEnv) -> pty_expect::PtySession {
@@ -150,6 +150,7 @@ fn spawn_receiver(env: &TestEnv) -> pty_expect::PtySession {
 fn send_message(outbox: &Mailbox, body: &str) {
     outbox
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: SENDER.into(),
             to: AGENT.into(),

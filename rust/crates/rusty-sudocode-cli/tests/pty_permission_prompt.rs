@@ -1,13 +1,11 @@
 //! Live PTY test for the interactive tool-permission approval prompt.
 //!
 //! In `--permission-mode workspace-write`, a tool that requires
-//! `danger-full-access` (e.g. `bash`) triggers an escalation prompt that the
-//! sync REPL answers through `CliPermissionPrompter`. That prompter reads the
-//! choice through the SHARED rustyline editor (not a throwaway `dialoguer::Select`
-//! that grabbed its own crossterm raw session mid-turn) — the same single-owner
-//! fix as the write_plan dialog. This test drives that path end-to-end: the box
-//! appears, "1" (Allow) is accepted through the shared editor, and the turn
-//! proceeds.
+//! `danger-full-access` (e.g. `bash`) asks for approval. The REPL presents the
+//! request in its choice panel, the same one the `write_plan` review uses, so
+//! the answer never spawns a second terminal owner mid-turn. This test drives
+//! that path end-to-end: the request appears, "1" (Allow once) is accepted and
+//! the command runs.
 //!
 //! Live-only: only a real model reliably decides to run a bash command, and the
 //! mock backend doesn't emit a permission-gated tool call.
@@ -23,7 +21,7 @@ use std::time::Duration;
 use common::{TestEnv, LIVE_TIMEOUT};
 
 #[test]
-fn permission_prompt_allow_is_read_through_shared_editor() {
+fn permission_prompt_allow_runs_the_tool() {
     let env = TestEnv::new("perm-prompt");
     if env.is_mock() {
         eprintln!("SKIP: mock backend does not emit a permission-gated tool call");
@@ -31,37 +29,43 @@ fn permission_prompt_allow_is_read_through_shared_editor() {
     }
 
     // workspace-write + a bash command → bash requires danger-full-access →
-    // the REPL shows the escalation prompt.
+    // the REPL asks for approval.
     let mut sess = env.spawn(&[
         "--permission-mode",
         "workspace-write",
         "--allowedTools",
         "bash",
     ]);
-    sess.expect("❯").expect("should see REPL prompt");
-
+    common::expect_input_line_cleared(&sess, LIVE_TIMEOUT, "REPL input ready");
+    let marker = common::turn_status_marker(&sess);
     sess.send("Run the bash command `echo perm_prompt_ok` and report its output.\r")
         .expect("send prompt");
 
+    // If the model declines to use bash, skip gracefully: the choice panel is
+    // covered deterministically by the write_plan review tests.
     let long = LIVE_TIMEOUT.saturating_mul(3);
-    sess.set_default_timeout(long);
-
-    // The escalation box must appear. If the model declines to use bash, skip
-    // gracefully (the shared-editor read path is unit-covered by the write_plan
-    // dialog; this test adds the permission-specific live coverage when reachable).
-    if sess.expect("(?i)Permission required").is_err() {
-        eprintln!("SKIP: live model did not attempt bash (no permission prompt shown)");
-        return;
+    let deadline = std::time::Instant::now() + long;
+    loop {
+        let screen = sess.render(common::screen_contents);
+        if screen.contains("Allow this tool call?") && screen.contains("Allow once") {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("SKIP: live model did not attempt bash (no permission request shown)");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
-    sess.expect("(?i)Approve this tool call")
-        .expect("should show the approve prompt read via the shared editor");
 
-    // Answer "1" (Allow) through the shared editor — the previously-throwaway path.
-    sess.send("1\r").expect("send Allow");
-
-    // With the tool allowed, the command runs and its output surfaces.
-    sess.expect("perm_prompt_ok")
-        .expect("allowed bash command output should surface");
+    // Quick-select "1" (Allow once); the command then runs and its output surfaces.
+    sess.send("1").expect("allow once");
+    common::expect_turn_complete_after(&sess, &marker, long, "allowed command completes");
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("perm_prompt_ok"),
+        common::DEFAULT_TIMEOUT,
+        "allowed bash command output should surface",
+    );
 
     // Best-effort teardown (the suite's tolerant pattern for post-turn /exit).
     sess.send("/exit\r").expect("send /exit");

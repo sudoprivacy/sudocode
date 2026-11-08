@@ -12,6 +12,32 @@ use unicode_width::UnicodeWidthChar;
 
 // Lowest matching row: a todo/queued label can also occur in scrollback above
 // the live chrome. Coordinates use terminal columns, not UTF-8 byte offsets.
+// Fixed terminal-cell expectations, independent of the product resolver.
+const DARK_AMBER: &str = "Rgb(245, 158, 11)";
+const LIGHT_AMBER: &str = "Rgb(148, 93, 5)";
+const DARK_SECONDARY: &str = "Rgb(158, 158, 158)";
+const LIGHT_SECONDARY: &str = "Rgb(118, 118, 118)";
+
+const CHOICE_PALETTES: [(&str, bool, &str, &str, &str, &str); 3] = [
+    (
+        "15;0",
+        false,
+        "Idx(255)",
+        "Idx(236)",
+        DARK_AMBER,
+        DARK_SECONDARY,
+    ),
+    (
+        "0;15",
+        false,
+        "Idx(234)",
+        "Idx(255)",
+        LIGHT_AMBER,
+        LIGHT_SECONDARY,
+    ),
+    ("15;0", true, "Default", "Default", "Default", "Default"),
+];
+
 fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String, bool, bool)> {
     sess.render(|screen| {
         // Search logical text across wrapping, but retain physical coordinates
@@ -95,13 +121,15 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
-fn expect_frame_caps(sess: &PtySession, color: &str) {
+/// `tail` is how the frame ends: `╎` while a call is in flight, `╰─` once
+/// it is finished.
+fn expect_frame_caps(sess: &PtySession, color: &str, tail: &str) {
     // Bold corners shift inside their cells in Menlo even though plain text
     // and column positions match. This contract also covers live overlays.
     if let Some(root) = std::env::var_os("SCODE_FRAME_SNAPSHOT_DIR") {
         common::expect_screen(
             sess,
-            |screen| screen.contains("╭─") && screen.contains("╰─"),
+            |screen| screen.contains("╭─") && screen.contains(tail),
             common::DEFAULT_TIMEOUT,
             "complete frame before raster capture",
         );
@@ -126,9 +154,43 @@ fn expect_frame_caps(sess: &PtySession, color: &str) {
         )
         .unwrap();
     }
-    for cap in ["╭─", "╰─"] {
+    for cap in ["╭─", tail] {
         expect_style(sess, cap, (color, false, false));
     }
+}
+
+/// A running card breathes: its frame alternates between the brand amber and
+/// one quieter shade, about once a second, changing colour but never weight.
+/// On a no-color terminal it stays steady.
+fn expect_frame_pulse(sess: &PtySession, border: &str, no_color: bool) {
+    let expected = terminal_palette::expected_color(border);
+    let mut seen: Vec<String> = Vec::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if let Some((color, bold, dim)) = attributes(sess, "╭─") {
+            assert!(!bold && !dim, "the pulse changes colour, never weight");
+            if seen.last() != Some(&color) {
+                seen.push(color);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let distinct: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
+    if no_color {
+        assert_eq!(distinct, [expected].into(), "no-color frames stay steady");
+        return;
+    }
+    assert!(
+        distinct.len() == 2 && distinct.contains(&expected) && !distinct.contains("Default"),
+        "the frame alternates between amber and one quieter shade: {seen:?}"
+    );
+    // A half period is 480 ms, so 3 s holds about six changes. Many more would
+    // be a flicker driven by redraws rather than the clock.
+    let changes = seen.len() - 1;
+    assert!(
+        (3..=10).contains(&changes),
+        "about one breath per second: {changes} changes in 3 s ({seen:?})"
+    );
 }
 
 fn settle_chrome(sess: &PtySession) {
@@ -176,11 +238,25 @@ fn exit(sess: &mut PtySession) {
     assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
 }
 
+fn question_prompt(env: &TestEnv, id: &str, input: &serde_json::Value) -> String {
+    if env.is_mock() {
+        return env.tool_batch_prompt(&serde_json::json!([{
+            "id": id, "name": "AskUserQuestion", "input": input,
+        }]));
+    }
+    let path = env.workspace_root().join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec(input).unwrap()).unwrap();
+    format!(
+        "Use read_file to read {} then call AskUserQuestion once with exactly that JSON object. Preserve every value. Answer briefly after I choose.",
+        path.display()
+    )
+}
+
 #[test]
 fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
     for (background, no_color, muted, border) in [
-        ("15;0", false, "Idx(247)", "Idx(248)"),
-        ("0;15", false, "Idx(241)", "Idx(241)"),
+        ("15;0", false, DARK_SECONDARY, DARK_SECONDARY),
+        ("0;15", false, LIGHT_SECONDARY, LIGHT_SECONDARY),
         ("15;0", true, "Default", "Default"),
     ] {
         let env = TestEnv::new("chrome-semantic-roles");
@@ -222,7 +298,8 @@ fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
 #[test]
 fn question_title_resets_restore_terminal_foreground_not_parent_color() {
     for background in ["15;0", "0;15"] {
-        let env = TestEnv::new("chrome-initial-style-reset");
+        // This renderer contract requires exact SGR bytes.
+        let env = TestEnv::new_mock("chrome-initial-style-reset");
         let mut sess = env.spawn_with_env(
             &["--permission-mode", "workspace-write"],
             &[
@@ -234,23 +311,16 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             ],
         );
         // The shared input-line observer samples one physical row. Keep this
-        // JSON fixture on one row, then inspect the actual question at an
+        // fixture command on one row, then inspect the actual question at an
         // ordinary width; wrapping is not the style-reset contract.
         sess.resize(40, 600).unwrap();
         settle_chrome(&sess);
         let input = serde_json::json!({
             "title": "InheritedTitle \u{1b}[31mRedTitle\u{1b}[39mDefaultTitle \u{1b}[1mBoldTitle\u{1b}[0mPlainTitle",
-            "question": "Choose style answer",
-            "options": ["Accept style"],
+            "questions": [{"id":"style", "prompt":"Choose style answer",
+                "options":[{"label":"Accept style", "value":"Accept style"}]}],
         });
-        let calls = serde_json::json!([{
-            "id": "style_question", "name": "AskUserQuestion", "input": input,
-        }]);
-        let prompt = if env.is_mock() {
-            format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-        } else {
-            format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-        };
+        let prompt = question_prompt(&env, "style_question", &input);
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
         common::expect_input_line(
             &sess,
@@ -276,9 +346,9 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             (
                 "InheritedTitle",
                 if background == "0;15" {
-                    "Idx(94)"
+                    LIGHT_AMBER
                 } else {
-                    "Idx(214)"
+                    DARK_AMBER
                 },
                 false,
             ),
@@ -305,13 +375,7 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
 
 #[test]
 fn question_focus_surface_moves_without_recoloring_ordinary_text() {
-    for (background, no_color, selected_fg, selected_bg, primary, muted) in [
-        (
-            "15;0", false, "Idx(255)", "Idx(236)", "Idx(214)", "Idx(247)",
-        ),
-        ("0;15", false, "Idx(234)", "Idx(255)", "Idx(94)", "Idx(241)"),
-        ("15;0", true, "Default", "Default", "Default", "Default"),
-    ] {
+    for (background, no_color, selected_fg, selected_bg, primary, muted) in CHOICE_PALETTES {
         for option_count in [2, 10] {
             let env = TestEnv::new("question-focus-surface");
             let mut sess = env.spawn_with_env(
@@ -326,24 +390,8 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
             );
             sess.resize(40, 600).unwrap();
             settle_chrome(&sess);
-            let mut options = vec![
-                "FirstSurfaceChoice".to_string(),
-                "SecondSurfaceChoice".to_string(),
-            ];
-            options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
-            let input = serde_json::json!({
-                "title": "SurfaceQuestionTitle",
-                "question": "Choose a readable surface",
-                "options": options,
-            });
-            let calls = serde_json::json!([{
-                "id": "surface_question", "name": "AskUserQuestion", "input": input,
-            }]);
-            let prompt = if env.is_mock() {
-                format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-            } else {
-                format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-            };
+            let input = surface_question_input(option_count);
+            let prompt = question_prompt(&env, "surface_question", &input);
             sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
             common::expect_input_line(
                 &sess,
@@ -440,7 +488,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
-    expect_style(&sess, "✓", ("Idx(10)", false, false));
+    expect_style(&sess, "✓", ("Idx(2)", false, false));
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
     expect_style(&sess, "Checking styles", ("Default", true, false));
     expect_style(&sess, "Finished parser", ("Default", false, true));
@@ -531,7 +579,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
-    expect_frame_caps(&sess, green);
+    expect_frame_caps(&sess, green, "╰─");
     expect_style(&sess, "│", (green, false, false));
     exit(&mut sess);
 }
@@ -579,25 +627,26 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     let border = if no_color {
         "Default"
     } else if light {
-        "Idx(94)"
+        LIGHT_AMBER
     } else {
-        "Idx(214)"
+        DARK_AMBER
     };
     let label = if no_color {
         "Default"
     } else if light {
-        "Idx(241)"
+        LIGHT_SECONDARY
     } else {
-        "Idx(247)"
+        DARK_SECONDARY
     };
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
+    expect_frame_pulse(&sess, border, no_color);
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
     sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
     sess.send("\x1b[A").expect("recall queued message");
     common::expect_input_line(
         &sess,
@@ -758,7 +807,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
 
 #[test]
 fn todo_summary_scopes_every_count_and_label_in_both_themes() {
-    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(241)")] {
+    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(243)")] {
         for statuses in [
             vec!["completed"],
             vec!["completed", "in_progress", "pending"],
@@ -793,7 +842,13 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                 for count in [
                     format!("{} todos", statuses.len()),
                     "1 done".into(),
-                    format!("{} open", statuses.len() - 1),
+                    format!(
+                        "{} open",
+                        statuses
+                            .iter()
+                            .filter(|status| **status == "pending")
+                            .count()
+                    ),
                 ] {
                     expect_style(&sess, &count, ("Default", true, false));
                 }
@@ -837,15 +892,15 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
 }
 
 #[test]
-fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
+fn resumed_status_scopes_semantic_accents_and_cache_colors() {
     use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
     // No API needed: resume real persisted usage through the production REPL.
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
     for (background, muted, hit_color, error_color) in [
-        ("15;0", "Idx(247)", "Idx(220)", "Idx(9)"),
-        ("0;15", "Idx(241)", "Idx(130)", "Idx(1)"),
+        ("15;0", "Idx(247)", "Idx(3)", "Idx(1)"),
+        ("0;15", "Idx(243)", "Default", "Idx(1)"),
     ] {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]
@@ -892,19 +947,24 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
-                for label in [
-                    "turn 1",
-                    "ctx ",
-                    "tokens · +1m14s Σ1m14s · ctx 10.0k",
-                    "chrome-style-branch",
-                ] {
+                for label in ["turn 1", "+1m14s Σ1m14s"] {
                     expect_style(&sess, label, (muted, false, false));
                 }
-                let healthy_color = if background == "15;0" {
-                    "Idx(10)"
-                } else {
-                    "Idx(2)"
-                };
+                let model_color = attributes(&sess, "[claude").unwrap().0;
+                let usage_color = attributes(&sess, "ctx ").unwrap().0;
+                let branch_color = attributes(&sess, "chrome-style-branch").unwrap().0;
+                for color in [&model_color, &usage_color, &branch_color] {
+                    assert_ne!(
+                        color, muted,
+                        "metadata accents stay distinct from secondary labels"
+                    );
+                }
+                assert_ne!(
+                    model_color, branch_color,
+                    "model and branch have distinct roles"
+                );
+                expect_style(&sess, "tokens", (&usage_color, false, false));
+                let healthy_color = "Idx(2)";
                 expect_style(
                     &sess,
                     hit,
@@ -931,4 +991,17 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             exit(&mut sess);
         }
     }
+}
+
+fn surface_question_input(option_count: usize) -> serde_json::Value {
+    let mut options = vec![
+        "FirstSurfaceChoice".to_string(),
+        "SecondSurfaceChoice".to_string(),
+    ];
+    options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
+    serde_json::json!({
+        "title": "SurfaceQuestionTitle",
+        "questions": [{"id":"surface", "prompt":"Choose a readable surface",
+            "options": options.into_iter().map(|label| serde_json::json!({"label":label, "value":label})).collect::<Vec<_>>()}],
+    })
 }

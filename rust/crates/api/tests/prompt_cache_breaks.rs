@@ -28,19 +28,7 @@ fn public_cache_contract_preserves_thinking_history_and_attributes_changes() {
         "../../../../spec/prompt_cache_observations.json"
     ))
     .expect("public contract must parse");
-    let defaults = api::PromptCacheConfig::default();
-    assert_eq!(
-        defaults.prompt_ttl.as_secs(),
-        contract["defaults"]["prompt_ttl_seconds"]
-    );
-    assert_eq!(
-        defaults.completion_ttl.as_secs(),
-        contract["defaults"]["completion_ttl_seconds"]
-    );
-    assert_eq!(
-        u64::from(defaults.cache_break_min_drop),
-        contract["defaults"]["cache_break_min_drop"]
-    );
+    assert_public_cache_defaults(&contract);
     for scenario in contract["ledger_scenarios"].as_array().unwrap() {
         let label = scenario["id"].as_str().unwrap();
         let cache = PromptCache::new(label);
@@ -83,7 +71,7 @@ fn public_cache_contract_preserves_thinking_history_and_attributes_changes() {
                     .try_into()
                     .unwrap(),
             ),
-            Default::default(),
+            api::ResponseTraceIds::default(),
         );
         let record = cache.record_usage(
             &after,
@@ -215,12 +203,12 @@ fn revealing_a_deferred_tool_is_attributed_to_tools() {
     let _ = cache.record_usage(
         &request_with_tools(vec![cron_list(true)]),
         &reads(300_000),
-        Default::default(),
+        api::ResponseTraceIds::default(),
     );
     let record = cache.record_usage(
         &request_with_tools(vec![cron_list(false)]),
         &reads(0),
-        Default::default(),
+        api::ResponseTraceIds::default(),
     );
 
     let event = record
@@ -268,7 +256,7 @@ fn a_prefix_discarded_before_it_was_read_is_still_a_break() {
             cache_read_input_tokens: 0,
             ..Usage::default()
         },
-        Default::default(),
+        api::ResponseTraceIds::default(),
     );
     let record = cache.record_usage(
         &request_with_tools(vec![cron_list(false)]),
@@ -277,7 +265,7 @@ fn a_prefix_discarded_before_it_was_read_is_still_a_break() {
             cache_read_input_tokens: 0,
             ..Usage::default()
         },
-        Default::default(),
+        api::ResponseTraceIds::default(),
     );
 
     let event = record
@@ -302,8 +290,8 @@ fn a_steady_fingerprint_with_no_drop_is_not_a_break() {
     let cache = PromptCache::new("steady-session");
 
     let request = request_with_tools(vec![cron_list(true)]);
-    let _ = cache.record_usage(&request, &reads(8_000), Default::default());
-    let record = cache.record_usage(&request, &reads(8_000), Default::default());
+    let _ = cache.record_usage(&request, &reads(8_000), api::ResponseTraceIds::default());
+    let record = cache.record_usage(&request, &reads(8_000), api::ResponseTraceIds::default());
 
     assert!(
         record.cache_break.is_none(),
@@ -313,5 +301,21 @@ fn a_steady_fingerprint_with_no_drop_is_not_a_break() {
         record.stats.breaks_by_cause.is_empty(),
         "got {:?}",
         record.stats.breaks_by_cause
+    );
+}
+
+fn assert_public_cache_defaults(contract: &serde_json::Value) {
+    let defaults = api::PromptCacheConfig::default();
+    assert_eq!(
+        defaults.prompt_ttl.as_secs(),
+        contract["defaults"]["prompt_ttl_seconds"]
+    );
+    assert_eq!(
+        defaults.completion_ttl.as_secs(),
+        contract["defaults"]["completion_ttl_seconds"]
+    );
+    assert_eq!(
+        u64::from(defaults.cache_break_min_drop),
+        contract["defaults"]["cache_break_min_drop"]
     );
 }

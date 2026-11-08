@@ -31,6 +31,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   build-linux-x64:
@@ -61,6 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       - name: Build static musl release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode --target x86_64-unknown-linux-musl
@@ -81,6 +86,11 @@ jobs:
             echo "Static musl binary unexpectedly has a dynamic interpreter" >&2
             exit 1
           fi
+
+      - name: Accept the built native artifact before packaging
+        uses: ./.github/actions/release-artifact
+        with:
+          binary: rust/target/x86_64-unknown-linux-musl/release/scode
 
       - name: Stage release payload
         shell: bash
@@ -164,9 +174,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
 
       - name: Build release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
+
+      - name: Accept the built native artifact before packaging
+        uses: ./.github/actions/release-artifact
+        with:
+          binary: rust/target/release/${{ matrix.bin }}
 
       - name: Stage release payload
         shell: bash
@@ -266,6 +284,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: scode-*
           merge-multiple: true
 
       - name: Generate checksums

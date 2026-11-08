@@ -106,7 +106,7 @@ fn a_frozen_seat_holder_keeps_the_seat_and_a_peer_stays_on_standby() {
 /// item cannot satisfy.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn screen_dump(sess: &pty_expect::PtySession) -> String {
-    sess.render(|s| s.contents())
+    sess.render(common::screen_contents)
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

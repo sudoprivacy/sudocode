@@ -5,9 +5,6 @@
 
 mod common;
 
-#[path = "support/terminal_palette.rs"]
-mod terminal_palette;
-
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -67,7 +64,7 @@ fn exit_with_context(sess: &mut PtySession, context: &str) {
     let code = sess.expect_eof().unwrap_or_else(|error| {
         // The method item cannot satisfy render's higher-ranked Screen lifetime.
         #[allow(clippy::redundant_closure_for_method_calls)]
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(common::screen_contents);
         panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
     assert_eq!(code, 0, "{context} should exit successfully");
@@ -173,6 +170,7 @@ fn inject_with_summary(
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: engine_events::InputDelivery::Queue,
             from: from.to_string(),
             to: receiver.to_string(),
@@ -411,8 +409,7 @@ fn queued_and_offline_messages_survive_receiver_restart() {
         }
     }
     exit_with_context(&mut resumed, "recovered receiver");
-    // TestEnv defaults to the synchronous REPL, where Ctrl-D edits a nonempty
-    // draft. Keep the A2A receiver's queue mode across this second restart.
+    // Keep the A2A receiver's queue mode across this second restart.
     let mut replay = env.spawn_with_env(
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
@@ -454,7 +451,10 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+        [
+            "Rgb(118, 118, 118)".to_owned(),
+            "Rgb(158, 158, 158)".to_owned(),
+        ]
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [
@@ -713,9 +713,18 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     wait_for_screen(&sess, "draft cleared", |screen| {
         screen.contains('❯') && input_text(screen).is_empty()
     });
+    let before_cancel = common::turn_status_marker(&sess);
     sess.send("\x03").unwrap(); // Hard-cancel while preserving the explicit queue.
-    wait_for_screen(&sess, "foreground task cancelled", |s| {
+                                // The notice and the cancelled turn's completion arrive on different
+                                // channels. Wait for both under one deadline, so the peer turn below is
+                                // measured from the cancelled turn's completion instead of racing it.
+    wait_for_screen(&sess, "foreground task cancelled and completed", |s| {
+        let identity = common::turn_status_identity(s);
         s.contains("Cancelled")
+            && !identity.is_empty()
+            && identity != before_cancel
+            && s.contains('❯')
+            && input_text(s).is_empty()
     });
     let marker = common::turn_status_marker(&sess);
     sess.send("\x1b").unwrap(); // Flush the retained queue while idle.
@@ -742,10 +751,16 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     );
     if env.is_mock() {
         let requests = env.captured_message_bodies().join("\n");
-        assert!(requests.contains(
-            "summary=\\\"结果 &quot;ready&quot; &amp; &lt;checked&gt; &amp;#10;&#10;第二行摘要\\\""
-        ));
-        assert!(requests.contains("QUEUED-BODY-END"));
+        assert!(
+            requests.contains(
+                "summary=\\\"结果 &quot;ready&quot; &amp; &lt;checked&gt; &amp;#10;&#10;第二行摘要\\\""
+            ),
+            "captured requests:\n{requests}"
+        );
+        assert!(
+            requests.contains("QUEUED-BODY-END"),
+            "captured requests:\n{requests}"
+        );
     }
     exit(&mut sess);
 
@@ -776,6 +791,7 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "<mailbox-message from=\"peer-one\">\nFIRST-PEER\n</mailbox-message>\n\n",
             "HUMAN-BETWEEN\n\n",
             "<mailbox-message from=\"peer-two&amp;three\" request-id=\"legacy-42\" summary=\"Legacy &quot;summary&quot; &amp; &#10;more\">\nSECOND-PEER\n</mailbox-message>\n\n",
+            "<mailbox-message from=\"node-peer\" verified=\"true\">\nVERIFIED-PEER\n</mailbox-message>\n\n",
             "HUMAN-AFTER"
         ))
         .unwrap();
@@ -814,6 +830,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             "│ Summary: Legacy \"summary\" &",
             "│ more",
             "│ SECOND-PEER",
+            "Message from node-peer · verified",
+            "│ VERIFIED-PEER",
             "❯ HUMAN-AFTER",
             "ASSISTANT-REPLY",
         ];
@@ -839,6 +857,10 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         assert!(text.contains("LITERAL-UNKNOWN"));
         assert!(text.contains("LITERAL-DUPLICATE"));
         assert!(!text.contains("Message from incomplete"));
+        assert!(
+            !text.contains("Message from peer-one · verified"),
+            "an unauthenticated sender is never shown as verified: {text}"
+        );
     });
     expect_replay_input_ready(&mut sess);
     exit(&mut sess);

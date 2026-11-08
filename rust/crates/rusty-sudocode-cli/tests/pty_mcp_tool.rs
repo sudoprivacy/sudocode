@@ -192,7 +192,7 @@ fn mcp_echo_tool_round_trips_through_ndjson_stdio() {
     if env.is_live() {
         // A real gateway may spend longer than 30s in queue/tool discovery.
         // Keep a bounded live deadline without slowing deterministic CI runs.
-        sess.set_default_timeout(std::time::Duration::from_secs(180));
+        sess.set_default_timeout(std::time::Duration::from_mins(3));
     }
 
     // Assert on the `echo:`-prefixed form, not the bare input text: the

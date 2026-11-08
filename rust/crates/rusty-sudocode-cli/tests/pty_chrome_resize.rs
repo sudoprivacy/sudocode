@@ -191,6 +191,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
                 if let Some(receiver) = receiver {
                     return Mailbox::workspace_local(&pair, "mac-ai".into()).send(
                         MailboxEnvelope {
+                            send_id: None,
                             delivery: engine_events::InputDelivery::Queue,
                             from: "mac-ai".into(),
                             to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
@@ -336,9 +337,13 @@ fn shared_budget_preserves_history_draft_and_cursor_in_the_real_terminal() {
     std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
     let mut saved = Session::new().with_workspace_root(env.workspace_root());
     saved.push_user_text("Saved budget conversation").unwrap();
-    let mut body = (0..70)
-        .map(|i| format!("Budget history line {i}\n"))
-        .collect::<String>();
+    let mut body = (0..70).fold(String::new(), |mut fixture_text, i| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut fixture_text,
+            format_args!("Budget history line {i}\n"),
+        );
+        fixture_text
+    });
     body.push_str("BudgetHistorySentinel");
     saved
         .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {

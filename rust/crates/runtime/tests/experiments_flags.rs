@@ -2,7 +2,7 @@
 //! registry: env precedence (legacy > generic), default-off, settings
 //! `experimental` parsing (unknown key / non-bool = load error), and
 //! the registry naming invariants. The config-install branch lives in
-//! `experiments_config_install.rs` — its process-global OnceLock must
+//! `experiments_config_install.rs` — its process-global `OnceLock` must
 //! not be populated in this binary or the default-off test races it.
 //!
 //! Tests are serialised via a process-wide mutex because flags read
@@ -17,7 +17,7 @@ fn env_mutex() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct EnvGuard(&'static str, Option<String>);

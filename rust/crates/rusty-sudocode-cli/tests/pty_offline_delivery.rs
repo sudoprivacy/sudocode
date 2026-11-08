@@ -32,6 +32,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
     let outbox = Mailbox::workspace_local(&root, sender.into());
     outbox
         .send(MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: sender.into(),
             to: recipient,
@@ -61,7 +62,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
         assert!(
             Instant::now() < deadline,
             "offline delivery was not committed after a successful turn:\n{}",
-            receiver.render(|screen| screen.contents())
+            receiver.render(common::screen_contents)
         );
         std::thread::sleep(Duration::from_millis(100));
     }

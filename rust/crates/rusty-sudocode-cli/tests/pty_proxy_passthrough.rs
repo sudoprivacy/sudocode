@@ -82,17 +82,17 @@ fn assert_passthrough_answers(label: &str, model: &str, question: &str, answer: 
             "read-only",
             question,
         ],
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .unwrap_or_else(|e| panic!("spawn scode with {model}: {e}"));
 
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
     // Let the run finish before judging it: a single digit is far too weak a
     // match to decide on by itself, since a provider error body carries a
     // request id full of digits.
     let matched = sess.expect(answer);
     let exit = sess.expect_eof().expect("should exit");
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(common::screen_contents);
 
     if exit != 0 {
         // The provider refused this model for the tester's account. Proxy

@@ -60,6 +60,7 @@ pub enum HistoryEvent {
     OpenContext {
         source_commit: Option<String>,
     },
+    OpenCompletedContext,
     Message {
         id: String,
         parent_id: Option<String>,
@@ -165,6 +166,17 @@ impl HistoryRecord {
             HistoryEvent::OpenContext {
                 source_commit: None,
             },
+        )
+    }
+
+    /// Select the latest completed turn at this record's committed log position.
+    /// Keep `OpenContext` replay unchanged for previously persisted continuations.
+    #[must_use]
+    pub fn branch_latest_completed() -> Self {
+        Self::new(
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            HistoryEvent::OpenCompletedContext,
         )
     }
 

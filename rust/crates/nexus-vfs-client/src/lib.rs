@@ -1,11 +1,10 @@
-#[allow(
-    clippy::all,
-    clippy::pedantic,
-    reason = "The protobuf generator owns the wire representation."
-)]
-pub mod proto {
-    tonic::include_proto!("nexus.grpc.vfs");
-}
+pub use kernel::kernel::conditional_content::{
+    ConditionalContentError, ConditionalContentResult, VersionedContent,
+};
+pub use kernel::kernel::vfs_proto as proto;
+
+use kernel::core::rpc_transport::conditional_content;
+use kernel::kernel::KernelError;
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
@@ -66,6 +65,14 @@ const DT_DIR_SETATTR: i32 = DT_DIR as i32;
 const DT_LINK_SETATTR: i32 = 6;
 
 enum VfsOp {
+    ReadVersioned {
+        request: proto::ReadVersionedRequest,
+        resp: mpsc::SyncSender<Result<Option<VersionedContent>, ConditionalContentError>>,
+    },
+    WriteIfVersion {
+        request: proto::WriteIfVersionRequest,
+        resp: mpsc::SyncSender<Result<ConditionalContentResult, ConditionalContentError>>,
+    },
     Lock {
         request: LockRequest,
         resp: mpsc::SyncSender<io::Result<Option<String>>>,
@@ -290,6 +297,22 @@ impl NexusVfsClient {
                         // that as `Disconnected` -> `BrokenPipe`.
                         tokio::spawn(async move {
                             match op {
+                                VfsOp::ReadVersioned { request, resp } => {
+                                    let result = conditional_content::read_versioned(
+                                        &mut client,
+                                        deadlined(request, OP_DEADLINE),
+                                    )
+                                    .await;
+                                    let _ = resp.send(result);
+                                }
+                                VfsOp::WriteIfVersion { request, resp } => {
+                                    let result = conditional_content::write_if_version(
+                                        &mut client,
+                                        deadlined(request, OP_DEADLINE),
+                                    )
+                                    .await;
+                                    let _ = resp.send(result);
+                                }
                                 VfsOp::Lock { request, resp } => {
                                     let result =
                                         client.lock(deadlined(request, LOCK_DEADLINE)).await;
@@ -609,6 +632,50 @@ impl NexusVfsClient {
             .map_err(io::Error::other)?;
 
         Ok(Self { tx })
+    }
+
+    /// Read one coherent image through the existing authenticated connection.
+    pub fn read_versioned(
+        &self,
+        path: &str,
+        auth_token: &str,
+    ) -> Result<Option<VersionedContent>, ConditionalContentError> {
+        let (resp, receiver) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::ReadVersioned {
+                request: proto::ReadVersionedRequest {
+                    path: path.to_owned(),
+                    auth_token: auth_token.to_owned(),
+                },
+                resp,
+            })
+            .map_err(|_| conditional_handoff_failed(&broken_pipe()))?;
+        wait_for_reply(&receiver, OP_DEADLINE + HANDOFF_GRACE)
+            .map_err(|error| conditional_handoff_failed(&error))?
+    }
+
+    /// Submit a conditional replacement once. A lost handoff reply is Unknown.
+    pub fn write_if_version(
+        &self,
+        path: &str,
+        expected_version: Option<&[u8]>,
+        content: &[u8],
+        auth_token: &str,
+    ) -> Result<ConditionalContentResult, ConditionalContentError> {
+        let (resp, receiver) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::WriteIfVersion {
+                request: proto::WriteIfVersionRequest {
+                    path: path.to_owned(),
+                    content: content.to_vec(),
+                    auth_token: auth_token.to_owned(),
+                    expected_version: expected_version.map(<[u8]>::to_vec),
+                },
+                resp,
+            })
+            .map_err(|_| conditional_handoff_failed(&broken_pipe()))?;
+        wait_for_reply(&receiver, OP_DEADLINE + HANDOFF_GRACE)
+            .map_err(|error| ConditionalContentError::Unknown(error.to_string()))?
     }
 
     pub fn read(&self, path: &str, auth_token: &str) -> io::Result<Vec<u8>> {
@@ -1007,6 +1074,10 @@ fn broken_pipe() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "vfs worker gone")
 }
 
+fn conditional_handoff_failed(error: &io::Error) -> ConditionalContentError {
+    ConditionalContentError::Failed(KernelError::IOError(error.to_string()))
+}
+
 /// Deadline for an ordinary op, carried ON the request.
 ///
 /// A deadline is a property of the request, so it is expressed once, in the
@@ -1018,7 +1089,7 @@ fn broken_pipe() -> io::Error {
 ///
 /// Generous on purpose: a stuck-detector, not a latency budget, so it must never
 /// fire on a slow-but-working call.
-const OP_DEADLINE: Duration = Duration::from_secs(60);
+const OP_DEADLINE: Duration = Duration::from_mins(1);
 const LOCK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How much later than a blocking tail's own `timeout_ms` its deadline sits.
@@ -1105,13 +1176,15 @@ fn deadlined<T>(msg: T, deadline: Duration) -> tonic::Request<T> {
 /// this budget strictly later, so the deadline wins where a deadline applies and
 /// this message is only ever emitted when it is true.
 ///
-/// Timing out is NOT the same as knowing the op failed: the task may still be in
-/// flight and may still complete. The error says "no answer within `budget`", and
-/// every caller here is idempotent-retry safe (a re-read at the same cursor, a
-/// re-`ensure_stream`), so a retry is the correct response.
+/// A handoff timeout can leave the operation in flight. Conditional writes retain
+/// that uncertainty through their typed outcome and use consumer-owned readback.
 fn await_reply<T>(resp_rx: &mpsc::Receiver<io::Result<T>>, budget: Duration) -> io::Result<T> {
+    wait_for_reply(resp_rx, budget)?
+}
+
+fn wait_for_reply<T>(resp_rx: &mpsc::Receiver<T>, budget: Duration) -> io::Result<T> {
     match resp_rx.recv_timeout(budget) {
-        Ok(result) => result,
+        Ok(result) => Ok(result),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!("vfs worker sent no reply within {budget:?}"),

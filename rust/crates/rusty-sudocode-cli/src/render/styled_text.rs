@@ -2,7 +2,7 @@
 //! Decode external ANSI once; keep owned styles as data until the output boundary.
 
 use crossterm::style::{Attribute, Color, ContentStyle};
-use std::{fmt::Write as _, ops::Range, sync::Arc};
+use std::{borrow::Cow, ops::Range, sync::Arc};
 use vte::{Params, Perform};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +19,61 @@ pub(crate) struct StyledText {
 }
 
 impl StyledText {
+    #[inline]
+    pub(crate) fn plain(&mut self, text: &str) {
+        self.push(ContentStyle::default(), text);
+    }
+
+    pub(crate) fn append(&mut self, other: &Self) {
+        self.append_range(other, 0..other.text.len());
+    }
+
+    pub(crate) fn append_range(&mut self, other: &Self, range: Range<usize>) {
+        for (style, part, link) in other.rich_spans(range) {
+            self.push_link(style, part, link);
+        }
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        let len = len.min(self.text.len());
+        self.text.truncate(len);
+        self.runs
+            .truncate(self.runs.partition_point(|run| run.range.start < len));
+        if let Some(last) = self.runs.last_mut() {
+            last.range.end = len;
+        }
+    }
+
+    pub(crate) fn trim(&mut self) {
+        let start = self.text.len() - self.text.trim_start().len();
+        let end = self.text.trim_end().len().max(start);
+        let mut trimmed = Self::default();
+        trimmed.append_range(self, start..end);
+        *self = trimmed;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.text.clear();
+        self.runs.clear();
+    }
+
+    #[inline]
+    pub(crate) fn slice(&self, range: Range<usize>) -> Self {
+        let mut result = Self::default();
+        result.append_range(self, range);
+        result
+    }
+
+    /// External plain source cannot carry terminal instructions or source SGR.
+    #[inline]
+    pub(crate) fn plain_source(input: &str) -> Cow<'_, str> {
+        if Self::needs_decoding(input) {
+            Cow::Owned(Self::from_ansi(input).text)
+        } else {
+            Cow::Borrowed(input)
+        }
+    }
+
     pub(crate) fn from_ansi(input: &str) -> Self {
         Self::from_ansi_with_style(input, ContentStyle::default())
     }
@@ -99,25 +154,45 @@ impl StyledText {
     }
 
     pub(crate) fn write_ansi(&self, range: Range<usize>, output: &mut String) {
+        let _ = self.fmt_ansi(range, output);
+    }
+
+    /// Framed consumers reset terminal styles between rows. Re-establish each
+    /// logical line's complete styles and links at this serialization boundary.
+    pub(crate) fn write_ansi_lines(&self, output: &mut String) {
+        let mut offset = 0;
+        for line in self.text.split_inclusive('\n') {
+            let end = offset + line.len();
+            self.write_ansi(offset..end, output);
+            offset = end;
+        }
+    }
+
+    pub(crate) fn fmt_ansi(
+        &self,
+        range: Range<usize>,
+        output: &mut (impl std::fmt::Write + ?Sized),
+    ) -> std::fmt::Result {
         let mut active: Option<&Arc<str>> = None;
         for (style, text, hyperlink) in self.rich_spans(range) {
             if hyperlink != active {
-                let _ = write!(
+                write!(
                     output,
                     "{}",
                     super::hyperlink::SetHyperlink(hyperlink.map(AsRef::as_ref))
-                );
+                )?;
                 active = hyperlink;
             }
             if style == ContentStyle::default() {
-                output.push_str(text);
+                output.write_str(text)?;
             } else {
-                let _ = write!(output, "{}{}", super::RESET, style.apply(text));
+                write!(output, "{}{}", super::RESET, style.apply(text))?;
             }
         }
         if active.is_some() {
-            let _ = write!(output, "{}", super::hyperlink::SetHyperlink(None));
+            write!(output, "{}", super::hyperlink::SetHyperlink(None))?;
         }
+        Ok(())
     }
 
     pub(crate) fn clear_styles(&mut self) {

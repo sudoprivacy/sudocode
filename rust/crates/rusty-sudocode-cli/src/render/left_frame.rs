@@ -18,6 +18,15 @@ pub(crate) fn body_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
 }
 
+/// How a frame's last row ends. Something still in progress stays open with a
+/// dashed `╎` ("continues"); a finished block closes with `╰─`. Both are one
+/// row, so a block keeps its height when it closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tail {
+    Closed,
+    Open,
+}
+
 /// Clip the title to one row and keep every body continuation inside the
 /// gutter. There is no right border, so ANSI, tabs and wide text share the
 /// same copyable layout. Keep every frame stroke at regular weight: some
@@ -27,6 +36,7 @@ pub(crate) fn render<'a>(
     bodies: impl IntoIterator<Item = &'a str>,
     width: usize,
     color: Color,
+    tail: Tail,
 ) -> String {
     // Content may leave bold or dim active; the frame owns its font weight.
     let frame = format!("{RESET}{}", ansi_fg(color));
@@ -46,6 +56,10 @@ pub(crate) fn render<'a>(
             }
         }
     }
-    let _ = write!(out, "\n{frame}╰─{RESET}");
+    let tail = match tail {
+        Tail::Closed => "╰─",
+        Tail::Open => "╎",
+    };
+    let _ = write!(out, "\n{frame}{tail}{RESET}");
     out
 }

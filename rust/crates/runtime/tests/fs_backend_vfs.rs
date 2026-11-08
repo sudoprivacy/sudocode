@@ -5,7 +5,7 @@
 //! / `grep_search` against a real in-memory `Kernel` (not a mock) so the
 //! backend-aware path normalisation and the `readdir`-composed traversal
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
-//! host, so a host-`std::fs` regression would surface as a NotFound
+//! host, so a host-`std::fs` regression would surface as a `NotFound`
 //! rather than silently passing.
 //!
 //! One test here is deliberately NOT about the VFS: `link` is a contract both
@@ -13,12 +13,12 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::abc::object_store::ObjectStore;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
@@ -34,14 +34,6 @@ use runtime::{
 };
 use sudo_contracts::ResourceRef;
 
-/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
-/// regular-file bytes (dirents fall through to the global metastore; only
-/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
-#[derive(Default)]
-struct MemStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
-}
-
 struct CountingAllow(Arc<AtomicUsize>);
 
 impl PermissionProvider for CountingAllow {
@@ -54,65 +46,6 @@ impl PermissionProvider for CountingAllow {
     ) -> Result<(), KernelError> {
         self.0.fetch_add(1, Ordering::Relaxed);
         Ok(())
-    }
-}
-
-impl ObjectStore for MemStore {
-    fn name(&self) -> &str {
-        "mem"
-    }
-
-    fn write_content(
-        &self,
-        content: &[u8],
-        content_id: &str,
-        _ctx: &OperationContext,
-        offset: u64,
-    ) -> Result<WriteResult, StorageError> {
-        let mut b = self.blobs.lock().unwrap();
-        let mut data = if offset > 0 {
-            b.get(content_id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let start = offset as usize;
-        if start > data.len() {
-            data.resize(start, 0);
-        }
-        let end = start + content.len();
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(content);
-        let size = data.len() as u64;
-        b.insert(content_id.to_string(), data);
-        Ok(WriteResult {
-            content_id: content_id.to_string(),
-            version: content_id.to_string(),
-            size,
-        })
-    }
-
-    fn read_content(
-        &self,
-        content_id: &str,
-        _ctx: &OperationContext,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .map(|d| d.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
     }
 }
 
@@ -131,7 +64,7 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
 }
 
 /// A planted descriptor for `name` in `zone` — the test-side stand-in for
-/// what the ManagedAgentService plants for a real managed agent, so backends
+/// what the `ManagedAgentService` plants for a real managed agent, so backends
 /// built from it carry the trusted-local zone source a planted descriptor
 /// grants.
 fn desc_for(name: &str, zone: &str) -> AgentDescriptor {
@@ -313,6 +246,8 @@ fn every_remote_backend_constructor_fails_before_rpc() {
         .expect("lazy client construction");
     let backend = NexusVfsFsBackend::new(client, "arbitrary-api-key".to_string());
     denied(backend.read("/agents/a/inbox"));
+    denied(backend.read_versioned("/agents/a/inbox"));
+    denied(backend.write_if_version("/agents/a/inbox", None, b"x"));
     denied(backend.write("/agents/a/inbox", b"x"));
     denied(backend.append("/agents/a/inbox", b"x"));
     denied(backend.stat("/agents/a/inbox"));
@@ -327,9 +262,12 @@ fn every_remote_backend_constructor_fails_before_rpc() {
     );
     let from_arc = NexusVfsFsBackend::from_arc(Arc::clone(&shared), String::new());
     denied(from_arc.read("/agents/a/inbox"));
+    denied(from_arc.read_versioned("/agents/a/inbox"));
+    denied(from_arc.write_if_version("/agents/a/inbox", None, b"x"));
 
     let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
     let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
         delivery: runtime::turn_input::InputDelivery::Steer,
         from: "sender".to_string(),
         to: "receiver".to_string(),
@@ -383,6 +321,25 @@ fn write_then_read_round_trips_through_the_vfs() {
         !std::path::Path::new(path).exists(),
         "co-hosted write must not touch the host filesystem"
     );
+}
+
+#[test]
+fn conditional_operations_preserve_files_on_unqualified_storage() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    let path = "/ws/plain-register";
+    fs.write(path, b"original").unwrap();
+    assert_eq!(
+        fs.read_versioned(path).unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        fs.write_if_version(path, None, b"replacement")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Unsupported,
+    );
+    assert_eq!(fs.read(path).unwrap(), b"original");
 }
 
 #[test]
@@ -503,18 +460,16 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
-    let mounts = vec![mount.to_string_lossy().into_owned()];
+    let native_mount = mount.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let mounts = [native_mount];
     #[cfg(windows)]
     let mounts = {
-        let ordinary = mounts[0]
+        let ordinary = native_mount
             .strip_prefix(r"\\?\")
             .expect("canonicalized Windows workspace")
             .to_string();
-        vec![
-            mounts[0].clone(),
-            ordinary.clone(),
-            ordinary.replace('\\', "/"),
-        ]
+        [native_mount, ordinary.clone(), ordinary.replace('\\', "/")]
     };
     for native_mount in mounts {
         let secret = format!("{native_mount}/secret.txt");
@@ -798,7 +753,7 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
 /// The host backend answers `link` with a REAL OS link, needing no privilege.
 ///
 /// The other half of the parity the test above claims. It is asserted here
-/// because the kernel half cannot show it: `KernelFsBackend` plants a DT_LINK,
+/// because the kernel half cannot show it: `KernelFsBackend` plants a `DT_LINK`,
 /// which says nothing about what `StdFsBackend` does on a host filesystem, and
 /// the co-host and a plain `scode` have to behave the same way — the chat-list
 /// index is a pointer at a conversation root on both.
@@ -1050,7 +1005,7 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
         "each agent's list is keyed by the agent, not by a directory they share"
     );
 
-    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+    let _ = TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
         content: String::from("Run the tests"),
         status: TodoStatus::InProgress,
         active_form: String::from("Running the tests"),
@@ -1382,6 +1337,8 @@ fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
 // constructor now fails closed before any RPC by design).
 // ─────────────────────────────────────────────────────────────────────────────
 
+type PermissionCall = (String, Permission, OperationContext, Option<String>);
+
 #[derive(Default)]
 struct FilePolicy {
     denied: Mutex<HashSet<String>>,
@@ -1389,7 +1346,7 @@ struct FilePolicy {
     read_denied: Mutex<HashSet<String>>,
     agent: Mutex<Option<String>>,
     broken: Mutex<Option<String>>,
-    calls: Mutex<Vec<(String, Permission, OperationContext, Option<String>)>>,
+    calls: Mutex<Vec<PermissionCall>>,
 }
 
 impl FilePolicy {
@@ -1631,10 +1588,10 @@ fn glob_drops_a_path_revoked_after_directory_discovery() {
         .lock()
         .unwrap()
         .insert("/ws/revoked.txt".into());
-    assert!(glob_search(&fs, "**/*.txt", None)
-        .unwrap()
-        .filenames
-        .is_empty());
+    assert_eq!(
+        glob_search(&fs, "**/*.txt", None).unwrap().filenames,
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -1810,12 +1767,160 @@ fn remote_backend(
         match fs.stat("/ws/ready.txt") {
             Ok(_) => break,
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("VFS host did not become ready: {error}"),
         }
     }
     (fs, host, client)
+}
+
+#[cfg(target_os = "linux")]
+fn install_conditional_alias_mounts(
+    kernel: &Kernel,
+    manager: &nexus_raft::ZoneManager,
+    root: &std::path::Path,
+) {
+    use nexus_raft::zone_meta_store::ZoneMetaStore;
+    use std::time::Duration;
+
+    let zone = manager.create_zone("root", vec![]).unwrap();
+    assert!(zone.wait_for_leader(Duration::from_secs(10)));
+    let cas = Arc::new(
+        backends::storage::cas_local::CasLocalBackend::new_durable(&root.join("cas")).unwrap(),
+    );
+    for mount in ["/control", "/control-alias"] {
+        kernel
+            .vfs_router_arc()
+            .add_mount(mount, "root", Some(cas.clone()), false);
+        kernel.install_mount_metastore(
+            Kernel::canonical_mount_key(mount, "root"),
+            Arc::new(ZoneMetaStore::new_with_subtree(
+                zone.consensus_node().clone(),
+                manager.runtime_handle(),
+                mount.into(),
+                "/__managed_content_v1__".into(),
+            )),
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn conditional_content_cohost_and_mtls_share_the_committed_image() {
+    use runtime::fs_backend::{VersionToken, WriteOutcome};
+
+    let root = tempfile::tempdir().unwrap();
+    let manager =
+        nexus_raft::ZoneManager::isolated(root.path().join("raft").to_str().unwrap()).unwrap();
+    let kernel = kernel_with_root_backend();
+    install_conditional_alias_mounts(&kernel, &manager, root.path());
+    let local = Arc::new(vfs_backend(&kernel));
+    local.create_dir_all("/ws").unwrap();
+    local.write("/ws/ready.txt", b"ready").unwrap();
+    let (remote, host, client) = remote_backend(&kernel);
+    let remote = Arc::new(remote);
+    let path = "/control/register";
+    let alias = "/control-alias/register";
+    assert!(local.read_versioned(path).unwrap().is_none());
+    assert!(remote.read_versioned(alias).unwrap().is_none());
+    let WriteOutcome::Committed(first) = local.write_if_version(path, None, b"").unwrap() else {
+        panic!("first image must commit");
+    };
+    assert_ne!(first.0, [] as [u8; 0]);
+    assert_eq!(
+        remote.read_versioned(alias).unwrap(),
+        Some((Vec::new(), first.clone()))
+    );
+    assert_eq!(
+        remote.write_if_version(alias, None, b"wrong").unwrap(),
+        WriteOutcome::Conflict {
+            current: Some(first.clone())
+        }
+    );
+
+    let outcomes = race_conditional_writers([local.clone(), remote.clone()], alias, &first);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, WriteOutcome::Committed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, WriteOutcome::Conflict { .. }))
+            .count(),
+        1
+    );
+    let image = remote.read_versioned(path).unwrap().unwrap();
+    assert!(image.0 == b"cohost" || image.0 == b"remote");
+    assert_ne!(image.1, first);
+    assert_eq!(local.read_versioned(alias).unwrap(), Some(image.clone()));
+    assert_eq!(
+        local
+            .write_if_version(path, Some(&first), b"stale")
+            .unwrap(),
+        WriteOutcome::Conflict {
+            current: Some(image.1.clone())
+        }
+    );
+    assert!(remote
+        .write_if_version(alias, Some(&VersionToken(Vec::new())), b"empty token")
+        .is_err());
+
+    let invalid = NexusVfsFsBackend::from_arc_mtls(client, "invalid-key".into(), "root");
+    assert!(invalid.read_versioned(path).is_err());
+    assert!(matches!(
+        invalid.write_if_version(path, Some(&image.1), b"forbidden"),
+        Err(_) | Ok(WriteOutcome::Unknown)
+    ));
+    assert_eq!(local.read_versioned(path).unwrap(), Some(image));
+    remote.write("/ws/plain", b"unqualified").unwrap();
+    assert_eq!(
+        remote.read_versioned("/ws/plain").unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        remote
+            .write_if_version("/ws/plain", None, b"overwrite")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(local.read("/ws/plain").unwrap(), b"unqualified");
+
+    drop(invalid);
+    drop(remote);
+    drop(host);
+    drop(local);
+    kernel.release_metastores();
+    manager.shutdown();
+}
+
+#[cfg(target_os = "linux")]
+fn race_conditional_writers(
+    writers: [Arc<dyn FsBackend>; 2],
+    path: &'static str,
+    expected: &runtime::fs_backend::VersionToken,
+) -> Vec<runtime::fs_backend::WriteOutcome> {
+    let barrier = Arc::new(std::sync::Barrier::new(writers.len()));
+    let tasks: Vec<_> = writers
+        .into_iter()
+        .zip([b"cohost".as_slice(), b"remote".as_slice()])
+        .map(|(writer, image)| {
+            let barrier = barrier.clone();
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                writer
+                    .write_if_version(path, Some(&expected), image)
+                    .unwrap()
+            })
+        })
+        .collect();
+    tasks.into_iter().map(|task| task.join().unwrap()).collect()
 }
 
 #[test]
@@ -1837,9 +1942,8 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        assert_eq!(
-            fs.exists("/ws/ready.txt").unwrap(),
-            false,
+        assert!(
+            !fs.exists("/ws/ready.txt").unwrap(),
             "{key}: an authentication refusal must read as absence, not leak existence"
         );
     }
@@ -2021,6 +2125,8 @@ fn metadata_and_lock_share_scope_with_positive_lifecycle_controls() {
     permission_denied(restricted.stat("/private/alias"));
     permission_denied(restricted.read_link("/private/alias"));
     permission_denied(restricted.try_lock("/private/lease", 1000));
+    permission_denied(restricted.read_versioned("/private/target"));
+    permission_denied(restricted.write_if_version("/private/target", None, b"changed"));
     permission_denied(restricted.record_log("/private/history", RecordLogMode::CreateNew));
     permission_denied(restricted.record_log("/private/target", RecordLogMode::Existing));
     assert_eq!(restricted.read_link("/ws/alias").unwrap(), "/ws/target");
@@ -2051,6 +2157,8 @@ fn links_cannot_redirect_scoped_io_or_rename_to_private_content() {
         "/ws",
     );
     permission_denied(restricted.read("/ws/escape"));
+    permission_denied(restricted.read_versioned("/ws/escape"));
+    permission_denied(restricted.write_if_version("/ws/escape", None, b"changed"));
     permission_denied(restricted.write("/ws/escape", b"changed"));
     permission_denied(restricted.append("/ws/escape", b"changed"));
     permission_denied(restricted.tail_read("/ws/escape", 0, 0));

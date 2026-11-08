@@ -1,13 +1,15 @@
 //! PTY probe: does the staging overlay actually render a *running* tool card
 //! during a long-running tool call? The staging design shows an in-flight call
-//! as a card in the overlay (above the prompt) until its ToolResult arrives.
+//! as a card in the overlay (above the prompt) until its `ToolResult` arrives.
 //! For a fast tool the running phase is sub-frame and invisible; this uses the
 //! `bash_interrupt_long_running` scenario (`printf 'interrupt-start'; sleep 30`)
 //! so the in-flight window is ~30 s — plenty for the 80 ms tick to render it.
 //!
 //! Asserts: while the tool is running (after `interrupt-start`, before any
 //! result), an L-frame card header (`╭─`) referencing the running Bash call is
-//! on screen. Cleaned up by `/exit` (SIGTERM to the sleep).
+//! on screen, and the card is still open: its frame ends in a dashed `╎`, not
+//! the `╰─` a finished call closes with. Cleaned up by `/exit` (SIGTERM to the
+//! sleep).
 
 mod common;
 
@@ -42,6 +44,24 @@ fn staging_overlay_shows_a_running_card_during_a_long_tool() {
     // in the echoed prompt.
     sess.expect("╭─").expect(
         "a running tool card should be visible in the staging overlay during the tool call",
+    );
+    common::expect_screen(
+        &sess,
+        |_| {
+            sess.render(|screen| {
+                let raw = screen.raw();
+                let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+                let Some(start) = rows.iter().position(|row| row.starts_with("╭─ Bash("))
+                else {
+                    return false;
+                };
+                let end = (start + 1..rows.len()).find(|&row| !rows[row].starts_with('│'));
+                end.is_some_and(|end| rows[end].trim_end() == "╎")
+                    && !rows.iter().any(|row| row.trim() == "╰─")
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "a running card stays open until its result arrives",
     );
 
     sess.send("/exit\r").expect("send /exit");

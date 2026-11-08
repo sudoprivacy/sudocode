@@ -346,22 +346,22 @@ fn lifecycle_update(lifecycle: SubagentLifecycle, stream: Option<Value>) -> Sess
 /// session's cwd lease + workspace-root scope.
 pub(crate) fn build_new_session(
     config: &SdkAcpConfig,
-    cwd: PathBuf,
-    mcp_servers: BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    cwd: &Path,
+    mcp_servers: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
     prompt_overrides: runtime::SystemPromptOverrides,
     memory: runtime::memory::MemoryMode,
 ) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
-    let cwd = canonical_session_cwd(&cwd).map_err(crate::AcpError::invalid_params)?;
+    let cwd = canonical_session_cwd(cwd).map_err(crate::AcpError::invalid_params)?;
     let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides, memory)
         .map_err(crate::AcpError::internal)?;
     let engine = SessionEngine::build(
         &cwd,
-        &mcp_servers,
+        mcp_servers,
         prompt_overrides,
         memory,
         system_prompt,
-        config.model.clone(),
-        config.model_flag_raw.clone(),
+        &config.model,
+        config.model_flag_raw.as_deref(),
         config.allowed_tools.clone(),
         config.permission_mode_override,
         config.reasoning_effort.clone(),
@@ -377,12 +377,12 @@ pub(crate) fn open_loaded_session(
     config: &SdkAcpConfig,
     registry: &SessionRegistry,
     session_id: &str,
-    cwd: PathBuf,
+    cwd: &Path,
     mcp_servers: BTreeMap<String, runtime::ScopedMcpServerConfig>,
     prompt_overrides: runtime::SystemPromptOverrides,
     memory: runtime::memory::MemoryMode,
 ) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
-    let cwd = canonical_session_cwd(&cwd).map_err(crate::AcpError::invalid_params)?;
+    let cwd = canonical_session_cwd(cwd).map_err(crate::AcpError::invalid_params)?;
     if let Some(engine) = registry.engine(session_id) {
         if registry.cwd(session_id).as_ref() != Some(&cwd) {
             return Err(crate::AcpError::invalid_params("session cwd mismatch"));
@@ -405,8 +405,8 @@ pub(crate) fn open_loaded_session(
         prompt_overrides,
         memory,
         system_prompt,
-        config.model.clone(),
-        config.model_flag_raw.clone(),
+        &config.model,
+        config.model_flag_raw.as_deref(),
         config.allowed_tools.clone(),
         config.permission_mode_override,
         config.reasoning_effort.clone(),
@@ -422,12 +422,12 @@ pub(crate) fn open_forked_session(
     config: &SdkAcpConfig,
     source: &SessionForkSource,
     registry: &SessionRegistry,
-    cwd: PathBuf,
-    mcp_servers: BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    cwd: &Path,
+    mcp_servers: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
     prompt_overrides: runtime::SystemPromptOverrides,
     memory: runtime::memory::MemoryMode,
 ) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
-    let cwd = canonical_session_cwd(&cwd).map_err(crate::AcpError::invalid_params)?;
+    let cwd = canonical_session_cwd(cwd).map_err(crate::AcpError::invalid_params)?;
     let parent = resolve_fork_source(source, registry)?;
 
     let _scope = WorkspaceRootScope::enter(&cwd);
@@ -448,12 +448,12 @@ pub(crate) fn open_forked_session(
         &cwd,
         handle,
         forked,
-        &mcp_servers,
+        mcp_servers,
         prompt_overrides,
         memory,
         system_prompt,
-        config.model.clone(),
-        config.model_flag_raw.clone(),
+        &config.model,
+        config.model_flag_raw.as_deref(),
         config.allowed_tools.clone(),
         config.permission_mode_override,
         config.reasoning_effort.clone(),

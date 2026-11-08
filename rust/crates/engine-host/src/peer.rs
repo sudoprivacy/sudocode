@@ -126,12 +126,12 @@ impl Peer {
     }
 
     /// The system-prompt section that teaches the model its identity and how
-    /// to reply on this namespace.
+    /// to reach peers: the same one on every host.
     #[must_use]
     pub fn prompt_section(&self) -> String {
         match self {
-            Self::Node(node) => runtime::nexus_mailbox::peer_system_prompt(&node.binding.agent),
-            Self::Disk(name) => runtime::agent_mailbox::repl_a2a_prompt_section(name),
+            Self::Node(node) => runtime::agent_mailbox::a2a_prompt_section(&node.binding.agent),
+            Self::Disk(name) => runtime::agent_mailbox::a2a_prompt_section(name),
         }
     }
 
@@ -161,7 +161,7 @@ impl Peer {
                 sink,
             ),
             Self::Disk(name) => runtime::mailbox::spawn_local_poller(
-                runtime::mailbox::local_pair_root(),
+                &runtime::mailbox::local_pair_root(),
                 name.clone(),
                 abort,
                 sink,
@@ -211,9 +211,12 @@ pub fn node(agent: &str) -> Option<Arc<Node>> {
             state: Mutex::new(NodeState::Pending { endpoint, error }),
         });
         let resolving = Arc::clone(&binding);
-        let mailbox = Arc::new(Mailbox::daemon_resolving(agent.to_string(), move || {
-            resolving.backend()
-        }));
+        // The binding is a certificate-only mTLS connection: the node
+        // authenticated every writer and stamped each `from`.
+        let mailbox = Arc::new(
+            Mailbox::daemon_resolving(agent.to_string(), move || resolving.backend())
+                .with_authenticated_senders(true),
+        );
         Some(Arc::new(Node { binding, mailbox }))
     };
     nodes.insert(agent.to_string(), decided.clone());
@@ -264,6 +267,7 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         delivery: "automatic",
         cursor: runtime::mailbox::cursor_guarantee(agent)
             .map_or("none", runtime::cursor_fence::CursorGuarantee::as_str),
+        health: runtime::mailbox::receiver_health(agent, error.is_some()),
         error,
         last_receiver_error: runtime::mailbox::last_receiver_error(agent),
     }

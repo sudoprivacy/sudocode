@@ -5,7 +5,7 @@
 //! 1. `prepare_agent_job` -> AgentOutput.color populated from
 //!    `runtime::agent_color::assign_agent_color(agent_id)`.
 //! 2. Color survives serde round-trip (matters because the
-//!    manifest is persisted as JSON and re-read on pid_output).
+//!    manifest is persisted as JSON and re-read on `pid_output`).
 //! 3. Different `agent_id`s produce distinguishable colors — at
 //!    least 3 buckets in a 10-sample, matching the runtime unit
 //!    test's spread guarantee.
@@ -21,7 +21,7 @@ use runtime::agent_color::{assign_agent_color, AGENT_COLOR_PALETTE};
 fn agent_color_palette_matches_runtime_and_tools_expectation() {
     assert_eq!(AGENT_COLOR_PALETTE.len(), 8);
     for name in AGENT_COLOR_PALETTE {
-        assert!(!name.is_empty());
+        assert_ne!(*name, "");
     }
 }
 

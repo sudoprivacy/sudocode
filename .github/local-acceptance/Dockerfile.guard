@@ -1,0 +1,20 @@
+FROM docker:29.4.3-cli@sha256:51e23845f5caff1e688a2fae003b0c69d635c9200ad544731db1593731df1d3a AS docker-client
+
+FROM rust:1.99@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+
+COPY --from=docker-client /usr/local/bin/docker /usr/local/bin/docker
+RUN docker --version
+
+RUN nice -n 10 apt-get update \
+ && nice -n 10 apt-get install -y --no-install-recommends python3-psutil \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN nice -n 10 rustup component add rustfmt clippy \
+ && cargo fmt --version \
+ && cargo clippy --version
+
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
+COPY nextest_seed.py /opt/nextest_seed.py
+RUN python3 /opt/nextest_seed.py --verify-cache
+COPY guard.py /opt/acceptance-guard.py
+ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

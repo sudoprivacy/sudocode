@@ -30,6 +30,7 @@ pub enum InputSource {
     Peer,
     Subagent,
     Background,
+    Scheduled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +82,7 @@ impl TurnInputInbox {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        debug_assert!(state.pending.is_empty());
+        debug_assert_eq!(state.pending, [] as [crate::turn_input::TurnInput; 0]);
         state.open = true;
     }
 

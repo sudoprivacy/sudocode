@@ -1,17 +1,18 @@
 //! Task browser with bounded, lazily decoded output and event-driven repaint.
 use super::choice_text::ChoiceText;
+use crate::render::TextRole;
 use crate::render::{
     ansi_fg,
     styled_text::StyledText,
     text_layout::{display_width, truncate_to_width, wrap_line},
     theme, RESET,
 };
-use engine_core::cache_advisor::{ttl_label, TtlAdvice};
+use engine_core::cache_advisor::{ttl_label, TtlAdvice, MIN_INTERVALS};
 use engine_core::cache_ttl::TtlChoice;
 use engine_events::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, fmt::Write as _, time::Instant};
 
 /// One projection of task events for the status row and footer. Reading state
 /// belongs to this browser; execution state always comes from the producer.
@@ -24,41 +25,50 @@ pub(super) struct TaskSummary {
     unconfirmed: usize,
     unread: usize,
     failed: usize,
+    /// Enabled scheduled jobs: their tab is reachable from the footer even
+    /// when no background task exists.
+    scheduled: usize,
 }
 
 impl TaskSummary {
+    /// Attention states keep priority over the remaining running work.
+    pub fn animates_status(self) -> bool {
+        self.unconfirmed == 0 && self.failed == 0 && self.running + self.stopping > 0
+    }
+
     pub fn status_lines(
         self,
         width: usize,
         completed_turn: Option<u32>,
+        frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
         let active = self.running + self.stopping;
-        let (full, short, color) = if self.unconfirmed > 0 {
+        let (full, short, role) = if self.unconfirmed > 0 {
             (
                 format!(
                     "{} unconfirmed",
                     quantity(self.unconfirmed, "background task")
                 ),
                 format!("{} unconfirmed", self.unconfirmed),
-                theme().activity_colors(true).label,
+                TextRole::Warning,
             )
         } else if self.failed > 0 {
             (
                 format!("{} failed", quantity(self.failed, "background task")),
                 format!("{} failed", self.failed),
-                theme().error,
+                TextRole::Error,
             )
         } else if self.stopping > 0 {
             (
                 format!("Stopping {}…", quantity(self.stopping, "background task")),
                 format!("{} stopping", self.stopping),
-                theme().activity_colors(false).label,
+                TextRole::Brand,
             )
         } else if self.running > 0 {
             (
                 format!("{} still running", quantity(self.running, "task")),
                 format!("{} running", self.running),
-                theme().activity_colors(false).label,
+                TextRole::Brand,
             )
         } else {
             return None;
@@ -70,30 +80,126 @@ impl TaskSummary {
         } else {
             String::new()
         };
-        let mut full = format!("{full}{suffix}");
-        if let Some(turn) = completed_turn {
-            use std::fmt::Write as _;
-            let _ = write!(full, " · turn {turn} finished");
-        }
-        let style = crossterm::style::ContentStyle {
-            foreground_color: (crate::render::ColorSupport::detect()
-                != crate::render::ColorSupport::NoColor)
-                .then_some(color),
-            ..Default::default()
-        };
-        let render = |label: &str| {
+        let full = format!("{full}{suffix}");
+        let metadata = completed_turn
+            .map(|turn| format!(" · turn {turn} finished"))
+            .unwrap_or_default();
+        let logo = self
+            .animates_status()
+            .then(|| crate::render::activity::spinner_frame(frame));
+        let logo_width = logo.map_or(0, |logo| display_width(logo) + 1);
+        let theme = theme();
+        let render = |label: &str, metadata: &str| {
             let mut text = StyledText::default();
-            text.push(style, &truncate_to_width(label, width));
+            if let Some(logo) = logo {
+                text.push(
+                    theme.style(TextRole::Brand),
+                    &truncate_to_width(&format!("{logo} "), width),
+                );
+            }
+            text.push(
+                theme.style(role),
+                &truncate_to_width(label, width.saturating_sub(logo_width)),
+            );
+            text.push(theme.style(TextRole::Secondary), metadata);
             std::sync::Arc::new(text)
         };
-        let summary = render(&short);
-        let full = if display_width(&full) > width {
+        let summary = render(&short, "");
+        let full = if logo_width + display_width(&full) + display_width(&metadata) > width {
             summary.clone()
         } else {
-            render(&full)
+            render(&full, &metadata)
         };
         Some((full, summary))
     }
+}
+
+fn job_label(job: &runtime::cron_registry::CronEntry) -> String {
+    job.name
+        .as_deref()
+        .or(job.description.as_deref())
+        .filter(|label| !label.trim().is_empty())
+        .map_or_else(|| plain(&job.prompt), plain)
+}
+
+fn schedule_text(job: &runtime::cron_registry::CronEntry) -> String {
+    use runtime::cron_registry::CronKind;
+    match job.kind {
+        CronKind::Cron => job.schedule.clone(),
+        CronKind::Every => job.schedule.parse::<u64>().map_or_else(
+            |_| format!("every {}", job.schedule),
+            |secs| match secs {
+                s if s % 3600 == 0 => format!("every {}h", s / 3600),
+                s if s % 60 == 0 => format!("every {}m", s / 60),
+                s => format!("every {s}s"),
+            },
+        ),
+        CronKind::At => "once".into(),
+    }
+}
+
+/// How far from now `at` is, as `in 12m` or `5m ago`.
+fn relative(at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let span = |secs: u64| match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    };
+    if at >= now {
+        format!("in {}", span(at - now))
+    } else {
+        format!("{} ago", span(now - at))
+    }
+}
+
+fn job_state(job: &runtime::cron_registry::CronEntry) -> String {
+    let next = if job.enabled {
+        job.next_run_at
+            .map_or_else(|| "not armed".into(), |at| format!("next {}", relative(at)))
+    } else {
+        "disabled".to_string()
+    };
+    match job.last_status.as_deref() {
+        Some(status) => format!("{next} · last {status}"),
+        None => next,
+    }
+}
+
+fn job_detail(job: &runtime::cron_registry::CronEntry, width: usize) -> Vec<String> {
+    use runtime::cron_registry::CronTarget;
+    let target = match &job.target {
+        CronTarget::Agent { name } => format!("message to {name}"),
+        CronTarget::NewSession => format!(
+            "new session in {}",
+            job.cwd.as_deref().unwrap_or("the current directory")
+        ),
+    };
+    let delivery = if job.delivery.is_steer() {
+        "steers into a running turn"
+    } else {
+        "queues behind a running turn"
+    };
+    let mut lines = vec![
+        format!("  {}", job_label(job)),
+        format!("  {} · {} · {delivery}", schedule_text(job), target),
+        format!("  {} · runs {}", job_state(job), job.run_count),
+    ];
+    if let Some(error) = &job.last_error {
+        lines.push(format!("  last error: {}", plain(error)));
+    }
+    lines.push(String::new());
+    lines.extend(
+        plain(&job.prompt)
+            .lines()
+            .take(8)
+            .map(|line| fit(&format!("  {line}"), width)),
+    );
+    lines
 }
 
 fn quantity(count: usize, noun: &str) -> String {
@@ -114,16 +220,39 @@ pub(super) enum TaskFocus {
     Ttl,
 }
 
+/// The browser's two lists, switched with ←/→.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum TaskTab {
+    #[default]
+    Background,
+    Scheduled,
+}
+
+/// The Scheduled tab: the shared cron store, through the same service
+/// `scode cron`, `/cron` and the agent's tools use.
+#[derive(Default)]
+struct ScheduledTab {
+    jobs: Vec<runtime::cron_registry::CronEntry>,
+    selected: usize,
+    confirm_delete: bool,
+    /// The outcome of the last action, shown under the list.
+    notice: Option<String>,
+}
+
 /// Rows of the cache-TTL panel, top to bottom.
 const TTL_CHOICES: [TtlChoice; 3] = [TtlChoice::OneHour, TtlChoice::FiveMinutes, TtlChoice::Auto];
+const COMMAND_PREVIEW_ROWS: usize = 3;
 
 struct Entry {
     task: BackgroundTask,
     output: Option<StyledText>,
     read: bool,
+    /// How many turns had begun when this task's failure was first seen.
+    failure_seen_at: Option<u32>,
     received: Instant,
     wrapped_width: usize,
     wrapped: Vec<StyledText>,
+    command_rows: Option<(usize, Vec<String>)>,
 }
 
 #[derive(Default)]
@@ -140,6 +269,10 @@ pub(super) struct TaskBrowser {
     ttl_advice: Option<TtlAdvice>,
     tip_actionable: bool,
     ttl_row: usize,
+    pub tab: TaskTab,
+    scheduled: ScheduledTab,
+    /// Turns begun in this session.
+    turns_begun: u32,
 }
 
 impl TaskBrowser {
@@ -155,7 +288,17 @@ impl TaskBrowser {
                     .is_some_and(|e| e.read && !e.task.status.is_active())
                     || (self.focus == TaskFocus::Detail
                         && self.selected.as_deref() == Some(&task.id));
+                let failure_seen_at = (task.status == BackgroundTaskStatus::Failed).then(|| {
+                    self.entries
+                        .get(&task.id)
+                        .and_then(|entry| entry.failure_seen_at)
+                        .unwrap_or(self.turns_begun)
+                });
                 if let Some(entry) = self.entries.get_mut(&task.id) {
+                    entry.failure_seen_at = failure_seen_at;
+                    if entry.command_rows.is_some() && entry.task.command != task.command {
+                        entry.command_rows = None;
+                    }
                     if entry.task.output != task.output {
                         entry.output = None;
                         entry.wrapped_width = 0;
@@ -171,9 +314,11 @@ impl TaskBrowser {
                             output: None,
                             task,
                             read,
+                            failure_seen_at,
                             received: Instant::now(),
                             wrapped_width: 0,
                             wrapped: Vec::new(),
+                            command_rows: None,
                         },
                     );
                 }
@@ -219,9 +364,18 @@ impl TaskBrowser {
                 summary.unconfirmed += 1;
             } else if !entry.read {
                 summary.unread += 1;
-                summary.failed += usize::from(entry.task.status == BackgroundTaskStatus::Failed);
+                summary.failed += usize::from(
+                    entry.task.status == BackgroundTaskStatus::Failed
+                        // Red through the next turn to begin, which reports
+                        // the failure; once another turn begins it is one of
+                        // the footer's new results.
+                        && entry
+                            .failure_seen_at
+                            .is_some_and(|turn| self.turns_begun <= turn + 1),
+                );
             }
         }
+        summary.scheduled = self.scheduled.jobs.iter().filter(|job| job.enabled).count();
         if self.summary == summary {
             return;
         }
@@ -239,6 +393,9 @@ impl TaskBrowser {
         if summary.unread > 0 {
             parts.push(quantity(summary.unread, "new result"));
         }
+        if summary.scheduled > 0 {
+            parts.push(format!("{} scheduled", summary.scheduled));
+        }
         self.footer_summary = parts.join(" · ");
         let mut compact = Vec::new();
         if summary.terminals > 0 {
@@ -252,6 +409,9 @@ impl TaskBrowser {
         }
         if summary.unread > 0 {
             compact.push(format!("+{}", summary.unread));
+        }
+        if summary.scheduled > 0 {
+            compact.push(format!("{} sched", summary.scheduled));
         }
         self.compact_summary = compact.join(" ");
     }
@@ -302,12 +462,15 @@ impl TaskBrowser {
         }
     }
 
-    /// Open the cache-TTL panel on the suggested row.
+    /// Open the cache-TTL panel on the suggested row, or on `auto` while the
+    /// TTL follows the session's stats.
     pub fn open_ttl(&mut self) {
         let Some(advice) = &self.ttl_advice else {
             return;
         };
-        let suggested = if advice.suggested_seconds == 3600 {
+        let suggested = if advice.auto {
+            TtlChoice::Auto
+        } else if advice.suggested_seconds == 3600 {
             TtlChoice::OneHour
         } else {
             TtlChoice::FiveMinutes
@@ -349,8 +512,175 @@ impl TaskBrowser {
         self.focus = TaskFocus::Input;
     }
 
+    pub fn turn_began(&mut self) {
+        self.turns_begun += 1;
+        self.refresh_summary();
+    }
+
+    /// Re-read the cron store: on open, on a tab switch, after an action, and
+    /// when a turn ends (a fire or another process may have changed it).
+    pub fn refresh_scheduled(&mut self) {
+        self.scheduled.jobs = runtime::cron_service::list();
+        self.scheduled.selected = self
+            .scheduled
+            .selected
+            .min(self.scheduled.jobs.len().saturating_sub(1));
+        self.refresh_summary();
+    }
+
+    pub fn switch_tab(&mut self) {
+        self.tab = match self.tab {
+            TaskTab::Background => TaskTab::Scheduled,
+            TaskTab::Scheduled => TaskTab::Background,
+        };
+        self.focus = TaskFocus::List;
+        self.scheduled.confirm_delete = false;
+        self.scheduled.notice = None;
+        self.refresh_scheduled();
+    }
+
+    fn selected_job(&self) -> Option<&runtime::cron_registry::CronEntry> {
+        self.scheduled.jobs.get(self.scheduled.selected)
+    }
+
+    /// A key in the Scheduled tab. ↑/↓ select, Enter details, `e` enable or
+    /// disable, `r` run now, `d` delete after `y`, Esc back.
+    pub fn scheduled_key(&mut self, code: iocraft::KeyCode) {
+        use iocraft::KeyCode;
+        if self.scheduled.confirm_delete {
+            self.scheduled.confirm_delete = false;
+            if code == KeyCode::Char('y') {
+                if let Some(job) = self.selected_job().cloned() {
+                    self.scheduled.notice =
+                        Some(match runtime::cron_service::remove(&job.cron_id) {
+                            Ok(_) => format!("Deleted {}", job_label(&job)),
+                            Err(error) => error,
+                        });
+                }
+                self.refresh_scheduled();
+            } else {
+                self.scheduled.notice = None;
+            }
+            return;
+        }
+        match (self.focus, code) {
+            (TaskFocus::Detail, KeyCode::Esc) => self.focus = TaskFocus::List,
+            (TaskFocus::List, KeyCode::Esc) => self.close(),
+            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => self.switch_tab(),
+            (TaskFocus::List, KeyCode::Up) => {
+                self.scheduled.selected = self.scheduled.selected.saturating_sub(1);
+            }
+            (TaskFocus::List, KeyCode::Down) => {
+                self.scheduled.selected =
+                    (self.scheduled.selected + 1).min(self.scheduled.jobs.len().saturating_sub(1));
+            }
+            (TaskFocus::List, KeyCode::Enter) if self.selected_job().is_some() => {
+                self.focus = TaskFocus::Detail;
+            }
+            (_, KeyCode::Char('e')) => {
+                if let Some(job) = self.selected_job().cloned() {
+                    let enabled = !job.enabled;
+                    self.scheduled.notice = Some(
+                        match runtime::cron_service::set_enabled(&job.cron_id, enabled) {
+                            Ok(_) if enabled => format!("Enabled {}", job_label(&job)),
+                            Ok(_) => format!("Disabled {}", job_label(&job)),
+                            Err(error) => error,
+                        },
+                    );
+                    self.refresh_scheduled();
+                }
+            }
+            (_, KeyCode::Char('r')) => {
+                if let Some(job) = self.selected_job().cloned() {
+                    self.scheduled.notice =
+                        Some(match runtime::cron_scheduler::trigger_here(&job.cron_id) {
+                            Ok(status) => format!("Ran {}: {status}", job_label(&job)),
+                            Err(error) => error,
+                        });
+                    self.refresh_scheduled();
+                }
+            }
+            (_, KeyCode::Char('d')) if self.selected_job().is_some() => {
+                self.scheduled.confirm_delete = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn scheduled_panel(&self, width: usize, max_rows: usize) -> String {
+        let secondary = theme().fg_seq(TextRole::Secondary);
+        let mut lines = vec![format!(
+            "{}Scheduled{RESET}{secondary} · {} · ← background tasks{RESET}",
+            theme().fg_seq(TextRole::Brand),
+            quantity(self.scheduled.jobs.len(), "job"),
+        )];
+        if self.focus == TaskFocus::Detail {
+            if let Some(job) = self.selected_job() {
+                lines.extend(job_detail(job, width));
+            }
+            lines.push(format!(
+                "{secondary}e enable/disable · r run now · d delete · Esc list{RESET}"
+            ));
+        } else {
+            if self.scheduled.jobs.is_empty() {
+                lines.push(
+                    "  No scheduled jobs. Ask the agent to schedule one, or use /cron add".into(),
+                );
+            }
+            // Header and key hints, plus the notice line while one shows.
+            let notice = self.scheduled.confirm_delete || self.scheduled.notice.is_some();
+            let rows = max_rows
+                .saturating_sub(2 + usize::from(notice))
+                .clamp(1, 18);
+            let start = self
+                .scheduled
+                .selected
+                .saturating_sub(rows / 2)
+                .min(self.scheduled.jobs.len().saturating_sub(rows));
+            for (index, job) in self
+                .scheduled
+                .jobs
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(rows)
+            {
+                let focused = index == self.scheduled.selected;
+                let marker =
+                    ChoiceText::new(theme(), crate::render::ColorSupport::detect(), focused)
+                        .prefix(if focused { "❯" } else { " " });
+                lines.push(format!(
+                    "{marker} {}{}{RESET}{secondary} · {} · {}{RESET}",
+                    theme().fg_seq(TextRole::Accent),
+                    fit(&job_label(job), width.saturating_sub(40)),
+                    schedule_text(job),
+                    job_state(job),
+                ));
+            }
+            lines.push(format!(
+                "{secondary}↑/↓ select · Enter details · e enable/disable · r run now · d delete · Esc back{RESET}"
+            ));
+        }
+        if self.scheduled.confirm_delete {
+            if let Some(job) = self.selected_job() {
+                lines.push(format!(
+                    "Delete {}? y to confirm, any other key to keep it",
+                    job_label(job)
+                ));
+            }
+        } else if let Some(notice) = &self.scheduled.notice {
+            lines.push(format!("{secondary}{notice}{RESET}"));
+        }
+        lines
+            .into_iter()
+            .map(|line| truncate_to_width(&line, width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn open(&mut self) {
         self.focus = TaskFocus::List;
+        self.refresh_scheduled();
         self.clamp();
     }
     fn clamp(&mut self) {
@@ -385,17 +715,14 @@ impl TaskBrowser {
         self.selected = self.rows.get(next).cloned();
     }
 
-    pub fn detail(&mut self) {
-        if let Some(entry) = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.entries.get_mut(id))
-        {
-            entry.read = true;
-            self.focus = TaskFocus::Detail;
-            self.scroll = 0;
-            self.refresh_summary();
-        }
+    pub fn detail(&mut self) -> Option<String> {
+        let id = self.selected.clone()?;
+        let entry = self.entries.get_mut(&id)?;
+        entry.read = true;
+        self.focus = TaskFocus::Detail;
+        self.scroll = 0;
+        self.refresh_summary();
+        Some(id)
     }
     pub fn scroll(&mut self, up: bool, amount: usize) {
         if up {
@@ -432,11 +759,20 @@ impl TaskBrowser {
         if self.focus == TaskFocus::Ttl {
             return self.ttl_panel(width);
         }
+        if self.tab == TaskTab::Scheduled {
+            return self.scheduled_panel(width, max_rows);
+        }
         let mut lines = vec![format!(
             "{}Background tasks{RESET}",
-            ansi_fg(theme().primary)
+            theme().fg_seq(TextRole::Brand)
         )];
         if self.focus == TaskFocus::List {
+            let _ = write!(
+                lines[0],
+                "{} · {} in this session{RESET}",
+                theme().fg_seq(TextRole::Secondary),
+                self.rows.len()
+            );
             let rows = max_rows.saturating_sub(2).clamp(1, 18);
             if self.rows.is_empty() {
                 lines.push("  No background tasks in this session".into());
@@ -470,7 +806,7 @@ impl TaskBrowser {
                 let title = fit(&plain(&task.title), width.saturating_sub(28));
                 lines.push(format!(
                     "{marker} {}{title}{RESET} · {kind} · {status}{}",
-                    theme().peer_sender_fg(),
+                    theme().fg_seq(TextRole::Accent),
                     if !entry.read && !task.status.is_active() {
                         " · new"
                     } else {
@@ -479,100 +815,239 @@ impl TaskBrowser {
                 ));
             }
             lines.push(format!(
-                "{}↑/↓ select · Enter details · k stop · Esc back{RESET}",
-                theme().muted_fg()
+                "{}↑/↓ select · Enter details · k stop · → scheduled · Esc back{RESET}",
+                theme().fg_seq(TextRole::Secondary)
             ));
         } else if let Some(entry) = self
             .selected
             .as_ref()
             .and_then(|id| self.entries.get_mut(id))
         {
-            let task = &entry.task;
-            lines.push(format!(
-                "{}{}{RESET} · {}{}{RESET}",
-                theme().peer_sender_fg(),
-                fit(&plain(&task.title), width.saturating_sub(18)),
-                ansi_fg(status_color(task.status)),
-                task.status.label()
-            ));
-            if let Some(command) = &task.command {
-                lines.push(fit(&format!("$ {}", plain(command)), width));
-            }
-            let details = format!(
-                "{}s{}{}",
-                (task.elapsed_ms.saturating_add(if task.status.is_active() {
-                    u64::try_from(entry.received.elapsed().as_millis()).unwrap_or(u64::MAX)
-                } else {
-                    0
-                })) / 1000,
-                task.exit_code
-                    .map_or(String::new(), |code| format!(" · exit {code}")),
-                if task.activity.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", plain(&task.activity))
-                }
-            );
-            lines.push(format!("{}{details}{RESET}", theme().muted_fg()));
-            let content_width = width.saturating_sub(2).max(1);
-            // Hidden output stays raw and bounded. Decode only when inspecting
-            // this task, then reuse it across keys, ticks and resizes.
-            let output = entry
-                .output
-                .get_or_insert_with(|| StyledText::from_ansi(&task.output));
-            if entry.wrapped_width != content_width {
-                entry.wrapped.clear();
-                let mut offset = 0;
-                for line in output.text.split('\n') {
-                    entry.wrapped.extend(
-                        wrap_line(output, offset..offset + line.len(), content_width, 0)
-                            .into_iter()
-                            .map(|(row, _)| row),
-                    );
-                    offset += line.len() + 1;
-                }
-                entry.wrapped_width = content_width;
-            }
-            let output_lines = &entry.wrapped;
-            // Fixed task metadata, optional full-output link and navigation
-            // remain outside the output viewport, just like question choices.
-            let rows = max_rows
-                .saturating_sub(lines.len() + usize::from(task.output_path.is_some()) + 1)
-                .clamp(1, 18);
-            let end = output_lines
-                .len()
-                .saturating_sub(self.scroll.min(output_lines.len().saturating_sub(1)));
-            let start = end.saturating_sub(rows);
-            if output.text.is_empty() {
-                lines.push(format!(
-                    "{}  Waiting for output…{RESET}",
-                    theme().muted_fg()
-                ));
-            } else {
-                lines.extend(output_lines[start..end].iter().map(|line| {
-                    let mut out = String::from("  ");
-                    line.write_ansi(0..line.text.len(), &mut out);
-                    out.push_str(RESET);
-                    out
-                }));
-            }
-            if let Some(path) = &task.output_path {
-                lines.push(format!(
-                    "{}{}{RESET}",
-                    theme().muted_fg(),
-                    fit(&format!("Full output: {path}"), width)
-                ));
-            }
-            lines.push(format!(
-                "{}↑/↓ scroll · k stop · Esc task list{RESET}",
-                theme().muted_fg()
-            ));
+            lines.extend(entry.detail_panel(width, max_rows, &mut self.scroll));
         }
         lines
             .into_iter()
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+impl Entry {
+    /// Format the inspected task from producer state and cached output.
+    fn detail_panel(&mut self, width: usize, max_rows: usize, scroll: &mut usize) -> Vec<String> {
+        let task = &self.task;
+        let muted = theme().fg_seq(TextRole::Secondary);
+        let border = theme().fg_seq(TextRole::Border);
+        let compact = max_rows
+            < 7 + usize::from(task.command.is_some())
+                + usize::from(!task.activity.is_empty())
+                + usize::from(task.output_path.is_some());
+        let kind = match task.kind {
+            BackgroundTaskKind::Terminal => "Shell details",
+            BackgroundTaskKind::Agent => "Agent details",
+        };
+        let mut lines = vec![format!(
+            "{}{kind}{RESET} · {}{}{RESET}",
+            theme().fg_seq(TextRole::Brand),
+            theme().fg_seq(TextRole::Accent),
+            fit(&plain(&task.title), width.saturating_sub(kind.len() + 3)),
+        )];
+        let elapsed = task.elapsed_ms.saturating_add(if task.status.is_active() {
+            u64::try_from(self.received.elapsed().as_millis()).unwrap_or(u64::MAX)
+        } else {
+            0
+        });
+        let runtime = runtime_label(elapsed / 1000);
+        let exit = task
+            .exit_code
+            .map_or(String::new(), |code| format!(" · exit {code}"));
+        let mut status = format!(
+            "{muted}Status:   {}{}{exit}{RESET}",
+            ansi_fg(status_color(task.status)),
+            task.status.label(),
+        );
+        if compact {
+            let _ = write!(status, "{muted} · {runtime}{RESET}");
+        }
+        lines.push(status);
+        if !compact {
+            lines.push(format!("{muted}Runtime:  {RESET}{runtime}"));
+        }
+        if let Some(command) = &task.command {
+            let command_width = width.saturating_sub(10).max(1);
+            // Cache at most three command rows across output and clock updates.
+            if self.command_rows.as_ref().map(|(w, _)| *w) != Some(command_width) {
+                let text = StyledText::from_ansi(&fit(
+                    &plain(command),
+                    command_width.saturating_mul(COMMAND_PREVIEW_ROWS),
+                ));
+                let wrapped = wrap_line(&text, 0..text.text.len(), command_width, 0);
+                let clipped = wrapped.len() > COMMAND_PREVIEW_ROWS;
+                let mut rows: Vec<_> = wrapped
+                    .into_iter()
+                    .take(COMMAND_PREVIEW_ROWS)
+                    .map(|(row, _)| row.text)
+                    .collect();
+                if clipped {
+                    let last = &mut rows[COMMAND_PREVIEW_ROWS - 1];
+                    *last = fit(&format!("{last}…"), command_width);
+                }
+                self.command_rows = Some((command_width, rows));
+            }
+            let rows = &self.command_rows.as_ref().expect("command rows prepared").1;
+            let command_budget = max_rows
+                .saturating_sub(
+                    8 + usize::from(!task.activity.is_empty())
+                        + usize::from(task.output_path.is_some()),
+                )
+                .clamp(1, COMMAND_PREVIEW_ROWS);
+            let count = rows.len().min(command_budget);
+            for (index, row) in rows.iter().take(count).enumerate() {
+                let label = if index == 0 {
+                    "Command:  "
+                } else {
+                    "          "
+                };
+                let row = if index + 1 == count && count < rows.len() {
+                    fit(&format!("{row}…"), command_width)
+                } else {
+                    row.clone()
+                };
+                lines.push(format!("{muted}{label}{RESET}{row}"));
+            }
+        }
+        if !task.activity.is_empty() {
+            lines.push(format!("{muted}Activity: {RESET}{}", plain(&task.activity)));
+        }
+
+        // The shared InputSlot allocator owns height. Borders yield first in
+        // a short window; controls and the full-output path remain outside it.
+        let trailing = usize::from(task.output_path.is_some()) + 1;
+        let framed = width >= 12 && max_rows >= 1 + lines.len() + trailing + 3;
+        let captioned = framed || max_rows >= 1 + lines.len() + trailing + 2;
+        // Desired-height measurement and the allocated projection share one
+        // wrap width, even when the latter has to drop its frame.
+        let content_width = width.saturating_sub(if width >= 12 { 6 } else { 2 }).max(1);
+        let output = self
+            .output
+            .get_or_insert_with(|| StyledText::from_ansi(&task.output));
+        if self.wrapped_width != content_width {
+            self.wrapped.clear();
+            let mut offset = 0;
+            // A final newline terminates a record; internal blank lines count.
+            for line in output
+                .text
+                .strip_suffix('\n')
+                .unwrap_or(&output.text)
+                .split('\n')
+            {
+                self.wrapped.extend(
+                    wrap_line(output, offset..offset + line.len(), content_width, 0)
+                        .into_iter()
+                        .map(|(row, _)| row),
+                );
+                offset += line.len() + 1;
+            }
+            self.wrapped_width = content_width;
+        }
+        let rows = max_rows
+            .saturating_sub(
+                1 + lines.len() + trailing + if framed { 2 } else { usize::from(captioned) },
+            )
+            .clamp(1, 18);
+        let visible_scroll = (*scroll).min(self.wrapped.len().saturating_sub(rows));
+        // The first projection measures desired height before allocation. It
+        // must not change navigation using a viewport the user never sees.
+        if max_rows != usize::MAX {
+            *scroll = visible_scroll;
+        }
+        let end = self.wrapped.len().saturating_sub(visible_scroll);
+        let start = end.saturating_sub(rows);
+        let label = if output.text.is_empty() {
+            "Output".to_string()
+        } else {
+            format!(
+                "Output tail · rows {}–{end}/{}",
+                start + 1,
+                self.wrapped.len()
+            )
+        };
+        if framed {
+            let label = fit(&label, width.saturating_sub(5));
+            lines.push(format!(
+                "{RESET}{border}╭─ {label} {}╮{RESET}",
+                "─".repeat(width.saturating_sub(display_width(&label) + 5)),
+            ));
+        } else if captioned {
+            lines.push(format!("{muted}{label}{RESET}"));
+        }
+        for row in &self.wrapped[start..end] {
+            // Reset both sides: bold/colored output must not style the frame.
+            let mut line = if framed {
+                format!("{RESET}{border}│{RESET}  ")
+            } else {
+                String::from("  ")
+            };
+            if output.text.is_empty() {
+                let message = if task.status.is_active() {
+                    "Waiting for output…"
+                } else {
+                    "No output"
+                };
+                let _ = write!(line, "{muted}{}{RESET}", fit(message, content_width));
+                if framed {
+                    line.push_str(
+                        &" ".repeat(content_width.saturating_sub(display_width(message))),
+                    );
+                }
+            } else {
+                row.write_ansi(0..row.text.len(), &mut line);
+                line.push_str(RESET);
+                if framed {
+                    line.push_str(
+                        &" ".repeat(content_width.saturating_sub(display_width(&row.text))),
+                    );
+                }
+            }
+            if framed {
+                let _ = write!(line, "  {border}│{RESET}");
+            }
+            lines.push(line);
+        }
+        if framed {
+            lines.push(format!("{RESET}{border}╰{}╯{RESET}", "─".repeat(width - 2)));
+        }
+        if let Some(path) = &task.output_path {
+            lines.push(format!(
+                "{muted}{}{RESET}",
+                fit(&format!("Full output: {path}"), width)
+            ));
+        }
+        lines.push(format!(
+            "{muted}↑/↓ scroll{} · Esc task list{RESET}",
+            if task.status.is_active() {
+                " · k stop"
+            } else {
+                ""
+            },
+        ));
+        lines
+    }
+}
+
+fn runtime_label(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!(
+            "{}h {}m {}s",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -583,15 +1058,23 @@ impl TaskBrowser {
         let Some(advice) = &self.ttl_advice else {
             return String::new();
         };
-        let muted = theme().muted_fg();
+        let muted = theme().fg_seq(TextRole::Secondary);
+        let mode = if advice.auto {
+            let target = advice.auto_target();
+            if target == advice.effective_seconds {
+                " · auto".to_owned()
+            } else {
+                format!(" · auto, heading for {}", ttl_label(target))
+            }
+        } else {
+            advice.pending.map_or(" · pinned".to_owned(), |pending| {
+                format!(" · pinned, pending {}", pending.describe().0)
+            })
+        };
         let mut lines = vec![format!(
-            "{}Prompt cache TTL{RESET}{muted} · now {}{}{RESET}",
-            ansi_fg(theme().primary),
+            "{}Prompt cache TTL{RESET}{muted} · now {}{mode}{RESET}",
+            theme().fg_seq(TextRole::Brand),
             ttl_label(advice.effective_seconds),
-            advice.pending.map_or(String::new(), |pending| format!(
-                " · pending {}",
-                choice_label(pending.choice)
-            )),
         )];
         if advice.has_saving {
             lines.push(format!(
@@ -607,8 +1090,10 @@ impl TaskBrowser {
             let focused = row == self.ttl_row;
             let marker = ChoiceText::new(theme(), crate::render::ColorSupport::detect(), focused)
                 .prefix(if focused { "❯" } else { " " });
+            // While automatic, choosing 1h or 5m pins it.
+            let pin = if advice.auto { "pin · " } else { "" };
             let detail = match choice {
-                TtlChoice::OneHour if advice.effective_seconds == 3600 => "current".to_owned(),
+                TtlChoice::OneHour if advice.effective_seconds == 3600 => format!("{pin}current"),
                 TtlChoice::OneHour => {
                     let cost = match (advice.switch_now_usd, advice.switch_cold_usd) {
                         (Some(now), Some(cold)) if advice.cached_tokens > 0 => format!(
@@ -617,12 +1102,22 @@ impl TaskBrowser {
                         ),
                         _ => String::new(),
                     };
-                    format!("at the next cold start (idle past the TTL, compact, resume){cost}")
+                    format!(
+                        "{pin}at the next cold start (idle past the TTL, compact, resume){cost}"
+                    )
                 }
-                TtlChoice::FiveMinutes if advice.effective_seconds == 300 => "current".to_owned(),
-                TtlChoice::FiveMinutes => "from the next request · keeps the cache".to_owned(),
+                TtlChoice::FiveMinutes if advice.effective_seconds == 300 => {
+                    format!("{pin}current")
+                }
+                TtlChoice::FiveMinutes => format!("{pin}from the next request · keeps the cache"),
+                TtlChoice::Auto if advice.auto => {
+                    format!(
+                        "current · follows this session's stats: {}",
+                        auto_verdict(advice)
+                    )
+                }
                 TtlChoice::Auto => {
-                    "the auth mode decides: 1h on a subscription, 5m on an API key".to_owned()
+                    format!("follow this session's stats: {}", auto_verdict(advice))
                 }
             };
             lines.push(format!(
@@ -638,6 +1133,24 @@ impl TaskBrowser {
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// What the stats say, for the `auto` row.
+fn auto_verdict(advice: &TtlAdvice) -> String {
+    if !advice.has_evidence {
+        format!(
+            "collecting {}/{MIN_INTERVALS} reuse intervals, 5m meanwhile",
+            advice.intervals
+        )
+    } else if advice.has_saving {
+        format!(
+            "{} ≈{:.0}% cheaper here",
+            ttl_label(advice.suggested_seconds),
+            advice.saving_pct()
+        )
+    } else {
+        "5m and 1h within 10% here".to_owned()
     }
 }
 
@@ -659,12 +1172,14 @@ fn tokens(count: u64) -> String {
 
 fn status_color(status: BackgroundTaskStatus) -> crossterm::style::Color {
     match status {
-        BackgroundTaskStatus::Running => theme().info(),
+        BackgroundTaskStatus::Running => theme().color(TextRole::Info),
         BackgroundTaskStatus::Stopping | BackgroundTaskStatus::ExecutionUnconfirmed => {
-            theme().warning
+            theme().color(TextRole::Warning)
         }
-        BackgroundTaskStatus::Completed => theme().tool_borders().success,
-        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Cancelled => theme().error,
+        BackgroundTaskStatus::Completed => theme().color(TextRole::Info),
+        BackgroundTaskStatus::Failed | BackgroundTaskStatus::Cancelled => {
+            theme().color(TextRole::Error)
+        }
     }
 }
 fn plain(text: &str) -> String {

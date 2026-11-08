@@ -82,12 +82,11 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
         ),
     );
 
-    let prompt = format!(
-        "Use Agent(subagent_type=\"sudocode-fixture-namer\", \
+    let prompt = "Use Agent(subagent_type=\"sudocode-fixture-namer\", \
          description=\"name 3 birds\", \
          prompt=\"Reply with three bird names, one per line, then finish.\") \
          to complete a small naming task. Report back briefly."
-    );
+        .to_string();
 
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     // Sub-agent tests are two serialised model turns (parent spawns a worker,
@@ -100,7 +99,7 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
     // Sentinel is the primary success indicator — proves the custom
     // agent's system prompt actually loaded and its body was applied.
     sess.expect(sentinel).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "custom .md agent did not emit its sentinel: {e}\n\
              tail of PTY screen (last 600 chars):\n{tail}",
@@ -117,7 +116,7 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
 
     sess.set_default_timeout(long);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(common::screen_contents);
         panic!(
             "scode did not exit cleanly after custom-agent chain: {e}\n\
              tail: {tail}",

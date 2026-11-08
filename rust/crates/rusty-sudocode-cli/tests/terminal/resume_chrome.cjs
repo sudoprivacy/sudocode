@@ -5,16 +5,13 @@ const assert = require('node:assert/strict');
 const { createHost } = require('../../../../../e2e/terminal-resize/host.cjs');
 const config = JSON.parse(process.argv[2]);
 const windows = process.platform === 'win32';
-const quote = value => windows ? "'" + value.replaceAll("'", "''") + "'"
-  : "'" + value.replaceAll("'", "'\\''") + "'";
-const launch = (windows ? '& ' : '') + [config.binary, ...config.args].map(quote).join(' ');
 const boundary = 'SCODE_RESTART_READY';
-const command = windows
-  ? `${launch}\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\nWrite-Output '${boundary}'\n$null = [Console]::ReadLine()\n${launch}\nexit $LASTEXITCODE`
-  : `${launch} || exit $?\nprintf '\\n${boundary}\\n'\nread -r restart\n${launch}`;
-const shell = windows ? path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe') : '/bin/sh';
-const host = createHost({ ...config, binary: shell,
-  args: windows ? ['-NoLogo', '-NoProfile', '-Command', command] : ['-c', command] });
+fs.mkdirSync(config.logRoot, { recursive: true });
+const launchConfig = path.join(config.logRoot, 'launch.json');
+fs.writeFileSync(launchConfig, JSON.stringify({ binary: config.binary, args: config.args, boundary }));
+// Inherit the same native terminal without a shell owning its console modes.
+const host = createHost({ ...config, binary: windows ? 'node.exe' : 'node',
+  args: [path.join(__dirname, 'resume_chrome_launcher.cjs'), launchConfig] });
 const { child, state, snapshot, viewport, settle, close } = host;
 const count = marker => snapshot().split(marker).length - 1;
 function history(copies, label) {

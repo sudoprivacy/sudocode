@@ -24,6 +24,8 @@ required-features = ["daemon"]
 default = []
 daemon = [
   "dep:nexus-cluster",
+  # Owner runtimes mount durable CAS for conditional control records.
+  "nexus-cluster/driver-cas-local",
   "dep:a2a",
   "dep:managed-agent",
   "dep:kernel",
@@ -79,6 +81,13 @@ kernel = { workspace = true, optional = true }
 # kernel it is handed.
 engine-acp = { path = "../engine-acp", optional = true, default-features = false, features = ["mailbox"] }
 anyhow = { version = "1", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lib = { workspace = true }
+nexus-raft = { workspace = true }
+nexus-vfs-client = { path = "../nexus-vfs-client" }
+serde_json = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

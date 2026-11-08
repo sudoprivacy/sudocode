@@ -14,8 +14,8 @@ mod control;
 mod storage;
 mod terminal;
 pub(crate) use storage::{
-    check_response_storage, check_shared_storage, is_binding_file as is_completion_binding_file,
-    prepare_shared_storage,
+    check_response_storage, check_shared_storage, deleted_storage,
+    is_binding_file as is_completion_binding_file, prepare_shared_storage, reclaim_deleted,
 };
 use terminal::TerminalSource;
 pub use terminal::{ShellKind, TaskCompletion, TerminalCompletion, TerminalSnapshot};
@@ -196,6 +196,9 @@ pub struct ReplayStatus {
     pub waiting: usize,
     pub pending: usize,
     pub unresolved: usize,
+    /// Exact source ownership for controller stop controls, including blocked
+    /// delivery. Session-wide counts cannot identify which old root is active.
+    pub unsettled_by_trace: BTreeMap<String, bool>,
     pub settled: usize,
     pub blocked: Vec<String>,
     pub context_ref: Option<ContextRef>,
@@ -213,6 +216,7 @@ pub struct CompletionJournal {
     fs: Arc<dyn FsBackend>,
     path: String,
     transcript: PathBuf,
+    store_root: Option<PathBuf>,
     state: Mutex<Journal>,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clear_cache: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -229,11 +233,13 @@ impl CompletionJournal {
     }
 
     pub fn deleted(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deleted
-            .is_some()
+        self.writer.deleted()
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deleted
+                .is_some()
     }
 
     pub fn tasks_enabled(&self) -> bool {
@@ -293,6 +299,7 @@ impl CompletionJournal {
             fs,
             path,
             transcript,
+            store_root: session.session_store_root().map(Path::to_path_buf),
             state: Mutex::new(state),
             wake: Mutex::new(None),
             clear_cache: Mutex::new(None),
@@ -515,12 +522,25 @@ impl CompletionJournal {
         }
         self.change(|state| {
             state.reducer.tool_result(assistant, id, name, output);
-            Self::terminal_tool_result(
-                state,
-                &crate::session_history::tool_source_key(assistant, id),
-                name,
-                output,
-            );
+            let key = crate::session_history::tool_source_key(assistant, id);
+            // Auto-backgrounding is observed at tool handoff, after registration.
+            // Keep that fact on the source: fail_turn removes reducer workers
+            // to block publication, but does not end the child's execution.
+            if state
+                .reducer
+                .workers
+                .get(&key)
+                .is_some_and(|w| w.background)
+            {
+                if let Some(lifecycle) = state
+                    .sources
+                    .get_mut(&key)
+                    .and_then(|s| s.lifecycle.as_mut())
+                {
+                    lifecycle.agent.background = true;
+                }
+            }
+            Self::terminal_tool_result(state, &key, name, output);
             Self::publish(state)
         })
     }
@@ -826,6 +846,37 @@ impl CompletionJournal {
         )
     }
 
+    fn unsettled_by_trace(state: &Journal) -> BTreeMap<String, bool> {
+        let mut traces = BTreeMap::new();
+        let mut unknown = BTreeSet::new();
+        for (tool, source) in &state.sources {
+            let unresolved = !source.settled && !source.suppressed;
+            let background = source.payload.is_some()
+                || source.terminal.as_ref().is_some_and(|t| t.backgrounded)
+                || source
+                    .lifecycle
+                    .as_ref()
+                    .is_some_and(|e| e.agent.background)
+                || state
+                    .reducer
+                    .workers
+                    .get(tool)
+                    .is_some_and(|w| w.background);
+            let unsettled = unresolved && background;
+            // Old failed journals can lack the auto-background handoff fact.
+            // Missing evidence must not become a claim that the trace settled.
+            if unresolved && source.blocked.is_some() && !background {
+                unknown.insert(source.trace_id.clone());
+            }
+            // A synchronous source can still hand off until its prompt closes.
+            if state.closed_traces.contains(&source.trace_id) || unsettled {
+                *traces.entry(source.trace_id.clone()).or_default() |= unsettled;
+            }
+        }
+        traces.retain(|trace, unsettled| *unsettled || !unknown.contains(trace));
+        traces
+    }
+
     fn status_inner(state: &Journal) -> ReplayStatus {
         ReplayStatus {
             watermark: state.watermark,
@@ -842,6 +893,7 @@ impl CompletionJournal {
                 })
                 .count(),
             unresolved: state.sources.values().filter(|s| !s.settled).count(),
+            unsettled_by_trace: Self::unsettled_by_trace(state),
             settled: state.sources.values().filter(|s| s.settled).count(),
             blocked: state
                 .sources

@@ -1,7 +1,8 @@
-//! Nexus-backed A2A mailbox - the standalone counterpart to the local
-//! [`crate::agent_mailbox`] (`.sudocode-inbox`).
+//! Nexus-backed A2A mailbox - the standalone counterpart to the
+//! workspace-local conversation transcript
+//! ([`crate::mailbox::Mailbox::workspace_local`]).
 //!
-//! A message is one framed append to the recipient's replicated DT_STREAM
+//! A message is one framed append to the recipient's replicated `DT_STREAM`
 //! inbox at `/agents/<recipient>/chat-with-me`; under auth-on the node
 //! stamps an unforgeable `from` by the authenticated writer. The wire type
 //! is [`a2a::MailboxEnvelope`] - the A2A SSOT the in-process co-host
@@ -253,25 +254,6 @@ impl Config {
             .map_err(|e| format!("mTLS dial {}: {e}", self.endpoint))?;
         Ok(Arc::new(client))
     }
-
-    /// System-prompt section telling the model its A2A identity and how to
-    /// reach peers. Delegates the reply contract + framing to the shared
-    /// [`crate::agent_mailbox::repl_a2a_prompt_section`] (the SSOT every REPL
-    /// receive path renders) and prepends the nexus-specific network note.
-    #[must_use]
-    pub fn peer_system_prompt(&self) -> String {
-        peer_system_prompt(&self.agent)
-    }
-}
-
-/// Stable node-namespace identity text, even before this agent has a credential.
-#[must_use]
-pub fn peer_system_prompt(agent: &str) -> String {
-    let base = crate::agent_mailbox::repl_a2a_prompt_section(agent);
-    format!(
-        "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
-         be on another machine; addressing it by name still reaches it."
-    )
 }
 
 #[cfg(test)]
@@ -291,8 +273,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(&dir).unwrap();
         for f in ["ca.pem", "agent.pem", "agent-key.pem"] {
@@ -306,16 +287,6 @@ mod tests {
         )
         .unwrap();
         dir.to_string_lossy().into_owned()
-    }
-
-    /// A throwaway `TlsPaths` for prompt tests that never dial.
-    fn test_tls() -> TlsPaths {
-        TlsPaths {
-            ca_pem: "ca.pem".into(),
-            client_cert: "agent.pem".into(),
-            client_key: "agent-key.pem".into(),
-            server_name: "nexus-node".into(),
-        }
     }
 
     #[test]
@@ -337,28 +308,9 @@ mod tests {
     }
 
     #[test]
-    fn peer_prompt_names_self_and_points_at_discovery() {
-        let cfg = Config {
-            endpoint: "127.0.0.1:2126".into(),
-            agent: "operator".into(),
-            tls: test_tls(),
-        };
-        let p = cfg.peer_system_prompt();
-        assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(p.contains("send"), "prompt must teach the tool: {p}");
-        assert!(
-            p.contains("agent_list"),
-            "prompt must point at agent_list for discovery: {p}"
-        );
-        assert!(
-            p.contains("another machine"),
-            "prompt must carry the nexus network note: {p}"
-        );
-    }
-
-    #[test]
     fn envelope_round_trips_via_unified_type() {
         let env = MailboxEnvelope {
+            send_id: None,
             delivery: crate::turn_input::InputDelivery::Steer,
             from: "operator".into(),
             to: "win-ai".into(),
@@ -382,7 +334,7 @@ mod tests {
         let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
         assert_eq!(env.from, "agent-a");
         assert_eq!(env.body, "hello");
-        assert!(env.kind.is_empty());
+        assert_eq!(env.kind, "");
         assert_eq!(env.timestamp, 0);
     }
 }

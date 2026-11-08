@@ -60,7 +60,6 @@ pub(crate) struct SessionDriver {
     input_turn: AtomicU64,
     native_input: AtomicBool,
     input_state: tokio::sync::watch::Sender<Option<engine_core::engine_events::InputState>>,
-    peer_events: tokio::sync::broadcast::Sender<EngineEvent>,
     hosted_factory: Mutex<Option<Weak<dyn crate::acp_sdk_server::HostedSessionFactory>>>,
 }
 
@@ -91,7 +90,6 @@ impl SessionDriver {
             input_turn: AtomicU64::new(0),
             native_input: AtomicBool::new(false),
             input_state: tokio::sync::watch::channel(None).0,
-            peer_events: tokio::sync::broadcast::channel(256).0,
             hosted_factory: Mutex::new(None),
         });
         let (tx, mut rx) = unbounded_channel();
@@ -135,11 +133,8 @@ impl SessionDriver {
                 .as_ref()
                 .and_then(Weak::upgrade)
             {
-                factory.state_changed(*state, None);
+                factory.state_changed(*state);
             }
-        }
-        if self.peer_events.receiver_count() > 0 {
-            let _ = self.peer_events.send(event.clone());
         }
         if self.answer_interaction(session_id, &event) {
             return;
@@ -223,6 +218,33 @@ impl SessionDriver {
     }
 
     fn answer_interaction(self: &Arc<Self>, session_id: &str, event: &EngineEvent) -> bool {
+        if let EngineEvent::HostContextRequest { id } = event {
+            let id = *id;
+            let connection = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .connection
+                .clone();
+            let driver = Arc::clone(self);
+            let session_id = session_id.to_owned();
+            let task = tokio::spawn(async move {
+                let context = match connection {
+                    Some(connection) => {
+                        crate::acp_sdk_server::resolve_host_context(&session_id, connection).await
+                    }
+                    None => Err("No connected client can resolve session context".into()),
+                };
+                let _ = driver.send(EngineCommand::HostContextAnswer { id, context });
+            });
+            let mut interactive = self
+                .interactive
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            interactive.retain(|task| !task.is_finished());
+            interactive.push(task);
+            return true;
+        }
         // Requests belong to the session, including automatically resumed queued turns.
         // A request/response listener must never own permission delivery.
         if matches!(
@@ -464,10 +486,6 @@ impl SessionDriver {
         self.input_state.subscribe()
     }
 
-    pub(crate) fn peer_events(&self) -> tokio::sync::broadcast::Receiver<EngineEvent> {
-        self.peer_events.subscribe()
-    }
-
     /// Atomically fence automatic input before host lifecycle operations.
     pub(crate) async fn lifecycle(
         self: &Arc<Self>,
@@ -516,6 +534,15 @@ impl SessionDriver {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    pub(crate) async fn runtime_status(self: &Arc<Self>) -> Result<Value, String> {
+        let driver = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            driver.request(|request_id| EngineCommand::RuntimeStatus { request_id })
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) async fn cancel_subagent(

@@ -87,15 +87,14 @@ impl Provider {
                                 ];
                                 (
                                     "text/event-stream",
-                                    frames
-                                        .iter()
-                                        .map(|f| {
-                                            format!(
-                                                "event: {}\ndata: {f}\n\n",
-                                                f["type"].as_str().unwrap()
-                                            )
-                                        })
-                                        .collect(),
+                                    frames.iter().fold(String::new(), |mut fixture_text, f| {
+                                        mock_anthropic_service::append_sse(
+                                            &mut fixture_text,
+                                            f["type"].as_str().unwrap(),
+                                            f,
+                                        );
+                                        fixture_text
+                                    }),
                                 )
                             } else {
                                 ("application/json", json!({"id":"read-fixture","model":model,"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"read-local","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},"finish_reason":"tool_calls"}]}).to_string())
@@ -104,7 +103,7 @@ impl Provider {
                         write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10))
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 }
@@ -122,9 +121,10 @@ impl Provider {
 impl Drop for Provider {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
-        if self.thread.take().unwrap().join().is_err() && !std::thread::panicking() {
-            panic!("provider fixture failed");
-        }
+        assert!(
+            self.thread.take().unwrap().join().is_ok() || std::thread::panicking(),
+            "provider fixture failed"
+        );
     }
 }
 
@@ -219,15 +219,15 @@ fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
         };
         let delta = json!({field: "structured fixture check"});
         let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]});
-        body.push_str(&format!("data: {chunk}\n\n"));
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {chunk}\n\n"));
     }
     // A character per SSE frame splits both tag boundaries and exercises UTF-8.
     for ch in text.chars() {
         let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{"content":ch.to_string()},"finish_reason":null}]});
-        body.push_str(&format!("data: {chunk}\n\n"));
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {chunk}\n\n"));
     }
     let stop = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-    body.push_str(&format!("data: {stop}\n\ndata: [DONE]\n\n"));
+    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("data: {stop}\n\ndata: [DONE]\n\n"));
     ("text/event-stream", body)
 }
 
@@ -282,17 +282,30 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
         std::fs::write(path, config.to_string()).unwrap();
 
         let mut cli = env.spawn(&["--permission-mode", "read-only"]);
-        cli.expect("❯").unwrap();
+        common::expect_input_line_cleared(&cli, common::DEFAULT_TIMEOUT, case);
+        let before = common::turn_status_marker(&cli);
         cli.send("Read fixture.txt and report its contents.\r")
             .unwrap();
         let has_thinking = !matches!(case, "none" | "empty");
         if has_thinking {
-            cli.expect("✻ Thinking").expect(case);
-            cli.expect("校验 fixture").unwrap();
+            cli.expect("校验 fixture").expect(case);
+            // The lead is styled apart from the text: check the rendered row.
+            common::expect_screen(
+                &cli,
+                |screen| {
+                    screen
+                        .lines()
+                        .any(|line| line.starts_with("✻ 校验 fixture"))
+                },
+                common::DEFAULT_TIMEOUT,
+                case,
+            );
             cli.expect("最后一步").unwrap();
         }
         cli.expect(&nonce).unwrap();
-        cli.expect("❯").unwrap();
+        // `/exit` during the turn would interrupt it; wait for the turn to finish.
+        common::expect_turn_complete_after(&cli, &before, common::DEFAULT_TIMEOUT, case);
+        common::expect_input_line_cleared(&cli, common::DEFAULT_TIMEOUT, case);
         cli.send("/exit\r").unwrap();
         assert_eq!(cli.expect_eof().unwrap(), 0, "{case}: CLI exit");
 
@@ -402,58 +415,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
         let sessions = store.list_sessions().unwrap();
         let session = Session::load_from_path(&sessions[0].path).unwrap();
-        assert!(session.messages().iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
-        let final_message = session
-            .messages()
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .unwrap();
-        let text: String = final_message
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let thinking: String = final_message
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect();
-        match case {
-            "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
-            "structured" | "structured-reasoning" => {
-                assert_eq!(thinking, "structured fixture check");
-            }
-            "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
-            _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
-        }
-        if case == "anthropic-error" {
-            assert!(
-                text.is_empty(),
-                "an upstream error must not produce an answer"
-            );
-        } else if case == "truncated" {
-            assert_eq!(
-                text.trim(),
-                "[Provider stream failed; unfinished tool calls were cancelled.]"
-            );
-            assert!(!text.contains("fixture checked") && !text.contains(&nonce));
-        } else if case == "prefaced" {
-            assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
-            assert_final_file_answer(&text, &nonce);
-        } else if matches!(case, "structured" | "structured-reasoning" | "ordinary") {
-            assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
-        } else if case == "literal-prefix" {
-            assert_eq!(text, format!("<thimble>{nonce}"));
-        } else {
-            assert_eq!(text.trim(), nonce);
-        }
+        assert_azure_session_answer(&session, case, &nonce);
         let requests = provider.requests.lock().unwrap();
         assert_eq!(
             requests.len(),
@@ -602,5 +564,60 @@ fn assert_final_file_answer(text: &str, nonce: &str) {
             !answer.contains(envelope),
             "final answer must not include a reasoning envelope"
         );
+    }
+}
+
+fn assert_azure_session_answer(session: &Session, case: &str, nonce: &str) {
+    assert!(session.messages().iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(nonce))));
+    let final_message = session
+        .messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)
+        .unwrap();
+    let text: String = final_message
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let thinking: String = final_message
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .collect();
+    match case {
+        "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
+        "structured" | "structured-reasoning" => {
+            assert_eq!(thinking, "structured fixture check");
+        }
+        "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
+        _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
+    }
+    if case == "anthropic-error" {
+        assert!(
+            text.is_empty(),
+            "an upstream error must not produce an answer"
+        );
+    } else if case == "truncated" {
+        assert_eq!(
+            text.trim(),
+            "[Provider stream failed; unfinished tool calls were cancelled.]"
+        );
+        assert!(!text.contains("fixture checked") && !text.contains(nonce));
+    } else if case == "prefaced" {
+        assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
+        assert_final_file_answer(&text, nonce);
+    } else if matches!(case, "structured" | "structured-reasoning" | "ordinary") {
+        assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
+    } else if case == "literal-prefix" {
+        assert_eq!(text, format!("<thimble>{nonce}"));
+    } else {
+        assert_eq!(text.trim(), nonce);
     }
 }

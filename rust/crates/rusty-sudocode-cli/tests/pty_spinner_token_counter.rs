@@ -74,7 +74,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
         "unused_live_only",
     );
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::at_least(Duration::from_mins(1)));
 
     // The spinner shows `↓` in the raw PTY byte stream while tokens
     // are being received. We must catch it before the response text
@@ -99,7 +99,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
 #[test]
 fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
     use std::time::Instant;
-    let warning = terminal_palette::expected_color("Idx(220)");
+    let warning = terminal_palette::expected_color("Idx(3)");
     let env = TestEnv::new_mock("spinner-activity");
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],

@@ -5,13 +5,14 @@
 //! showing fields + current values; selecting a leaf dispatches to the
 //! appropriate InputSlot variant for editing.
 
+use crate::render::TextRole;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
 
-use crate::render::{ansi_fg, theme, DIM, RESET};
-use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
+use crate::render::{theme, DIM, RESET};
+use crate::repl_ui::{OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
 
 // ── public entry point ──────────────────────────────────────────────
@@ -25,7 +26,6 @@ pub(crate) fn build_config_tree_handler(
     settings_path: PathBuf,
     sudocode_path: PathBuf,
 ) -> SlashSelectionHandler {
-    let items = vec!["settings.json".to_string(), "sudocode.json".to_string()];
     let question = QuestionPromptView {
         presentation: runtime::QuestionPresentation::Question,
         title: Some("Config".to_string()),
@@ -53,41 +53,36 @@ pub(crate) fn build_config_tree_handler(
         custom_input_hint: None,
         force_fuzzy_select: false,
         back_value: None,
+        initial_value: None,
     };
     ui.show_question(question);
 
     let ui2 = ui.clone();
     let picker_paths = (settings_path.clone(), sudocode_path.clone());
-    SlashSelectionHandler(Box::new(move |answer: &str, _cli, _out| {
-        let resolved = resolve_answer(answer, &items);
-        match resolved.as_str() {
-            "settings.json" => Some(show_schema_level(
-                &ui2,
-                config_schema::SETTINGS_SCHEMA,
-                &settings_path,
-                "settings.json",
-                Vec::new(),
-                None,
-                picker_paths.clone(),
-            )),
-            "sudocode.json" => Some(show_schema_level(
-                &ui2,
-                config_schema::SUDOCODE_SCHEMA,
-                &sudocode_path,
-                "sudocode.json",
-                Vec::new(),
-                None,
-                picker_paths.clone(),
-            )),
-            _ => None,
-        }
+    SlashSelectionHandler(Box::new(move |answer: &str, _cli, _out| match answer {
+        "settings.json" => Some(show_schema_level(
+            &ui2,
+            config_schema::SETTINGS_SCHEMA,
+            &settings_path,
+            "settings.json",
+            Vec::new(),
+            None,
+            picker_paths.clone(),
+        )),
+        "sudocode.json" => Some(show_schema_level(
+            &ui2,
+            config_schema::SUDOCODE_SCHEMA,
+            &sudocode_path,
+            "sudocode.json",
+            Vec::new(),
+            None,
+            picker_paths.clone(),
+        )),
+        _ => None,
     }))
 }
 
 // ── schema level navigation ─────────────────────────────────────────
-
-/// Sentinel value used as the DialPad option for "← Back".
-const BACK_VALUE: &str = "\x00__back__";
 
 /// Show a DialPad/FuzzySelect for one level of the schema tree.
 ///
@@ -111,18 +106,19 @@ fn show_schema_level(
     // Navigate to the nested object indicated by breadcrumb.
     let current_obj = navigate_json(&json_root, &breadcrumb);
 
-    let visible: Vec<&FieldSchema> = schema.iter().filter(|f| !f.is_deprecated).collect();
+    let visible: Vec<&FieldSchema> = schema
+        .iter()
+        .filter(|f| !f.is_deprecated && !f.is_compat_only)
+        .collect();
 
-    let mut keys: Vec<String> = Vec::new();
     let mut options: Vec<QuestionOptionView> = Vec::new();
 
     for f in &visible {
         let val_summary = current_obj
             .and_then(|obj| obj.get(f.key))
-            .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
+            .map_or_else(|| "(not set)".to_string(), truncate_json_value);
         let is_object = f.children.is_some() && f.field_type == FieldType::Object;
         let hint = if is_object { " \u{25b8}" } else { "" };
-        keys.push(f.key.to_string());
         options.push(QuestionOptionView {
             label: format!("{}{hint}  {DIM}{val_summary}{RESET}", f.key),
             value: f.key.to_string(),
@@ -149,20 +145,21 @@ fn show_schema_level(
         allow_custom_input: false,
         custom_input_hint: None,
         force_fuzzy_select: visible.len() > 9,
-        back_value: Some(BACK_VALUE.to_string()),
+        back_value: Some(crate::repl_ui::QUESTION_BACK.to_string()),
+        initial_value: None,
     };
     ui.show_question(question);
 
     let ui2 = ui.clone();
     let file_path = file_path.to_path_buf();
     let file_label = file_label.to_string();
-    let breadcrumb2 = breadcrumb.clone();
+    let breadcrumb2 = breadcrumb;
 
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let selected = resolve_answer(answer, &keys);
+        let selected = answer.to_string();
 
         // ← Back
-        if selected == BACK_VALUE {
+        if selected == crate::repl_ui::QUESTION_BACK {
             return if let Some(parent) = parent_schema {
                 // Go up one level.
                 let mut parent_bc = breadcrumb2.clone();
@@ -209,17 +206,7 @@ fn show_schema_level(
         }
 
         // Leaf field — dispatch to appropriate editor.
-        let input_kind = config_schema::resolve_input_kind(field);
-        handle_leaf_edit(
-            &ui2,
-            field,
-            &input_kind,
-            &file_path,
-            &file_label,
-            &breadcrumb2,
-            cli,
-            out,
-        )
+        handle_leaf_edit(&ui2, field, &file_path, &file_label, &breadcrumb2, cli, out)
     }))
 }
 
@@ -228,7 +215,6 @@ fn show_schema_level(
 fn handle_leaf_edit(
     ui: &UiCommandSender,
     field: &'static FieldSchema,
-    input_kind: &ConfigInputKind,
     file_path: &Path,
     file_label: &str,
     breadcrumb: &[String],
@@ -241,9 +227,11 @@ fn handle_leaf_edit(
     let current_obj = navigate_json(&json_root, breadcrumb);
     let current_val = current_obj.and_then(|obj| obj.get(field.key));
 
-    match input_kind {
+    match config_schema::resolve_input_kind(field) {
         ConfigInputKind::BoolToggle => {
-            let current_bool = current_val.and_then(|v| v.as_bool()).unwrap_or(false);
+            let current_bool = current_val
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let new_val = !current_bool;
             match write_config_value(file_path, breadcrumb, field.key, serde_json::json!(new_val)) {
                 Ok(()) => out.println(&format!(
@@ -253,14 +241,14 @@ fn handle_leaf_edit(
                 )),
                 Err(e) => out.println(&format!(
                     "{}Error writing config: {e}{}",
-                    ansi_fg(theme().error),
+                    theme().fg_seq(TextRole::Error),
                     RESET
                 )),
             }
             None
         }
         ConfigInputKind::Enum(opts) => {
-            let items: Vec<String> = opts.clone();
+            let items: Vec<String> = opts;
             let current_str = current_val.and_then(|v| v.as_str()).unwrap_or("");
             let options: Vec<QuestionOptionView> = items
                 .iter()
@@ -291,6 +279,7 @@ fn handle_leaf_edit(
                 custom_input_hint: None,
                 force_fuzzy_select: false,
                 back_value: None,
+                initial_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();
@@ -298,7 +287,7 @@ fn handle_leaf_edit(
             let field_key = field.key;
             Some(SlashSelectionHandler(Box::new(
                 move |answer: &str, _cli, out| {
-                    let selected = resolve_answer(answer, &items);
+                    let selected = answer.to_string();
                     match write_config_value(
                         &file_path,
                         &breadcrumb,
@@ -311,7 +300,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }
@@ -355,15 +344,15 @@ fn handle_leaf_edit(
                 custom_input_hint: Some("or type a model name".to_string()),
                 force_fuzzy_select: true,
                 back_value: None,
+                initial_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();
             let breadcrumb = breadcrumb.to_vec();
             let field_key = field.key;
-            let items = models;
             Some(SlashSelectionHandler(Box::new(
                 move |answer: &str, _cli, out| {
-                    let selected = resolve_answer(answer, &items);
+                    let selected = answer.to_string();
                     match write_config_value(
                         &file_path,
                         &breadcrumb,
@@ -376,7 +365,7 @@ fn handle_leaf_edit(
                         )),
                         Err(e) => out.println(&format!(
                             "{}Error writing config: {e}{}",
-                            ansi_fg(theme().error),
+                            theme().fg_seq(TextRole::Error),
                             RESET
                         )),
                     }
@@ -446,14 +435,6 @@ fn breadcrumb_display(breadcrumb: &[String]) -> String {
     } else {
         format!("{}.", breadcrumb.join("."))
     }
-}
-
-fn resolve_answer(answer: &str, items: &[String]) -> String {
-    answer
-        .parse::<usize>()
-        .ok()
-        .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-        .unwrap_or_else(|| answer.to_string())
 }
 
 /// Atomically write a value to a config JSON file at the given path.
@@ -595,19 +576,6 @@ mod tests {
     fn truncate_json_value_array() {
         let arr = serde_json::json!([1, 2, 3]);
         assert_eq!(truncate_json_value(&arr), "[3 items]");
-    }
-
-    #[test]
-    fn resolve_answer_numeric() {
-        let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(resolve_answer("1", &items), "a");
-        assert_eq!(resolve_answer("3", &items), "c");
-    }
-
-    #[test]
-    fn resolve_answer_text() {
-        let items = vec!["a".to_string()];
-        assert_eq!(resolve_answer("custom", &items), "custom");
     }
 
     #[test]

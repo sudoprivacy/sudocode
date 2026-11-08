@@ -474,9 +474,16 @@ returns `{"appendSystemPrompt":"exact current context"}`. The controller owns
 source selection and authorization; the model cannot select a provider or grant
 access through this request. This interface performs no model summarization.
 
-The engine replaces only the caller's appended prompt and preserves the existing
-session, history, model, memory mode and execution policy. Byte-identical content
-does not rebuild the runtime. A failed, disconnected, malformed, empty or timed
+The response field retains its v1 name for compatibility. With this capability,
+the initial caller append on `session/new` or `session/load` is superseded before
+model work. The resolved snapshot is then a native harness record at the current
+conversation tail. It does not replace the fixed provider system prompt or
+rewrite earlier messages, so a changed revision preserves the reusable request
+prefix. Ordinary caller appends without this capability keep their existing
+semantics. The session, model, memory mode and execution policy are preserved.
+Byte-identical snapshots do not append duplicates or rebuild the runtime. The
+latest exact snapshot survives compaction without pinning the old prefix or
+relying on an LLM summary to preserve it. A failed, disconnected, malformed, empty or timed
 out response fails the turn before model work; it never falls back to a stale
 append. The provider has a 30-second response budget and cancellation releases
 its pending request. Slash and shell management commands do not call the provider.
@@ -497,12 +504,27 @@ Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.
 
+Provider cache checkpoint metadata can move as the conversation grows. The
+process regression compares the unchanged system prompt, message roles and all
+content fields, excluding only content-block `cache_control` markers. That
+establishes preserved model input, not a live cache hit; provider usage and the
+native cache ledger remain the evidence for actual reuse and cost.
+
+The live `acp_live_smoke` case
+`live_host_context_survives_revision_compaction_and_resume` exercises the actual
+CLI and provider with isolated project facts: revision A, revision B, unchanged
+B, explicit model compaction, B after compaction, and revision C after resume.
+It checks exact model answers and the persisted snapshot, and removes its
+temporary credentials and history. This is engine acceptance; the controller
+must separately verify authorization and bindings against a real project.
+
 The shared native release profile also drives the actual CLI with a pinned Sudograph
 compiler installed in a dedicated Python environment. Two turns around a model
 edit must receive the exact compiled context for their respective revisions;
 the graph must expose the same new revision. Captured provider requests must
-retain user history without copying context into user messages, and a synthetic
-host denial must prevent another model request. The loopback provider returns
+retain the exact current snapshot at the conversation tail and preserve both
+the system and earlier history prefixes. A synthetic host denial must prevent
+another model request. The loopback provider returns
 fixed responses: this checks the compiler/engine contract, not model reasoning,
 production host authorization or Sudowork's UI. Evidence retains the executable
 checksum, compiler identity, revisions, request bodies and ACP diagnostics.

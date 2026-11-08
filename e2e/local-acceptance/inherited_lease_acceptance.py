@@ -16,6 +16,7 @@ ACTOR = '''import errno, importlib.util, json, os, subprocess, sys, time
 from pathlib import Path
 source, output = map(Path, sys.argv[1:3])
 mode, label = sys.argv[3:5]
+deadline = float(sys.argv[5])
 spec = importlib.util.spec_from_file_location("lease_authority", source / ".github/scripts/local_acceptance.py")
 authority = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(authority)
@@ -29,8 +30,9 @@ if mode == "enter":
 
 checks = []
 def child(label, claim, success):
-    command = [sys.executable, __file__, str(source), str(output), "enter", label]
-    result = subprocess.run(command, env={**os.environ, lease_env: claim}, capture_output=True, timeout=15)
+    command = [sys.executable, __file__, str(source), str(output), "enter", label, str(deadline)]
+    result = subprocess.run(command, env={**os.environ, lease_env: claim}, capture_output=True,
+                            timeout=max(0, deadline - time.monotonic()))
     (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
     assert (result.returncode == 0) == success, (label, result.stdout, result.stderr)
     assert (output / (label + ".entered")).exists() == success, label
@@ -67,7 +69,6 @@ with authority.host_acceptance_lease({}, "fixture-owner"):
     ready = output / "owner-ready.json"
     ready.with_suffix(".tmp").write_text(json.dumps({"claim": claim, "pid": os.getpid()}))
     ready.with_suffix(".tmp").replace(ready)
-    deadline = time.monotonic() + 45
     while not (output / "release-owner").exists() and time.monotonic() < deadline:
         time.sleep(.02)
     assert (output / "release-owner").exists(), "controller never released its private owner"
@@ -102,12 +103,13 @@ def verify_inherited_lease(output, source, environment):
     actor = output / "actor.py"
     actor.write_text(ACTOR, encoding="utf-8")
     command = [sys.executable, str(actor), str(source), str(output)]
+    deadline = time.monotonic() + 120
     log = (output / "owner.log").open("wb")
-    owner = subprocess.Popen([*command, "owner", "owner"], env=environment, stdout=log, stderr=subprocess.STDOUT)
+    owner = subprocess.Popen([*command, "owner", "owner", str(deadline)], env=environment,
+                             stdout=log, stderr=subprocess.STDOUT)
     external = []
     try:
         ready = output / "owner-ready.json"
-        deadline = time.monotonic() + 30
         while not ready.is_file():
             assert owner.poll() is None, (output / "owner.log").read_text(errors="replace")
             assert time.monotonic() < deadline, "Private lease owner did not become ready"
@@ -115,15 +117,16 @@ def verify_inherited_lease(output, source, environment):
         claim = json.loads(ready.read_text())["claim"]
         for label, value in [("arbitrary-string", "enclosing-acceptance"),
                              ("copied-unrelated-owner", claim)]:
-            result = subprocess.run([*command, "enter", label], env={**environment, LEASE_ENV: value},
-                                    capture_output=True, timeout=15)
+            result = subprocess.run([*command, "enter", label, str(deadline)],
+                                    env={**environment, LEASE_ENV: value}, capture_output=True,
+                                    timeout=max(0, deadline - time.monotonic()))
             (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
             assert result.returncode != 0 and not (output / (label + ".entered")).exists(), label
             assert b"Invalid inherited host acceptance lease" in result.stderr, result.stderr
             assert owner.poll() is None, "Negative control must run while the real owner holds the lock"
             external.append(label)
         (output / "release-owner").touch()
-        assert owner.wait(timeout=30) == 0, (output / "owner.log").read_text(errors="replace")
+        assert owner.wait(timeout=max(0, deadline - time.monotonic())) == 0, (output / "owner.log").read_text(errors="replace")
         checks = json.loads((output / "owner-results.json").read_text()) + external
         assert len(checks) == 12, checks
         (output / "receipt.json").write_text(json.dumps({

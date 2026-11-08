@@ -342,6 +342,8 @@ inside `host.lock` is authoritative; `host-lease.json` is a diagnostic snapshot.
 Standalone enforcement fixtures use private homes and real private locks, never
 a fabricated claim. Existing older runners can finish naturally; their legacy
 claims do not authorize execution under a newer validator.
+The native author guard and complementary native jobs run the same real-process
+inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
 profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.

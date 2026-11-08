@@ -739,6 +739,14 @@ and hashes remain in the signed profile. The existing host FIFO stays exclusive.
 An unchanged full-guard experiment completed in 501 seconds; the earlier serial
 author run took 907 seconds. These different runs support further qualification,
 not a fixed or population author-to-merge saving. No check coverage is removed.
+Within the author-native guard, the original Git/SSH/HTTP publication controls
+overlap the original serial compiler/test lane. The same supervisor requires
+every original command log and cancels only its owned descendants on failure or
+interrupt. Four additional real native controls check clean completion, either
+failure direction, serial command order and parent/child cleanup. The existing
+seven Docker controls remain mandatory. Same-source observations recorded 488
+seconds serial and 344 seconds overlapping; this single field does not establish
+a population delivery-time reduction. No compiler concurrency is added.
 Every newly built release artifact must pass native acceptance before packaging
 and publication. Both Linux builds, both Mac builds and both Windows builds use
 their actual native executable. The gate verifies its Git revision, architecture

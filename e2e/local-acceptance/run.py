@@ -6,6 +6,7 @@ reported as product PTY/browser/performance acceptance.
 """
 
 import argparse
+import atexit
 import base64
 import json
 import os
@@ -17,6 +18,8 @@ import tempfile
 
 
 SOURCE = Path(__file__).resolve().parents[2]
+FIXTURE_HOME = tempfile.TemporaryDirectory(prefix="scode-enforcement-home-")
+atexit.register(FIXTURE_HOME.cleanup)
 
 
 def fixture_environment():
@@ -30,8 +33,13 @@ def fixture_environment():
     environment = {key: value for key, value in os.environ.items() if key not in names
                    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
     environment["PYTHONIOENCODING"] = "utf-8"
+    environment.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
+    environment.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
     environment.pop("SUDOCODE_ACCEPTANCE_HOST_LEASE", None)
-    return {**environment, "NO_COLOR": "1"}
+    # Callers also merge this mapping into os.environ; an empty value clears
+    # their inherited claim in both that path and an explicit subprocess env.
+    return {**environment, "SUDOCODE_ACCEPTANCE_HOST_LEASE": "", "NO_COLOR": "1", "HOME": FIXTURE_HOME.name,
+            "USERPROFILE": FIXTURE_HOME.name}
 
 
 FIXTURE_ENV = fixture_environment()
@@ -558,9 +566,6 @@ def plan_acceptance(directory):
 def enforcement_acceptance(*, profile_compat_only=False, publication_only=False):
     with tempfile.TemporaryDirectory(prefix="scode-local-guard-") as temporary:
         directory = Path(temporary)
-        home = directory / "home"
-        home.mkdir()
-        FIXTURE_ENV.update(HOME=str(home), USERPROFILE=str(home))
         if not profile_compat_only and not publication_only:
             scope_acceptance(directory)
             performance_scope_acceptance(directory)

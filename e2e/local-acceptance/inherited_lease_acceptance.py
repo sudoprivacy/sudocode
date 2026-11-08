@@ -23,14 +23,25 @@ spec.loader.exec_module(authority)
 authority.ROOT = source
 lease_env = authority.HOST_LEASE_ENV
 lock = Path.home() / ".nexus/local-acceptance/host.lock"
+if mode == "fixture-entry":
+    spec = importlib.util.spec_from_file_location("shared_fixture_environment", source / "e2e/local-acceptance/run.py")
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    os.environ.update(fixture.FIXTURE_ENV)
+    result = subprocess.run([sys.executable, __file__, str(source), str(output), "enter", label, str(deadline)],
+                            env=os.environ, capture_output=True,
+                            timeout=max(0, deadline - time.monotonic()))
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    raise SystemExit(result.returncode)
 if mode == "enter":
     with authority.host_acceptance_lease({}, "fixture-child"):
         (output / (label + ".entered")).touch()
     raise SystemExit(0)
 
 checks = []
-def child(label, claim, success):
-    command = [sys.executable, __file__, str(source), str(output), "enter", label, str(deadline)]
+def child(label, claim, success, mode="enter"):
+    command = [sys.executable, __file__, str(source), str(output), mode, label, str(deadline)]
     result = subprocess.run(command, env={**os.environ, lease_env: claim}, capture_output=True,
                             timeout=max(0, deadline - time.monotonic()))
     (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
@@ -53,6 +64,7 @@ with authority.host_acceptance_lease({}, "fixture-owner"):
         assert os.environ[lease_env] == claim
     checks.append("same-process-nesting")
     child("genuine-descendant", claim, True)
+    child("standalone-fixture-environment", claim, True, mode="fixture-entry")
     descriptor = os.open(lock, os.O_RDWR)
     try:
         record = authority.read_host_lease_record(descriptor)
@@ -128,7 +140,7 @@ def verify_inherited_lease(output, source, environment):
         (output / "release-owner").touch()
         assert owner.wait(timeout=max(0, deadline - time.monotonic())) == 0, (output / "owner.log").read_text(errors="replace")
         checks = json.loads((output / "owner-results.json").read_text()) + external
-        assert len(checks) == 12, checks
+        assert len(checks) == 13, checks
         (output / "receipt.json").write_text(json.dumps({
             "status": "passed", "system": sys.platform, "real_native_processes": True,
             "private_home": str(home), "checks": checks,

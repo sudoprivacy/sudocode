@@ -42,8 +42,15 @@ const result = (value, tool, input) => {
   } } } } };
 };
 const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
-  .onRequest(acp.methods.agent.initialize, ctx => {
-    if (scenario === 'cold-recovery' && !existsSync(`${journal}.online`)) process.exit(18);
+  .onRequest(acp.methods.agent.initialize, async ctx => {
+    if (['delayed-initialize', 'closing-initialize'].includes(scenario)) {
+      log({ method: 'initialize-pending' });
+      while (!existsSync(`${journal}.initialize`)) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (scenario === 'cold-recovery' && !existsSync(`${journal}.online`)) {
+      log({ method: 'initialize-offline' });
+      process.exit(18);
+    }
     // Like scode, every advertising fixture echoes peer input a client declares.
     peerOwned = scenario === 'legacy' ? 0
       : Math.min(2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
@@ -71,6 +78,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
     // A client that owns peer input hears peers even before its own startup completes.
     if (peerOwned && scenario.startsWith('channel')) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
+      log({ method: 'peer-notification', from });
       void ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', { sessionId, deliveryId:'b'.repeat(64),
         text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
         body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting',

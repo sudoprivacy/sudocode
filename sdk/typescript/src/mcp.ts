@@ -79,7 +79,9 @@ export async function runScodeMcp(file: string, lifecycle: {
     const senderVerified = typeof authenticated === 'boolean' ? authenticated : verified;
     if (!channel || message.sessionId !== config.acpSessionId
         || (channel.peerPolicy === 'allowlist' && !channel.peers!.includes(from))) return;
-    if (!transportReady) { if (early.length < 64) early.push(message); return; }
+    if (!transportReady || (channel.peerPolicy === 'node-namespace' && !verified)) {
+      if (early.length < 64) early.push(message); return;
+    }
     audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified: senderVerified });
     void server.server.notification({ method: 'notifications/claude/channel', params: {
       content: message.text,
@@ -104,8 +106,6 @@ export async function runScodeMcp(file: string, lifecycle: {
   const onEof = () => { void stop().catch(error => process.stderr.write(`${String(error)}\n`)); };
   process.stdin.once('end', onEof);
   try {
-    let firstAttemptFinished = () => {};
-    const firstAttempt = new Promise<void>(resolve => { firstAttemptFinished = resolve; });
     // Only this already-bound session may reconnect. A command submitted on a
     // dead connection is never replayed; the callback's durable inbox survives.
     ownerTask = (async () => {
@@ -143,7 +143,7 @@ export async function runScodeMcp(file: string, lifecycle: {
           audit({ phase: 'connected', sessionId: candidate.sessionId, pid: candidate.pid });
           scode = candidate;
           ownerError = undefined;
-          firstAttemptFinished();
+          if (transportReady) for (const message of early.splice(0)) toChannel(message);
           const exit = await candidate.exited;
           scode = undefined;
           ownerError = `scode exited ${exit.code}/${exit.signal}`;
@@ -157,9 +157,11 @@ export async function runScodeMcp(file: string, lifecycle: {
         } finally {
           scode = undefined;
           verified = false;
-          firstAttemptFinished();
           // A failed close stops this supervisor; it must not make a second owner.
           await candidate?.close();
+          // Never authenticate a failed connection's buffered channel messages
+          // using the next connection's successful namespace check.
+          early.length = 0;
         }
         await delay(retryMs, undefined, { signal: abort.signal }).catch(error => {
           if (!abort.signal.aborted) throw error;
@@ -168,10 +170,12 @@ export async function runScodeMcp(file: string, lifecycle: {
       }
     })().catch(error => {
       ownerError = String(error);
-      firstAttemptFinished();
       process.stderr.write(`scode recovery stopped: ${ownerError}\n`);
     });
-    await firstAttempt;
+    // MCP initialization must not wait for ACP/native availability. A slow
+    // first attempt can exceed the frontend's MCP startup timeout and kill the
+    // very supervisor that should recover it. Tools expose not_submitted until
+    // the original session is connected; commands are never buffered/replayed.
     if (abort.signal.aborted) return;
     let promptActive = false;
     registerScodeMcpTools(server, () => {

@@ -366,6 +366,12 @@ advertised typed pre-admission refusal is not_submitted. Listing means
 visibility/addressability, not online proof. The host binds actual actor and
 namespace; the wrapper does not accept a caller-selected sender.
 
+The MCP handshake is available while the original ACP session is connecting.
+`scode_status` reports that state, and commands return `not_submitted` until
+the session is ready. A slow first connection cannot hold up the MCP handshake;
+the same-session supervisor continues independently. Refused commands are not
+buffered for later execution.
+
 ## Optional Codex callback adapter and existing-thread migration
 
 The current bridge binds one explicitly configured ACP SID and callback thread.

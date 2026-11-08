@@ -12,6 +12,16 @@ const fixture = path.join(root, 'test/fixtures/scode-direct-a2a-agent.mjs');
 const journal = (file: string) => fs.existsSync(file)
   ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>) : [];
 
+async function ready(client: Client): Promise<void> {
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    const result = await client.callTool({ name: 'scode_status', arguments: {} });
+    if (JSON.parse((result.content as Array<{text: string}>)[0].text).closed === false) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Original ACP session did not become ready');
+}
+
 async function checkMcp(scenario: string): Promise<void> {
   const config = path.join(directory, `${scenario}.json`);
   const log = path.join(directory, `${scenario}-fixture.jsonl`);
@@ -31,9 +41,34 @@ async function checkMcp(scenario: string): Promise<void> {
   transport.stderr?.on('data', bytes => { stderr += String(bytes); });
   const client = new Client({ name: 'direct-smoke', version: '1' });
   try {
-    await client.connect(transport);
+    await client.connect(transport, { timeout: 5000 });
     const tools = (await client.listTools()).tools.map(tool => tool.name).sort();
     assert.deepEqual(tools, ['scode_agent_list', 'scode_prompt', 'scode_send', 'scode_status']);
+    if (['delayed-initialize', 'closing-initialize'].includes(scenario)) {
+      const deadline = Date.now() + 5000;
+      while (!journal(log).some(row => row.method === 'initialize-pending') && Date.now() < deadline)
+        await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(journal(log).filter(row => row.method === 'initialize-pending').length, 1);
+      assert.equal(journal(log).filter(row => row.method === 'session/load').length, 0);
+      const refused = await client.callTool({ name: 'scode_send', arguments: {
+        to: 'fixture-peer', message: 'must not queue during startup', summary: 'not ready',
+      } });
+      assert.match(JSON.stringify(refused), /not_submitted/);
+      assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 0);
+      if (scenario === 'closing-initialize') return;
+      fs.writeFileSync(`${log}.initialize`, 'allow original initialization');
+      await ready(client);
+      const sent = await client.callTool({ name: 'scode_send', arguments: {
+        to: 'fixture-peer', message: 'new explicit send after readiness', summary: 'ready',
+      } });
+      assert.equal(sent.isError, false);
+      assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 1);
+      assert.equal(journal(log).filter(row => row.method === 'session/load').length, 1);
+      assert.equal(journal(log).filter(row => row.method === 'session/new').length, 0);
+      assert.equal(new Set(journal(log).map(row => row.pid)).size, 1);
+      return;
+    }
+    if (scenario !== 'cold-recovery') await ready(client);
     if (scenario === 'task') {
       const task = await client.callTool({ name: 'scode_prompt', arguments: { text: 'Do a task' } });
       assert.ok(!task.isError);
@@ -44,6 +79,10 @@ async function checkMcp(scenario: string): Promise<void> {
     }
     const text = 'exact 零模型 🧪 text\nsecond\u0000line  ';
     if (scenario === 'cold-recovery') {
+      const firstAttemptDeadline = Date.now() + 5000;
+      while (!journal(log).some(row => row.method === 'initialize-offline') && Date.now() < firstAttemptDeadline)
+        await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(journal(log).some(row => row.method === 'initialize-offline'));
       const refused = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'offline' } });
       assert.match(JSON.stringify(refused), /not_submitted/);
       fs.writeFileSync(`${log}.online`, 'ready');
@@ -51,6 +90,7 @@ async function checkMcp(scenario: string): Promise<void> {
       while (journal(log).filter(row => row.method === 'session/load').length < 1 && Date.now() < deadline)
         await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(journal(log).filter(row => row.method === 'session/load').length, 1);
+      await ready(client);
       const recovered = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'online' } });
       assert.equal(recovered.isError, false);
       assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 1);
@@ -104,7 +144,25 @@ async function checkMcp(scenario: string): Promise<void> {
     assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0);
     assert.equal(journal(log).filter(row => row.method === 'session/load').length, scenario === 'loss' ? 2 : 1);
   } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
-  finally { await client.close(); }
+  finally {
+    await client.close();
+    if (scenario === 'closing-initialize') {
+      const pid = Number(journal(log).find(row => row.method === 'initialize-pending')?.pid);
+      assert.ok(Number.isSafeInteger(pid) && pid > 0);
+      const deadline = Date.now() + 5000;
+      let exited = false;
+      while (Date.now() < deadline) {
+        try { process.kill(pid, 0); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+          exited = true; break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.ok(exited, 'Closing MCP during initialization must reap its ACP child');
+      assert.equal(journal(log).filter(row => row.method === 'session/load').length, 0);
+    }
+  }
 }
 
 /** Claude Code channel: peers arrive as `notifications/claude/channel`, gated by policy. */
@@ -113,9 +171,12 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
   const config = path.join(directory, `${scenario}.json`);
   const log = path.join(directory, `${scenario}-fixture.jsonl`);
   const auditLog = path.join(directory, `${scenario}-audit.jsonl`);
+  const identityGate = path.join(directory, `${scenario}-identity.ready`);
   fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, scenario],
     workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
-    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log },
+    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log,
+      ...(peerPolicy === 'node-namespace' ? { SCODE_DIRECT_FIXTURE_LIST_GATE: identityGate } : {}),
+    },
     claudeChannel: { peerPolicy, ...(peerPolicy === 'allowlist' ? { peers: ['fixture-peer'] } : {}) },
   }), { mode: 0o600 });
   const transport = new StdioClientTransport({ command: process.execPath,
@@ -130,9 +191,18 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
     events.push(notification.params);
   });
   try {
-    await client.connect(transport);
+    await client.connect(transport, { timeout: 5000 });
     assert.deepEqual(client.getServerCapabilities()?.experimental?.['claude/channel'], {});
     assert.match(String(client.getInstructions()), /reply only with the scode_send tool/);
+    if (peerPolicy === 'node-namespace') {
+      const pendingDeadline = Date.now() + 5000;
+      while (journal(log).filter(row => row.method === 'peer-notification').length < 2 && Date.now() < pendingDeadline)
+        await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(journal(log).filter(row => row.method === 'peer-notification').length, 2);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.equal(events.length, 0, 'MCP readiness must not bypass the Node identity check');
+      fs.writeFileSync(identityGate, 'allow this connection identity check');
+    }
     const deadline = Date.now() + 5000;
     const expected = peerPolicy === 'allowlist' ? 1 : 2;
     while (events.length < expected && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
@@ -152,9 +222,16 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
 }
 
 async function main(): Promise<void> {
+  // A focused regression control can supply the previous bridge executable.
+  // Normal source and portable-package acceptance still run every case below.
+  if (process.argv[3] !== undefined) {
+    assert.equal(process.argv[3], '--case=delayed-initialize');
+    await checkMcp('delayed-initialize');
+    return;
+  }
   for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
-    'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'malformed']) await checkMcp(scenario);
+    'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'delayed-initialize', 'closing-initialize', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.
   const log = path.join(directory, 'helper-fixture.jsonl');
   const connection = await connectScode({ scodeArgv: [process.execPath, fixture], workspace: directory,

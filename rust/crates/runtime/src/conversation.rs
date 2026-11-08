@@ -809,6 +809,11 @@ impl ToolDispatchContext {
     reason = "Tool futures are polled on the owning thread and deliberately do not require Send."
 )]
 pub trait ToolExecutor: Send {
+    /// Tool selection only; this does not grant dispatch-time permission.
+    fn is_tool_enabled(&self, _tool_name: &str) -> bool {
+        true
+    }
+
     /// The mailbox actually installed in this executor. A direct A2A call
     /// requires this binding instead of resolving an unscoped disk default.
     fn external_a2a_binding(&self) -> Option<crate::external_a2a::MailboxBinding> {
@@ -1707,8 +1712,12 @@ where
             return Err("compacted session has no active history; restore a pre-compaction transcript before continuing".into());
         }
 
-        // Verify tool executor is responsive with a non-destructive probe
-        // Using glob_search with a pattern that won't match anything
+        // A messaging-only executor is healthy without filesystem tools.
+        // Preserve the empty-history refusal above and all dispatch checks.
+        if !self.tool_executor_mut().is_tool_enabled("glob_search") {
+            return Ok(());
+        }
+        // Verify an enabled executor with a non-destructive glob probe.
         let probe_input = r#"{"pattern": "*.health-check-probe-"}"#;
         // A new turn can compact before its first tool batch. Do not reuse the
         // previous batch's cancellation generation for this independent probe.

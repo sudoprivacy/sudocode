@@ -261,7 +261,9 @@ fn resumed_card_layout(is_error: bool) {
         common::DEFAULT_TIMEOUT,
         "replayed transcript",
     );
-    assert_list_continuations(&sess, 0);
+    // Replay draws through the live turn renderer, so answers keep the live
+    // response margin: the same 2 columns the live layout test expects.
+    assert_list_continuations(&sess, 2);
     sess.render(|screen| {
         let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
         let start = rows
@@ -276,12 +278,18 @@ fn resumed_card_layout(is_error: bool) {
             rows[start + 1].starts_with("│ $ printf"),
             "body starts immediately after title"
         );
-        let before = rows.iter().position(|row| row == "Before tool.").unwrap();
+        let before = rows
+            .iter()
+            .position(|row| row.trim_start() == "Before tool.")
+            .unwrap();
         assert_eq!(start, before + 2, "one blank row before card: {rows:?}");
         let end = (start + 1..rows.len())
             .find(|&row| rows[row].starts_with("╰─"))
             .unwrap();
-        let after = rows.iter().position(|row| row == "After tool.").unwrap();
+        let after = rows
+            .iter()
+            .position(|row| row.trim_start() == "After tool.")
+            .unwrap();
         assert_eq!(after, end + 2, "one blank row after card: {rows:?}");
         let body: String = rows[start + 1..end]
             .iter()

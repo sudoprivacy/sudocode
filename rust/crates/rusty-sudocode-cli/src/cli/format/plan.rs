@@ -60,7 +60,7 @@ fn review_label(status: PlanReviewStatus) -> &'static str {
 
 /// Reconstruct historical proposals from their recorded arguments, never from
 /// the mutable current plan file. Dispatch uses this same document composer.
-pub(super) fn replay(
+pub(crate) fn replay(
     input: &str,
     output: &str,
     renderer: &crate::render::TerminalRenderer,

@@ -2,7 +2,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
-const { createHost } = require('./host.cjs');
+const { createHost, countRows } = require('./host.cjs');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (config.scenario === 'browser-links') {
   // CommonJS module return leaves the headless observer uninitialized.
@@ -18,7 +18,7 @@ function check(label) {
   for (const marker of ['turn 1', '1 todos', 'ResizeCompletedTask', 'ResizeHistorySentinel', 'DraftSurvivesResize'])
     assert.equal(text.split(marker).length - 1, 1, `${label}: ${marker}\n${text}`);
   for (let i = 0; i < 70; i++)
-    assert.equal(text.split('\n').filter(line => line.trim() === `Earlier history line ${i}`).length,
+    assert.equal(countRows(text, `Earlier history line ${i}`),
       1, `${label}: history ${i} was lost or duplicated\n${text}`);
   console.log(JSON.stringify({ label, history: 70, chrome: 1, draft: true }));
 }
@@ -106,7 +106,7 @@ async function sharedBudget() {
   const history = label => {
     const text = snapshot();
     for (let i = 0; i < 70; i++)
-      assert.equal(text.split('\n').filter(row => row.trim() === `Budget history line ${i}`).length,
+      assert.equal(countRows(text, `Budget history line ${i}`),
         1, `${label}: history ${i} lost or duplicated\n${text}`);
     assert.equal(text.split('BudgetHistorySentinel').length - 1, 1, label);
   };

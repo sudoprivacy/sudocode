@@ -56,8 +56,8 @@ use cli::format::{
     format_compaction_notice, format_context_report, format_cost_report, format_issue_report,
     format_model_report, format_model_switch_report, format_permission_prompt_box,
     format_permissions_report, format_permissions_switch_report, format_pr_report,
-    format_resume_report, format_sandbox_report, format_ultraplan_report, render_messages,
-    render_version_report, turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
+    format_resume_report, format_sandbox_report, format_ultraplan_report, render_version_report,
+    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_workspace_summary,
@@ -4755,16 +4755,14 @@ impl LiveCli {
     }
 
     /// Render the restored conversation history to a scrollback string, or an
-    /// empty string when there is none (a fresh session), through the shared
-    /// `render_messages`, so a resumed session's history stays visible.
+    /// empty string when there is none (a fresh session), through the live
+    /// turn renderer, so a resumed session looks as it did before the restart.
     fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
             return String::new();
         }
-        let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-        let renderer = render::TerminalRenderer::new();
-        render_messages(session.messages(), term_width, &renderer)
+        render_engine::replay(session.messages())
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the

@@ -755,6 +755,7 @@ impl SessionDriver {
                 text,
                 display,
                 source,
+                pasted: Vec::new(),
                 attachments: Vec::new(),
             },
             delivery: InputDelivery::Queue,

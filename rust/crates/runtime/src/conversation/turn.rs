@@ -191,8 +191,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .push_message(ConversationMessage::unanswered_turn_boundary())
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
         }
+        let echoes = observer
+            .as_deref()
+            .map_or_else(Vec::new, RuntimeObserver::prompt_echoes);
         self.session
-            .push_user_blocks(prepared_blocks)
+            .push_prompt(prepared_blocks, echoes)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         if let Some(observer) = observer.as_deref_mut() {
             observer.on_prompt_committed();
@@ -243,7 +246,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 break;
             }
             self.session
-                .push_user_blocks(prepared?)
+                .push_prompt(prepared?, vec![view.echo()])
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             self.turn_inputs.committed(input.id);
             if let Some(observer) = observer.as_deref_mut() {

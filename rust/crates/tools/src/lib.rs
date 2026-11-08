@@ -8552,6 +8552,7 @@ fn build_forked_messages(
         usage: None,
         model: None,
         duration_ms: None,
+        inputs: Vec::new(),
     };
 
     vec![full_assistant, user_message]
@@ -11276,6 +11277,7 @@ mod tests {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         });
         let converted = convert_messages(&messages);
         assert_eq!(converted.len(), 2);
@@ -11332,6 +11334,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
             ConversationMessage {
                 history: None,
@@ -11345,6 +11348,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
         let discovered = extract_discovered_tool_names(&messages);

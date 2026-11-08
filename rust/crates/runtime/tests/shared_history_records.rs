@@ -122,6 +122,7 @@ fn assistant(blocks: Vec<ContentBlock>) -> ConversationMessage {
         model: None,
         duration_ms: None,
         history: None,
+        inputs: Vec::new(),
     }
 }
 fn text(text: &str) -> ConversationMessage {

@@ -59,6 +59,7 @@ impl WireAction {
                         display: display.unwrap_or_else(|| text.clone()),
                         text,
                         source: InputSource::Human,
+                        pasted: Vec::new(),
                         attachments: images
                             .into_iter()
                             .map(|(data, mime_type)| {

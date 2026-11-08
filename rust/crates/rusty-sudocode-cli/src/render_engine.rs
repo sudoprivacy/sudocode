@@ -199,13 +199,17 @@ impl EngineEventRenderer {
         }
     }
 
-    /// A committed prompt: the user's own text, and any peer messages in it.
-    fn prompt(&mut self, text: &str) {
-        let echo = crate::cli::received::render_prompt(
-            text,
-            crate::render::query_terminal_width(),
-            &self.renderer,
-        );
+    /// A committed input, drawn the same way live and on replay.
+    fn commit_input(&mut self, input: &engine_events::InputEcho) {
+        let echo = crate::cli::received::echo(input, query_terminal_width(), &self.renderer);
+        self.write_block(&echo, OutputBlock::Notice);
+    }
+
+    /// A prompt saved before its echo was recorded: its text, with any peer
+    /// messages in it framed.
+    fn saved_prompt(&mut self, text: &str) {
+        let echo =
+            crate::cli::received::render_prompt(text, query_terminal_width(), &self.renderer);
         self.write_block(&echo, OutputBlock::Notice);
     }
 
@@ -523,12 +527,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::InputCommitted(input) => {
                 self.finish_response();
-                match input.source {
-                    engine_events::InputSource::Human | engine_events::InputSource::Peer => {
-                        self.prompt(&input.display);
-                    }
-                    _ => self.write_block(&input.display, OutputBlock::Notice),
-                }
+                self.commit_input(&input.echo());
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
@@ -769,12 +768,17 @@ pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
         match message.role {
             MessageRole::User => {
                 let text = crate::cli::format::text_from_blocks(&message.blocks);
-                if text.is_empty() {
+                if message.inputs.is_empty() && text.is_empty() {
                     continue;
                 }
                 finish(turn.take(), &mut output);
                 let mut renderer = EngineEventRenderer::capturing();
-                renderer.prompt(&text);
+                if message.inputs.is_empty() {
+                    renderer.saved_prompt(&text);
+                }
+                for input in &message.inputs {
+                    renderer.commit_input(input);
+                }
                 turn = Some(renderer);
             }
             MessageRole::Assistant => {

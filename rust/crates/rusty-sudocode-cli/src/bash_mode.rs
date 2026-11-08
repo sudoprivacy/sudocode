@@ -27,6 +27,7 @@ pub fn messages_from_blocks(blocks: Vec<ContentBlock>) -> Vec<ConversationMessag
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .collect()
 }

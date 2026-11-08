@@ -37,7 +37,7 @@
 pub use runtime::background_tasks::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
-pub use runtime::turn_input::{InputDelivery, InputSource, InputView, TurnInput};
+pub use runtime::turn_input::{InputDelivery, InputEcho, InputSource, InputView, TurnInput};
 pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
@@ -495,6 +495,10 @@ pub enum EngineCommand {
     Prompt {
         blocks: Vec<ContentBlock>,
         context: Option<PromptContext>,
+        /// How the host already drew this prompt. Saved with it so a restored
+        /// session draws it the same way; unlike `context.input_views`, it is
+        /// not announced again.
+        shown: Vec<InputEcho>,
     },
     /// Cancel the in-flight turn (was `abort_signal.abort()`).
     Cancel,

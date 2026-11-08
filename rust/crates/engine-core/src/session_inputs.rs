@@ -156,6 +156,7 @@ impl State {
                         text,
                         display,
                         source,
+                        pasted: Vec::new(),
                         attachments: Vec::new(),
                     },
                     receipt: Some(Receipt {
@@ -413,6 +414,7 @@ impl SessionInputs {
             EngineCommand::Prompt {
                 blocks,
                 context: Some(context),
+                shown: Vec::new(),
             },
             state.snapshot(),
         ))

@@ -39,6 +39,8 @@ pub struct TurnInput {
     pub text: String,
     pub display: String,
     pub source: InputSource,
+    /// Byte ranges of `display` that were pasted rather than typed.
+    pub pasted: Vec<std::ops::Range<usize>>,
     /// Native image blocks travel with the input through queueing and steering.
     pub attachments: Vec<crate::ContentBlock>,
 }
@@ -49,6 +51,20 @@ pub struct InputView {
     pub id: u64,
     pub display: String,
     pub source: InputSource,
+    /// Byte ranges of `display` that were pasted rather than typed.
+    pub pasted: Vec<std::ops::Range<usize>>,
+}
+
+/// How an input was drawn in scrollback. It is saved with the message the
+/// input became, so a restored session draws it exactly as it was shown live:
+/// a sub-agent result as its one-line notice rather than the notification the
+/// model read, a paste dimmed. Never sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputEcho {
+    pub source: InputSource,
+    pub display: String,
+    /// Byte ranges of `display` that were pasted rather than typed.
+    pub pasted: Vec<std::ops::Range<usize>>,
 }
 
 impl TurnInput {
@@ -59,7 +75,111 @@ impl TurnInput {
             id: self.id,
             display: self.display.clone(),
             source: self.source,
+            pasted: self.pasted.clone(),
         }
+    }
+}
+
+impl InputView {
+    #[must_use]
+    pub fn echo(&self) -> InputEcho {
+        InputEcho {
+            source: self.source,
+            display: self.display.clone(),
+            pasted: self.pasted.clone(),
+        }
+    }
+}
+
+impl InputEcho {
+    pub(crate) fn to_json(&self) -> crate::json::JsonValue {
+        use crate::json::JsonValue;
+        let mut object = std::collections::BTreeMap::from([
+            (
+                "source".to_string(),
+                JsonValue::String(self.source.name().to_string()),
+            ),
+            (
+                "display".to_string(),
+                JsonValue::String(self.display.clone()),
+            ),
+        ]);
+        if !self.pasted.is_empty() {
+            let ranges = self
+                .pasted
+                .iter()
+                .map(|range| {
+                    JsonValue::Array(
+                        [range.start, range.end]
+                            .map(|offset| {
+                                JsonValue::Number(i64::try_from(offset).unwrap_or(i64::MAX))
+                            })
+                            .to_vec(),
+                    )
+                })
+                .collect();
+            object.insert("pasted".to_string(), JsonValue::Array(ranges));
+        }
+        JsonValue::Object(object)
+    }
+
+    /// `None` for a record this build cannot read (a source added later, a
+    /// range outside its text), so the message falls back to its text instead
+    /// of failing to load. The record is presentation only and is not kept:
+    /// this build drops it when it next saves the session, as builds older
+    /// than the `inputs` key drop the whole key.
+    pub(crate) fn from_json(value: &crate::json::JsonValue) -> Option<Self> {
+        let object = value.as_object()?;
+        let source = InputSource::from_name(object.get("source")?.as_str()?)?;
+        let display = object.get("display")?.as_str()?.to_string();
+        let pasted = match object.get("pasted") {
+            None => Vec::new(),
+            Some(ranges) => ranges
+                .as_array()?
+                .iter()
+                .map(|range| {
+                    let [start, end] = range.as_array()? else {
+                        return None;
+                    };
+                    let start = usize::try_from(start.as_i64()?).ok()?;
+                    let end = usize::try_from(end.as_i64()?).ok()?;
+                    (start < end
+                        && end <= display.len()
+                        && display.is_char_boundary(start)
+                        && display.is_char_boundary(end))
+                    .then_some(start..end)
+                })
+                .collect::<Option<_>>()?,
+        };
+        Some(Self {
+            source,
+            display,
+            pasted,
+        })
+    }
+}
+
+impl InputSource {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Peer => "peer",
+            Self::Subagent => "subagent",
+            Self::Background => "background",
+            Self::Scheduled => "scheduled",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::Human,
+            Self::Peer,
+            Self::Subagent,
+            Self::Background,
+            Self::Scheduled,
+        ]
+        .into_iter()
+        .find(|source| source.name() == name)
     }
 }
 

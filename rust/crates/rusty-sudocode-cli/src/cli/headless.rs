@@ -308,6 +308,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
             cli.engine_handle.commands.send(EngineCommand::Prompt {
                 blocks,
                 context: None,
+                shown: Vec::new(),
             })?;
             result["num_turns"] = json!(1);
             stage = "runtime_error";

@@ -410,8 +410,15 @@ pub(crate) fn render_version_report() -> String {
 /// #182 item 3: multi-line input used to collapse to a single line because
 /// the call site did `replace('\n', " ")`. We now preserve every line so the
 /// echo matches what the user actually typed.
-pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+/// `pasted` holds byte ranges of `input` the user pasted; they are dimmed so a
+/// paste stands apart from what was typed, live and after a restart alike.
+pub(crate) fn format_input_echo(
+    input: &str,
+    pasted: &[std::ops::Range<usize>],
+    term_width: usize,
+) -> (String, usize) {
     let trimmed = input.trim();
+    let lead = input.len() - input.trim_start().len();
     // `split('\n')` (not `lines()`) so an input that ends with `\n` still
     // contributes a trailing empty echo row — rustyline drew one for it.
     let raw_lines: Vec<&str> = if trimmed.is_empty() {
@@ -420,13 +427,15 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         trimmed.split('\n').collect()
     };
     let mut rendered = String::new();
+    let mut offset = lead;
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
         // box uses. Live commits and replay share this presentation; the
         // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
-        let body = format!("{prefix}{line}");
+        let body = format!("{prefix}{}", dim_pasted(line, offset, pasted));
+        offset += line.len() + 1;
         if idx > 0 {
             rendered.push('\n');
         }
@@ -443,6 +452,33 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         }
     }
     (rendered, raw_lines.len())
+}
+
+/// `line` (starting at byte `offset` of its prompt) with the pasted parts dim.
+/// Ends the dim with "normal intensity" rather than a reset, which would also
+/// drop the prompt's background.
+fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> String {
+    let end = offset + line.len();
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for range in pasted {
+        let start = range.start.clamp(offset, end) - offset;
+        let stop = range.end.clamp(offset, end) - offset;
+        if start >= stop
+            || start < at
+            || !line.is_char_boundary(start)
+            || !line.is_char_boundary(stop)
+        {
+            continue;
+        }
+        out.push_str(&line[at..start]);
+        out.push_str(crate::render::DIM);
+        out.push_str(&line[start..stop]);
+        out.push_str("\x1b[22m");
+        at = stop;
+    }
+    out.push_str(&line[at..]);
+    out
 }
 
 /// The built-in tools the card renderer recognizes, each matched from *both*
@@ -3002,7 +3038,7 @@ mod tests {
         // share the same prompt glyph. Both reference render::PROMPT_PREFIX, so
         // this asserts the echo starts with it — if someone hardcodes a
         // different glyph again (the old `›` bug), this fails.
-        let (echo, _) = format_input_echo("hi", 80);
+        let (echo, _) = format_input_echo("hi", &[], 80);
         assert!(
             echo.starts_with(crate::render::PROMPT_PREFIX),
             "echo must start with the shared prompt prefix: {echo:?}"

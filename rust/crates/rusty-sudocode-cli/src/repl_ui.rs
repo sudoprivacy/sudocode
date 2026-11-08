@@ -595,23 +595,21 @@ fn insert_image_placeholder(
     }
 }
 
-/// Core expansion engine shared by plain and display variants.
+/// Replace paste placeholders with the text they stand for.
 ///
 /// Scans left to right and copies each placeholder's replacement into a fresh
 /// output buffer. Inserted text is never re-scanned, so a stored paste whose
 /// own text happens to contain a `[Pasted text #N]` string can never cause an
 /// infinite loop (it is emitted verbatim, not re-expanded).
 ///
-/// When `wrap` is `Some((before, after))`, each pasted region is wrapped with
-/// the given ANSI sequences for visual distinction in terminal output.
-#[inline]
-fn expand_paste_inner(
+/// Returns the expanded text and the byte ranges each paste occupies in it.
+fn expand_paste_placeholders(
     input: &str,
     store: &std::collections::HashMap<u32, String>,
-    wrap: Option<(&str, &str)>,
-) -> String {
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let mut pasted = Vec::new();
     if store.is_empty() || next_paste_placeholder(input).is_none() {
-        return input.to_string();
+        return (input.to_string(), pasted);
     }
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
@@ -632,13 +630,8 @@ fn expand_paste_inner(
         });
 
         if let Some((consumed_after_prefix, real_text)) = matched {
-            if let Some((before, after)) = wrap {
-                result.push_str(before);
-                result.push_str(real_text);
-                result.push_str(after);
-            } else {
-                result.push_str(real_text);
-            }
+            pasted.push(result.len()..result.len() + real_text.len());
+            result.push_str(real_text);
             rest = &after_prefix[consumed_after_prefix..];
         } else {
             result.push_str(placeholder_prefix);
@@ -646,25 +639,8 @@ fn expand_paste_inner(
         }
     }
     result.push_str(rest);
-    result
-}
-
-/// Replace all paste placeholders with their real text (plain).
-fn expand_paste_placeholders(
-    input: &str,
-    store: &std::collections::HashMap<u32, String>,
-) -> String {
-    expand_paste_inner(input, store, None)
-}
-
-/// Replace placeholders with the real text, wrapping each pasted region in DIM
-/// so it's visually distinguishable from typed text in scrollback.
-fn expand_paste_for_display(input: &str, store: &std::collections::HashMap<u32, String>) -> String {
-    expand_paste_inner(
-        input,
-        store,
-        Some((crate::render::DIM, crate::render::RESET)),
-    )
+    pasted.retain(|range| !range.is_empty());
+    (result, pasted)
 }
 
 fn enter_key_event_for_value(value: &str) -> Option<InputEvent> {
@@ -687,6 +663,7 @@ fn enter_key_event_for_value(value: &str) -> Option<InputEvent> {
         Some(InputEvent::Submit {
             text: text.clone(),
             display: text,
+            pasted: Vec::new(),
         })
     }
 }
@@ -788,7 +765,7 @@ fn format_question_panel(
 /// include their own newlines from the markdown renderer).
 enum OutputMsg {
     /// User echo formatted identically for live output and session replay.
-    UserPrompt(String),
+    UserPrompt(runtime::turn_input::InputEcho),
     /// One event's stable history and replacement live prose, in order.
     AssistantUpdate {
         committed: String,
@@ -867,8 +844,8 @@ pub struct OutputSender {
 }
 
 impl OutputSender {
-    pub(crate) fn user_prompt(&self, display: &str) {
-        let _ = self.tx.send(OutputMsg::UserPrompt(display.to_string()));
+    pub(crate) fn user_prompt(&self, input: runtime::turn_input::InputEcho) {
+        let _ = self.tx.send(OutputMsg::UserPrompt(input));
     }
     pub(crate) fn tool_progress(&self, text: Option<String>) {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
@@ -882,16 +859,6 @@ impl OutputSender {
 
     pub fn println(&self, text: &str) {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
-    }
-
-    /// Commit a complete transcript echo through the existing output channel.
-    /// One payload avoids separately allocating/sending its separator rows.
-    #[inline]
-    pub(crate) fn print_block(&self, mut text: String) {
-        crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
-        if !text.is_empty() {
-            let _ = self.tx.send(OutputMsg::Raw(text));
-        }
     }
 
     pub fn suspend(&self) -> io::Result<TerminalSuspension> {
@@ -946,10 +913,13 @@ pub enum InputEvent {
     Submit {
         text: String,
         display: String,
+        /// Byte ranges of `display` that were pasted.
+        pasted: Vec<std::ops::Range<usize>>,
     },
     Queue {
         text: String,
         display: String,
+        pasted: Vec<std::ops::Range<usize>>,
     },
     /// An option value, literal custom text, or QUESTION_BACK. The input view
     /// already resolves digit shortcuts; consumers must preserve this value.
@@ -1391,7 +1361,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     let raw = dialpad_input.read().clone();
                                     let store_snap = paste_store.read().clone();
                                     let answer =
-                                        expand_paste_placeholders(&raw, &store_snap).trim().to_string();
+                                        expand_paste_placeholders(&raw, &store_snap).0.trim().to_string();
                                     if !answer.is_empty() {
                                         if !*has_submitted.read() {
                                             has_submitted.set(true);
@@ -1742,8 +1712,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
-                        Ok(OutputMsg::UserPrompt(display)) => {
-                            let mut text = crate::cli::format::format_input_echo(&display, crate::render::query_terminal_width()).0;
+                        Ok(OutputMsg::UserPrompt(input)) => {
+                            let mut text = crate::cli::received::echo(&input, crate::render::query_terminal_width(), &crate::render::TerminalRenderer::new());
                             crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
                             (text, false)
                         }
@@ -2503,8 +2473,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     InputEvent::Exit => { should_exit.set(true); InputEvent::Exit }
                                     InputEvent::Submit { text, .. } => {
                                         let store = paste_store.read().clone();
-                                        let expanded = expand_paste_placeholders(&text, &store);
-                                        let display = expand_paste_for_display(&text, &store);
+                                        let (expanded, pasted) = expand_paste_placeholders(&text, &store);
+                                        let display = expanded.clone();
                                         paste_store.write().clear();
                                         next_paste_id.set(1);
                                         let trimmed = expanded.trim();
@@ -2512,8 +2482,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         if !trimmed.is_empty() && history.last().is_none_or(|last| last != trimmed) {
                                             history.push(trimmed.to_string());
                                         }
-                                        if *code == KeyCode::Tab { InputEvent::Queue { text: expanded, display } }
-                                        else { InputEvent::Submit { text: expanded, display } }
+                                        if *code == KeyCode::Tab { InputEvent::Queue { text: expanded, display, pasted } }
+                                        else { InputEvent::Submit { text: expanded, display, pasted } }
                                     }
                                     _ => unreachable!("plain input cannot answer a panel"),
                                 };
@@ -2845,6 +2815,7 @@ mod tests {
             Some(InputEvent::Submit {
                 text: "hello".to_string(),
                 display: "hello".to_string(),
+                pasted: Vec::new(),
             })
         );
     }
@@ -2928,6 +2899,7 @@ mod tests {
             Some(InputEvent::Submit {
                 text: "/status".to_string(),
                 display: "/status".to_string(),
+                pasted: Vec::new(),
             })
         );
         assert_eq!(
@@ -2935,6 +2907,7 @@ mod tests {
             Some(InputEvent::Submit {
                 text: "/cost".to_string(),
                 display: "/cost".to_string(),
+                pasted: Vec::new(),
             })
         );
     }
@@ -3001,7 +2974,7 @@ mod tests {
             assert_eq!(out, expected);
             assert_eq!(id, next_id);
             assert_eq!(store.is_empty(), next_id == 1);
-            assert_eq!(expand_paste_placeholders(&out, &store), pasted);
+            assert_eq!(expand_paste_placeholders(&out, &store).0, pasted);
         }
     }
 
@@ -3016,7 +2989,7 @@ mod tests {
         assert_eq!(id, 2, "id consumed");
         // Round-trips back to the real text at submit time.
         assert_eq!(
-            expand_paste_placeholders(&out, &store),
+            expand_paste_placeholders(&out, &store).0,
             format!("start {pasted}")
         );
     }
@@ -3026,7 +2999,7 @@ mod tests {
         let mut store = std::collections::HashMap::new();
         store.insert(1u32, "line one\nline two".to_string());
         let input = "before [Pasted text #1 +1 lines] after";
-        let expanded = expand_paste_placeholders(input, &store);
+        let expanded = expand_paste_placeholders(input, &store).0;
         assert_eq!(expanded, "before line one\nline two after");
     }
 
@@ -3034,7 +3007,7 @@ mod tests {
     fn expand_paste_placeholders_noop_when_no_store() {
         let store = std::collections::HashMap::new();
         let input = "no placeholders here";
-        assert_eq!(expand_paste_placeholders(input, &store), input);
+        assert_eq!(expand_paste_placeholders(input, &store).0, input);
     }
 
     #[test]
@@ -3042,29 +3015,6 @@ mod tests {
         let mut store = std::collections::HashMap::new();
         store.insert(3u32, "hello".to_string());
         let input = "[Pasted text #3]";
-        assert_eq!(expand_paste_placeholders(input, &store), "hello");
-    }
-
-    #[test]
-    fn expand_paste_for_display_wraps_pasted_regions_in_dim() {
-        let mut store = std::collections::HashMap::new();
-        store.insert(1u32, "pasted stuff".to_string());
-        let input = "typed [Pasted text #1] more";
-        let display = expand_paste_for_display(input, &store);
-        assert_eq!(
-            display,
-            format!(
-                "typed {}pasted stuff{} more",
-                crate::render::DIM,
-                crate::render::RESET
-            ),
-        );
-    }
-
-    #[test]
-    fn expand_paste_for_display_noop_without_placeholders() {
-        let store = std::collections::HashMap::new();
-        let input = "plain text";
-        assert_eq!(expand_paste_for_display(input, &store), input);
+        assert_eq!(expand_paste_placeholders(input, &store).0, "hello");
     }
 }

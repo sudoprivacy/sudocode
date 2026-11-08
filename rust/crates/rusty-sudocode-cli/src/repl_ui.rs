@@ -1160,132 +1160,6 @@ fn render_pending_overlay(
     lines.join("\n")
 }
 
-// ── TodoSlot — todo summary and items ─────────────────────────────────
-
-/// Render the todo panel matching CC's `TodoWrite` layout:
-///
-/// ```text
-/// 5 todos (2 done, 1 in progress, 2 open)
-///   ✓ Update docs
-///   ■ Writing unit tests
-///   □ Fix login bug
-///   … +2 pending, 1 completed
-/// ```
-///
-/// - Header: count summary with done/in_progress/open breakdown
-/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
-/// - Full projection bounds item count; shared layout owns terminal height.
-/// - Priority order: in_progress > pending > completed; hidden summary
-fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
-    use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
-
-    if todos.is_empty() {
-        return String::new();
-    }
-
-    let t = theme();
-    let success = t.fg_seq(TextRole::Success);
-    let info = ansi_fg(t.color(crate::render::TextRole::Info));
-
-    let completed_count = todos
-        .iter()
-        .filter(|t| t.status == runtime::TodoStatus::Completed)
-        .count();
-    let in_progress_count = todos
-        .iter()
-        .filter(|t| t.status == runtime::TodoStatus::InProgress)
-        .count();
-    let open_count = todos
-        .iter()
-        .filter(|t| t.status == runtime::TodoStatus::Pending)
-        .count();
-
-    // Header summary line
-    let mut header = crate::render::StyledLine::muted();
-    header.push_count(todos.len());
-    header.push(" todos (");
-    header.push_count(completed_count);
-    header.push(" done");
-    if in_progress_count > 0 {
-        header.push(", ");
-        header.push_count(in_progress_count);
-        header.push(" in progress");
-    }
-    header.push(", ");
-    header.push_count(open_count);
-    header.push(" open)");
-
-    let mut lines = Vec::with_capacity(todos.len() + 2);
-    lines.push(header.to_string());
-
-    // Summary and full view derive their counts/styles from the same source.
-    if max_display == 0 {
-        return lines.join("\n");
-    }
-
-    // Sort by priority: in_progress first, then pending, then completed.
-    let mut sorted: Vec<&runtime::Todo> = todos.iter().collect();
-    sorted.sort_by_key(|t| match t.status {
-        runtime::TodoStatus::InProgress => 0,
-        runtime::TodoStatus::Pending => 1,
-        runtime::TodoStatus::Completed => 2,
-    });
-
-    let display_count = sorted.len().min(max_display);
-    let visible = &sorted[..display_count];
-    let hidden = &sorted[display_count..];
-
-    for todo in visible {
-        // While in progress, show the present-continuous `activeForm`; otherwise
-        // the imperative `content`.
-        let label = if todo.status == runtime::TodoStatus::InProgress {
-            todo.active_form.as_str()
-        } else {
-            todo.content.as_str()
-        };
-        let (icon, label_fmt) = match todo.status {
-            runtime::TodoStatus::Completed => (
-                format!("{success}\u{2713}{RESET}"),
-                format!("{DIM}\x1b[9m{label}\x1b[29m{RESET}"),
-            ),
-            runtime::TodoStatus::InProgress => (
-                format!("{info}\u{25a0}{RESET}"),
-                format!("{BOLD}{label}{RESET}"),
-            ),
-            runtime::TodoStatus::Pending => ("\u{25a1}".to_string(), label.to_string()),
-        };
-        lines.push(format!("  {icon} {label_fmt}"));
-    }
-
-    if !hidden.is_empty() {
-        let mut parts = Vec::new();
-        let hi = hidden
-            .iter()
-            .filter(|t| t.status == runtime::TodoStatus::InProgress)
-            .count();
-        let hp = hidden
-            .iter()
-            .filter(|t| t.status == runtime::TodoStatus::Pending)
-            .count();
-        let hc = hidden
-            .iter()
-            .filter(|t| t.status == runtime::TodoStatus::Completed)
-            .count();
-        if hi > 0 {
-            parts.push(format!("{hi} in progress"));
-        }
-        if hp > 0 {
-            parts.push(format!("{hp} pending"));
-        }
-        if hc > 0 {
-            parts.push(format!("{hc} completed"));
-        }
-        lines.push(format!("{DIM}  \u{2026} +{}{RESET}", parts.join(", ")));
-    }
-
-    lines.join("\n")
-}
-
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
@@ -2430,8 +2304,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(render_todo_panel(&todos, 10)),
-                summary: ansi(render_todo_panel(&todos, 0)),
+                full: ansi(crate::cli::format::todo::panel(&todos, 10)),
+                summary: ansi(crate::cli::format::todo::panel(&todos, 0)),
             },
             Slot {
                 minimum_full_rows: 0,

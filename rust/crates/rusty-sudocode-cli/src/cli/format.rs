@@ -5,6 +5,7 @@ mod agent;
 mod plan;
 mod question;
 pub(crate) mod reasoning;
+pub(crate) mod todo;
 use crate::render::TextRole;
 pub(super) use a2a::summary_preview;
 
@@ -600,6 +601,7 @@ pub(crate) enum ToolKind {
     PidOutput,
     PidStatus,
     PidKill,
+    TodoWrite,
 }
 
 impl ToolKind {
@@ -626,6 +628,7 @@ impl ToolKind {
             Self::PidOutput => "PidOutput",
             Self::PidStatus => "PidStatus",
             Self::PidKill => "PidKill",
+            Self::TodoWrite => "TodoWrite",
         }
     }
 
@@ -661,6 +664,7 @@ impl ToolKind {
             "pid_output" | "PidOutput" => Some(Self::PidOutput),
             "pid_status" | "PidStatus" => Some(Self::PidStatus),
             "pid_kill" | "PidKill" => Some(Self::PidKill),
+            "TodoWrite" => Some(Self::TodoWrite),
             _ => None,
         }
     }
@@ -778,6 +782,7 @@ pub(crate) fn tool_card_content(
         Some(ToolKind::Skill) => skill_card(input, output, status),
         Some(ToolKind::ReadToolOutput) => read_tool_output_card(input, output, status),
         Some(ToolKind::WebSearch) => web_search_card(input, output, status),
+        Some(ToolKind::TodoWrite) => todo::card(name, output),
         None => generic_tool_card(name, input, output, status),
     }
 }
@@ -2960,6 +2965,62 @@ mod tests {
     /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
     fn ok_card_plain(content: &ToolCardContent) -> String {
         strip_ansi(&render_tool_card(content, ToolStatus::Ok))
+    }
+
+    /// A `TodoWrite` card shows the saved list the way the todo panel does,
+    /// never the result JSON, and never the nudge addressed to the model.
+    #[test]
+    fn todo_write_card_shows_the_list_not_the_result_json() {
+        let input = r#"{"todos":[]}"#;
+        let output = serde_json::json!({
+            "todos": [
+                {"content": "Ship card", "status": "completed", "activeForm": "Shipping card"},
+                {"content": "Write test", "status": "in_progress", "activeForm": "Writing test"},
+                {"content": "Open PR", "status": "pending", "activeForm": "Opening PR"},
+            ],
+            "verificationStreakNudge": runtime::verification_watcher::VERIFICATION_NUDGE_TEXT,
+        })
+        .to_string();
+        let plain = strip_ansi(&format_tool_result("TodoWrite", input, &output, false));
+        for shown in [
+            "TodoWrite",
+            "3 todos (1 done, 1 in progress, 1 open)",
+            "\u{2713} Ship card",
+            "\u{25a0} Writing test",
+            "\u{25a1} Open PR",
+        ] {
+            assert!(plain.contains(shown), "missing {shown:?}:\n{plain}");
+        }
+        for hidden in [
+            "verificationStreakNudge",
+            "system-reminder",
+            "activeForm",
+            "{\"",
+        ] {
+            assert!(!plain.contains(hidden), "leaked {hidden:?}:\n{plain}");
+        }
+    }
+
+    #[test]
+    fn todo_write_card_says_when_the_list_was_cleared() {
+        let plain = strip_ansi(&format_tool_result(
+            "TodoWrite",
+            r#"{"todos":[]}"#,
+            r#"{"todos":[]}"#,
+            false,
+        ));
+        assert!(plain.contains("todo list cleared"), "{plain}");
+    }
+
+    #[test]
+    fn todo_write_card_shows_an_unreadable_result_raw() {
+        let plain = strip_ansi(&format_tool_result(
+            "TodoWrite",
+            "{}",
+            r#"{"unexpected":"shape"}"#,
+            false,
+        ));
+        assert!(plain.contains("unexpected"), "{plain}");
     }
 
     #[test]

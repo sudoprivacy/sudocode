@@ -35,6 +35,9 @@ rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
 used from the OS installation, with no Python/psutil or native Node addon needed.
 If PowerShell exits before its synchronous compiler-bootstrap completion
 marker, descendant cleanup remains UNKNOWN and the receiver lock is retained.
+If initial qualification also failed, the cleanup error retains that original
+error as its `cause` and includes it in MCP status and stderr. A later monitor
+exit or repeated shutdown does not replace the first qualification failure.
 The common CLI signal adapter waits for receiver cleanup before exiting.
 Rejected cleanup keeps the original MCP endpoint available for status and
 retains exclusivity; another graceful signal does not reinterpret failure as

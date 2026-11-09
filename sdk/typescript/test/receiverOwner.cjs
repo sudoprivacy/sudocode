@@ -93,14 +93,22 @@ async function main(){
     // The stream transport speaks the same JSON-RPC protocol in either role.
     const stream=new StdioServerTransport(host.stdout,host.stdin);
     const probe=new Client({name:'cleanup-ownership-acceptance',version:'1'});
-    let disconnected=false;probe.onclose=()=>{disconnected=true;};
+    let disconnected=false,originalFailure;probe.onclose=()=>{disconnected=true;};
     try{
       await probe.connect(stream,{timeout:5000});
       const readyDeadline=Date.now()+12000;
       for(;;){
         const status=await probe.callTool({name:'scode_status',arguments:{}});
         const state=JSON.parse(status.content[0].text);
-        if(state.error){assert.equal(state.closed,true);assert.match(state.error,/bootstrap interrupted/);break;}
+        if(state.error){
+          assert.equal(state.closed,true);assert.match(state.error,/bootstrap interrupted/);
+          // Both failures must survive the real packaged startup path. The
+          // cleanup UNKNOWN remains authoritative; it must not hide the
+          // original compiler refusal (or be downgraded by that refusal).
+          assert.match(state.error,/original qualification failure: Error: Receiver owner monitor closed before qualification:/);
+          assert.match(state.error,/Add-Type/);
+          originalFailure=state.error;break;
+        }
         assert.ok(Date.now()<readyDeadline,failureStderr);await delay(30);
       }
       host.send('SIGTERM');
@@ -113,9 +121,10 @@ async function main(){
       assert.equal(disconnected,false,'Cleanup UNKNOWN must not close MCP and invite frontend disposal');
       assert.equal(host.exitCode,null,'Graceful signal must retain the receiver process');
       const failedStatus=JSON.parse((await probe.callTool({name:'scode_status',arguments:{}})).content[0].text);
-      assert.equal(failedStatus.closed,true);assert.ok(failedStatus.error);
+      assert.equal(failedStatus.closed,true);assert.equal(failedStatus.error,originalFailure);
       await assert.rejects(acquireReceiverOwner(failureIdentity,failureSid),/EADDRINUSE/);
       host.send('SIGINT');await delay(100);assert.equal(host.exitCode,null);
+      assert.equal(JSON.parse((await probe.callTool({name:'scode_status',arguments:{}})).content[0].text).error,originalFailure);
       assert.equal(fs.existsSync(failureLog),false,'No ACP start before owner qualification, no replacement');
       assert.equal(guarded.child.exitCode,null,'Original frontend never signalled');
       console.log('PASS full MCP bootstrap refusal: real compiler startup failure, endpoint and owner lock retained, no replacement');

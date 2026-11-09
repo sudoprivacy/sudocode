@@ -70,6 +70,7 @@ export async function runScodeMcp(file: string, lifecycle: {
   let callback: CodexCallback | undefined;
   let ownerTask: Promise<void> | undefined;
   let ownerLease: ReceiverOwnerLease | undefined;
+  let cleanupUnknown: unknown;
   let ownerError: string | undefined;
   let transportReady = false;
   let observed: { updates: unknown[]; bytes: number; truncated: boolean } | undefined;
@@ -102,9 +103,10 @@ export async function runScodeMcp(file: string, lifecycle: {
       abort.abort();
       await ownerTask;
       const results = await Promise.allSettled([callback?.close(), scode?.close()]);
-      await server.close();
       const rejected = results.find(result => result.status === 'rejected');
-      if (rejected?.status === 'rejected') throw rejected.reason;
+      if (rejected?.status === 'rejected') cleanupUnknown = rejected.reason;
+      await server.close();
+      if (cleanupUnknown) throw cleanupUnknown;
     })().finally(finish);
     return stopping;
   };
@@ -174,7 +176,8 @@ export async function runScodeMcp(file: string, lifecycle: {
           scode = undefined;
           verified = false;
           // A failed close stops this supervisor; it must not make a second owner.
-          await candidate?.close();
+          try { await candidate?.close(); }
+          catch (error) { cleanupUnknown = error; throw error; }
           // Never authenticate a failed connection's buffered channel messages
           // using the next connection's successful namespace check.
           early.length = 0;
@@ -186,6 +189,10 @@ export async function runScodeMcp(file: string, lifecycle: {
       }
     })().catch(error => {
       ownerError = String(error);
+      // The original process must remain the exclusive receiver owner when a
+      // child close was not observed. Stopping MCP must not release its lock
+      // and silently permit a replacement while that child might still live.
+      if (error instanceof ScodeCleanupUnknownError || error instanceof CodexCleanupUnknownError) cleanupUnknown = error;
       process.stderr.write(`scode recovery stopped: ${ownerError}\n`);
     });
     // MCP initialization must not wait for ACP/native availability. A slow
@@ -224,7 +231,11 @@ export async function runScodeMcp(file: string, lifecycle: {
   } finally {
     try { await stop(); }
     finally {
-      try { await ownerLease?.close(); }
+      try {
+        if (cleanupUnknown && ownerLease) {
+          process.stderr.write(`Receiver ownership retained: cleanup UNKNOWN; ${String(cleanupUnknown)}\n`);
+        } else await ownerLease?.close();
+      }
       finally {
         removeShutdown();
         process.stdin.removeListener('end', onEof);

@@ -39,7 +39,7 @@ def load(path):
 
 def clean_environment():
     return {key: value for key, value in os.environ.items()
-            if key not in TOKEN_NAMES and key.lower() not in {"https_proxy", "http_proxy", "all_proxy", "no_proxy"}}
+            if key.upper() not in TOKEN_NAMES and key.lower() not in {"https_proxy", "http_proxy", "all_proxy", "no_proxy"}}
 
 
 @contextmanager
@@ -266,7 +266,7 @@ assert Path(sys.argv[2]).read_bytes() == b"scoped-tool-payload"
         probe = private / "candidate.py"
         probe.write_text('''import json, os, sys
 from pathlib import Path
-present = sorted(name for name in ("GH_TOKEN", "GITHUB_TOKEN") if name in os.environ)
+present = sorted({name.upper() for name in os.environ if name.upper() in {"GH_TOKEN", "GITHUB_TOKEN"}})
 Path(sys.argv[1]).write_text(json.dumps({"credentialNamesPresent": present}))
 assert not present, "Candidate inherited GitHub authority"
 ''')
@@ -277,7 +277,8 @@ spec = importlib.util.spec_from_file_location("executor", sys.argv[1])
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 helper.run_command([sys.executable, sys.argv[2], sys.argv[3]], Path(sys.argv[4]), Path(sys.argv[5]),
-                   {"GH_TOKEN": os.environ["GH_TOKEN"], "GITHUB_TOKEN": os.environ["GITHUB_TOKEN"]})
+                   {"GH_TOKEN": os.environ["GH_TOKEN"], "GITHUB_TOKEN": os.environ["GITHUB_TOKEN"],
+                    "gh_token": os.environ["GH_TOKEN"], "github_token": os.environ["GITHUB_TOKEN"]})
 ''')
         helper = SOURCE / ".github/scripts/local_acceptance.py"
         probe_result = output / "candidate-environment.json"
@@ -285,8 +286,16 @@ helper.run_command([sys.executable, sys.argv[2], sys.argv[3]], Path(sys.argv[4])
                      private, output / "candidate-command.log"], clean_environment() | {"GH_TOKEN": token, "GITHUB_TOKEN": token})
         assert json.loads(probe_result.read_text()) == {"credentialNamesPresent": []}
         original = helper.read_text(encoding="utf-8")
-        cleanup = '    for name in ("GH_TOKEN", "GITHUB_TOKEN"):\n        environment.pop(name, None)\n'
+        cleanup = ('    environment = {key: value for key, value in environment.items()\n'
+                   '                   if key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}\n')
         assert original.count(cleanup) == 1
+        case_sensitive_helper = private / "case-sensitive-executor.py"
+        case_sensitive_helper.write_text(original.replace(cleanup,
+            '    for name in ("GH_TOKEN", "GITHUB_TOKEN"):\n        environment.pop(name, None)\n'), encoding="utf-8")
+        run("case-sensitive-inheritance-refused", [sys.executable, executor, case_sensitive_helper, probe, probe_result,
+            private, output / "case-sensitive-candidate-command.log"],
+            clean_environment() | {"GH_TOKEN": token, "GITHUB_TOKEN": token}, passed=False)
+        assert json.loads(probe_result.read_text()) == {"credentialNamesPresent": ["GH_TOKEN", "GITHUB_TOKEN"]}
         unsafe_helper = private / "unsafe-executor.py"
         unsafe_helper.write_text(original.replace(cleanup, ""), encoding="utf-8")
         run("candidate-inheritance-refused", [sys.executable, executor, unsafe_helper, probe, probe_result,
@@ -297,9 +306,11 @@ helper.run_command([sys.executable, sys.argv[2], sys.argv[3]], Path(sys.argv[4])
         "workflowTokenScopedToPreparation": True, "realHttpsViaPrivateConnectProxy": True,
         "nextestArchiveFixture": "original checksum-pinned archive",
         "protocArchiveFixture": "controlled ZIP of the existing version-verified executable" if protoc is not None else None,
+        "caseInsensitiveExplicitOverrides": True,
         "publicGithubRequestMade": False, "productionRequestMade": False}, indent=2) + "\n", encoding="utf-8")
     print("PASS: authenticated metadata/binary APIs, public access, redirect stripping, three real HTTP refusals, "
-          "cold pinned tool preparation and credential-free native subprocess; workflow token is preparation-only")
+          "cold pinned tool preparation and credential-free native subprocess including mixed-case overrides; "
+          "workflow token is preparation-only")
 
 
 if __name__ == "__main__":

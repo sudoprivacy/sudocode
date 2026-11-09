@@ -1004,8 +1004,10 @@ def run_command(command, cwd, log, env=None):
     environment.update(env or {})
     # Neither ambient credentials, SDK discovery nor per-command overrides may
     # pass GitHub API authority to candidate builds, tests or product processes.
-    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
-        environment.pop(name, None)
+    # Windows resolves environment names without regard to case, including
+    # explicit dictionary overrides that have not passed through os.environ.
+    environment = {key: value for key, value in environment.items()
+                   if key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     command = [shutil.which(str(command[0])) or str(command[0]), *map(str, command[1:])]
     started = time.monotonic()
     priorities = {}

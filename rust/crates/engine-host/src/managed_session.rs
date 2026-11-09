@@ -99,24 +99,16 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
         .with_identity(identity.clone());
     let mut session = Session::new();
     let id = resume_id.unwrap_or(&session.session_id).to_string();
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-    {
+    if runtime::session_control::validate_session_id(&id).is_err() {
         return Err("co-host: resume_session_id must be a durable ID, not a path".into());
     }
     let root = store.sessions_dir().to_string_lossy();
     let lease = SessionLease::acquire(kernel, &format!("{root}/{id}"), &desc.pid, abort)?;
     if resume_id.is_some() {
         session = store
-            .load_session(&id)
+            .load_exact(&id)
             .map_err(|e| format!("co-host: restore session: {e}"))?
             .session;
-        if session.session_id != id {
-            return Err("co-host: transcript ID does not match requested session".into());
-        }
     }
     if session.identity.is_none() {
         session.identity = Some(identity);

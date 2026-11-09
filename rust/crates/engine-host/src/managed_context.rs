@@ -1,0 +1,136 @@
+//! The one value a managed agent's host is built from.
+//!
+//! A managed agent is bound by its host registry (who it is) and reaches the
+//! VFS through exactly one backend (where its effects land). Both are resolved
+//! here, once, before any session exists. The session store and its writer
+//! lease, the file tools, the mailbox and the model mount all take this
+//! backend, so a managed agent has no second path to local disk, a private
+//! kernel or a direct model endpoint.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use runtime::fs_backend::FsLock;
+use runtime::spawn_task::{AgentDescriptor, KernelConvenience};
+use runtime::{FsBackend, KernelFsAccess, KernelFsBackend};
+
+/// How long a session lease outlives its last renewal; renewed every 10 s.
+pub(crate) const SESSION_LEASE_TTL_SECS: u64 = 60;
+
+/// Takes the exclusive writer lease on a session path: `Ok(None)` when
+/// another writer holds it. Errors are rendered for the refusal message.
+pub(crate) type SessionLocks =
+    Arc<dyn Fn(&str) -> Result<Option<Arc<dyn FsLock>>, String> + Send + Sync>;
+
+/// A managed agent's resolved runtime context: the registry binding plus the
+/// single backend every effect goes through.
+pub struct ManagedRuntimeContext {
+    /// The binding the host registry holds for this agent instance: pid,
+    /// name, owner, zone, repository mounts and model label.
+    pub(crate) desc: AgentDescriptor,
+    /// The one backend for sessions, leases, file tools, mailbox and model.
+    pub(crate) fs: Arc<dyn FsBackend>,
+    /// The native directory backing the workspace, when it has one; the
+    /// shell runs there. `None` gives the agent a host directory of its own.
+    pub(crate) shell_root: Option<PathBuf>,
+    /// Whether every conversation writer is authenticated and stamped, so
+    /// peers' senders this agent reads are verified.
+    pub(crate) authenticated_senders: bool,
+    /// Who fences a session's writers. A co-host takes the lease as the host,
+    /// on its own kernel; an out-of-process agent can only take it under its
+    /// own credential, on the daemon that stores the session.
+    pub(crate) session_locks: SessionLocks,
+}
+
+/// A co-host's session lease: a kernel lock held by the agent's pid, taken
+/// and released as the host, below the agent's permission checks.
+struct KernelLease<K: KernelConvenience> {
+    kernel: Arc<K>,
+    path: String,
+    id: String,
+}
+
+impl<K: KernelConvenience + Send + Sync> FsLock for KernelLease<K> {
+    fn renew(&self) -> std::io::Result<bool> {
+        Ok(matches!(
+            self.kernel
+                .sys_lock(&self.path, &self.id, 1, SESSION_LEASE_TTL_SECS, ""),
+            Ok(Some(_))
+        ))
+    }
+}
+
+impl<K: KernelConvenience> Drop for KernelLease<K> {
+    fn drop(&mut self) {
+        let _ = self.kernel.sys_unlock(&self.path, &self.id, false);
+    }
+}
+
+impl ManagedRuntimeContext {
+    /// An agent co-hosted inside the daemon, on the daemon's kernel.
+    ///
+    /// File tools reach the kernel, not local disk: a write passes the hooks,
+    /// the audit trail and the permission checks a `std::fs` write never sees.
+    pub fn cohost<K>(
+        kernel: &Arc<K>,
+        desc: &AgentDescriptor,
+        authenticated_senders: bool,
+    ) -> Result<Self, String>
+    where
+        K: KernelConvenience + KernelFsAccess + Send + Sync + 'static,
+    {
+        let primary_repo = desc
+            .repos
+            .iter()
+            .find(|repo| repo.alias == "workspace")
+            .or_else(|| desc.repos.first());
+        let context = runtime::agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
+        let local_directory = primary_repo
+            .map(|repo| kernel.local_workspace_directory(&repo.mount_path, &context))
+            .transpose()
+            .map_err(|error| format!("co-host: resolve project directory: {error:?}"))?
+            .flatten();
+        let workspace_root = local_directory.as_ref().and(primary_repo).map_or_else(
+            || format!("/proc/{}/workspace", desc.pid),
+            |repo| repo.mount_path.clone(),
+        );
+        // Built from the complete planted descriptor so the agent's delegation
+        // reference participates in every target authorization the backend
+        // makes (zone-scoped ResourceRef checks), rather than trusting
+        // caller-supplied owner/zone/name strings.
+        let fs = KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), desc, workspace_root);
+        let fs: Arc<dyn FsBackend> = Arc::new(match &local_directory {
+            Some(directory) => fs
+                .with_local_workspace(directory)
+                .map_err(|error| format!("co-host: bind project directory: {error}"))?,
+            None => fs,
+        });
+        let lock_kernel = Arc::clone(kernel);
+        let pid = desc.pid.clone();
+        let session_locks: SessionLocks = Arc::new(move |path: &str| {
+            let id = lock_kernel
+                .sys_lock(path, "", 1, SESSION_LEASE_TTL_SECS, &pid)
+                .map_err(|e| format!("{e:?}"))?;
+            Ok(id.map(|id| {
+                Arc::new(KernelLease {
+                    kernel: Arc::clone(&lock_kernel),
+                    path: path.to_owned(),
+                    id,
+                }) as Arc<dyn FsLock>
+            }))
+        });
+        Ok(Self {
+            desc: desc.clone(),
+            fs,
+            shell_root: local_directory,
+            authenticated_senders,
+            session_locks,
+        })
+    }
+
+    /// The agent instance this context is bound to.
+    #[must_use]
+    pub fn descriptor(&self) -> &AgentDescriptor {
+        &self.desc
+    }
+}

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
 use engine_host::managed_agent::{prepare_managed_agent, PreparedManagedAgent};
+use engine_host::managed_context::ManagedRuntimeContext;
 use engine_host::SessionEngine;
 use managed_agent::{SpawnHandle, SpawnOptions, SpawnTask};
 use runtime::spawn_task::{AgentDescriptor, AgentState, KernelConvenience};
@@ -123,7 +124,8 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
             .session_endpoint
             .clone()
             .ok_or("managed session has no mailbox endpoint")?;
-        let prepared = prepare_managed_agent(&kernel, &desc, &options, self.authenticated_senders)?;
+        let context = ManagedRuntimeContext::cohost(&kernel, &desc, self.authenticated_senders)?;
+        let prepared = prepare_managed_agent(&context, options.resume_session_id.as_deref())?;
         let peer_mailbox = prepared.mailbox();
         let session_id = prepared.durable_session_id().to_string();
         // This signal terminates the HOST. Turn cancellation belongs to each

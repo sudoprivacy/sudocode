@@ -4,10 +4,12 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+use runtime::fs_backend::FsLock;
 use runtime::session_control::SessionStore;
-use runtime::spawn_task::{AgentDescriptor, KernelConvenience};
 use runtime::HostedSessionIdentity;
-use runtime::{FsBackend, HookAbortSignal, Session};
+use runtime::{HookAbortSignal, Session};
+
+use crate::managed_context::ManagedRuntimeContext;
 
 /// Serialize initialization. Legacy transcripts retain this admission guard
 /// for their lifetime; committed record contexts release it after activation.
@@ -17,20 +19,19 @@ pub(crate) struct SessionLease {
 }
 
 impl SessionLease {
-    fn acquire<K: KernelConvenience + Send + Sync + 'static>(
-        kernel: &Arc<K>,
+    /// Take the writer lease through the context's lease authority: the
+    /// daemon's kernel for a co-host, the storing daemon for a remote agent.
+    fn acquire(
+        ctx: &ManagedRuntimeContext,
         path: &str,
-        pid: &str,
         abort: HookAbortSignal,
     ) -> Result<Self, String> {
-        let lock = kernel
-            .sys_lock(path, "", 1, 60, pid)
-            .map_err(|e| format!("co-host: acquire session lease: {e:?}"))?
+        let lock: Arc<dyn FsLock> = (ctx.session_locks)(path)
+            .map_err(|e| format!("co-host: acquire session lease: {e}"))?
             .ok_or("co-host: session is still running; stop it before resuming")?;
         let (stop, receiver) = mpsc::channel();
-        let thread_kernel = Arc::clone(kernel);
-        let thread_path = path.to_string();
-        let thread_lock = lock.clone();
+        // The thread owns the lock: it releases when renewal ends, and a
+        // thread that fails to start drops it here.
         let renewal = thread::Builder::new()
             .name("cohost-session-lease".into())
             .spawn(move || {
@@ -38,21 +39,15 @@ impl SessionLease {
                     receiver.recv_timeout(Duration::from_secs(10)),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    if !matches!(
-                        thread_kernel.sys_lock(&thread_path, &thread_lock, 1, 60, ""),
-                        Ok(Some(_))
-                    ) {
+                    if !matches!(lock.renew(), Ok(true)) {
                         abort.abort();
                         let _ = receiver.recv();
                         break;
                     }
                 }
-                let _ = thread_kernel.sys_unlock(&thread_path, &thread_lock, false);
+                drop(lock);
             })
-            .map_err(|e| {
-                let _ = kernel.sys_unlock(path, &lock, false);
-                format!("co-host: start session lease renewal: {e}")
-            })?;
+            .map_err(|e| format!("co-host: start session lease renewal: {e}"))?;
         Ok(Self {
             stop,
             renewal: Some(renewal),
@@ -69,14 +64,14 @@ impl Drop for SessionLease {
     }
 }
 
-pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
-    kernel: &Arc<K>,
-    desc: &AgentDescriptor,
-    fs: Arc<dyn FsBackend>,
+pub(crate) fn prepare_session(
+    ctx: &ManagedRuntimeContext,
     resume_id: Option<&str>,
     model: &str,
     abort: HookAbortSignal,
 ) -> Result<(Session, Option<SessionLease>), String> {
+    let desc = &ctx.desc;
+    let fs = Arc::clone(&ctx.fs);
     let workspace = fs
         .working_root()
         .map_err(|error| format!("co-host: resolve session workspace: {error}"))?;
@@ -103,7 +98,7 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
         return Err("co-host: resume_session_id must be a durable ID, not a path".into());
     }
     let root = store.sessions_dir().to_string_lossy();
-    let lease = SessionLease::acquire(kernel, &format!("{root}/{id}"), &desc.pid, abort)?;
+    let lease = SessionLease::acquire(ctx, &format!("{root}/{id}"), abort)?;
     if resume_id.is_some() {
         session = store
             .load_exact(&id)

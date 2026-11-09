@@ -13,14 +13,13 @@
 
 use std::sync::Arc;
 
-// `::` because this module shares its name with that crate.
-use ::managed_agent::SpawnOptions;
 use runtime::agent_mailbox::a2a_prompt_section;
 use runtime::mailbox::Mailbox;
-use runtime::spawn_task::{cohost_shell_prompt_section, AgentDescriptor, KernelConvenience};
-use runtime::{FsBackend, KernelFsAccess, KernelFsBackend, PermissionMode, SystemPrompt};
+use runtime::spawn_task::cohost_shell_prompt_section;
+use runtime::{PermissionMode, SystemPrompt};
 
 use crate::config::{require_sudocode_config_for_cwd, resolve_auth_mode};
+use crate::managed_context::ManagedRuntimeContext;
 use crate::runtime_build::{HostContext, RuntimeConfig};
 
 /// Label key where `ManagedAgentService` stores the model id in the
@@ -86,20 +85,13 @@ impl PreparedManagedAgent {
     }
 }
 
-/// Prepare a new or resumed co-hosted session against the daemon's kernel.
+/// Prepare a new (`resume_id` = `None`) or resumed managed session in `ctx`.
 /// No turn loop runs here: the session renderer drives the shared engine.
-/// `authenticated_senders` is the daemon's auth posture: when armed, its
-/// stamping hook authenticates every conversation writer, so peers' `from`
-/// values this agent reads are verified.
-pub fn prepare_managed_agent<K>(
-    kernel: &Arc<K>,
-    desc: &AgentDescriptor,
-    options: &SpawnOptions,
-    authenticated_senders: bool,
-) -> Result<PreparedManagedAgent, String>
-where
-    K: KernelConvenience + KernelFsAccess + Send + Sync + 'static,
-{
+pub fn prepare_managed_agent(
+    ctx: &ManagedRuntimeContext,
+    resume_id: Option<&str>,
+) -> Result<PreparedManagedAgent, String> {
+    let desc = &ctx.desc;
     // Nothing in this daemon ticks `crons.json`: the scode scheduler is the
     // `scode cron daemon` / OS-cron path, which is a CLI process. A `CronCreate`
     // here would persist an entry that either never fires or — if a `scode cron`
@@ -119,51 +111,11 @@ where
         .cloned()
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    // File tools reach the kernel, not local disk. That reach is the whole
-    // reason to co-host: a write here passes the hooks, the audit trail and the
-    // permission checks that a `std::fs` write never sees.
-    let primary_repo = desc
-        .repos
-        .iter()
-        .find(|repo| repo.alias == "workspace")
-        .or_else(|| desc.repos.first());
-    let context = runtime::agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
-    let local_directory = primary_repo
-        .map(|repo| kernel.local_workspace_directory(&repo.mount_path, &context))
-        .transpose()
-        .map_err(|error| format!("co-host: resolve project directory: {error:?}"))?
-        .flatten();
-    let workspace_root = local_directory.as_ref().and(primary_repo).map_or_else(
-        || format!("/proc/{}/workspace", desc.pid),
-        |repo| repo.mount_path.clone(),
-    );
-    // Built from the complete planted descriptor so the agent's delegation
-    // reference participates in every target authorization the backend makes
-    // (zone-scoped ResourceRef checks), rather than trusting caller-supplied
-    // owner/zone/name strings.
-    let fs =
-        KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), desc, workspace_root.clone());
-    let fs: Arc<dyn FsBackend> = Arc::new(match &local_directory {
-        Some(directory) => fs
-            .with_local_workspace(directory)
-            .map_err(|error| format!("co-host: bind project directory: {error}"))?,
-        None => fs,
-    });
-
-    // The agent's conversations, over the SAME backend as its file tools. An
-    // absolute A2A path bypasses the workspace root, so one backend serves both
-    // the workspace and `/conversations` — sender and receiver are two views of
-    // one object rather than two implementations that have to agree.
-    let mailbox = Arc::new(
-        Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone())
-            .with_authenticated_senders(authenticated_senders),
-    );
-
-    // Through the same named constructor the CLI uses, for the same reason the
-    // engine is shared: the two hosts' shapes sit next to each other in
+    // Through the same named constructor family the CLI uses, for the same
+    // reason the engine is shared: the hosts' shapes sit next to each other in
     // `runtime_build`, so the difference between them is readable in one place
     // instead of assembled here and inferred there.
-    let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox), local_directory)
+    let host = HostContext::for_managed(ctx)
         .map_err(|e| format!("co-host: create the agent's host-side directory: {e}"))?;
 
     // Kernel authorization and a user's tool approval are separate checks.
@@ -207,14 +159,8 @@ where
         .load()
         .map_err(|error| format!("co-host: load runtime settings: {error}"))?;
     runtime::experiments::init_config_flags(settings.experiments().clone());
-    let (session, lease) = crate::managed_session::prepare_session(
-        kernel,
-        desc,
-        Arc::clone(&host.fs),
-        options.resume_session_id.as_deref(),
-        &config.model,
-        abort.clone(),
-    )?;
+    let (session, lease) =
+        crate::managed_session::prepare_session(ctx, resume_id, &config.model, abort.clone())?;
     Ok(PreparedManagedAgent {
         host,
         session,

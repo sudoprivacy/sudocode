@@ -33,8 +33,14 @@ the lock is released after the owned receiver and monitor close successfully.
 The monitor requests synchronization and limited query access, never termination
 rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
 used from the OS installation, with no Python/psutil or native Node addon needed.
-If qualification must forcibly interrupt PowerShell's compiler bootstrap,
-descendant cleanup remains UNKNOWN and the receiver lock is retained.
+If PowerShell exits before its synchronous compiler-bootstrap completion
+marker, descendant cleanup remains UNKNOWN and the receiver lock is retained.
+The common CLI signal adapter waits for receiver cleanup before exiting.
+Rejected cleanup keeps the original MCP endpoint available for status and
+retains exclusivity; another graceful signal does not reinterpret failure as
+success. Forced OS termination is outside this guarantee. The global inventory
+owner uses this same shutdown adapter and releases its endpoint only after
+startup and all owned connections finish cleanup.
 
 MCP initialization remains independent of owner qualification and ACP startup;
 tools refuse as `not_submitted` until ready. Once bound, the existing shared

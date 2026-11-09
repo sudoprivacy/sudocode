@@ -105,11 +105,13 @@ export async function runScodeMcp(file: string, lifecycle: {
       const results = await Promise.allSettled([callback?.close(), scode?.close()]);
       const rejected = results.find(result => result.status === 'rejected');
       if (rejected?.status === 'rejected') cleanupUnknown = rejected.reason;
-      await server.close();
       if (cleanupUnknown) throw cleanupUnknown;
       // Graceful shutdown includes the ownership lease, not just the MCP
       // transport. The signal adapter must await its actual cleanup outcome.
       await ownerLease?.close();
+      // Keep the MCP endpoint available on UNKNOWN. Closing it first can ask
+      // the frontend to dispose this process before ownership is reconciled.
+      await server.close();
     })().finally(finish);
     return stopping;
   };

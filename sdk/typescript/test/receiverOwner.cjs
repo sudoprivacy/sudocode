@@ -1,8 +1,9 @@
 // Real Windows handles and public MCP entry; no simulated wait functions.
 const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const {spawn}=require('node:child_process'),{once}=require('node:events'),{setTimeout:delay}=require('node:timers/promises');
+const {spawn,fork}=require('node:child_process'),{once}=require('node:events'),{setTimeout:delay}=require('node:timers/promises');
 const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
 const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
+const {StdioServerTransport}=require('@modelcontextprotocol/sdk/server/stdio.js');
 const {captureReceiverOwner,acquireReceiverOwner}=require('../dist/index.cjs');
 const root=path.resolve(__dirname,'..');
 async function deadline(value,ms=12000){
@@ -72,6 +73,51 @@ async function main(){
       assert.equal(audit.find(row=>row.phase==='receiver_owner_ended')?.reason,'owner_exited');
       console.log('PASS packaged MCP: one config/SID/guard; real owner exit closes receiver');
     }finally{await client.close();await owner.close();}
+
+    // Full packaged MCP + actual ACP child cleanup refusal. The bounded
+    // stderr holder is real, not a replacement close function or fake result.
+    const guarded=originalProcess(),failureConfig=path.join(directory,'cleanup-config.json');
+    const failureLog=path.join(directory,'cleanup-fixture.jsonl'),failureAudit=path.join(directory,'cleanup-audit.jsonl');
+    const failureIdentity=await captureReceiverOwner(guarded.child.pid),failureSid=sessionId+'-cleanup';
+    fs.writeFileSync(failureConfig,JSON.stringify({version:1,
+      scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs'),'cleanup-unknown'],
+      workspace:directory,acpSessionId:failureSid,auditLog:failureAudit,closeTimeoutMs:200,
+      receiverOwner:failureIdentity,env:{HYDRA_DIRECT_FIXTURE_JOURNAL:failureLog}}));
+    const host=fork(path.join(root,'test/fixtures/lifecycle-mcp.cjs'),[failureConfig],{silent:true,windowsHide:true});
+    const hostClosed=once(host,'close');let failureStderr='';host.stderr.on('data',b=>{failureStderr+=String(b);});
+    // The stream transport speaks the same JSON-RPC protocol in either role.
+    const stream=new StdioServerTransport(host.stdout,host.stdin);
+    const probe=new Client({name:'cleanup-ownership-acceptance',version:'1'});
+    let disconnected=false;probe.onclose=()=>{disconnected=true;};
+    try{
+      await probe.connect(stream,{timeout:5000});
+      const readyDeadline=Date.now()+12000;
+      for(;;){
+        const status=await probe.callTool({name:'scode_status',arguments:{}});
+        if(JSON.parse(status.content[0].text).closed===false)break;
+        assert.ok(Date.now()<readyDeadline,failureStderr);await delay(30);
+      }
+      host.send('SIGTERM');
+      const refusedDeadline=Date.now()+12000;
+      while(!failureStderr.includes('Shutdown refused; cleanup UNKNOWN')){
+        assert.ok(Date.now()<refusedDeadline,failureStderr);await delay(30);
+      }
+      assert.equal(disconnected,false,'Cleanup UNKNOWN must not close MCP and invite frontend disposal');
+      assert.equal(host.exitCode,null,'Graceful signal must retain the receiver process');
+      const failedStatus=JSON.parse((await probe.callTool({name:'scode_status',arguments:{}})).content[0].text);
+      assert.equal(failedStatus.closed,true);assert.ok(failedStatus.error);
+      await assert.rejects(acquireReceiverOwner(failureIdentity,failureSid),/EADDRINUSE/);
+      host.send('SIGINT');await delay(100);assert.equal(host.exitCode,null);
+      const events=fs.readFileSync(failureLog,'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(events.filter(r=>r.method==='session/load').length,1,'No replacement ACP process');
+      const holder=events.find(r=>r.method==='cleanup-holder');assert.ok(holder);
+      assert.throws(()=>process.kill(holder.pid,0),{code:'ESRCH'},'The bounded holder actually finished');
+      console.log('PASS full MCP cleanup refusal: actual stderr-held child, endpoint and owner lock retained, no replacement');
+    }finally{
+      await probe.close();
+      if(host.exitCode===null&&host.signalCode===null)host.kill('SIGKILL');
+      await deadline(hostClosed);await guarded.close();
+    }
   }finally{
     await lease?.close();await original.close();
     assert.equal(path.dirname(directory),path.resolve(os.tmpdir()));assert.ok(path.basename(directory).startsWith('scode-receiver-owner-'));

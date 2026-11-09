@@ -62,6 +62,9 @@ use crate::subagent_completions::{
 pub enum AcpError {
     InvalidParams(String),
     Internal(String),
+    /// `session/load` named a well-formed session id that this workspace never
+    /// persisted. Carries the requested id; nothing was loaded or created.
+    SessionNotFound(String),
     /// A prompt-turn failure that arrived already classified by the runtime
     /// (via [`runtime::RuntimeError`]'s typed bits). Carrying the classification
     /// here — instead of flattening to a bare `Internal(String)` and later
@@ -94,6 +97,11 @@ impl AcpError {
         Self::Internal(message.into())
     }
 
+    #[must_use]
+    pub fn session_not_found(session_id: impl Into<String>) -> Self {
+        Self::SessionNotFound(session_id.into())
+    }
+
     /// Build a turn error from a runtime error, capturing its typed
     /// classification so the ACP surface never has to re-derive behavior by
     /// string-matching the message.
@@ -121,6 +129,7 @@ impl AcpError {
                 message
             }
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
+            Self::SessionNotFound(session_id) => return format!("session not found: {session_id}"),
         };
 
         if raw_message.contains(runtime::COMPACTION_FAILED) {
@@ -192,6 +201,7 @@ impl std::fmt::Display for AcpError {
             Self::InvalidParams(message) | Self::Internal(message) | Self::Turn { message, .. } => {
                 f.write_str(message)
             }
+            Self::SessionNotFound(session_id) => write!(f, "session not found: {session_id}"),
         }
     }
 }
@@ -3754,6 +3764,9 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
     match e {
         AcpError::InvalidParams(msg) => {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
+        }
+        AcpError::SessionNotFound(session_id) => {
+            Error::resource_not_found(None).data(json!({ "sessionId": session_id }))
         }
         AcpError::Internal(message) | AcpError::Turn { message, .. } => {
             let mut error =

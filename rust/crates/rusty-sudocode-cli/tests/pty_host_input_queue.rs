@@ -197,16 +197,16 @@ fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
         .unwrap()
         .iter()
         .all(|item| item["delivery"] == "steer"));
-    let before = fs::read(env.workspace_root().join("input-tool-ticks"))
-        .unwrap()
-        .len();
-    std::thread::sleep(Duration::from_millis(350));
-    assert!(
-        fs::read(env.workspace_root().join("input-tool-ticks"))
-            .unwrap()
-            .len()
-            > before,
-        "flush cancelled the real shell"
+    // The shell appends a tick every 100 ms until released. A loaded host can
+    // delay one well past a fixed window, so wait within the shared budget: a
+    // cancelled shell never ticks again and still fails here.
+    let ticks = env.workspace_root().join("input-tool-ticks");
+    let before = fs::read(&ticks).unwrap().len();
+    common::expect_screen(
+        &host.terminal,
+        |_| fs::read(&ticks).is_ok_and(|bytes| bytes.len() > before),
+        common::DEFAULT_TIMEOUT,
+        "flush cancelled the real shell",
     );
     fs::write(env.workspace_root().join("release-input-tool"), "release").unwrap();
     let idle = host.idle();

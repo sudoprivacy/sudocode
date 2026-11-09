@@ -602,6 +602,12 @@ executable before compilation. A missing download or corrupt cache fails before
 Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
 corrupt-archive process controls protect this ordering. Tool preparation stays
 inside the invocation's total elapsed time; test selection and retries are unchanged.
+On Windows/macOS the native guard also prepares the original protoc 3.20.2
+before its matrix and checks the real executable's version. The isolated cohost
+canary copies only that tool cache into its private HOME and runs offline;
+it retains private Git/lease state and the original feature/stamp refusals.
+Real proxy 504 controls require protoc failure before cohost Cargo or any full
+native guard command. Tool preparation and failures remain in total timing.
 Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its

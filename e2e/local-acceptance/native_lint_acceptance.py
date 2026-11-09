@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,22 @@ def execute(command, cwd, log, env=None):
     return helper.run_command(command, cwd, log, env)
 result = {}
 try:
-    if sys.argv[5] == "cached-valid":
+    if sys.argv[5] == "native-guard":
+        directory = output / "guard"
+        policy = output / "guard-source"
+        source = Path(profiles.__file__).resolve().parents[2]
+        for relative in [".github/local-acceptance/checks.py", ".github/local-acceptance/native_guard.py",
+                         ".github/scripts/local_acceptance.py"]:
+            destination = policy / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((source / relative).read_bytes())
+        process = subprocess.run([sys.executable, str(policy / ".github/local-acceptance/native_guard.py"),
+            "--repository", str(root), "--output", str(directory), "--executable", sys.argv[6],
+            "--source-receipt", sys.argv[7], "--options", "[]"], capture_output=True, text=True)
+        assert process.returncode != 0
+        assert not list(directory.glob("*.command.json")), "The full guard started commands before its tool refusal"
+        raise RuntimeError(process.stdout + process.stderr)
+    elif sys.argv[5] == "cached-valid":
         executable = profiles.nextest_binary(output)
         version = subprocess.check_output([str(executable), "nextest", "--version"], text=True)
         result.update(status="PASS", version=version.strip())
@@ -78,6 +94,8 @@ finally:
     try:
         selections = [(name, state) for name in ["native-workspace", "native-resize", "native-services"]
                       for state in ["missing", "corrupt"]] + [("cached-valid", "valid")]
+        if platform.system() in {"Windows", "Darwin"}:
+            selections += [("native-cohost", "missing"), ("native-guard", "missing")]
         for name, state in selections:
             directory = output / (name + "-" + state)
             home, root, evidence = directory / "home", directory / "source", directory / "evidence"
@@ -96,7 +114,8 @@ finally:
             before = len(requests)
             process = subprocess.run([sys.executable, str(driver), str(Path(profiles.__file__).resolve()),
                                       str(SOURCE / ".github/scripts/local_acceptance.py"), str(root),
-                                      str(evidence), name], env=environment, capture_output=True, timeout=30)
+                                      str(evidence), name, str(binary), str(seed / "nextest-source.json")],
+                                     env=environment, capture_output=True, timeout=30)
             (directory / "stdout.log").write_bytes(process.stdout)
             (directory / "stderr.log").write_bytes(process.stderr)
             assert process.returncode == 0, process.stderr.decode(errors="replace")
@@ -120,7 +139,8 @@ finally:
         proxy.server_close()
         thread.join(timeout=5)
     print("PASS: real nextest proxy504 and corrupted archives refuse before Cargo on all three profiles; "
-          "the checksum-verified cached native executable runs offline", flush=True)
+          "the checksum-verified cached executable runs offline; Windows/macOS protoc proxy504 refuses "
+          "before cohost Cargo or full native guard commands", flush=True)
     return cases
 
 

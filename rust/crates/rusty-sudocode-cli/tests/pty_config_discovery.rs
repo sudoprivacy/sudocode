@@ -329,8 +329,27 @@ fn compact_flag_shows_only_final_text() {
 /// These commands don't call the API.
 #[test]
 fn informational_commands_bypass_credentials() {
+    let env = TestEnv::new_mock("informational-without-credentials");
+    let config = env.workspace_root().join("empty-config");
+    std::fs::create_dir_all(&config).expect("empty informational config");
+    let config = config.to_string_lossy();
+    let without_credentials = [
+        ("SCODE_GLOBAL_CONFIG_DIR", config.as_ref()),
+        ("SCODE_PROJECT_CONFIG_DIR", config.as_ref()),
+        ("ANTHROPIC_API_KEY", ""),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("PROXY_AUTH_TOKEN", ""),
+        ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+    ];
     for subcmd in &["version", "help", "doctor", "status", "sandbox", "config"] {
-        let mut sess = spawn_scode(&[subcmd]).unwrap_or_else(|_| panic!("spawn scode {subcmd}"));
+        // Diagnose the command's credential-free behavior, independent of a
+        // developer's saved credentials, invalid settings or active workspace.
+        let mut sess =
+            env.spawn_binary_with_env(&env.binary_path(), &[subcmd], &without_credentials);
+        if *subcmd == "doctor" {
+            sess.expect("no supported auth env vars were found")
+                .expect("doctor must observe the credential-free fixture");
+        }
 
         let exit = sess
             .expect_eof()

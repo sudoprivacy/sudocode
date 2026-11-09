@@ -303,9 +303,13 @@ A durable client declares `clientCapabilities._meta.sudocode.peerInput =
 { "version": 2 }` and requires version 2 in the initialize response. scode
 sends `_sudocode/session/peer_message` as a **request**, containing `sessionId`,
 `deliveryId`, `text`, `body` and `sudocode.a2a` (`from`, `kind`, `verified`,
-optional `summary` and `sendId`). `deliveryId` is the SHA-256 of the complete
-mailbox envelope, including the sender's logical send ID; cursor replay retains
-it, while a new send of identical text receives a different ID.
+optional `summary` and `sendId`). For envelopes with a logical send ID,
+`deliveryId` remains the SHA-256 of the complete envelope. Legacy envelopes
+without a send ID also bind the transcript path and actual committed stream
+position (or absolute JSONL byte position). These positions come from the reader,
+never sender-supplied fields. Replaying a record after a lost ACK or restart
+retains its ID, while two identical legacy records at different positions have
+different IDs. Ambiguous framing or non-advancing positions refuse consumption.
 
 The client must durably store the original message before returning
 `{ "accepted": true, "sessionId": "…", "deliveryId": "…" }`. Only that exact

@@ -247,6 +247,57 @@ fn envelopes_in(data: &[u8]) -> Vec<MailboxEnvelope> {
     )
 }
 
+/// One persisted mailbox record. Its delivery identity is reader provenance,
+/// never a field accepted from a sender's envelope.
+#[derive(Clone, Debug)]
+pub struct MailboxRecord {
+    envelope: MailboxEnvelope,
+    delivery_id: String,
+}
+
+impl MailboxRecord {
+    #[must_use]
+    pub fn envelope(&self) -> &MailboxEnvelope {
+        &self.envelope
+    }
+
+    #[must_use]
+    pub fn delivery_id(&self) -> &str {
+        &self.delivery_id
+    }
+
+    fn new(
+        envelope: MailboxEnvelope,
+        path: &str,
+        framed: bool,
+        position: u64,
+        within: u64,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        if envelope.send_id.as_deref().is_none_or(str::is_empty) {
+            // Legacy records can be byte-identical independent sends. Bind
+            // their actual committed stream position or JSONL byte position,
+            // not a batch index, timestamp, process ID or newly minted UUID.
+            hash.update(b"scode-mailbox-record-v1\0");
+            hash.update((path.len() as u64).to_be_bytes());
+            hash.update(path.as_bytes());
+            hash.update([u8::from(framed)]);
+            hash.update(position.to_be_bytes());
+            hash.update(within.to_be_bytes());
+        }
+        // Preserve the existing ID for modern logical sends, including the
+        // complete content binding. No wire format or sender identity changes.
+        hash.update(serde_json::to_vec(&envelope).expect("mailbox envelope serializes"));
+        Self {
+            envelope,
+            delivery_id: format!("{:x}", hash.finalize()),
+        }
+    }
+}
+
+type RecordSink = dyn Fn(&MailboxRecord) -> bool + Send + Sync;
+
 impl MailboxBackend {
     #[inline]
     pub(crate) fn resolve(&self) -> Result<Arc<dyn FsBackend>, String> {
@@ -875,11 +926,25 @@ impl Mailbox {
         cursor: u64,
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
+        let (records, next) = self.poll_conversation_records(peer, cursor, block_ms)?;
+        Ok((
+            records.into_iter().map(|record| record.envelope).collect(),
+            next,
+        ))
+    }
+
+    /// Poll with durable record identity, before committing the reader cursor.
+    pub fn poll_conversation_records(
+        &self,
+        peer: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> Result<(Vec<MailboxRecord>, u64), String> {
         let path = self.transcript_path(peer);
-        let (mut messages, next) = self.poll_tail(&path, cursor, block_ms)?;
+        let (mut messages, next) = self.poll_tail_records(&path, cursor, block_ms)?;
         // Session control has its own generation-aware codec and consumer.
         // All peer consumers skip those frames while advancing past them.
-        messages.retain(|message| message.kind != a2a::session::SESSION_KIND);
+        messages.retain(|record| record.envelope.kind != a2a::session::SESSION_KIND);
         Ok((messages, next))
     }
 
@@ -899,9 +964,22 @@ impl Mailbox {
     fn poll_tail(
         &self,
         path: &str,
-        mut cursor: u64,
+        cursor: u64,
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
+        let (records, next) = self.poll_tail_records(path, cursor, block_ms)?;
+        Ok((
+            records.into_iter().map(|record| record.envelope).collect(),
+            next,
+        ))
+    }
+
+    fn poll_tail_records(
+        &self,
+        path: &str,
+        mut cursor: u64,
+        block_ms: u64,
+    ) -> Result<(Vec<MailboxRecord>, u64), String> {
         let mut out = Vec::new();
         let backend = self.backend.resolve()?;
         let mut first = true;
@@ -914,13 +992,42 @@ impl Mailbox {
             if eof {
                 break;
             }
-            for env in envelopes_in(&data) {
-                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
-                    out.push(env);
-                }
-            }
             if next <= cursor {
-                break;
+                return Err(format!(
+                    "mailbox poll {path}@{cursor}: record position did not advance"
+                ));
+            }
+            let framed = backend
+                .is_append_stream(path)
+                .map_err(|e| format!("mailbox record framing {path}: {e}"))?;
+            if !framed && next.checked_sub(cursor) != Some(data.len() as u64) {
+                return Err(format!(
+                    "mailbox poll {path}@{cursor}: ambiguous byte record positions"
+                ));
+            }
+            let mut append = |env: MailboxEnvelope, within: u64| {
+                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
+                    // A stream read returns one committed frame and its end
+                    // cursor. File reads may regroup JSONL records on replay;
+                    // absolute byte positions stay unchanged across grouping.
+                    let (position, within) = if framed {
+                        (next, within)
+                    } else {
+                        (cursor + within, 0)
+                    };
+                    out.push(MailboxRecord::new(env, path, framed, position, within));
+                }
+            };
+            if let Some(env) = framed.then(|| MailboxEnvelope::from_bytes(&data)).flatten() {
+                append(env, 0);
+            } else {
+                let mut within = 0;
+                for line in data.split_inclusive(|byte| *byte == b'\n') {
+                    if let Some(env) = MailboxEnvelope::from_bytes(line) {
+                        append(env, within);
+                    }
+                    within += line.len() as u64;
+                }
             }
             cursor = next;
         }
@@ -1951,7 +2058,44 @@ pub fn spawn_inbox_poller_with_notices(
     notices: telemetry::RetryNotices,
     sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> std::thread::JoinHandle<()> {
-    let sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync> = Arc::new(sink);
+    spawn_inbox_record_poller_with_notices(
+        mailbox,
+        block_ms,
+        label,
+        abort,
+        notices,
+        move |record| sink(record.envelope()),
+    )
+}
+
+/// The same receiver with persisted record identity for durable consumers.
+pub fn spawn_inbox_record_poller(
+    mailbox: Arc<Mailbox>,
+    block_ms: u64,
+    label: &'static str,
+    abort: crate::HookAbortSignal,
+    sink: impl Fn(&MailboxRecord) -> bool + Send + Sync + 'static,
+) -> std::thread::JoinHandle<()> {
+    spawn_inbox_record_poller_with_notices(
+        mailbox,
+        block_ms,
+        label,
+        abort,
+        telemetry::RetryNotices::LogOnly,
+        sink,
+    )
+}
+
+/// Record-aware receiver with host-owned retry presentation.
+pub fn spawn_inbox_record_poller_with_notices(
+    mailbox: Arc<Mailbox>,
+    block_ms: u64,
+    label: &'static str,
+    abort: crate::HookAbortSignal,
+    notices: telemetry::RetryNotices,
+    sink: impl Fn(&MailboxRecord) -> bool + Send + Sync + 'static,
+) -> std::thread::JoinHandle<()> {
+    let sink: Arc<RecordSink> = Arc::new(sink);
     std::thread::Builder::new()
         .name(format!("{label}-inbox"))
         .spawn(move || {
@@ -2019,7 +2163,7 @@ fn receive_while_seated(
     block_ms: u64,
     diagnostics: &Arc<telemetry::RetryDiagnostics>,
     abort: &crate::HookAbortSignal,
-    sink: &Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+    sink: &Arc<RecordSink>,
 ) {
     let tails_stop = crate::HookAbortSignal::new();
     let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
@@ -2301,7 +2445,7 @@ fn spawn_conversation_tail(
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
     abort: crate::HookAbortSignal,
-    sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+    sink: Arc<RecordSink>,
 ) -> std::thread::JoinHandle<()> {
     let tail = ConversationTail {
         mailbox,
@@ -2323,7 +2467,7 @@ struct ConversationTail {
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
     abort: crate::HookAbortSignal,
-    sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+    sink: Arc<RecordSink>,
 }
 
 impl ConversationTail {
@@ -2368,23 +2512,24 @@ impl ConversationTail {
         let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
         let mut stall_repeats = 0_u32;
         while !abort.is_aborted() && reader.is_valid() {
-            let (msgs, next) = match mailbox.poll_conversation(peer, reader.offset, block_ms) {
-                Ok(batch) => batch,
-                Err(e) => {
-                    DeliveryEvent::new(
-                        peer,
-                        reader.cursor.holder(),
-                        Some(reader.offset),
-                        None,
-                        DeliveryStall::PollFailed,
-                        None,
-                        0,
-                    )
-                    .observe(mailbox, diagnostics, scope, Some(&e));
-                    sleep_unless_aborted(abort, block_ms.max(1));
-                    continue;
-                }
-            };
+            let (msgs, next) =
+                match mailbox.poll_conversation_records(peer, reader.offset, block_ms) {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        DeliveryEvent::new(
+                            peer,
+                            reader.cursor.holder(),
+                            Some(reader.offset),
+                            None,
+                            DeliveryStall::PollFailed,
+                            None,
+                            0,
+                        )
+                        .observe(mailbox, diagnostics, scope, Some(&e));
+                        sleep_unless_aborted(abort, block_ms.max(1));
+                        continue;
+                    }
+                };
             let mut lease_lost = false;
             if msgs.iter().all(|m| {
                 // Record which step failed as it happens. Asking

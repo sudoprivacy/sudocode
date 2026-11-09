@@ -172,16 +172,6 @@ fn is_zero(v: &u64) -> bool {
 }
 
 impl MailboxEnvelope {
-    /// Stable receiver identity across cursor replay and process restarts.
-    /// Include the complete envelope (and logical send ID) so a reused sender
-    /// ID with different content cannot suppress another message.
-    #[must_use]
-    pub fn delivery_id(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(self).expect("mailbox envelope serializes");
-        format!("{:x}", Sha256::digest(bytes))
-    }
-
     /// The ONE wrapper a peer message gets as model input, on every host.
     ///
     /// An XML-shaped `<mailbox-*>` block, so the model can tell where a message

@@ -3,6 +3,7 @@ use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use runtime::mailbox::Mailbox;
 use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
+use runtime::FsBackend;
 use runtime::KernelFsBackend;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -136,4 +137,53 @@ fn blocked_kernel_consumer_renews_ownership_past_the_lease() {
     assert_eq!(receiver.read_position("sender").unwrap(), Some(0));
     pending.acknowledge().unwrap();
     assert!(receiver.read_position("sender").unwrap().unwrap() > 0);
+}
+
+#[test]
+fn legacy_record_identity_uses_committed_kernel_positions() {
+    let kernel = Arc::new(Kernel::new());
+    kernel.vfs_router_arc().add_mount(
+        "/",
+        "root",
+        Some(Arc::new(runtime::test_support::MemObjectStore::default())),
+        false,
+    );
+    let backend = Arc::new(KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &planted("sender"),
+        "/",
+    ));
+    let sender = Mailbox::daemon_absolute(backend.clone(), "sender".into());
+    let receiver = Mailbox::daemon_absolute(backend.clone(), "receiver".into());
+    let path = sender.transcript_path("receiver");
+    backend
+        .create_dir_all(
+            std::path::Path::new(&path)
+                .parent()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+    kernel.create_stream(&path, 1 << 20).unwrap();
+    sender.ensure_conversation("receiver").unwrap();
+    assert!(
+        backend.is_append_stream(&path).unwrap(),
+        "exercise real DT_STREAM"
+    );
+    let raw = br#"{"from":"sender","to":"receiver","body":"identical legacy"}"#;
+    backend.append(&path, raw).unwrap();
+    let (first, cursor) = receiver.poll_conversation_records("sender", 0, 0).unwrap();
+    assert_eq!(first.len(), 1);
+    backend.append(&path, raw).unwrap();
+    let (both, _) = receiver.poll_conversation_records("sender", 0, 0).unwrap();
+    assert_eq!(both.len(), 2);
+    assert_eq!(both[0].envelope(), both[1].envelope());
+    assert_eq!(first[0].delivery_id(), both[0].delivery_id());
+    assert_ne!(both[0].delivery_id(), both[1].delivery_id());
+    let (resumed, _) = receiver
+        .poll_conversation_records("sender", cursor, 0)
+        .unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].delivery_id(), both[1].delivery_id());
 }

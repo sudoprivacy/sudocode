@@ -887,7 +887,7 @@ async fn ensure_a2a_receiver(
 }
 
 type PeerDelivery = (
-    runtime::agent_mailbox::MailboxEnvelope,
+    runtime::mailbox::MailboxRecord,
     std::sync::mpsc::SyncSender<bool>,
 );
 type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
@@ -927,7 +927,7 @@ async fn admit_peer_receiver(
                 let stop = HookAbortSignal::new();
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
                 let callback_stop = stop.clone();
-                let worker = runtime::mailbox::spawn_inbox_poller(
+                let worker = runtime::mailbox::spawn_inbox_record_poller(
                     Arc::clone(mailbox),
                     200,
                     "acp-peer",
@@ -966,11 +966,11 @@ async fn admit_peer_receiver(
 }
 
 fn deliver_peer_envelope(
-    message: &runtime::agent_mailbox::MailboxEnvelope,
+    message: &runtime::mailbox::MailboxRecord,
     tx: &tokio::sync::mpsc::UnboundedSender<PeerDelivery>,
     callback_stop: &HookAbortSignal,
 ) -> bool {
-    if message.body.trim().is_empty() {
+    if message.envelope().body.trim().is_empty() {
         return true;
     }
     let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
@@ -1008,9 +1008,10 @@ async fn run_peer_receiver(
             () = stop.cancelled() => break,
             inbound = rx.recv() => inbound,
         };
-        let Some((message, ack)) = inbound else {
+        let Some((record, ack)) = inbound else {
             break;
         };
+        let message = record.envelope();
         // The session this agent's messages go to: the one bound so far
         // while it lives, else another session of the same agent.
         // A refusal leaves the message unread; the mailbox receiver backs off
@@ -1024,7 +1025,7 @@ async fn run_peer_receiver(
             // v2 advances the mailbox only after the owner durably accepts.
             // A lost response or disconnected client leaves this exact ID unread.
             let delivered = if client_owned >= 2 {
-                let payload = peer_message_payload(&session_id, &message, verified);
+                let payload = peer_message_payload(&session_id, &record, verified);
                 let response = tokio::select! {
                     () = stop.cancelled() => None,
                     response = tokio::time::timeout(std::time::Duration::from_secs(10),
@@ -1035,9 +1036,9 @@ async fn run_peer_receiver(
                 matches!(response, Some(Ok(Ok(ref value)))
                     if value["accepted"] == true
                     && value["sessionId"] == session_id
-                    && value["deliveryId"] == message.delivery_id())
+                    && value["deliveryId"] == record.delivery_id())
             } else {
-                cx.send_notification(peer_message_notification(&session_id, &message, verified))
+                cx.send_notification(peer_message_notification(&session_id, &record, verified))
                     .is_ok()
             };
             let _ = ack.send(delivered);
@@ -1052,7 +1053,7 @@ async fn run_peer_receiver(
         };
         let text = message.to_prompt(verified);
         let mut states = driver.input_changes();
-        let action = peer_input_action(&message, &text);
+        let action = peer_input_action(message, &text);
         let receipt = tokio::select! {
             () = stop.cancelled() => { let _ = ack.send(false); break; },
             receipt = driver.input(action, cx.clone()) => receipt,
@@ -1097,7 +1098,7 @@ async fn run_peer_receiver(
 /// model would read, plus the sender fields a client routes and replies on.
 fn peer_message_notification(
     session_id: &str,
-    message: &runtime::agent_mailbox::MailboxEnvelope,
+    message: &runtime::mailbox::MailboxRecord,
     verified: bool,
 ) -> AgentNotification {
     AgentNotification::ExtNotification(ExtNotification::new(
@@ -1108,15 +1109,16 @@ fn peer_message_notification(
 
 fn peer_message_payload(
     session_id: &str,
-    message: &runtime::agent_mailbox::MailboxEnvelope,
+    record: &runtime::mailbox::MailboxRecord,
     verified: bool,
 ) -> Box<serde_json::value::RawValue> {
+    let message = record.envelope();
     let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified, "sendId": message.send_id});
     if let Some(summary) = &message.summary {
         a2a["summary"] = json!(summary);
     }
     serde_json::value::to_raw_value(&json!({
-        "sessionId": session_id, "deliveryId": message.delivery_id(),
+        "sessionId": session_id, "deliveryId": record.delivery_id(),
         "text": message.to_prompt(verified), "body": message.body,
         "sudocode": {"a2a": a2a},
     }))

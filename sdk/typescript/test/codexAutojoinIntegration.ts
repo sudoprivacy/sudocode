@@ -333,6 +333,66 @@ async function main() {
   assert.ok(!deliveryJournal.some(row=>row.method==='session/prompt'),'no scode model turn for a peer');
   await owner.close();owner=undefined;loaded=[legacyId];
 
+  // Initial agent_list can fail with a VALID native audit. It must preserve
+  // its operation error and recover the ready binding, never re-enroll it.
+  for (const cleanupUnknown of process.platform==='win32' ? [false] : [false,true]) {
+    loaded=[ids[0]];
+    const tag=cleanupUnknown?'initial-query-cleanup-unknown':'initial-query-recovery';
+    const stateDirectory=path.join(directory,tag);
+    const failureFile=path.join(directory,tag+'.first-failure');
+    const beforeRows=rows().length,beforeCalls=calls.length,beforeEnrollments=enrollments.length;
+    const errors: unknown[]=[];
+    owner=await connectCodexAutojoin({...config,stateDirectory,onError:error=>errors.push(error),
+      async resolveAgent(claim) {
+        const resolved=await config.resolveAgent(claim);
+        const profile=JSON.parse(fs.readFileSync(resolved.configFile,'utf8'));
+        profile.scodeArgv.push('initial-list-unavailable'+(cleanupUnknown?'-cleanup-unknown':''));
+        profile.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE=failureFile;
+        fs.writeFileSync(resolved.configFile,JSON.stringify(profile));
+        return resolved;
+      }});
+    const failed=owner.status()[0];
+    assert.equal(failed.state,'disconnected');
+    assert.match(failed.error!,/Owned Node identity query failed:.*Unavailable.*tcp connect error/);
+    assert.doesNotMatch(failed.error!,/does not match/);
+    const originalError=errors.find(error=>error instanceof Error&&error.message.startsWith('Owned Node identity query failed:')) as Error;
+    assert.ok(originalError?.cause,'retain the authenticated original result');
+    const originalResult=originalError.cause as {isError:boolean;content:string};
+    assert.equal(originalResult.isError,true);
+    assert.match(originalResult.content,/Unavailable/);
+    const bindingFile=path.join(stateDirectory,ids[0]+'.json');
+    const originalBinding=fs.readFileSync(bindingFile);
+    const binding=JSON.parse(originalBinding.toString());
+    const originalProfile=fs.readFileSync(binding.configFile);
+    const profile=JSON.parse(originalProfile.toString());
+    const firstLoad=rows().slice(beforeRows).find(row=>row.method==='session/load');
+    assert.equal(firstLoad.sessionId,profile.acpSessionId);
+    assert.ok(rows().slice(beforeRows).some(row=>row.pid===firstLoad.pid&&row.method==='session/close'));
+    await new Promise(resolve=>setTimeout(resolve,5100));await owner.refresh();
+    assert.equal(enrollments.length,beforeEnrollments+1,'recovery never calls the issuer again');
+    assert.deepEqual(fs.readFileSync(bindingFile),originalBinding);
+    assert.deepEqual(fs.readFileSync(binding.configFile),originalProfile);
+    const afterRows=rows().slice(beforeRows);
+    assert.ok(!afterRows.some(row=>['session/new','session/prompt','_sudocode/a2a/send'].includes(row.method)));
+    assert.ok(!calls.slice(beforeCalls).some(call=>call.method==='thread/queue/addOnce'));
+    assert.throws(()=>process.kill(firstLoad.pid,0),{code:'ESRCH'},'the original owned ACP actually exited');
+    if(cleanupUnknown) {
+      assert.ok(fs.existsSync(failureFile+'.drained'),'bounded stderr holder ended naturally');
+      assert.equal(afterRows.filter(row=>row.method==='session/load').length,1,'unknown cleanup never grants a replacement');
+      assert.equal(owner.status()[0].state,'disconnected');
+      assert.throws(()=>owner!.connectionFor(ids[0]),/Owned Node identity query failed/);
+      await assert.rejects(owner.close());owner=undefined;
+    } else {
+      const reconnected=owner.connectionFor(ids[0]);
+      assert.notEqual(reconnected.pid,firstLoad.pid);
+      assert.equal(reconnected.sessionId,profile.acpSessionId);
+      assert.equal(owner.status()[0].actor,failed.actor);
+      assert.equal(afterRows.filter(row=>row.method==='session/load').length,2);
+      await owner.close();owner=undefined;
+    }
+    loaded=[legacyId];
+  }
+
   if(process.platform!=='win32') {
     // Real POSIX proxy stderr keeps a failed reconnect's close unconfirmed.
     // Even when its callback refuses cleanup, the sibling ACP must be closed.

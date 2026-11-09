@@ -1,5 +1,6 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
@@ -14,6 +15,7 @@ const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
 let sessionId;
 let peerOwned = 0;
+let returnedInitialListFailure = false;
 const frame = (hash, value) => {
   const bytes = Buffer.from(value), length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length)); hash.update(length).update(bytes);
@@ -32,10 +34,10 @@ const inputDigest = (tool, params) => {
   }
   return hash.digest('hex');
 };
-const result = (value, tool, input) => {
-  const content = JSON.stringify(value);
-  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([0])); frame(hash, content);
-  return { content, isError: scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
+const result = (value, tool, input, operationError = false) => {
+  const content = operationError ? value : JSON.stringify(value);
+  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([operationError ? 1 : 0])); frame(hash, content);
+  return { content, isError: operationError || scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
     version: 1, commandId: `external-a2a-${randomUUID()}`, sessionId: scenario === 'bad-audit' ? 'wrong' : sessionId,
     actor, namespaceRoot: '', tool,
     requestedInputSha256: inputDigest(tool, input), effectiveInputSha256: inputDigest(tool, input), resultSha256: hash.digest('hex'),
@@ -114,8 +116,26 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });
     const gate=process.env.SCODE_DIRECT_FIXTURE_LIST_GATE;
     while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
+    const failure = process.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE;
+    if (scenario.startsWith('initial-list-unavailable') && failure && !existsSync(failure)) {
+      writeFileSync(failure, JSON.stringify({pid:process.pid,sessionId}), {flag:'wx'});
+      returnedInitialListFailure = true;
+      return result('list recipients at /agents: status: Unavailable, message: "tcp connect error", details: [], metadata: MetadataMap { headers: {} }', 'agent_list', ctx.params, true);
+    }
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
-  .onRequest(acp.methods.agent.session.close, () => ({}));
+  .onRequest(acp.methods.agent.session.close, () => {
+    if (scenario.startsWith('initial-list-unavailable')) log({method:'session/close',sessionId});
+    if (scenario === 'initial-list-unavailable-cleanup-unknown' && returnedInitialListFailure) {
+      // POSIX-only test: this real bounded descendant holds the original stderr
+      // pipe past the close deadline even after its direct parent exits.
+      const drained = process.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE+'.drained';
+      const holder = spawn(process.execPath, ['-e',
+        'setTimeout(()=>require("node:fs").writeFileSync(process.argv[1],"drained"),4000)', drained],
+        {stdio:['ignore','ignore',process.stderr]});
+      holder.unref();
+    }
+    return {};
+  });
 const connection = app.connect(acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
 await connection.closed;

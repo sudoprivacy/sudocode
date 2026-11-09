@@ -555,9 +555,72 @@ fn response_capture_drains_native_io_before_reclaiming_an_active_runtime() {
     reclaim_active_capture(true);
 }
 
-fn reclaim_active_capture(block_io: bool) {
+fn block_capture_append(
+    body: &std::path::Path,
+    provider: &StreamProvider,
+    timeout: Duration,
+) -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(body)
+        .unwrap();
+    file.lock().unwrap();
+    provider.capture_release.store(1, Ordering::SeqCst);
+    // Native append opens this real file then waits in the OS lock syscall.
+    // Linux exposes that pending syscall; other hosts retain the same file
+    // lock and the existing capture batch settling interval.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let inode = format!(":{} ", file.metadata().unwrap().ino());
+        let deadline = Instant::now() + timeout;
+        while !std::fs::read_to_string("/proc/locks")
+            .unwrap()
+            .lines()
+            .any(|line| line.contains("->") && line.contains(&inode))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the CLI never entered the blocked native append"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = timeout;
+        thread::sleep(Duration::from_millis(150));
+    }
+    file
+}
+
+fn assert_capture_io_remains_admitted(transcript: &std::path::Path, body: &std::path::Path) {
     use runtime::fs_backend::{FsBackend, StdFsBackend};
 
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < deadline {
+        assert!(
+            transcript.exists() && body.exists(),
+            "reclamation ran before admitted native I/O drained"
+        );
+        assert!(
+            StdFsBackend
+                .try_lock(
+                    &transcript
+                        .with_extension("responses.lock")
+                        .to_string_lossy(),
+                    30_000
+                )
+                .unwrap()
+                .is_none(),
+            "the response admission lock closed while its real append was still blocked"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn reclaim_active_capture(block_io: bool) {
     let env = TestEnv::new_mock("response-capture-retirement");
     let provider = StreamProvider::new(ResponseKind::CaptureIdleGaps);
     configure_peer(&env, &provider, ResponseKind::CaptureIdleGaps);
@@ -595,38 +658,7 @@ fn reclaim_active_capture(block_io: bool) {
         "the first real response batch reached storage",
     );
     let body = body_path().unwrap();
-    let blocked_file = block_io.then(|| {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&body)
-            .unwrap();
-        file.lock().unwrap();
-        provider.capture_release.store(1, Ordering::SeqCst);
-        // Native append opens this real file then waits in the OS lock syscall.
-        // Linux exposes that pending syscall; other hosts retain the same file
-        // lock and the existing capture batch settling interval.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let inode = format!(":{} ", file.metadata().unwrap().ino());
-            let deadline = Instant::now() + env.timeout();
-            while !std::fs::read_to_string("/proc/locks")
-                .unwrap()
-                .lines()
-                .any(|line| line.contains("->") && line.contains(&inode))
-            {
-                assert!(
-                    Instant::now() < deadline,
-                    "the CLI never entered the blocked native append"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        thread::sleep(Duration::from_millis(150));
-        file
-    });
+    let blocked_file = block_io.then(|| block_capture_append(&body, &provider, env.timeout()));
     let controller = runtime::Session::new().with_workspace_root(&root);
     let controller_path =
         runtime::session_control::session_transcript_path(&store, &controller.session_id);
@@ -639,26 +671,7 @@ fn reclaim_active_capture(block_io: bool) {
         .unwrap();
     deleter.expect("Session deleted").unwrap();
     if blocked_file.is_some() {
-        let deadline = Instant::now() + Duration::from_millis(1200);
-        while Instant::now() < deadline {
-            assert!(
-                transcript.exists() && body.exists(),
-                "reclamation ran before admitted native I/O drained"
-            );
-            assert!(
-                StdFsBackend
-                    .try_lock(
-                        &transcript
-                            .with_extension("responses.lock")
-                            .to_string_lossy(),
-                        30_000
-                    )
-                    .unwrap()
-                    .is_none(),
-                "the response admission lock closed while its real append was still blocked"
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        assert_capture_io_remains_admitted(&transcript, &body);
     }
     drop(blocked_file);
     let deadline = Instant::now() + env.timeout();

@@ -30,6 +30,7 @@ let auditFailureOwner: ChildProcess | undefined;
 let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
 let initialNativeOffline = true;
+let dropQueueOnce = false;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -39,6 +40,7 @@ server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call);
   if(call.id===undefined)return;
   if(initialNativeOffline) { socket.terminate(); return; }
+  if(dropQueueOnce && call.method==='thread/queue/addOnce') { dropQueueOnce=false;socket.terminate();return; }
   const retiring=retiringRead;
   if(call.method==='thread/read'&&retiring&&call.params.threadId===retiring.id){
     if(retiring.absent)loaded=loaded.filter(id=>id!==retiring.id);
@@ -330,6 +332,39 @@ async function main() {
   assert.ok(deliveryJournal.some(row=>row.method==='initialize'&&row.peerOwned),'the owned scode hands peer input over');
   assert.ok(!deliveryJournal.some(row=>row.method==='session/prompt'),'no scode model turn for a peer');
   await owner.close();owner=undefined;loaded=[legacyId];
+
+  if(process.platform!=='win32') {
+    // Real POSIX proxy stderr keeps a failed reconnect's close unconfirmed.
+    // Even when its callback refuses cleanup, the sibling ACP must be closed.
+    loaded=[ids[0]];
+    const failureDirectory=path.join(directory,'cleanup-bindings');
+    const reconnectJournal=path.join(directory,'autojoin-reconnect.jsonl');
+    owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:failureDirectory,
+      native:{...config.native,codexArgv:[...config.native.codexArgv.slice(0,-1),'fail-reconnect-close'],
+        closeTimeoutMs:300,env:{...proxyEnv,SCODE_FIXTURE_RECONNECT_JOURNAL:reconnectJournal}}});
+    const sibling=owner.connectionFor(ids[0]);
+    dropQueueOnce=true;
+    await sibling.request('_fixture/peer',{from:'fixture-peer',text:'cleanup propagation regression'});
+    const callbackLog=path.join(failureDirectory,`${ids[0]}.callback.jsonl`);
+    const cleanupDeadline=Date.now()+5000;
+    while(!fs.readFileSync(callbackLog,'utf8').includes('cleanup unconfirmed')) {
+      assert.ok(Date.now()<cleanupDeadline,'callback did not retain failed-reconnect cleanup');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    let originalCleanup: unknown;
+    await assert.rejects(owner.close(),error=>{
+      originalCleanup=error;return /cleanup unconfirmed/.test(String(error));
+    });
+    assert.equal(sibling.closed,true,'callback failure must not skip sibling ACP cleanup');
+    assert.equal((await sibling.exited).code,0);
+    await assert.rejects(owner.close(),error=>error===originalCleanup);
+    owner=undefined;
+    while(!fs.existsSync(reconnectJournal+'.drained')) {
+      assert.ok(Date.now()<cleanupDeadline,'bounded fixture pipe holder did not finish');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    loaded=[legacyId];
+  }
 
   // A directory at the log path deterministically refuses append on every OS,
   // including elevated test users. Startup must still fail before admission.

@@ -62,7 +62,11 @@ export async function connectCodex(
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: config.env,
     });
   const wire = Duplex.from({ readable: child.stdout, writable: child.stdin });
-  const socket = new WebSocket('ws://localhost/', { createConnection: () => wire, handshakeTimeout: 10000 });
+  // This one-shot stdio wire is not a TCP socket and cannot enter HTTP's
+  // keep-alive pool when a proxy returns a non-upgrade response.
+  const socket = new WebSocket('ws://localhost/', { createConnection: () => wire, handshakeTimeout: 10000,
+    finishRequest(request) { request.shouldKeepAlive = false; request.end(); },
+  });
   let stderr = '';
   child.stderr.on('data', bytes => { stderr = (stderr+String(bytes)).slice(-4096); });
   let serial = 0;
@@ -224,7 +228,11 @@ export async function connectRecoveringCodex(config: CodexConnectionConfig,
       closed = true;
       return closing ??= (async () => {
         await replacing?.catch(() => {});
-        await current?.close(); finish(current ? await current.exited : { code: null, signal: null });
+        await current?.close();
+        // A failed replacement may have spawned a child which never became
+        // current. Closing the previous proxy cannot prove that child's exit.
+        if (recoveryStopped) throw reconnectError;
+        finish(current ? await current.exited : { code: null, signal: null });
       })();
     },
   };

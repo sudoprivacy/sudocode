@@ -33,7 +33,7 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
   let lastSequence = 0;
   const sequences = new Set<number>();
   let closed = false, timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
-  let cleanupUnconfirmed = false;
+  let cleanupError: CodexCleanupUnknownError | undefined;
   const report = (entry: object) => { try { observe(entry); } catch (error) { process.stderr.write(`Callback audit: ${String(error)}\n`); } };
   const file = (id: string) => path.join(directory, id + '.json');
   const save = (record: Record) => {
@@ -69,7 +69,7 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
     if (record.state === 'pending') pending.set(record.eventId, record);
   }
   const schedule = (delay = 0) => {
-    if (closed || cleanupUnconfirmed || timer || active || !pending.size) return;
+    if (closed || cleanupError || timer || active || !pending.size) return;
     timer = setTimeout(() => {
       timer = undefined;
       const record = [...pending.values()].sort((a, b) => a.sequence - b.sequence)[0];
@@ -82,7 +82,7 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
           save(done); pending.delete(record.eventId);
           report({ eventId: record.eventId, phase: 'queued', ...(result as object), receipt: result });
         } catch (error) {
-          cleanupUnconfirmed = error instanceof CodexCleanupUnknownError;
+          if (error instanceof CodexCleanupUnknownError) cleanupError ??= error;
           report({ eventId: record.eventId, phase: 'pending', attempts: record.attempts, error: String(error), ...(error instanceof CodexRequestError ? {outcome: error.outcome} : {}) });
         }
       })().finally(() => {
@@ -123,6 +123,12 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
       save(record); pending.set(eventId, record);
       report({ eventId, phase: 'received', message }); schedule();
     },
-    async close() { closed = true; clearTimeout(timer); await active; },
+    async close() {
+      closed = true; clearTimeout(timer); await active;
+      // The owner must retain custody when an old proxy's exit is unknown.
+      // The delivery catch keeps pending bytes; it must not turn UNKNOWN into
+      // successful cleanup merely because the asynchronous attempt settled.
+      if (cleanupError) throw cleanupError;
+    },
   };
 }

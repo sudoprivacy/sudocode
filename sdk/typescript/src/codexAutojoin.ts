@@ -110,8 +110,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     }
   }
   const stopOwner = async (owner: Owner) => {
-    await owner.callback?.close();
-    await owner.connection?.close();
+    const results = await Promise.allSettled([owner.callback?.close(), owner.connection?.close()]);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   };
   const open = async (thread: Thread) => {
     let binding = bindings.get(thread.id);
@@ -272,7 +273,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     await chain;
     try {
       const results = await Promise.allSettled([...owners.values()].map(stopOwner));
-      await native.close();
+      results.push(...await Promise.allSettled([native.close()]));
       const error = results.find(result => result.status === 'rejected');
       if(error?.status==='rejected')throw error.reason;
     } finally {

@@ -4,8 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
+import { connectRecoveringCodex, CodexCleanupUnknownError as RecoveryCleanupUnknownError } from '../src/codexConnection';
 const root = path.resolve(__dirname, '../..');
-const { connectCodex, connectCodexCallback, CodexRequestError } = require(process.argv[2] ?? path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectCodex, connectCodexCallback, createCodexCallback, CodexRequestError, CodexCleanupUnknownError } = require(process.argv[2] ?? path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 
 async function main(): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scode-codex-connection-'));
@@ -144,6 +145,36 @@ async function main(): Promise<void> {
     assert.ok(Date.now() - closingAt < 2000, 'an uncooperative owned proxy must stop within the configured bounded phases');
     await assert.rejects(connectCodex({ codexArgv: [path.join(directory, 'missing-native-binary')] }), /ENOENT|exited/);
 
+    // POSIX inherited pipe lifetime is the failure trigger here. Windows
+    // cleanup ownership has its separate real bootstrap-failure regression.
+    if (process.platform !== 'win32') {
+    const recoveryJournal = path.join(directory, 'recovery-cleanup.jsonl');
+    const recovering = await connectRecoveringCodex({ ...config, closeTimeoutMs: 300,
+      codexArgv: [...config.codexArgv.slice(0, -1), 'fail-reconnect-close'],
+      env: { ...config.env, SCODE_FIXTURE_RECONNECT_JOURNAL: recoveryJournal } });
+    let recoveryError: unknown;
+    try {
+      await assert.rejects(recovering.request('fixture/drop', {}));
+      await assert.rejects(recovering.request('thread/loaded/list', {}), error => {
+        recoveryError = error;
+        return error instanceof RecoveryCleanupUnknownError;
+      });
+      await assert.rejects(recovering.close(), error => error === recoveryError);
+      await waitFor(() => fs.existsSync(recoveryJournal + '.drained'));
+      // Later pipe draining does not erase the retained unconfirmed cleanup.
+      await assert.rejects(recovering.close(), error => error === recoveryError);
+      await assert.rejects(recovering.request('thread/loaded/list', {}), /closed/);
+      const spawned = fs.readFileSync(recoveryJournal, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(spawned.filter(row => row.phase === 'proxy').length, 2, 'failed replacement is never retried');
+      assert.equal(spawned.filter(row => row.phase === 'stderr-holder').length, 1);
+    } finally {
+      await recovering.close().catch(error => { if (error !== recoveryError) throw error; });
+      if (fs.existsSync(recoveryJournal) && fs.readFileSync(recoveryJournal, 'utf8').includes('stderr-holder')) {
+        await waitFor(() => fs.existsSync(recoveryJournal + '.drained'));
+      }
+    }
+    }
+
     const message = { sessionId: 'existing-acp', text: '<mailbox-message from="allowed-peer">peer data 零 🧪</mailbox-message>',
       body: 'peer data 零 🧪', sudocode: { a2a: { from: 'allowed-peer' } } };
     for (const mode of ['idle', 'active']) {
@@ -234,6 +265,52 @@ async function main(): Promise<void> {
       { code: process.platform === 'win32' ? 'ENOENT' : 'ENOTDIR' });
     await failing.close();
     assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, beforeBounded);
+
+    // Inject the typed cleanup failure after a real proxy RPC. This exercises
+    // the public shared-connection callback and its durable filesystem inbox;
+    // it does not claim to reproduce an OS process that cannot be reaped.
+    for (const closeDuringDelivery of [true, false]) {
+      const shared = await connectCodex(config);
+      const cleanupLog = path.join(directory, `cleanup-${closeDuringDelivery}.jsonl`);
+      const cleanupError = new CodexCleanupUnknownError('Fixture proxy cleanup remains unconfirmed');
+      let release!: () => void, submitted = false;
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      const callback = createCodexCallback(async (method, params) => {
+        await shared.request(method, params);
+        submitted = true;
+        await barrier;
+        throw cleanupError;
+      }, { threadId: original, peers: ['allowed-peer'], log: cleanupLog }, 'existing-acp');
+      const before = calls.filter(call => call.method === 'thread/queue/addOnce').length;
+      try {
+        callback.receive({ ...message, deliveryId: (closeDuringDelivery ? '8' : '9').repeat(64) });
+        await waitFor(() => submitted);
+        const inbox = cleanupLog + '.inbox';
+        const names = fs.readdirSync(inbox).filter(name => name.endsWith('.json'));
+        assert.equal(names.length, 1);
+        const pendingPath = path.join(inbox, names[0]);
+        const beforeBytes = fs.readFileSync(pendingPath);
+        assert.equal(JSON.parse(beforeBytes.toString()).state, 'pending');
+        const closing = closeDuringDelivery ? callback.close() : undefined;
+        release();
+        if (!closing) {
+          await waitFor(() => fs.readFileSync(cleanupLog, 'utf8').includes('"phase":"pending"'));
+          // Let the ordinary one-second retry period pass before close.
+          await new Promise(resolve => setTimeout(resolve, 1100));
+        }
+        await assert.rejects(closing ?? callback.close(), error => error === cleanupError);
+        await assert.rejects(callback.close(), error => error === cleanupError);
+        assert.deepEqual(fs.readFileSync(pendingPath), beforeBytes,
+          'cleanup failure preserves the original pending ID, bytes and attempt count');
+        assert.equal(calls.filter(call => call.method === 'thread/queue/addOnce').length, before + 1,
+          'cleanup UNKNOWN stops delivery scheduling without replay');
+        assert.throws(() => callback.receive(message), /closed/);
+      } finally {
+        release();
+        await callback.close().catch(error => { if (error !== cleanupError) throw error; });
+        await shared.close(); // This fixture's actual returned process is reaped.
+      }
+    }
     state = 'notLoaded';
     await assert.rejects(connectCodexCallback({ ...config, threadId: original, peers: [],
       log: path.join(directory, 'unloaded.jsonl') }, 'existing-acp'), /already be loaded/);

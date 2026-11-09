@@ -596,8 +596,13 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces retain eight workers on hosts with at least eight logical
+Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
+resize and service dispatch verify its original pinned archive and
+executable before compilation. A missing download or corrupt cache fails before
+Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
+corrupt-archive process controls protect this ordering. Tool preparation stays
+inside the invocation's total elapsed time; test selection and retries are unchanged.
+Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,

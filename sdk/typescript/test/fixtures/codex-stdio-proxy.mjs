@@ -6,10 +6,12 @@ import { spawn } from 'node:child_process';
 // Only a stdio proxy to the test's already-listening native protocol fixture.
 const [port, scenario, ...args] = process.argv.slice(2);
 assert.deepEqual(args, ['app-server', 'proxy', '--sock', 'fixture-native.sock']);
-assert.ok(['normal', 'ignore-close', 'fail-reconnect-close'].includes(scenario));
+assert.ok(['normal', 'ignore-close', 'http-refusal', 'fail-reconnect-close'].includes(scenario));
 assert.equal(process.env.SCODE_NATIVE_ENV_SENTINEL, 'owned-proxy');
 assert.equal(process.env.CODEX_THREAD_ID, undefined, 'an explicit child environment is complete, not merged');
-if (scenario === 'fail-reconnect-close') {
+if (scenario === 'http-refusal') {
+  process.stdout.write('HTTP/1.1 503 Fixture startup refusal\r\nContent-Length: 0\r\n\r\n', () => process.exit(23));
+} else if (scenario === 'fail-reconnect-close') {
   const journal = process.env.SCODE_FIXTURE_RECONNECT_JOURNAL;
   assert.ok(journal);
   const replacement = fs.existsSync(journal);

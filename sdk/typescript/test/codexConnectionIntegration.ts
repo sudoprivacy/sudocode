@@ -144,6 +144,8 @@ async function main(): Promise<void> {
     assert.equal(exited, true, 'close cannot report success before its spawned proxy exits');
     assert.ok(Date.now() - closingAt < 2000, 'an uncooperative owned proxy must stop within the configured bounded phases');
     await assert.rejects(connectCodex({ codexArgv: [path.join(directory, 'missing-native-binary')] }), /ENOENT|exited/);
+    await assert.rejects(connectCodex({ ...config,
+      codexArgv: [...config.codexArgv.slice(0, -1), 'http-refusal'] }), /Unexpected server response: 503/);
 
     // POSIX inherited pipe lifetime is the failure trigger here. Windows
     // cleanup ownership has its separate real bootstrap-failure regression.

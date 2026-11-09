@@ -65,7 +65,12 @@ export async function connectCodex(
   // This one-shot stdio wire is not a TCP socket and cannot enter HTTP's
   // keep-alive pool when a proxy returns a non-upgrade response.
   const socket = new WebSocket('ws://localhost/', { createConnection: () => wire, handshakeTimeout: 10000,
-    finishRequest(request) { request.shouldKeepAlive = false; request.end(); },
+    finishRequest(request) {
+      request.end();
+      // Serializing Connection: Upgrade sets this flag back to true. Disable
+      // reuse after the headers are written, before any asynchronous response.
+      request.shouldKeepAlive = false;
+    },
   });
   let stderr = '';
   child.stderr.on('data', bytes => { stderr = (stderr+String(bytes)).slice(-4096); });

@@ -204,7 +204,7 @@ impl SessionStore {
         {
             candidate
         } else if looks_like_path {
-            return Err(SessionControlError::Format(
+            return Err(SessionControlError::NotFound(
                 format_missing_session_reference(reference, &self.sessions_root),
             ));
         } else {
@@ -230,7 +230,7 @@ impl SessionStore {
                 return Ok(path);
             }
         }
-        Err(SessionControlError::Format(
+        Err(SessionControlError::NotFound(
             format_missing_session_reference(session_id, &self.sessions_root),
         ))
     }
@@ -303,14 +303,34 @@ impl SessionStore {
         reference: &str,
     ) -> Result<LoadedManagedSession, SessionControlError> {
         let handle = self.resolve_reference(reference)?;
-        let session = Session::load_from_path_with(&*self.fs, &handle.path)?
+        self.load_at(handle.path)
+    }
+
+    /// Load exactly the session persisted under `id`. Unlike
+    /// [`Self::load_session`] no alias or path is resolved, and the transcript
+    /// must carry the requested id, so a protocol client cannot land on a
+    /// different session from the one it named.
+    pub fn load_exact(&self, id: &str) -> Result<LoadedManagedSession, SessionControlError> {
+        validate_session_id(id)?;
+        let loaded = self.load_at(self.resolve_managed_path(id)?)?;
+        if loaded.session.session_id != id {
+            return Err(SessionControlError::Format(format!(
+                "transcript carries session {}, not the requested {id}",
+                loaded.session.session_id
+            )));
+        }
+        Ok(loaded)
+    }
+
+    fn load_at(&self, path: PathBuf) -> Result<LoadedManagedSession, SessionControlError> {
+        let session = Session::load_from_path_with(&*self.fs, &path)?
             .with_fs_backend(Arc::clone(&self.fs))
             .with_session_store_root(&self.sessions_root);
-        self.validate_loaded_session(&handle.path, &session)?;
+        self.validate_loaded_session(&path, &session)?;
         Ok(LoadedManagedSession {
             handle: SessionHandle {
                 id: session.session_id.clone(),
-                path: handle.path,
+                path,
             },
             session,
         })
@@ -653,7 +673,16 @@ pub enum SessionControlError {
     Io(std::io::Error),
     Session(SessionError),
     Format(String),
-    WorkspaceMismatch { expected: PathBuf, actual: PathBuf },
+    WorkspaceMismatch {
+        expected: PathBuf,
+        actual: PathBuf,
+    },
+    /// Nothing is persisted under the requested reference. Carries the same
+    /// guidance the CLI has always printed.
+    NotFound(String),
+    /// A protocol load named something that is not a durable session id: an
+    /// alias such as `latest`, a path, or a malformed string.
+    InvalidId(String),
 }
 
 impl Display for SessionControlError {
@@ -661,7 +690,8 @@ impl Display for SessionControlError {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::Session(error) => write!(f, "{error}"),
-            Self::Format(error) => write!(f, "{error}"),
+            Self::Format(error) | Self::NotFound(error) => write!(f, "{error}"),
+            Self::InvalidId(id) => write!(f, "not a durable session id: {id:?}"),
             Self::WorkspaceMismatch { expected, actual } => write!(
                 f,
                 "session workspace mismatch: expected {}, found {}",
@@ -806,6 +836,22 @@ pub fn fork_managed_session_for(
 ) -> Result<ForkedManagedSession, SessionControlError> {
     let store = SessionStore::from_cwd(base_dir)?;
     store.fork_session(session, branch_name)
+}
+
+/// A durable session id: 1-128 ASCII letters, digits, `-` or `_`, and not one
+/// of the CLI's `latest`-style aliases. No path form passes.
+pub fn validate_session_id(id: &str) -> Result<(), SessionControlError> {
+    let is_id = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && !is_session_reference_alias(id);
+    if is_id {
+        Ok(())
+    } else {
+        Err(SessionControlError::InvalidId(id.to_string()))
+    }
 }
 
 #[must_use]

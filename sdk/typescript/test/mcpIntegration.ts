@@ -132,9 +132,9 @@ async function checkMcp(scenario: string): Promise<void> {
           'a dead ACP child preserves its pending Unknown response during backoff');
         const unavailable = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: 'not sent', summary: 'offline' } });
         assert.match(JSON.stringify(unavailable), /not_submitted/);
-        const deadline = Date.now() + 12000;
-        while (journal(log).filter(row => row.method === 'session/load').length < 2 && Date.now() < deadline)
-          await new Promise(resolve => setTimeout(resolve, 30));
+        // The child journals session/load before its reply reaches the MCP
+        // supervisor. Wait for public readiness, under the same 12 s bound.
+        await ready(client);
         const recovered = await client.callTool({ name: 'scode_status', arguments: {} });
         assert.equal(JSON.parse((recovered.content as Array<{text: string}>)[0].text).closed, false);
         assert.equal(journal(log).filter(row => row.method === '_sudocode/a2a/send').length, 1, 'recovery never retries the ambiguous send');

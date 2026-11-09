@@ -63,6 +63,10 @@ def main():
         "--output", str(output / "contract-reads"),
     ], SOURCE, output / "contract-reads.log")
     fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/github_asset_credentials.py"),
+        "--output", str(output / "github-asset-credentials"),
+    ], SOURCE, output / "github-asset-credentials.log")
+    fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
         "--output", str(output / "parallel-acceptance"),
     ], SOURCE, output / "parallel-acceptance.log")

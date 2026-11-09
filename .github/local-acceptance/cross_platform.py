@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 
+if any(os.environ.get(name) for name in ('GH_TOKEN', 'GITHUB_TOKEN')):
+    raise RuntimeError('Native candidate execution must not receive release-download credentials')
+
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)

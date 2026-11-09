@@ -971,7 +971,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "db3e7843e3db4c08ef755e6fb15896bcc622764b4ad1dd13d96c768ae2458120",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "6d5f10bb582d7dd636a6ad98dd43d2efac2f92d8e597ba07c3b0414e707467cd",
+        ".github/local-acceptance/native_guard.py": "fbd4662ddbb417e1a429bef551ef55e018b0b254024cd151db1de294a370a27b",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",

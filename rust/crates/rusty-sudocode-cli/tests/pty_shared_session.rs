@@ -783,23 +783,7 @@ fn reclaim_while_idle(record_history: bool) {
         .unwrap_err()
         .to_string()
         .contains("session_deleted"));
-    deleter.send("/session list\r").unwrap();
-    common::expect_screen_settled(
-        &deleter,
-        |screen| {
-            screen
-                .rsplit_once("Select a session")
-                .is_some_and(|(_, picker)| {
-                    !picker.contains(&session.session_id)
-                        && picker.contains(&survivor.session_id)
-                        && picker.contains("msgs=")
-                })
-        },
-        env.timeout(),
-        "the actual Session list excludes the deleted SID",
-    );
-    deleter.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&deleter, env.timeout(), "Session picker cancelled");
+    assert_deleted_session_in_picker(&env, &mut deleter, &session, &survivor);
     idle.send("STALE_WRITE_MUST_NOT_COMMIT\r").unwrap();
     idle.expect("session_deleted")
         .expect("the old context cannot write after deletion");
@@ -829,6 +813,31 @@ fn reclaim_while_idle(record_history: bool) {
     assert_damaged_session_picker(&env, &mut deleter, &survivor, &session);
     exit_cli(&env, &mut idle);
     exit_cli(&env, &mut deleter);
+}
+
+fn assert_deleted_session_in_picker(
+    env: &TestEnv,
+    deleter: &mut PtySession,
+    removed: &Session,
+    survivor: &Session,
+) {
+    deleter.send("/session list\r").unwrap();
+    common::expect_screen_settled(
+        deleter,
+        |screen| {
+            screen
+                .rsplit_once("Select a session")
+                .is_some_and(|(_, picker)| {
+                    !picker.contains(&removed.session_id)
+                        && picker.contains(&survivor.session_id)
+                        && picker.contains("msgs=")
+                })
+        },
+        env.timeout(),
+        "the actual Session list excludes the deleted SID",
+    );
+    deleter.send("\x1b").unwrap();
+    common::expect_input_line_cleared(deleter, env.timeout(), "Session picker cancelled");
 }
 
 fn seed_owned_session_payload(

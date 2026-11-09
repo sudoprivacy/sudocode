@@ -21,6 +21,28 @@ import urllib.request
 import zipfile
 
 
+def github_asset_download(repository, tag, filename, destination):
+    """Fetch one named release asset through GitHub's public metadata/binary API."""
+    endpoint = f'https://api.github.com/repos/{repository}'
+    request = urllib.request.Request(f'{endpoint}/releases/tags/{tag}',
+                                     headers={'Accept': 'application/vnd.github+json'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    assets = [asset for asset in release['assets'] if asset['name'] == filename]
+    if release['tag_name'] != tag or len(assets) != 1:
+        raise RuntimeError(f'Expected exactly one pinned GitHub release asset: {repository}/{tag}/{filename}')
+    asset_id = assets[0]['id']
+    if not isinstance(asset_id, int) or asset_id <= 0:
+        raise RuntimeError('The pinned GitHub release returned an invalid asset identity')
+    download = f'{endpoint}/releases/assets/{asset_id}'
+    print('GITHUB_ASSET_DOWNLOAD=' + json.dumps({
+        'repository': repository, 'tag': tag, 'filename': filename, 'api': download,
+    }), flush=True)
+    request = urllib.request.Request(download, headers={'Accept': 'application/octet-stream'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        destination.write_bytes(response.read())
+
+
 def nextest_binary(output):
     """Use a pinned, checksum-verified tool without replacing a user's installation."""
     version = '0.9.150'
@@ -53,7 +75,7 @@ def nextest_binary(output):
         with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            urllib.request.urlretrieve(source, temporary_path)
+            github_asset_download('nextest-rs/nextest', f'cargo-nextest-{version}', filename, temporary_path)
             if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
                 raise RuntimeError(f'nextest archive checksum mismatch: {source}')
             os.replace(temporary_path, archive)
@@ -100,9 +122,8 @@ def cohost_protoc():
     if not executable.exists():
         folder.mkdir(parents=True, exist_ok=True)
         archive = folder / "protoc.zip"
-        urllib.request.urlretrieve(
-            f"https://github.com/protocolbuffers/protobuf/releases/download/v3.20.2/protoc-3.20.2-{archive_name}.zip",
-            archive)
+        github_asset_download('protocolbuffers/protobuf', 'v3.20.2',
+                              f'protoc-3.20.2-{archive_name}.zip', archive)
         with zipfile.ZipFile(archive) as stream:
             stream.extractall(folder)
         executable.chmod(0o755)
@@ -957,7 +978,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "459727d3e7bb16aa0672fb3479ae04d4015441857f8bf509652ef421a5eaabe4",
+        "e2e/local-acceptance/native_lint_acceptance.py": "91cf10d403051be6394574b0a92e46e2153e1a0f8aa72965b08a8517392e8c72",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
@@ -1022,7 +1043,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'c7029fba0a1c2dbe6b15be2e5adce8579f813d5ac6af31eae52eb323cf25f24a', 'native-context': 'cbb31f23fd408e95f6b464cf99eae1c3b63841fed02d168e0892902a739e4318'}
+    expected = {'native-release': 'd4911ad59da55607826c1b378c23aa4b8bd23db472063df0f7781d381a7046f7', 'native-context': 'd499820b45ff17c6683f6f830b96022fbe6a397d3be716d8fb69bd80a322ee93'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1047,9 +1068,9 @@ def guard_tool_source(root, policy_ref):
     source = subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
     functions = [node for node in ast.parse(source).body
-                 if isinstance(node, ast.FunctionDef) and node.name == "nextest_binary"]
-    if len(functions) != 1:
-        raise RuntimeError("Protected nextest_binary must have exactly one top-level definition before building the guard image")
+                 if isinstance(node, ast.FunctionDef) and node.name in {"github_asset_download", "nextest_binary"}]
+    if sorted(node.name for node in functions) != ["github_asset_download", "nextest_binary"]:
+        raise RuntimeError("Protected GitHub downloader and nextest_binary must each have one definition before building the guard image")
     prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
               "from pathlib import Path\n\n")
     main = '''
@@ -1088,7 +1109,7 @@ if __name__ == "__main__":
         **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
     }), flush=True)
 '''
-    return (prefix + ast.get_source_segment(source, functions[0]) + main).encode("utf-8")
+    return (prefix + '\n\n'.join(ast.get_source_segment(source, node) for node in functions) + main).encode("utf-8")
 
 
 def guard_image_context(root, policy_ref, context):

@@ -600,7 +600,12 @@ Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
 resize and service dispatch verify its original pinned archive and
 executable before compilation. A missing download or corrupt cache fails before
 Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
-corrupt-archive process controls protect this ordering. Tool preparation stays
+corrupt-archive process controls protect this ordering. Missing nextest/protoc
+archives resolve their exact tag and filename through GitHub's public release
+metadata and asset API. The existing nextest archive/executable digests and
+protoc executable version still qualify the result. This avoids failing browser
+download redirects; the canonical artifact URL in the tool receipt stays stable.
+The Docker image provisions the same protected downloader. Tool preparation stays
 inside the invocation's total elapsed time; test selection and retries are unchanged.
 On Windows/macOS the native guard also prepares the original protoc 3.20.2
 before its matrix and checks the real executable's version. The isolated cohost

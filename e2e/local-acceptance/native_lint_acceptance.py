@@ -132,7 +132,7 @@ finally:
                 assert result["status"] == "REFUSED", result
                 assert ("504" if state == "missing" else "checksum mismatch") in result["error"], result
                 if state == "missing":
-                    assert contacted == ["github.com:443"], contacted
+                    assert contacted == ["api.github.com:443"], contacted
                 else:
                     assert not contacted, contacted
             cases.append({"profile": name, "cache": state, "actual_proxy_requests": contacted,

@@ -329,14 +329,41 @@ fn compact_flag_shows_only_final_text() {
 /// These commands don't call the API.
 #[test]
 fn informational_commands_bypass_credentials() {
+    let env = TestEnv::new_mock("informational-without-credentials");
+    // Keep HOME, cwd and config roots in the shared isolated fixture, then
+    // remove its model credentials so informational commands must need none.
+    std::fs::remove_file(env.config_home().join("sudocode.json")).unwrap();
+    let auth = [
+        ("ANTHROPIC_API_KEY", ""),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("PROXY_AUTH_TOKEN", ""),
+        ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+    ];
     for subcmd in &["version", "help", "doctor", "status", "sandbox", "config"] {
-        let mut sess = spawn_scode(&[subcmd]).unwrap_or_else(|_| panic!("spawn scode {subcmd}"));
+        let mut sess = env.spawn_with_env_at_size(&[subcmd], &auth, 60, 240);
+        if *subcmd == "doctor" {
+            for credential in [
+                "ANTHROPIC_API_KEY=absent",
+                "ANTHROPIC_AUTH_TOKEN=absent",
+                "PROXY_AUTH_TOKEN=absent",
+                "CLAUDE_CODE_OAUTH_TOKEN=absent",
+            ] {
+                sess.expect(credential)
+                    .expect("doctor confirms no auth env");
+            }
+        }
 
         let exit = sess
             .expect_eof()
             .unwrap_or_else(|_| panic!("{subcmd} should exit"));
-        assert_eq!(exit, 0, "{subcmd} should exit 0 without credentials");
+        assert_eq!(
+            exit,
+            0,
+            "{subcmd} should exit 0 without credentials:\n{}",
+            sess.render(common::screen_contents)
+        );
     }
+    assert_eq!(env.captured_message_count(), 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────

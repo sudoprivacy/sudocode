@@ -340,7 +340,8 @@ async function main() {
     const tag=cleanupUnknown?'initial-query-cleanup-unknown':'initial-query-recovery';
     const stateDirectory=path.join(directory,tag);
     const failureFile=path.join(directory,tag+'.first-failure');
-    const beforeRows=rows().length,beforeCalls=calls.length,beforeEnrollments=enrollments.length;
+    const beforeRows=rows().length,beforeCalls=calls.length;
+    const beforeEnrollments: number=enrollments.length;
     const errors: unknown[]=[];
     owner=await connectCodexAutojoin({...config,stateDirectory,onError:error=>errors.push(error),
       async resolveAgent(claim) {

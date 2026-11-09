@@ -159,6 +159,11 @@ Every request includes `sessionId` and an `action`:
 `steer` allows delivery at the next model boundary within the active turn.
 `queue` waits for the current turn to end. These actions do not interrupt a
 running tool to inject text. Idle input starts a new turn automatically.
+Background and sub-agent notifications on this path follow the `steer` rule:
+one that arrives while a turn is running is delivered at that turn's next
+model boundary, and otherwise it is queued and starts the next turn, as in
+the CLI. Journaled completions (`taskCompletions`, `subagentCompletions`,
+below) still deliver only after the parent turn commits.
 Cancellation through `session/cancel` always remains available and pauses
 unapplied input; an explicit human steer or flush resumes delivery. Delivery
 does not add a mandatory instruction to abandon the model's existing work.

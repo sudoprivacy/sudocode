@@ -1,4 +1,4 @@
-//! Turn-boundary delivery for this session's background tasks.
+//! Model notifications for this session's background tasks.
 //!
 //! Upstream's `BackgroundTasks` registry publishes every state change, and the
 //! REPL already forwards those to the task panel so a human can watch them.

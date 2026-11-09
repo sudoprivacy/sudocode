@@ -754,6 +754,7 @@ async fn run_one_turn(
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
+    evt_tx.inputs.attach_inbox(inbox.clone());
     if let Some(inbox) = &inbox {
         inbox.begin();
     }

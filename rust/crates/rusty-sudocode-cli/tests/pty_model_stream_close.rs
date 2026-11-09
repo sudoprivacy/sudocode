@@ -546,6 +546,157 @@ fn raw_stream_capture_rearms_after_idle_batches() {
 }
 
 #[test]
+fn idle_response_capture_retires_without_waiting_for_http_eof() {
+    reclaim_active_capture(false);
+}
+
+#[test]
+fn response_capture_drains_native_io_before_reclaiming_an_active_runtime() {
+    reclaim_active_capture(true);
+}
+
+fn reclaim_active_capture(block_io: bool) {
+    use runtime::fs_backend::{FsBackend, StdFsBackend};
+
+    let env = TestEnv::new_mock("response-capture-retirement");
+    let provider = StreamProvider::new(ResponseKind::CaptureIdleGaps);
+    configure_peer(&env, &provider, ResponseKind::CaptureIdleGaps);
+    let root = std::fs::canonicalize(env.workspace_root()).unwrap();
+    let store = root
+        .join(".scode/sessions")
+        .join(runtime::session_control::workspace_fingerprint(&root));
+    let seed = runtime::Session::new().with_workspace_root(&root);
+    let transcript = runtime::session_control::session_transcript_path(&store, &seed.session_id);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    // Seed legacy bytes directly: only the actual CLI owns storage handles or
+    // discovers deletion work in this journey.
+    std::fs::write(&transcript, seed.to_json().unwrap().render()).unwrap();
+    let directory =
+        runtime::Session::response_captures_dir_for(&transcript, &seed.session_id).unwrap();
+    std::fs::write(root.join("independent.txt"), "keep independent data").unwrap();
+    let mut cli = env.spawn(&["--resume", &seed.session_id]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "response owner ready");
+    cli.send("Report the stream result\r").unwrap();
+    let body_path = || {
+        std::fs::read_dir(&directory).ok().and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .find(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "gz")
+                        && entry.metadata().is_ok_and(|metadata| metadata.len() > 10)
+                })
+                .map(|entry| entry.path())
+        })
+    };
+    common::expect_screen(
+        &cli,
+        |_| body_path().is_some(),
+        env.timeout(),
+        "the first real response batch reached storage",
+    );
+    let body = body_path().unwrap();
+    let blocked_file = block_io.then(|| {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&body)
+            .unwrap();
+        file.lock().unwrap();
+        provider.capture_release.store(1, Ordering::SeqCst);
+        // Native append opens this real file then waits in the OS lock syscall.
+        // Linux exposes that pending syscall; other hosts retain the same file
+        // lock and the existing capture batch settling interval.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let inode = format!(":{} ", file.metadata().unwrap().ino());
+            let deadline = Instant::now() + env.timeout();
+            while !std::fs::read_to_string("/proc/locks")
+                .unwrap()
+                .lines()
+                .any(|line| line.contains("->") && line.contains(&inode))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the CLI never entered the blocked native append"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        thread::sleep(Duration::from_millis(150));
+        file
+    });
+    let controller = runtime::Session::new().with_workspace_root(&root);
+    let controller_path =
+        runtime::session_control::session_transcript_path(&store, &controller.session_id);
+    std::fs::create_dir_all(controller_path.parent().unwrap()).unwrap();
+    std::fs::write(controller_path, controller.to_json().unwrap().render()).unwrap();
+    let mut deleter = env.spawn(&["--resume", &controller.session_id]);
+    common::expect_input_line_cleared(&deleter, env.timeout(), "capture deletion controller ready");
+    deleter
+        .send(&format!("/session delete {} --force\r", seed.session_id))
+        .unwrap();
+    deleter.expect("Session deleted").unwrap();
+    if blocked_file.is_some() {
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < deadline {
+            assert!(
+                transcript.exists() && body.exists(),
+                "reclamation ran before admitted native I/O drained"
+            );
+            assert!(
+                StdFsBackend
+                    .try_lock(
+                        &transcript
+                            .with_extension("responses.lock")
+                            .to_string_lossy(),
+                        30_000
+                    )
+                    .unwrap()
+                    .is_none(),
+                "the response admission lock closed while its real append was still blocked"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    drop(blocked_file);
+    let deadline = Instant::now() + env.timeout();
+    while transcript.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "an idle HTTP recorder pinned deleted Session storage"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!directory.exists());
+    assert!(
+        provider.capture_release.load(Ordering::SeqCst) < 2,
+        "the HTTP response is still open"
+    );
+    provider.capture_release.store(2, Ordering::SeqCst);
+    cli.expect("session_deleted").unwrap();
+    common::expect_input_line_cleared(
+        &cli,
+        env.timeout(),
+        "deleted turn returned to its live runtime",
+    );
+    assert!(
+        !transcript.exists() && !directory.exists(),
+        "late body/finalization recreated Session storage"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("independent.txt")).unwrap(),
+        "keep independent data"
+    );
+    assert!(transcript.with_extension("completions.json").exists());
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    deleter.send("/exit\r").unwrap();
+    assert_eq!(deleter.expect_eof().unwrap(), 0);
+}
+
+#[test]
 fn raw_stream_capture_can_be_disabled_or_budget_limited() {
     for configuration in [json!({"enabled":false}), json!({"maxSessionBytes":1})] {
         let env = TestEnv::new("raw-stream-disabled");

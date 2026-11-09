@@ -1146,19 +1146,22 @@ creates a journal. Use that exact reference with subsequent operations:
   execution or remove unknown execution facts.
 - `purge {sessionId,cwd,storageRef,cleanupId}` requires no active prompt. Its ACK
   is `{disposition:"purged",cleanupId,storageRef}` after writing a minimal deleted
-  binding. It retires cached results and fences all late writes. It does not
-  remove the transcript, child manifests, project files or original full logs.
-  Native session deletion additionally removes its transcript and offloaded
-  tool results after committing the same tombstone.
+  binding. It retires cached results and fences all late protocol writes and
+  ACKs. Native storage automatically releases idle Session, completion and
+  response handles, drains already admitted I/O, and reclaims owned transcripts,
+  backups, response captures and offloaded tool results. OS process exit is not
+  required. Independent project files, Agent data and mailboxes remain intact.
 
 Transcript saves, compaction, journal writes, ACKs and deletion use the
 [same commit and context ownership contract](#durable-direct-sub-agent-completions-extension-v1).
-Purge checks other native transcript writers and completion context owners. It
-reports `session_writer_busy` while another writer is alive, including CLI
-instances that have no completion extension. Native writer presence is an OS
-lock; a crashed writer's free locator does not assert liveness. The committed
-SID tombstone fences subsequent transcript and journal writes. Context lock
-files retain stable paths for exclusion.
+Purge publishes the irreversible SID tombstone under the native commit barrier.
+Actual native locks prove I/O retirement before reclamation; a PID lookup or
+lease expiry is insufficient. Idle runtimes observe the same durable tombstone
+without waiting for new input. Late callbacks cannot recreate owned files.
+Older clients that retain their locks can defer reclamation until those handles
+close. Context lock files retain stable paths for exclusion, and the minimal
+deleted binding remains permanent. Hosted storage retains its capability refusal
+until equivalent storage ownership and drain are qualified.
 A temporary storage error retains the bounded exit snapshot for
 retry; a process loss before that snapshot was saved becomes
 `execution_unconfirmed`, even if its child later exits. Uncertain process creation

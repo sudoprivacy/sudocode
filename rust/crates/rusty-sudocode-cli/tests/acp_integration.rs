@@ -9733,12 +9733,15 @@ async fn assert_shared_completion_deletion(
         "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"finished-contexts"
     })).await;
     assert_eq!(purged["result"]["disposition"], "purged", "{purged}");
-    assert!(
-        transcript.is_file(),
-        "live runtime clients must retire before physical cleanup"
-    );
-    let history_after_delete = fs::read(&transcript).unwrap();
-    let journal_after_delete = fs::read(&stale_journal).unwrap();
+    timeout(Duration::from_secs(10), async {
+        while transcript.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("storage handles retire and cleanup finishes while both ACP runtimes remain alive");
+    assert!(!stale_journal.exists());
+    let binding_after_delete = fs::read(transcript.with_extension("completions.json")).unwrap();
     stale
         .send_raw(&json!({"jsonrpc":"2.0","id":unacknowledged["id"],"result":{
             "completionId":unacknowledged["params"]["completionId"],"disposition":"stored"
@@ -9757,17 +9760,20 @@ async fn assert_shared_completion_deletion(
         refused["error"].to_string().contains("session_deleted"),
         "{refused}"
     );
+    assert!(
+        !stale_journal.exists(),
+        "an old ACK must not recreate its journal"
+    );
+    assert!(
+        !transcript.exists(),
+        "the old runtime must not recreate its history"
+    );
+    assert_eq!(
+        fs::read(transcript.with_extension("completions.json")).unwrap(),
+        binding_after_delete,
+        "an old ACK must preserve the permanent deletion decision"
+    );
     stale.shutdown().await;
-    assert_eq!(
-        fs::read(&stale_journal).unwrap(),
-        journal_after_delete,
-        "a real old ACK must not settle or replace the deleted Session's journal"
-    );
-    assert_eq!(
-        fs::read(&transcript).unwrap(),
-        history_after_delete,
-        "the old runtime must not append to a deleted Session"
-    );
     let mut observer = spawn_shared_history_client(workspace);
     initialize_task_completions(&mut observer).await;
     let (_, refused) = observer

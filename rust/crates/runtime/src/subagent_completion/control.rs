@@ -82,15 +82,7 @@ impl CompletionJournal {
             .lock()
             .map_err(|_| "completion journal poisoned")?;
         if state.deleted.is_none() {
-            let shared_history = self.writer.has_history()?;
-            let _write = if shared_history {
-                self.writer.write()?
-            } else {
-                self.writer.purge_write()?
-            };
-            if !shared_history && state.active_trace.is_some() {
-                return Err("trace_still_active".into());
-            }
+            let _write = self.writer.write()?;
             let deletion = super::storage::Deletion {
                 session_id: &state.session_id,
                 cwd: &state.cwd,
@@ -98,16 +90,7 @@ impl CompletionJournal {
                 cleanup_id,
                 store_root: self.store_root.as_deref(),
             };
-            if shared_history {
-                super::storage::mark_deleted(self.fs.as_ref(), &self.transcript, &deletion)?;
-            } else {
-                super::storage::purge(
-                    self.fs.as_ref(),
-                    &self.transcript,
-                    &deletion,
-                    Some(&self.path),
-                )?;
-            }
+            super::storage::mark_deleted(self.fs.as_ref(), &self.transcript, &deletion)?;
 
             // Retire before releasing the same mutex used by terminal callbacks.
             self.writer.retire();
@@ -161,13 +144,6 @@ impl CompletionJournal {
             if !fs.fenced_locks() {
                 return Err("completion_storage_exclusion_unavailable".into());
             }
-            let shared_history = fs
-                .exists(&transcript.to_string_lossy())
-                .map_err(|e| e.to_string())?
-                && crate::session::history::is_record_history(
-                    &fs.read_snapshot(&transcript.to_string_lossy())
-                        .map_err(|e| e.to_string())?,
-                );
             let deletion = super::storage::Deletion {
                 session_id,
                 cwd,
@@ -175,13 +151,8 @@ impl CompletionJournal {
                 cleanup_id,
                 store_root,
             };
-            if shared_history {
-                let _write = SessionWriter::commit_lock(fs.as_ref(), transcript)?;
-                super::storage::mark_deleted(fs.as_ref(), transcript, &deletion)?;
-            } else {
-                let _write = SessionWriter::purge_lock(fs.as_ref(), transcript)?;
-                super::storage::purge(fs.as_ref(), transcript, &deletion, None)?;
-            }
+            let _write = SessionWriter::commit_lock(fs.as_ref(), transcript)?;
+            super::storage::mark_deleted(fs.as_ref(), transcript, &deletion)?;
         }
         crate::session_cleanup::resume(fs, transcript)?;
         Ok(json!({"cleanupId": cleanup_id, "disposition": "purged", "storageRef": storage_ref}))

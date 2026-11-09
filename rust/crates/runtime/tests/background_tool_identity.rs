@@ -271,17 +271,15 @@ fn background_exit_after_external_session_deletion_retires_its_monitor() {
         None,
     )
     .unwrap();
-    let history = std::fs::read(&path).unwrap();
-    let journals: Vec<_> = std::fs::read_dir(path.with_extension("completions"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .map(|path| {
-            let bytes = std::fs::read(&path).unwrap();
-            (path, bytes)
-        })
-        .collect();
-    assert_ne!(journals, [] as [(std::path::PathBuf, Vec<u8>); 0]);
+    wait_for(
+        || !path.exists(),
+        "cleanup while the runtime and native child remain alive",
+    );
+    assert!(!path.with_extension("completions").exists());
+    assert!(
+        !root.join("release").exists(),
+        "the child is still executing"
+    );
     std::fs::write(root.join("release"), b"release").unwrap();
     wait_for(
         || {
@@ -295,10 +293,14 @@ fn background_exit_after_external_session_deletion_retires_its_monitor() {
         std::fs::read(root.join("effect")).unwrap(),
         b"independent native write completed"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), history);
-    for (path, bytes) in journals {
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
-    }
+    assert!(
+        !path.exists(),
+        "a late background exit must not recreate history"
+    );
+    assert!(
+        !path.with_extension("completions").exists(),
+        "a late callback must not recreate its journal"
+    );
     session.close_persistence();
     drop(journal);
     drop(tasks);

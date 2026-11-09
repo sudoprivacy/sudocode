@@ -999,7 +999,7 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/github_asset_auth_acceptance.py": "15d6174299b2450b1f3396a33484020b1732fa6006fb629fce99b26a7b722758",
+        "e2e/local-acceptance/github_asset_auth_acceptance.py": "4e6cbb4bd810263cf340e459ac07d2f0b1120526034078bfc29eeda2f2d3af2f",
         "e2e/local-acceptance/host_lease_acceptance.py": "8928b11c2448258f0ee0fbf6a9713aa8a71c5dddb4e0485b7c90ac23f903c9ba",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
@@ -1069,7 +1069,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'd4911ad59da55607826c1b378c23aa4b8bd23db472063df0f7781d381a7046f7', 'native-context': 'd499820b45ff17c6683f6f830b96022fbe6a397d3be716d8fb69bd80a322ee93'}
+    expected = {'native-release': '18d3cfe72bdedd754f24a87ee04a214da7ca91ca8a77150d36512767c293b7e4', 'native-context': 'ec3ab78ebad05f79ba80d257a62a1676832cad1cf3da23975751d355828cf993'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

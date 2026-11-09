@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import zipfile
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -170,9 +172,15 @@ def main():
     protoc = profiles.cohost_protoc()
     if protoc is not None:
         folder = protoc.parent.parent
+        # The existing native guard copies only the version-verified executable
+        # into isolated homes. A cached original ZIP is not part of its contract.
+        # Repackage those exact bytes for the controlled transport/extract test.
+        protoc_archive = io.BytesIO()
+        with zipfile.ZipFile(protoc_archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr('bin/' + protoc.name, protoc.read_bytes())
         assets.append({"repository": "protocolbuffers/protobuf", "tag": "v3.20.2",
                        "filename": "protoc-3.20.2-" + folder.name + ".zip",
-                       "body": (folder / "protoc.zip").read_bytes()})
+                       "body": protoc_archive.getvalue()})
     workflow_scope()
     token = "controlled-asset-token-" + uuid.uuid4().hex
     results = []
@@ -273,6 +281,8 @@ helper.run_command([sys.executable, sys.argv[2], sys.argv[3]], Path(sys.argv[4])
         assert json.loads(probe_result.read_text()) == {"credentialNamesPresent": ["GH_TOKEN", "GITHUB_TOKEN"]}
     (output / "receipt.json").write_text(json.dumps({"passed": True, "cases": results,
         "workflowTokenScopedToPreparation": True, "realHttpsViaPrivateConnectProxy": True,
+        "nextestArchiveFixture": "original checksum-pinned archive",
+        "protocArchiveFixture": "controlled ZIP of the existing version-verified executable" if protoc is not None else None,
         "publicGithubRequestMade": False, "productionRequestMade": False}, indent=2) + "\n", encoding="utf-8")
     print("PASS: authenticated metadata/binary APIs, public access, redirect stripping, three real HTTP refusals, "
           "cold pinned tool preparation and credential-free native subprocess; workflow token is preparation-only")

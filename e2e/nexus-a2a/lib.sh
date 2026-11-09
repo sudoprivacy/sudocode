@@ -218,9 +218,26 @@ grpcurl_bin() {
     *) arch=x86_64 ;;
   esac
   mkdir -p "$(dirname "$cache")"
-  local url="https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_${os}_${arch}.${suffix}"
+  # Immutable public release asset IDs avoid the release-page download gateway.
+  # SHA-256 pins below are the publisher's v1.9.4 archive digests.
+  local asset digest
+  case "${os}_${arch}" in
+    linux_arm64) asset=538422789; digest=ad66227d90631da5428b4a5ccf28d63846f0f15649d8b2367df044a59edbb617 ;;
+    linux_x86_64) asset=538422736; digest=97e13d58d2733a0e62cd2571d1d5f0c02823f0d25282f08bddedf1ad9c5d1736 ;;
+    osx_arm64) asset=538422750; digest=e0df111350acf8ee38f453f4e97e0474cfe1a987ee0c368ebe5383e6a4bccf25 ;;
+    osx_x86_64) asset=538422786; digest=0c1b24a82097862027af6abe88f362db73e4846859a3ceda2dd466e4dc971a06 ;;
+    windows_arm64) asset=538422748; digest=f42f6646bc259989cc8e8b7ecb3b987456ea24dd103361bcabb61534f2c77189 ;;
+    windows_x86_64) asset=538422735; digest=412dbe98dc6f3fddfbdc15db061768495d3b4c6ee24de998c83c36f79857680d ;;
+    *) echo "!! no pinned grpcurl archive for ${os}_${arch}" >&2; return 1 ;;
+  esac
+  local url="https://api.github.com/repos/fullstorydev/grpcurl/releases/assets/${asset}"
   local download="$cache.dl.$suffix"
-  curl -fsSL --retry 3 -o "$download" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
+  curl -fsSL --retry 3 -H 'Accept: application/octet-stream' -o "$download" "$url" \
+    || { echo "!! could not fetch pinned grpcurl ${version} ${os}_${arch}: $url" >&2; return 1; }
+  local python
+  python="$(python3_bin)" || return 1
+  "$python" -c 'import hashlib,pathlib,sys; archive=pathlib.Path(sys.argv[1]); actual=hashlib.file_digest(archive.open("rb"),"sha256").hexdigest(); assert actual == sys.argv[2], f"grpcurl archive SHA-256 mismatch: {archive.name}: {actual}"' "$(native_path "$download")" "$digest" \
+    || return 1
   if [ "$suffix" = zip ]; then
     # git bash ships GNU tar (no zip); PowerShell's Expand-Archive is always
     # there and requires a .zip suffix plus Windows paths.

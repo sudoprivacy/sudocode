@@ -73,6 +73,7 @@ def nexus_proto_root():
 
 
 def run(args, root):
+    assert args.grpcurl.is_file(), f'Expected an installed grpcurl executable, got: {args.grpcurl}'
     grpcurl_version = subprocess.check_output([str(args.grpcurl), '--version'],
         stderr=subprocess.STDOUT, text=True, timeout=5).strip()
     if args.daemon is None:

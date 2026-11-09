@@ -23,7 +23,7 @@ async function main(){
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'scode-receiver-owner-'));
   const config=path.join(directory,'runtime.json');fs.writeFileSync(config,'{}');
   const sessionId=path.basename(directory);
-  const original=originalProcess();let lease;
+  const original=originalProcess();let lease,completed=false;
   try{
     const identity=await captureReceiverOwner(original.child.pid);
     assert.equal(identity.pid,original.child.pid);assert.match(identity.createdFiletime100ns,/^[0-9]+$/);
@@ -100,7 +100,9 @@ async function main(){
       host.send('SIGTERM');
       const refusedDeadline=Date.now()+12000;
       while(!failureStderr.includes('Shutdown refused; cleanup UNKNOWN')){
-        assert.ok(Date.now()<refusedDeadline,failureStderr);await delay(30);
+        assert.ok(Date.now()<refusedDeadline,JSON.stringify({failureStderr,hostExit:host.exitCode,hostSignal:host.signalCode,
+          fixture:fs.existsSync(failureLog)?fs.readFileSync(failureLog,'utf8'):null,
+          audit:fs.existsSync(failureAudit)?fs.readFileSync(failureAudit,'utf8'):null}));await delay(30);
       }
       assert.equal(disconnected,false,'Cleanup UNKNOWN must not close MCP and invite frontend disposal');
       assert.equal(host.exitCode,null,'Graceful signal must retain the receiver process');
@@ -118,10 +120,12 @@ async function main(){
       if(host.exitCode===null&&host.signalCode===null)host.kill('SIGKILL');
       await deadline(hostClosed);await guarded.close();
     }
+    completed=true;
   }finally{
     await lease?.close();await original.close();
     assert.equal(path.dirname(directory),path.resolve(os.tmpdir()));assert.ok(path.basename(directory).startsWith('scode-receiver-owner-'));
-    fs.rmSync(directory,{recursive:true,force:true});
+    if(completed)fs.rmSync(directory,{recursive:true,force:true});
+    else console.error('Failed process evidence retained at '+directory);
   }
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;});

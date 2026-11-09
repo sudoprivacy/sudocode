@@ -51,9 +51,23 @@ def api_fixture(directory, expected_token, assets):
     if openssl is None:
         raise RuntimeError("The native TLS credential guard requires the existing OpenSSL tool")
     cert, key = directory / "tls.crt", directory / "tls.key"
+    configuration = directory / "openssl.cnf"
+    configuration.write_text('''[req]
+distinguished_name=dn
+x509_extensions=server
+prompt=no
+[dn]
+CN=api.github.com
+[server]
+basicConstraints=critical,CA:TRUE
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
+keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign,cRLSign
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:api.github.com,DNS:assets.invalid
+''', encoding="utf-8")
     subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                    "-subj", "/CN=api.github.com", "-addext", "basicConstraints=critical,CA:TRUE",
-                    "-addext", "subjectAltName=DNS:api.github.com,DNS:assets.invalid",
+                    "-config", str(configuration),
                     "-keyout", str(key), "-out", str(cert)],
                    check=True, capture_output=True, timeout=30, env=clean_environment())
     state = {"requests": [], "authenticated": True}

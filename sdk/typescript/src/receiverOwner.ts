@@ -50,7 +50,7 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
   const child = spawn(windowsPowerShell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(windowsProcessOwnerSource, 'utf16le').toString('base64')],
   { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-  let buffer = '', stderr = '', settled = false, closing = false;
+  let buffer = '', stderr = '', settled = false, closing = false, qualified = false;
   let finish!: (result: ReceiverOwnerEnd) => void;
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };
@@ -92,7 +92,7 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
               || value.phase !== (request.mode === 'capture' ? 'captured' : 'ready')) {
             throw new Error('Owner monitor returned a different identity or operation');
           }
-          clearTimeout(startup); ready(Object.freeze(value.identity));
+          qualified = true; clearTimeout(startup); ready(Object.freeze(value.identity));
         } else if (value.phase === 'ended' && ['owner_exited', 'receiver_exited', 'channel_closed'].includes(value.reason)) {
           end({ reason: value.reason });
         } else throw new Error(`Owner monitor refused: ${value.error ?? 'invalid protocol'}`);
@@ -113,6 +113,10 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
     // selected owner, a PID discovered later, an original server or a peer.
     child.kill();
     if (!await wait(2000)) throw new ReceiverOwnerCleanupUnknownError('Owned monitor exit unobserved; no replacement receiver permitted');
+    // Windows PowerShell may invoke its compiler while Add-Type initializes.
+    // Readiness proves that synchronous bootstrap completed. Killing an
+    // unqualified helper cannot prove any bootstrap descendant also exited.
+    if (!qualified) throw new ReceiverOwnerCleanupUnknownError('Monitor bootstrap interrupted; descendant cleanup UNKNOWN; no replacement receiver permitted');
   })();
   return { initialized, ended, close, pid: child.pid };
 }

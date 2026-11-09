@@ -33,6 +33,8 @@ the lock is released after the owned receiver and monitor close successfully.
 The monitor requests synchronization and limited query access, never termination
 rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
 used from the OS installation, with no Python/psutil or native Node addon needed.
+If qualification must forcibly interrupt PowerShell's compiler bootstrap,
+descendant cleanup remains UNKNOWN and the receiver lock is retained.
 
 MCP initialization remains independent of owner qualification and ACP startup;
 tools refuse as `not_submitted` until ready. Once bound, the existing shared

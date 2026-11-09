@@ -8,6 +8,7 @@ import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBin
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
+import { captureReceiverOwner } from './receiverOwner';
 
 interface Manifest {
   sourceCommit: string;
@@ -40,6 +41,7 @@ function verify(): void {
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals:true, options: {
     config: { type: 'string' }, help: { type: 'boolean' }, version: { type: 'boolean' },
+    'capture-receiver-owner': { type: 'string' },
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
@@ -57,6 +59,7 @@ async function main(): Promise<void> {
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
+      + 'scode-acp-bridge --capture-receiver-owner PID  (read-only Windows identity; place once in private config receiverOwner)\n'
       + 'scode-acp-bridge --verify | --version\n'
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
       + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
@@ -78,6 +81,11 @@ async function main(): Promise<void> {
     return;
   }
   if (values.verify) { verify(); return; }
+  if (values['capture-receiver-owner'] !== undefined) {
+    if (Object.keys(values).some(key => key !== 'capture-receiver-owner')) throw new Error('Select one capture mode');
+    console.log(JSON.stringify(await captureReceiverOwner(Number(values['capture-receiver-owner']))));
+    return;
+  }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
   if(values['install-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','install-codex','command-entry'].includes(key)))throw new Error('Select one installation mode');

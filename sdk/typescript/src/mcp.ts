@@ -9,11 +9,15 @@ import { registerScodeMcpTools } from './mcpTools';
 import { registerCommandShutdown } from './lifecycle';
 import { connectCodexCallback, type CodexCallback, type CodexCallbackConfig } from './codexCallback';
 import { CodexCleanupUnknownError } from './codexConnection';
+import { acquireReceiverOwner, validateReceiverOwner, type ReceiverOwnerIdentity, type ReceiverOwnerLease } from './receiverOwner';
 
 export interface ScodeMcpConfig extends ScodeAcpConfig {
   version: 1;
   auditLog: string;
   codexCallback?: CodexCallbackConfig;
+  /** Optional binding for a receiver attached to an existing Windows frontend.
+   * SID/callback identity stays in this same config, never in a guard sidecar. */
+  receiverOwner?: ReceiverOwnerIdentity;
   /** The MCP client (Claude Code) is the agent: peer messages arrive as
    * `notifications/claude/channel` events instead of turns of the scode session. */
   claudeChannel?: ClaudeChannelConfig;
@@ -38,6 +42,7 @@ function readConfig(file: string): ScodeMcpConfig {
     throw new Error('MCP config requires version:1, an existing acpSessionId and an absolute auditLog');
   }
   const channel = config.claudeChannel;
+  if (config.receiverOwner !== undefined) validateReceiverOwner(config.receiverOwner);
   if (channel && (!['allowlist', 'node-namespace'].includes(channel.peerPolicy)
       || (channel.peerPolicy === 'allowlist' && (!Array.isArray(channel.peers) || !channel.peers.length
         || channel.peers.some(peer => typeof peer !== 'string' || !peer)))
@@ -64,6 +69,7 @@ export async function runScodeMcp(file: string, lifecycle: {
   let scode: ScodeConnection | undefined;
   let callback: CodexCallback | undefined;
   let ownerTask: Promise<void> | undefined;
+  let ownerLease: ReceiverOwnerLease | undefined;
   let ownerError: string | undefined;
   let transportReady = false;
   let observed: { updates: unknown[]; bytes: number; truncated: boolean } | undefined;
@@ -109,6 +115,16 @@ export async function runScodeMcp(file: string, lifecycle: {
     // Only this already-bound session may reconnect. A command submitted on a
     // dead connection is never replayed; the callback's durable inbox survives.
     ownerTask = (async () => {
+      if (config.receiverOwner) {
+        ownerLease = await acquireReceiverOwner(config.receiverOwner, file, abort.signal);
+        audit({ phase: 'receiver_owner_bound', identity: config.receiverOwner, monitorPid: ownerLease.monitorPid });
+        void ownerLease.ended.then(result => {
+          // A monitor error means UNKNOWN, never proof that the frontend died.
+          try { audit({ phase: 'receiver_owner_ended', ...result }); }
+          catch (error) { process.stderr.write(`Owner observation persistence failed: ${String(error)}\n`); }
+          void stop().catch(error => process.stderr.write(`${String(error)}\n`));
+        });
+      }
       let retryMs = 5000;
       while (!abort.signal.aborted) {
         let candidate: ScodeConnection | undefined;
@@ -206,8 +222,13 @@ export async function runScodeMcp(file: string, lifecycle: {
     for (const message of early.splice(0)) toChannel(message);
     await finished;
   } finally {
-    await stop();
-    removeShutdown();
-    process.stdin.removeListener('end', onEof);
+    try { await stop(); }
+    finally {
+      try { await ownerLease?.close(); }
+      finally {
+        removeShutdown();
+        process.stdin.removeListener('end', onEof);
+      }
+    }
   }
 }

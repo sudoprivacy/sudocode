@@ -12,6 +12,34 @@ Linux ARM64 (including DGX Spark), Linux x64, macOS and Windows use the same
 JavaScript payload. CI runs actual stdio/package workflows on these platforms;
 a new machine still needs its own scode, credential and transport acceptance.
 
+## Receiver lifetime attached to an existing Windows frontend
+
+For a fixed-session receiver which must retire with one original frontend,
+capture its identity with `node dist/server.cjs --capture-receiver-owner PID`.
+This read-only command returns `platform`, `pid`, decimal-string
+`createdFiletime100ns` and `exe`. Place that object in `receiverOwner` in the
+same private runtime config as `acpSessionId` and `codexCallback.threadId`.
+Run the ordinary `--config` entry. There is no second launcher, identity
+sidecar, repeated PID probe or application-maintained heartbeat.
+
+The shared adapter verifies the exact identity and holds the original Windows
+process handle. A timeout during initial qualification reports liveness UNKNOWN;
+once ready, only the kernel exit event proves that the original owner exited.
+Monitor failure is separately recorded and closes the receiver without claiming
+owner exit. It never adopts a replacement PID. A per-canonical-config named pipe
+prevents duplicate receivers and is released only after owned monitor cleanup.
+The monitor requests synchronization and limited query access, never termination
+rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
+used from the OS installation, with no Python/psutil or native Node addon needed.
+
+MCP initialization remains independent of owner qualification and ACP startup;
+tools refuse as `not_submitted` until ready. Once bound, the existing shared
+same-SID connection recovery handles transport failure. Process lifetime,
+durable inbox delivery, native acceptance and model completion remain distinct.
+Approval settings remain the responsibility of the original foreground launcher;
+this observer does not set or authorize them. This option is Windows-only. The
+global autojoin owner still follows native-root inventory, not one frontend PID.
+
 ## Existing-thread native queue ingress
 
 For an explicitly known legacy thread without a reachable native socket,

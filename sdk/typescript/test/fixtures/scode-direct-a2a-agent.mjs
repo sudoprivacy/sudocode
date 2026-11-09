@@ -3,7 +3,6 @@ import { appendFileSync, readFileSync, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
 
 // Protocol fixture only. Real engine/policy/mailbox and zero-inference proofs
 // belong to sudocode's stdio acceptance, not this Hydra transport smoke.
@@ -117,15 +116,6 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
-  .onRequest(acp.methods.agent.session.close, () => {
-    if (scenario === 'cleanup-unknown') {
-      // A bounded real descendant retains stderr past the close deadline.
-      // The direct child's exit alone cannot prove pipe/descendant cleanup.
-      const child=spawn(process.execPath,['-e','setTimeout(()=>{},4000)'],
-        {windowsHide:true,stdio:['ignore','ignore',process.stderr]});
-      log({method:'cleanup-holder',pid:child.pid});child.unref();
-    }
-    return {};
-  });
+  .onRequest(acp.methods.agent.session.close, () => ({}));
 const connection = app.connect(acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
 await connection.closed;

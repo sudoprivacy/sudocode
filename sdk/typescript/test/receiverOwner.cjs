@@ -74,16 +74,21 @@ async function main(){
       console.log('PASS packaged MCP: one config/SID/guard; real owner exit closes receiver');
     }finally{await client.close();await owner.close();}
 
-    // Full packaged MCP + actual ACP child cleanup refusal. The bounded
-    // stderr holder is real, not a replacement close function or fake result.
+    // Full packaged MCP + real Windows compiler-bootstrap failure. A regular
+    // file is not a temporary directory. This environment is child-local;
+    // there is no installed policy change or replacement close function.
+    // A process ending before bootstrap_complete is deliberately UNKNOWN:
+    // observing that helper alone does not reconcile compiler descendants.
     const guarded=originalProcess(),failureConfig=path.join(directory,'cleanup-config.json');
     const failureLog=path.join(directory,'cleanup-fixture.jsonl'),failureAudit=path.join(directory,'cleanup-audit.jsonl');
     const failureIdentity=await captureReceiverOwner(guarded.child.pid),failureSid=sessionId+'-cleanup';
+    const invalidTemp=path.join(directory,'not-a-temp-directory');fs.writeFileSync(invalidTemp,'regular file');
     fs.writeFileSync(failureConfig,JSON.stringify({version:1,
-      scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs'),'cleanup-unknown'],
+      scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs')],
       workspace:directory,acpSessionId:failureSid,auditLog:failureAudit,closeTimeoutMs:200,
       receiverOwner:failureIdentity,env:{HYDRA_DIRECT_FIXTURE_JOURNAL:failureLog}}));
-    const host=fork(path.join(root,'test/fixtures/lifecycle-mcp.cjs'),[failureConfig],{silent:true,windowsHide:true});
+    const host=fork(path.join(root,'test/fixtures/lifecycle-mcp.cjs'),[failureConfig],{silent:true,windowsHide:true,
+      env:{...process.env,TEMP:invalidTemp,TMP:invalidTemp}});
     const hostClosed=once(host,'close');let failureStderr='';host.stderr.on('data',b=>{failureStderr+=String(b);});
     // The stream transport speaks the same JSON-RPC protocol in either role.
     const stream=new StdioServerTransport(host.stdout,host.stdin);
@@ -94,7 +99,8 @@ async function main(){
       const readyDeadline=Date.now()+12000;
       for(;;){
         const status=await probe.callTool({name:'scode_status',arguments:{}});
-        if(JSON.parse(status.content[0].text).closed===false)break;
+        const state=JSON.parse(status.content[0].text);
+        if(state.error){assert.equal(state.closed,true);assert.match(state.error,/bootstrap interrupted/);break;}
         assert.ok(Date.now()<readyDeadline,failureStderr);await delay(30);
       }
       host.send('SIGTERM');
@@ -110,11 +116,9 @@ async function main(){
       assert.equal(failedStatus.closed,true);assert.ok(failedStatus.error);
       await assert.rejects(acquireReceiverOwner(failureIdentity,failureSid),/EADDRINUSE/);
       host.send('SIGINT');await delay(100);assert.equal(host.exitCode,null);
-      const events=fs.readFileSync(failureLog,'utf8').trim().split('\n').map(JSON.parse);
-      assert.equal(events.filter(r=>r.method==='session/load').length,1,'No replacement ACP process');
-      const holder=events.find(r=>r.method==='cleanup-holder');assert.ok(holder);
-      assert.throws(()=>process.kill(holder.pid,0),{code:'ESRCH'},'The bounded holder actually finished');
-      console.log('PASS full MCP cleanup refusal: actual stderr-held child, endpoint and owner lock retained, no replacement');
+      assert.equal(fs.existsSync(failureLog),false,'No ACP start before owner qualification, no replacement');
+      assert.equal(guarded.child.exitCode,null,'Original frontend never signalled');
+      console.log('PASS full MCP bootstrap refusal: real compiler startup failure, endpoint and owner lock retained, no replacement');
     }finally{
       await probe.close();
       if(host.exitCode===null&&host.signalCode===null)host.kill('SIGKILL');

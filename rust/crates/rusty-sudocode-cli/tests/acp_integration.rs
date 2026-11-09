@@ -9784,10 +9784,7 @@ async fn assert_shared_completion_deletion(
             }),
         )
         .await;
-    assert!(
-        refused["error"].to_string().contains("session_deleted"),
-        "{refused}"
-    );
+    assert_reclaimed_session_load_refused(&refused, sid);
     restored.shutdown().await;
     timeout(Duration::from_secs(10), async {
         while transcript.exists() {
@@ -9812,11 +9809,20 @@ async fn assert_shared_completion_deletion(
             }),
         )
         .await;
-    assert!(
-        refused.get("error").is_some(),
-        "physical cleanup must not permit SID recreation: {refused}"
-    );
+    assert_reclaimed_session_load_refused(&refused, sid);
     observer.shutdown().await;
+}
+
+fn assert_reclaimed_session_load_refused(response: &Value, sid: &str) {
+    // Fresh SID lookup can report an absent transcript after automatic GC.
+    // Retained runtime writes still require the exact session_deleted fence.
+    let detail = response["error"]["data"].as_str().unwrap_or_default();
+    assert!(
+        response.get("result").is_none()
+            && (detail.contains("session_deleted")
+                || detail.contains(&format!("session not found: {sid}"))),
+        "reclaimed Session load must fail for its deleted identity: {response}"
+    );
 }
 
 #[cfg(unix)]

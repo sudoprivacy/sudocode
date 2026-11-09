@@ -5,9 +5,10 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
-import { shutdownCommand } from './lifecycle';
+import { installCommandShutdownSignals } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
+import { captureReceiverOwner } from './receiverOwner';
 
 interface Manifest {
   sourceCommit: string;
@@ -40,6 +41,7 @@ function verify(): void {
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals:true, options: {
     config: { type: 'string' }, help: { type: 'boolean' }, version: { type: 'boolean' },
+    'capture-receiver-owner': { type: 'string' },
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
@@ -57,6 +59,7 @@ async function main(): Promise<void> {
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
+      + 'scode-acp-bridge --capture-receiver-owner PID  (read-only Windows identity; place once in private config receiverOwner)\n'
       + 'scode-acp-bridge --verify | --version\n'
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
       + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
@@ -78,6 +81,11 @@ async function main(): Promise<void> {
     return;
   }
   if (values.verify) { verify(); return; }
+  if (values['capture-receiver-owner'] !== undefined) {
+    if (Object.keys(values).some(key => key !== 'capture-receiver-owner')) throw new Error('Select one capture mode');
+    console.log(JSON.stringify(await captureReceiverOwner(Number(values['capture-receiver-owner']))));
+    return;
+  }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
   if(values['install-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','install-codex','command-entry'].includes(key)))throw new Error('Select one installation mode');
@@ -145,9 +153,7 @@ async function main(): Promise<void> {
   if (values.scode || values.workspace || values['session-id']) throw new Error('init fields require --init');
   // The standalone package changes only the launch surface. Ownership, policy,
   // wire handling and callback behavior stay in the existing shared host.
-  for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
-    process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
-  }
+  installCommandShutdownSignals();
   if(values.codex && values['codex-owner'])throw new Error('Select one Codex entry mode');
   if(values['codex-owner'])await runCodexMcpOwner(values.config);
   else if(values.codex)await runCodexMcp(values.config,__filename);

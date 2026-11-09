@@ -9,11 +9,15 @@ import { registerScodeMcpTools } from './mcpTools';
 import { registerCommandShutdown } from './lifecycle';
 import { connectCodexCallback, type CodexCallback, type CodexCallbackConfig } from './codexCallback';
 import { CodexCleanupUnknownError } from './codexConnection';
+import { acquireReceiverOwner, validateReceiverOwner, ReceiverOwnerCleanupUnknownError, type ReceiverOwnerIdentity, type ReceiverOwnerLease } from './receiverOwner';
 
 export interface ScodeMcpConfig extends ScodeAcpConfig {
   version: 1;
   auditLog: string;
   codexCallback?: CodexCallbackConfig;
+  /** Optional binding for a receiver attached to an existing Windows frontend.
+   * SID/callback identity stays in this same config, never in a guard sidecar. */
+  receiverOwner?: ReceiverOwnerIdentity;
   /** The MCP client (Claude Code) is the agent: peer messages arrive as
    * `notifications/claude/channel` events instead of turns of the scode session. */
   claudeChannel?: ClaudeChannelConfig;
@@ -38,6 +42,7 @@ function readConfig(file: string): ScodeMcpConfig {
     throw new Error('MCP config requires version:1, an existing acpSessionId and an absolute auditLog');
   }
   const channel = config.claudeChannel;
+  if (config.receiverOwner !== undefined) validateReceiverOwner(config.receiverOwner);
   if (channel && (!['allowlist', 'node-namespace'].includes(channel.peerPolicy)
       || (channel.peerPolicy === 'allowlist' && (!Array.isArray(channel.peers) || !channel.peers.length
         || channel.peers.some(peer => typeof peer !== 'string' || !peer)))
@@ -64,6 +69,8 @@ export async function runScodeMcp(file: string, lifecycle: {
   let scode: ScodeConnection | undefined;
   let callback: CodexCallback | undefined;
   let ownerTask: Promise<void> | undefined;
+  let ownerLease: ReceiverOwnerLease | undefined;
+  let cleanupUnknown: unknown;
   let ownerError: string | undefined;
   let transportReady = false;
   let observed: { updates: unknown[]; bytes: number; truncated: boolean } | undefined;
@@ -96,9 +103,15 @@ export async function runScodeMcp(file: string, lifecycle: {
       abort.abort();
       await ownerTask;
       const results = await Promise.allSettled([callback?.close(), scode?.close()]);
-      await server.close();
       const rejected = results.find(result => result.status === 'rejected');
-      if (rejected?.status === 'rejected') throw rejected.reason;
+      if (rejected?.status === 'rejected') cleanupUnknown = rejected.reason;
+      if (cleanupUnknown) throw cleanupUnknown;
+      // Graceful shutdown includes the ownership lease, not just the MCP
+      // transport. The signal adapter must await its actual cleanup outcome.
+      await ownerLease?.close();
+      // Keep the MCP endpoint available on UNKNOWN. Closing it first can ask
+      // the frontend to dispose this process before ownership is reconciled.
+      await server.close();
     })().finally(finish);
     return stopping;
   };
@@ -109,6 +122,16 @@ export async function runScodeMcp(file: string, lifecycle: {
     // Only this already-bound session may reconnect. A command submitted on a
     // dead connection is never replayed; the callback's durable inbox survives.
     ownerTask = (async () => {
+      if (config.receiverOwner) {
+        ownerLease = await acquireReceiverOwner(config.receiverOwner, config.acpSessionId!, abort.signal);
+        audit({ phase: 'receiver_owner_bound', identity: config.receiverOwner, monitorPid: ownerLease.monitorPid });
+        void ownerLease.ended.then(result => {
+          // A monitor error means UNKNOWN, never proof that the frontend died.
+          try { audit({ phase: 'receiver_owner_ended', ...result }); }
+          catch (error) { process.stderr.write(`Owner observation persistence failed: ${String(error)}\n`); }
+          void stop().catch(error => process.stderr.write(`${String(error)}\n`));
+        });
+      }
       let retryMs = 5000;
       while (!abort.signal.aborted) {
         let candidate: ScodeConnection | undefined;
@@ -158,7 +181,8 @@ export async function runScodeMcp(file: string, lifecycle: {
           scode = undefined;
           verified = false;
           // A failed close stops this supervisor; it must not make a second owner.
-          await candidate?.close();
+          try { await candidate?.close(); }
+          catch (error) { cleanupUnknown = error; throw error; }
           // Never authenticate a failed connection's buffered channel messages
           // using the next connection's successful namespace check.
           early.length = 0;
@@ -170,6 +194,11 @@ export async function runScodeMcp(file: string, lifecycle: {
       }
     })().catch(error => {
       ownerError = String(error);
+      // The original process must remain the exclusive receiver owner when a
+      // child close was not observed. Stopping MCP must not release its lock
+      // and silently permit a replacement while that child might still live.
+      if (error instanceof ScodeCleanupUnknownError || error instanceof CodexCleanupUnknownError
+          || error instanceof ReceiverOwnerCleanupUnknownError) cleanupUnknown = error;
       process.stderr.write(`scode recovery stopped: ${ownerError}\n`);
     });
     // MCP initialization must not wait for ACP/native availability. A slow
@@ -206,8 +235,14 @@ export async function runScodeMcp(file: string, lifecycle: {
     for (const message of early.splice(0)) toChannel(message);
     await finished;
   } finally {
-    await stop();
-    removeShutdown();
-    process.stdin.removeListener('end', onEof);
+    let cleanupComplete = false;
+    try { await stop(); cleanupComplete = true; }
+    finally {
+      // Keep the same rejected shutdown registered while an OS lock remains;
+      // a later signal cannot treat an absent handler as successful cleanup.
+      if (cleanupComplete) removeShutdown();
+      else process.stderr.write('Receiver ownership retained: cleanup UNKNOWN\n');
+      process.stdin.removeListener('end', onEof);
+    }
   }
 }

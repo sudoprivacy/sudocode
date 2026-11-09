@@ -7,7 +7,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
 import { runEnrollmentCommand } from './enrollmentCommand';
-import { validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
+import { validateCodexConnectionConfig, CodexCleanupUnknownError, type CodexConnectionConfig } from './codexConnection';
+import { ScodeCleanupUnknownError } from './scodeAcp';
+import { registerCommandShutdown } from './lifecycle';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
 import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
@@ -212,6 +214,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     try {audit(entry);} catch { /* Diagnostics cannot prevent runtime cleanup. */ }
   };
   let network: CodexAutojoin | undefined;
+  let networkTask: Promise<CodexAutojoin> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
   let lastInventory: string | undefined;
@@ -221,13 +224,23 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   const stop = (reason: string) => stopping ??= (async()=>{
     observe({phase:'stopping',reason,agents:network?.status()??[]});
     clearTimeout(idleTimer);
-    listener.close();
     for(const socket of sockets)socket.destroy();
-    await network?.close();
+    // Startup may still own processes. Drain it before releasing the endpoint;
+    // an early signal must not let a second inventory owner start alongside it.
+    let owner = network;
+    if (!owner && networkTask) {
+      try { owner = await networkTask; }
+      catch (error) {
+        if (error instanceof CodexCleanupUnknownError || error instanceof ScodeCleanupUnknownError) throw error;
+      }
+    }
+    await owner?.close();
+    await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));
     observe({phase:'stopped',reason});
   })().finally(finish);
   const scheduleExit = () => {
     clearTimeout(idleTimer);
+    if (stopping) return;
     if(!sockets.size)idleTimer=setTimeout(()=>{
       void (async()=>{
         await network?.refresh();
@@ -238,6 +251,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     },5000);
   };
   const listener = createServer(socket=>{
+    if (stopping) { socket.destroy(); return; }
     sockets.add(socket);clearTimeout(idleTimer);
     socket.on('error',()=>{});
     socket.once('close',()=>{sockets.delete(socket);scheduleExit();});
@@ -262,29 +276,32 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     })().catch(()=>socket.destroy());
   });
   await claimOwner(listener, config.endpoint.port);
-  const onTerm = () => {void stop('SIGTERM');};
-  const onInt = () => {void stop('SIGINT');};
+  let removeShutdown = () => {};
   const onCrash = (error: Error, origin: string) => observe({phase:'owner_crash',origin,error:String(error)});
   try {
     audit({phase:'listening'});
-    process.once('SIGTERM',onTerm);process.once('SIGINT',onInt);
+    removeShutdown = registerCommandShutdown(() => stop('command_shutdown'));
     process.on('uncaughtExceptionMonitor',onCrash);
     scheduleExit();
-    network = await connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
+    networkTask = connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
       peerPolicy:config.peerPolicy,
-      onClosed:()=>{void stop('native_connection_closed');},
+      onClosed:()=>{void stop('native_connection_closed').catch(error=>observe({phase:'cleanup_unknown',error:String(error)}));},
       onInventory:observation=>{
         const value=JSON.stringify(observation);
         if(value!==lastInventory){observe({phase:'native_inventory',...observation});lastInventory=value;}
       },
       resolveAgent:claim=>enroll(config.enrollmentArgv,claim),
       onError:error=>observe({phase:'attachment_error',error:String(error)})});
+    network = await networkTask;
     if(stopping)await network.close();
     await finished;
   } finally {
-    await stop('owner_finally');
-    process.removeListener('SIGTERM',onTerm);process.removeListener('SIGINT',onInt);
-    process.removeListener('uncaughtExceptionMonitor',onCrash);
+    let cleanupComplete = false;
+    try { await stop('owner_finally'); cleanupComplete = true; }
+    finally {
+      if (cleanupComplete) removeShutdown();
+      process.removeListener('uncaughtExceptionMonitor',onCrash);
+    }
   }
 }
 

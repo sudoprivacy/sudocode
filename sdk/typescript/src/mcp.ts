@@ -9,7 +9,7 @@ import { registerScodeMcpTools } from './mcpTools';
 import { registerCommandShutdown } from './lifecycle';
 import { connectCodexCallback, type CodexCallback, type CodexCallbackConfig } from './codexCallback';
 import { CodexCleanupUnknownError } from './codexConnection';
-import { acquireReceiverOwner, validateReceiverOwner, type ReceiverOwnerIdentity, type ReceiverOwnerLease } from './receiverOwner';
+import { acquireReceiverOwner, validateReceiverOwner, ReceiverOwnerCleanupUnknownError, type ReceiverOwnerIdentity, type ReceiverOwnerLease } from './receiverOwner';
 
 export interface ScodeMcpConfig extends ScodeAcpConfig {
   version: 1;
@@ -107,6 +107,9 @@ export async function runScodeMcp(file: string, lifecycle: {
       if (rejected?.status === 'rejected') cleanupUnknown = rejected.reason;
       await server.close();
       if (cleanupUnknown) throw cleanupUnknown;
+      // Graceful shutdown includes the ownership lease, not just the MCP
+      // transport. The signal adapter must await its actual cleanup outcome.
+      await ownerLease?.close();
     })().finally(finish);
     return stopping;
   };
@@ -192,7 +195,8 @@ export async function runScodeMcp(file: string, lifecycle: {
       // The original process must remain the exclusive receiver owner when a
       // child close was not observed. Stopping MCP must not release its lock
       // and silently permit a replacement while that child might still live.
-      if (error instanceof ScodeCleanupUnknownError || error instanceof CodexCleanupUnknownError) cleanupUnknown = error;
+      if (error instanceof ScodeCleanupUnknownError || error instanceof CodexCleanupUnknownError
+          || error instanceof ReceiverOwnerCleanupUnknownError) cleanupUnknown = error;
       process.stderr.write(`scode recovery stopped: ${ownerError}\n`);
     });
     // MCP initialization must not wait for ACP/native availability. A slow
@@ -229,17 +233,14 @@ export async function runScodeMcp(file: string, lifecycle: {
     for (const message of early.splice(0)) toChannel(message);
     await finished;
   } finally {
-    try { await stop(); }
+    let cleanupComplete = false;
+    try { await stop(); cleanupComplete = true; }
     finally {
-      try {
-        if (cleanupUnknown && ownerLease) {
-          process.stderr.write(`Receiver ownership retained: cleanup UNKNOWN; ${String(cleanupUnknown)}\n`);
-        } else await ownerLease?.close();
-      }
-      finally {
-        removeShutdown();
-        process.stdin.removeListener('end', onEof);
-      }
+      // Keep the same rejected shutdown registered while an OS lock remains;
+      // a later signal cannot treat an absent handler as successful cleanup.
+      if (cleanupComplete) removeShutdown();
+      else process.stderr.write('Receiver ownership retained: cleanup UNKNOWN\n');
+      process.stdin.removeListener('end', onEof);
     }
   }
 }

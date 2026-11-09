@@ -68,6 +68,7 @@ public sealed class ScodeProcessOwner : IDisposable {
     }
 }
 '@
+[Console]::WriteLine('{"phase":"bootstrap_complete"}')
 $selected = $null
 $receiver = $null
 try {

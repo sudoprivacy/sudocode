@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
-import { shutdownCommand } from './lifecycle';
+import { installCommandShutdownSignals } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
 import { captureReceiverOwner } from './receiverOwner';
@@ -153,9 +153,7 @@ async function main(): Promise<void> {
   if (values.scode || values.workspace || values['session-id']) throw new Error('init fields require --init');
   // The standalone package changes only the launch surface. Ownership, policy,
   // wire handling and callback behavior stay in the existing shared host.
-  for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
-    process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
-  }
+  installCommandShutdownSignals();
   if(values.codex && values['codex-owner'])throw new Error('Select one Codex entry mode');
   if(values['codex-owner'])await runCodexMcpOwner(values.config);
   else if(values.codex)await runCodexMcp(values.config,__filename);

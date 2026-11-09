@@ -50,7 +50,7 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
   const child = spawn(windowsPowerShell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(windowsProcessOwnerSource, 'utf16le').toString('base64')],
   { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-  let buffer = '', stderr = '', settled = false, closing = false, qualified = false;
+  let buffer = '', stderr = '', settled = false, closing = false, bootstrapComplete = false;
   let finish!: (result: ReceiverOwnerEnd) => void;
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };
@@ -84,6 +84,9 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
         const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
         if (!line) continue;
         const value = JSON.parse(line);
+        if (value.phase === 'bootstrap_complete' && !bootstrapComplete) {
+          bootstrapComplete = true; continue;
+        }
         if (value.phase === 'captured' || value.phase === 'ready') {
           validateReceiverOwner(value.identity);
           if (value.identity.pid !== request.pid
@@ -92,7 +95,8 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
               || value.phase !== (request.mode === 'capture' ? 'captured' : 'ready')) {
             throw new Error('Owner monitor returned a different identity or operation');
           }
-          qualified = true; clearTimeout(startup); ready(Object.freeze(value.identity));
+          if (!bootstrapComplete) throw new Error('Owner identity arrived before compiler bootstrap completed');
+          clearTimeout(startup); ready(Object.freeze(value.identity));
         } else if (value.phase === 'ended' && ['owner_exited', 'receiver_exited', 'channel_closed'].includes(value.reason)) {
           end({ reason: value.reason });
         } else throw new Error(`Owner monitor refused: ${value.error ?? 'invalid protocol'}`);
@@ -108,15 +112,16 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
       try { return await Promise.race([closed.then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), ms); })]); }
       finally { clearTimeout(timer); }
     };
-    if (await wait(2000)) return;
-    // Only our returned helper handle may be terminated. Never signal the
-    // selected owner, a PID discovered later, an original server or a peer.
-    child.kill();
-    if (!await wait(2000)) throw new ReceiverOwnerCleanupUnknownError('Owned monitor exit unobserved; no replacement receiver permitted');
+    if (!await wait(2000)) {
+      // Only our returned helper handle may be terminated. Never signal the
+      // selected owner, a PID discovered later, an original server or a peer.
+      child.kill();
+      if (!await wait(2000)) throw new ReceiverOwnerCleanupUnknownError('Owned monitor exit unobserved; no replacement receiver permitted');
+    }
     // Windows PowerShell may invoke its compiler while Add-Type initializes.
-    // Readiness proves that synchronous bootstrap completed. Killing an
-    // unqualified helper cannot prove any bootstrap descendant also exited.
-    if (!qualified) throw new ReceiverOwnerCleanupUnknownError('Monitor bootstrap interrupted; descendant cleanup UNKNOWN; no replacement receiver permitted');
+    // Its explicit completion marker distinguishes an identity refusal from
+    // termination during compilation, including unexpected external exit.
+    if (child.pid !== undefined && !bootstrapComplete) throw new ReceiverOwnerCleanupUnknownError('Monitor bootstrap interrupted; descendant cleanup UNKNOWN; no replacement receiver permitted');
   })();
   return { initialized, ended, close, pid: child.pid };
 }

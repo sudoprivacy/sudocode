@@ -5,8 +5,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
+import shutil
 import subprocess
 import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -17,6 +22,130 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def nextest_preflight(output, profiles):
+    """Refuse real proxy failures and corrupt archives before any Cargo child."""
+    output.mkdir(parents=True)
+    seed = output / "seed"
+    seed.mkdir()
+    binary = profiles.nextest_binary(seed)
+    archive = next(path for path in binary.parent.glob("cargo-nextest-*")
+                   if path.name.endswith((".zip", ".tar.gz")))
+    homes = tempfile.TemporaryDirectory(prefix="scode-tool-homes-")
+    requests = []
+
+    class UnavailableProxy(BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            requests.append(self.path)
+            self.send_error(504, "Fixture gateway unavailable")
+
+        def log_message(self, _format, *_args):
+            pass
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), UnavailableProxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    driver = output / "actual-native-dispatcher.py"
+    driver.write_text('''import importlib.util, json, subprocess, sys
+from pathlib import Path
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+profiles = load("actual_profiles", sys.argv[1])
+helper = load("actual_commands", sys.argv[2])
+root, output = map(Path, sys.argv[3:5])
+helper.ROOT = root
+commands = []
+def execute(command, cwd, log, env=None):
+    commands.append(list(command))
+    return helper.run_command(command, cwd, log, env)
+result = {}
+try:
+    if sys.argv[5] == "native-guard":
+        directory = output / "guard"
+        policy = output / "guard-source"
+        source = Path(profiles.__file__).resolve().parents[2]
+        for relative in [".github/local-acceptance/checks.py", ".github/local-acceptance/native_guard.py",
+                         ".github/scripts/local_acceptance.py"]:
+            destination = policy / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((source / relative).read_bytes())
+        process = subprocess.run([sys.executable, str(policy / ".github/local-acceptance/native_guard.py"),
+            "--repository", str(root), "--output", str(directory), "--executable", sys.argv[6],
+            "--source-receipt", sys.argv[7], "--options", "[]"], capture_output=True, text=True)
+        assert process.returncode != 0
+        assert not list(directory.glob("*.command.json")), "The full guard started commands before its tool refusal"
+        raise RuntimeError(process.stdout + process.stderr)
+    elif sys.argv[5] == "cached-valid":
+        executable = profiles.nextest_binary(output)
+        version = subprocess.check_output([str(executable), "nextest", "--version"], text=True)
+        result.update(status="PASS", version=version.strip())
+    else:
+        profiles.run(sys.argv[5], root, output, "HEAD", execute)
+        result["status"] = "UNEXPECTED_NATIVE_PASS"
+except Exception as error:
+    result.update(status="REFUSED", error=str(error))
+finally:
+    result["commands"] = commands
+    (output / "child-result.json").write_text(json.dumps(result, indent=2))
+''', encoding="utf-8")
+    cases = []
+    try:
+        selections = [(name, state) for name in ["native-workspace", "native-resize", "native-services"]
+                      for state in ["missing", "corrupt"]] + [("cached-valid", "valid")]
+        if platform.system() in {"Windows", "Darwin"}:
+            selections += [("native-cohost", "missing"), ("native-guard", "missing")]
+        for name, state in selections:
+            directory = output / (name + "-" + state)
+            home = Path(homes.name) / (name + "-" + state)
+            root, evidence = directory / "source", directory / "evidence"
+            for path in [home, root / "rust", evidence]:
+                path.mkdir(parents=True)
+            if state != "missing":
+                cached = home / archive.relative_to(Path.home())
+                cached.parent.mkdir(parents=True)
+                shutil.copyfile(archive, cached)
+                if state == "corrupt":
+                    contents = cached.read_bytes()
+                    cached.write_bytes(bytes([contents[0] ^ 1]) + contents[1:])
+            address = f"http://127.0.0.1:{proxy.server_port}"
+            environment = {**os.environ, "HOME": str(home), "USERPROFILE": str(home),
+                           "HTTPS_PROXY": address, "https_proxy": address, "NO_PROXY": "", "no_proxy": ""}
+            before = len(requests)
+            process = subprocess.run([sys.executable, str(driver), str(Path(profiles.__file__).resolve()),
+                                      str(SOURCE / ".github/scripts/local_acceptance.py"), str(root),
+                                      str(evidence), name, str(binary), str(seed / "nextest-source.json")],
+                                     env=environment, capture_output=True, timeout=30)
+            (directory / "stdout.log").write_bytes(process.stdout)
+            (directory / "stderr.log").write_bytes(process.stderr)
+            assert process.returncode == 0, process.stderr.decode(errors="replace")
+            result = json.loads((evidence / "child-result.json").read_text())
+            assert not result["commands"], result
+            contacted = requests[before:]
+            if state == "valid":
+                assert result["status"] == "PASS" and result["version"].startswith("cargo-nextest 0.9.150 "), result
+                assert not contacted, contacted
+            else:
+                assert result["status"] == "REFUSED", result
+                assert ("504" if state == "missing" else "checksum mismatch") in result["error"], result
+                if state == "missing":
+                    assert contacted == ["github.com:443"], contacted
+                else:
+                    assert not contacted, contacted
+            cases.append({"profile": name, "cache": state, "actual_proxy_requests": contacted,
+                          "result": result, "dispatcher_commands_started": 0})
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
+        homes.cleanup()
+    print("PASS: real nextest proxy504 and corrupted archives refuse before Cargo on all three profiles; "
+          "the checksum-verified cached executable runs offline; Windows/macOS protoc proxy504 refuses "
+          "before cohost Cargo or full native guard commands", flush=True)
+    return cases
 
 
 def prepared_lint(output, root, base, helper, profiles, environment):
@@ -322,6 +451,7 @@ def run(output, executor=None):
     helper = load("lint_fixture_commands", SOURCE / ".github/scripts/local_acceptance.py")
     helper.ROOT = SOURCE
     profiles = load("lint_fixture_profiles", executor or SOURCE / ".github/local-acceptance/checks.py")
+    tool_preflight = nextest_preflight(output / "nextest-preflight", profiles)
     prepared = None
     for kind in ["workspace", "selected"]:
         root = output / kind / "source"
@@ -399,6 +529,7 @@ def run(output, executor=None):
     grouped = grouped_lint(output / "grouped", helper, profiles)
     formatting = formatting_scope(output / "formatting", helper, profiles)
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
+              "nextest_preflight": tool_preflight,
               "grouped_lint": grouped,
               "formatting": formatting,
               "prepared_lint": prepared,

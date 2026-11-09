@@ -596,8 +596,22 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces retain eight workers on hosts with at least eight logical
+Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
+resize and service dispatch verify its original pinned archive and
+executable before compilation. A missing download or corrupt cache fails before
+Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
+corrupt-archive process controls protect this ordering. Tool preparation stays
+inside the invocation's total elapsed time; test selection and retries are unchanged.
+On Windows/macOS the native guard also prepares the original protoc 3.20.2
+before its matrix and checks the real executable's version. The isolated cohost
+canary copies only that tool cache into its private HOME and runs offline;
+it retains private Git/lease state and the original feature/stamp refusals.
+Real proxy 504 controls require protoc failure before cohost Cargo or any full
+native guard command. Tool preparation and failures remain in total timing.
+Tool controls keep their isolated HOME short on Windows and run from the real
+nested policy/evidence layout, preserving raw logs without exceeding native
+executable path limits.
+Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,

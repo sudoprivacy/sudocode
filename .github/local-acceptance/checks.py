@@ -17,15 +17,30 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 
 
-def github_asset_download(repository, tag, filename, destination):
-    """Fetch one named release asset through GitHub's public metadata/binary API."""
+NATIVE_NEXTEST_CHECKS = {"native-workspace", "native-resize", "native-services"}
+
+
+def github_asset_download(repository, tag, filename, destination, token=None):
+    """Authenticate the two API requests without forwarding credentials on redirects."""
+    def api_request(url, accept):
+        origin = urllib.parse.urlsplit(url)
+        if origin.scheme != 'https' or origin.netloc != 'api.github.com':
+            raise RuntimeError('Release tool authentication requires the exact GitHub API origin')
+        request = urllib.request.Request(url, headers={'Accept': accept})
+        if token:
+            # urllib copies only normal headers to a redirected Request. Keep
+            # credentials on the original API request, including for assets
+            # whose response redirects to GitHub's separate storage origin.
+            request.add_unredirected_header('Authorization', 'Bearer ' + token)
+        return request
+
     endpoint = f'https://api.github.com/repos/{repository}'
-    request = urllib.request.Request(f'{endpoint}/releases/tags/{tag}',
-                                     headers={'Accept': 'application/vnd.github+json'})
+    request = api_request(f'{endpoint}/releases/tags/{tag}', 'application/vnd.github+json')
     with urllib.request.urlopen(request, timeout=30) as response:
         release = json.load(response)
     assets = [asset for asset in release['assets'] if asset['name'] == filename]
@@ -38,12 +53,12 @@ def github_asset_download(repository, tag, filename, destination):
     print('GITHUB_ASSET_DOWNLOAD=' + json.dumps({
         'repository': repository, 'tag': tag, 'filename': filename, 'api': download,
     }), flush=True)
-    request = urllib.request.Request(download, headers={'Accept': 'application/octet-stream'})
+    request = api_request(download, 'application/octet-stream')
     with urllib.request.urlopen(request, timeout=30) as response:
         destination.write_bytes(response.read())
 
 
-def nextest_binary(output):
+def nextest_binary(output, token=None):
     """Use a pinned, checksum-verified tool without replacing a user's installation."""
     version = '0.9.150'
     architecture = platform.machine().lower()
@@ -75,7 +90,7 @@ def nextest_binary(output):
         with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            github_asset_download('nextest-rs/nextest', f'cargo-nextest-{version}', filename, temporary_path)
+            github_asset_download('nextest-rs/nextest', f'cargo-nextest-{version}', filename, temporary_path, token=token)
             if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
                 raise RuntimeError(f'nextest archive checksum mismatch: {source}')
             os.replace(temporary_path, archive)
@@ -111,7 +126,7 @@ def nextest_binary(output):
     return executable
 
 
-def cohost_protoc():
+def cohost_protoc(token=None):
     """Prepare the original platform-pinned compiler without changing global PATH."""
     if platform.system() not in {"Windows", "Darwin"}:
         return None
@@ -123,14 +138,24 @@ def cohost_protoc():
         folder.mkdir(parents=True, exist_ok=True)
         archive = folder / "protoc.zip"
         github_asset_download('protocolbuffers/protobuf', 'v3.20.2',
-                              f'protoc-3.20.2-{archive_name}.zip', archive)
+                              f'protoc-3.20.2-{archive_name}.zip', archive, token=token)
         with zipfile.ZipFile(archive) as stream:
             stream.extractall(folder)
         executable.chmod(0o755)
-    version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    environment = {key: value for key, value in os.environ.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+    version = subprocess.check_output([str(executable), "--version"], text=True, env=environment).strip()
     if version != "libprotoc 3.20.2":
         raise RuntimeError(f"Cohost protoc version differs from the pinned 3.20.2: {version}")
     return executable
+
+
+def prepare_native_tools(names, output, token=None):
+    """Acquire only selected pinned tools before the credential-free candidate step."""
+    output.mkdir(parents=True, exist_ok=True)
+    if NATIVE_NEXTEST_CHECKS.intersection(names):
+        nextest_binary(output, token=token)
+    if "native-cohost" in names:
+        cohost_protoc(token=token)
 
 
 def nextest_options(output):
@@ -736,7 +761,7 @@ def run(name, root, output, base, execute):
         return command(str(nextest_binary(output)), "nextest", "run",
                        *nextest_options(output), *args, cwd=rust)
 
-    if name in {"native-workspace", "native-resize", "native-services"}:
+    if name in NATIVE_NEXTEST_CHECKS:
         print("NATIVE_TOOL_PREFLIGHT: verify the checksum-pinned nextest archive and executable "
               "before compilation; all original tests remain required.", flush=True)
         nextest_binary(output)
@@ -955,18 +980,18 @@ def native_guard_files():
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
+        ".github/local-acceptance/cross_platform.py": "86fc10e479332247ebbabf9cb3fe9cd6a377c5184fe367f61a11abc36d15b184",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "78508b7fe8fe5840fac4b499fc43e8e42bbb2250e53fdc7847e0bc8eef14ced6",
+        ".github/local-acceptance/native_guard.py": "7e58bdf6bba6a14a99777da6fcb2a2975f523b94548189522ea238119923d17b",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "4ef0d9ac543bf5c3ede6bb9ba94090cc20ab318d0b3b701743ad235bafe01500",
+        ".github/scripts/local_acceptance.py": "c5b4b87b3c616e21709e27712f9106f9f107613cd6841d5d75dfc0af343b1408",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
-        ".github/workflows/local-acceptance.yml": "18837b5fa7635f74a65af6645a15a8e0bb5dd9b80434a8cac3c800c519ca6d7d",
+        ".github/workflows/local-acceptance.yml": "27676e700ed28f3bee63285d75fb49cf8bcbcb96e5dbbc6be84044d40363f5bc",
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
@@ -974,6 +999,7 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
+        "e2e/local-acceptance/github_asset_auth_acceptance.py": "15d6174299b2450b1f3396a33484020b1732fa6006fb629fce99b26a7b722758",
         "e2e/local-acceptance/host_lease_acceptance.py": "8928b11c2448258f0ee0fbf6a9713aa8a71c5dddb4e0485b7c90ac23f903c9ba",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
@@ -1071,7 +1097,7 @@ def guard_tool_source(root, policy_ref):
                  if isinstance(node, ast.FunctionDef) and node.name in {"github_asset_download", "nextest_binary"}]
     if sorted(node.name for node in functions) != ["github_asset_download", "nextest_binary"]:
         raise RuntimeError("Protected GitHub downloader and nextest_binary must each have one definition before building the guard image")
-    prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
+    prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.parse, urllib.request, zipfile\n"
               "from pathlib import Path\n\n")
     main = '''
 

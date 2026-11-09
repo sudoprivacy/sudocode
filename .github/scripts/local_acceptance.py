@@ -1002,6 +1002,10 @@ def run_command(command, cwd, log, env=None):
     environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
+    # Neither ambient credentials, SDK discovery nor per-command overrides may
+    # pass GitHub API authority to candidate builds, tests or product processes.
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        environment.pop(name, None)
     command = [shutil.which(str(command[0])) or str(command[0]), *map(str, command[1:])]
     started = time.monotonic()
     priorities = {}

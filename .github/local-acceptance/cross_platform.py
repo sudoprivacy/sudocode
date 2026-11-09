@@ -4,6 +4,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
+
+
+# Only the separate trusted preparation step receives GitHub API credentials.
+# Consume both names before loading helpers or launching even tool subprocesses.
+tool_tokens = [os.environ.pop(name, None) for name in ("GH_TOKEN", "GITHUB_TOKEN")]
 
 
 def load(name, path):
@@ -32,6 +38,14 @@ root, output = Path.cwd(), Path(os.environ["ACCEPTANCE_OUTPUT"])
 for name in native_checks:
     if not name.startswith("native-"):
         raise RuntimeError("Only native profiles may execute in the complementary CI job")
+
+if sys.argv[1:] == ["--prepare-tools"]:
+    checks.prepare_native_tools(native_checks, output / "tool-preparation",
+                                token=next((token for token in tool_tokens if token), None))
+    raise SystemExit(0)
+if sys.argv[1:] or any(tool_tokens):
+    raise RuntimeError("GitHub API credentials belong only to the separate --prepare-tools step")
+del tool_tokens
 
 if os.environ.get("GITHUB_WORKSPACE"):
     layout_module = load("native_cache_layout", trusted / ".github/local-acceptance/cache_layout.py")

@@ -818,18 +818,15 @@ fn exec_env_prefix(dir: &str) -> String {
     cmd
 }
 
-/// A throwaway config home under `parent`, seeded from the real one, for a
-/// spawned `scode` that has no [`TestEnv`] to get one from.
+/// A fresh config home for credential-free CLI subcommands outside [`TestEnv`].
 ///
 /// Not every `scode` in the suite comes from `TestEnv`: a few files build their
 /// own `Command` for read-only subcommands. Those inherit the environment,
 /// which points at the developer's real `~/.nexus/sudocode` — and `scode`
-/// writes there: `/config` with no section opens an interactive editor over
-/// `settings.json` and `sudocode.json`. A live run was rewriting both
-/// mid-suite, losing `auth_profile` and repointing every model at a different
-/// proxy account, after which later tests billed an account the developer had
-/// not selected and failed against a routing group it cannot reach — as
-/// timeouts, with no mention of auth, moving between runs like flakes.
+/// writes there. These subcommands need neither the developer's credentials nor
+/// their preferences, which may belong to another CLI version. Copying those
+/// files made memory and undo acceptance fail on stale operator configuration.
+/// Tests that talk to a model use [`TestEnv`]'s separate live credential copy.
 ///
 /// Per call, under the caller's own temp root, deliberately: these tests run in
 /// parallel and `scode` writes into its config home, so a single shared
@@ -838,12 +835,8 @@ fn exec_env_prefix(dir: &str) -> String {
 /// is cleaned up with the rest of that test.
 #[must_use]
 pub fn throwaway_config_home(parent: &std::path::Path) -> PathBuf {
-    let real = default_config_home();
     let dir = parent.join("scode-config-home");
     fs::create_dir_all(&dir).expect("throwaway config home should be created");
-    if real.join("sudocode.json").exists() {
-        copy_live_credentials(&real, &dir);
-    }
     dir
 }
 

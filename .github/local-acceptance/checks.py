@@ -21,6 +21,28 @@ import urllib.request
 import zipfile
 
 
+def github_asset_download(repository, tag, filename, destination):
+    """Fetch one named release asset through GitHub's public metadata/binary API."""
+    endpoint = f'https://api.github.com/repos/{repository}'
+    request = urllib.request.Request(f'{endpoint}/releases/tags/{tag}',
+                                     headers={'Accept': 'application/vnd.github+json'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    assets = [asset for asset in release['assets'] if asset['name'] == filename]
+    if release['tag_name'] != tag or len(assets) != 1:
+        raise RuntimeError(f'Expected exactly one pinned GitHub release asset: {repository}/{tag}/{filename}')
+    asset_id = assets[0]['id']
+    if not isinstance(asset_id, int) or asset_id <= 0:
+        raise RuntimeError('The pinned GitHub release returned an invalid asset identity')
+    download = f'{endpoint}/releases/assets/{asset_id}'
+    print('GITHUB_ASSET_DOWNLOAD=' + json.dumps({
+        'repository': repository, 'tag': tag, 'filename': filename, 'api': download,
+    }), flush=True)
+    request = urllib.request.Request(download, headers={'Accept': 'application/octet-stream'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        destination.write_bytes(response.read())
+
+
 def nextest_binary(output):
     """Use a pinned, checksum-verified tool without replacing a user's installation."""
     version = '0.9.150'
@@ -53,7 +75,7 @@ def nextest_binary(output):
         with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            urllib.request.urlretrieve(source, temporary_path)
+            github_asset_download('nextest-rs/nextest', f'cargo-nextest-{version}', filename, temporary_path)
             if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
                 raise RuntimeError(f'nextest archive checksum mismatch: {source}')
             os.replace(temporary_path, archive)
@@ -86,6 +108,28 @@ def nextest_binary(output):
         'version': version, 'url': source, 'archive_sha256': hashes[triplet],
         'executable_sha256': hashlib.sha256(executable_bytes).hexdigest(),
     }, indent=2))
+    return executable
+
+
+def cohost_protoc():
+    """Prepare the original platform-pinned compiler without changing global PATH."""
+    if platform.system() not in {"Windows", "Darwin"}:
+        return None
+    architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
+    archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
+    folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
+    executable = folder / "bin" / ("protoc.exe" if os.name == "nt" else "protoc")
+    if not executable.exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        archive = folder / "protoc.zip"
+        github_asset_download('protocolbuffers/protobuf', 'v3.20.2',
+                              f'protoc-3.20.2-{archive_name}.zip', archive)
+        with zipfile.ZipFile(archive) as stream:
+            stream.extractall(folder)
+        executable.chmod(0o755)
+    version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    if version != "libprotoc 3.20.2":
+        raise RuntimeError(f"Cohost protoc version differs from the pinned 3.20.2: {version}")
     return executable
 
 
@@ -491,6 +535,62 @@ def native_workspace_lint_arguments(root, base, scope):
             "--", "-D", "warnings"]
 
 
+def native_workspace_format(root, cargo, command):
+    """Keep cargo fmt --all's roots, path dependencies and editions in bounded argv."""
+    pending = [root / "rust/Cargo.toml"]
+    visited = set()
+    targets = {}
+    while pending:
+        manifest = pending.pop().resolve()
+        if manifest in visited:
+            continue
+        metadata_log = cargo("metadata", "--no-deps", "--format-version=1",
+                             "--manifest-path", str(manifest))
+        packages = json.loads(metadata_log.read_text(encoding="utf-8"))["packages"]
+        visited.update(Path(package["manifest_path"]).resolve() for package in packages)
+        for package in packages:
+            for target in package["targets"]:
+                path = str(Path(target["src_path"]).resolve())
+                edition = target["edition"]
+                if path in targets and targets[path] != edition:
+                    raise RuntimeError(f"Conflicting Rust editions for formatting target: {path}")
+                targets[path] = edition
+            for dependency in package["dependencies"]:
+                if dependency.get("path"):
+                    local = Path(dependency["path"]) / "Cargo.toml"
+                    if local.is_file() and local.resolve() not in visited:
+                        pending.append(local)
+    if not targets:
+        raise RuntimeError("No Cargo formatting targets found; formatting remains required")
+    formatter = os.environ.get("RUSTFMT") or shutil.which("rustfmt")
+    if not formatter:
+        raise RuntimeError("Native acceptance requires the active toolchain's rustfmt")
+
+    def command_units(arguments):
+        # CreateProcessW counts UTF-16 units including quoting and the final NUL.
+        return len(subprocess.list2cmdline(arguments).encode("utf-16-le")) // 2 + 1
+
+    batches = []
+    for edition in sorted(set(targets.values())):
+        prefix = [formatter, "--edition", edition, "--check"]
+        batch = prefix.copy()
+        for path in sorted(path for path, selected in targets.items() if selected == edition):
+            if command_units([*prefix, path]) > 24_000:
+                raise RuntimeError(f"Formatting target exceeds the native command budget: {path}")
+            if command_units([*batch, path]) > 24_000:
+                batches.append(batch)
+                batch = prefix.copy()
+            batch.append(path)
+        batches.append(batch)
+    print("NATIVE_FORMAT_SCOPE=" + json.dumps({
+        "cargo_target_roots": len(targets), "manifests": len(visited), "batches": len(batches),
+        "max_command_utf16_units": max(map(command_units, batches)),
+        "scope": "All Cargo targets and recursive local path dependencies; normal module/config discovery.",
+    }), flush=True)
+    for arguments in batches:
+        command(*arguments, cwd=root / "rust")
+
+
 def native_workspace_lint(root, output, base, cargo, command):
     """Run the original lint prefix; a pass alone never completes workspace acceptance."""
     if os.name == "nt" and not shutil.which("pwsh.exe"):
@@ -498,7 +598,7 @@ def native_workspace_lint(root, output, base, cargo, command):
                            "Add your existing PowerShell 7 directory to PATH, or install it with "
                            "`winget install --id Microsoft.PowerShell --exact --source winget`, "
                            "then rerun the same acceptance command. No workspace compilation started.")
-    cargo("fmt", "--all", "--check")
+    native_workspace_format(root, cargo, command)
     tests = changed_cli_test_targets(root, base)
     scope = {"tests": tests, "targets": None}
     (output / "test-scope.json").write_text(json.dumps({
@@ -635,6 +735,11 @@ def run(name, root, output, base, execute):
     def native_tests(*args):
         return command(str(nextest_binary(output)), "nextest", "run",
                        *nextest_options(output), *args, cwd=rust)
+
+    if name in {"native-workspace", "native-resize", "native-services"}:
+        print("NATIVE_TOOL_PREFLIGHT: verify the checksum-pinned nextest archive and executable "
+              "before compilation; all original tests remain required.", flush=True)
+        nextest_binary(output)
 
     if os.name == "nt" and name in NATIVE_RUST_PTY_CHECKS:
         try:
@@ -785,18 +890,8 @@ def run(name, root, output, base, execute):
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
-        if platform.system() in {"Windows", "Darwin"}:
-            architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
-            archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
-            folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
-            executable = folder / "bin" / ("protoc" + suffix)
-            if not executable.exists():
-                folder.mkdir(parents=True, exist_ok=True)
-                archive = folder / "protoc.zip"
-                urllib.request.urlretrieve(f"https://github.com/protocolbuffers/protobuf/releases/download/v3.20.2/protoc-3.20.2-{archive_name}.zip", archive)
-                with zipfile.ZipFile(archive) as stream:
-                    stream.extractall(folder)
-                executable.chmod(0o755)
+        executable = cohost_protoc()
+        if executable is not None:
             env["PROTOC"] = str(executable)
         print("Native cohost acceptance uses the workspace dev graph with daemon, model and egress features. "
               "Optimized builds and platform size budgets run on nexusd-cohost release tags.", flush=True)
@@ -862,7 +957,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "1b1b0745cb791ab6650edf2086ae876b982cc4f362056d6c97e68a75071d860b",
+        ".github/local-acceptance/native_guard.py": "78508b7fe8fe5840fac4b499fc43e8e42bbb2250e53fdc7847e0bc8eef14ced6",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
@@ -873,7 +968,7 @@ def native_guard_files():
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "18837b5fa7635f74a65af6645a15a8e0bb5dd9b80434a8cac3c800c519ca6d7d",
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
-        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
+        "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "c5c0b065991d3834cc4fbc61f286f9853e59d1251350d291285602e9ffcc69c0",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
@@ -883,15 +978,15 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "6dbdd847c991fb6695951b7fe441a0e7e76b3ea205e1f161a7e912dbae63c1e9",
+        "e2e/local-acceptance/native_lint_acceptance.py": "91cf10d403051be6394574b0a92e46e2153e1a0f8aa72965b08a8517392e8c72",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "d879d4737966b4b48446bfd82c394072eab09baa103316fdac9086b27b6f97d8",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "5242a95e8c71c7f25fa6323044dd9925b0dc6de1452986c59fd9c78d0482afe4",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
         "e2e/local-acceptance/release_acceptance.py": "a58b820d2dc74d1a1828e38f34a3606440df8f941ff9b9f22bf7b6d761c8db87",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "5bb23d7da0331f34e2a67cca3b397ce1e0940a811d511471f2941b5c4830706b",
+        "e2e/local-acceptance/run.py": "5ff76c4737b83ef65c4d4076822b61cf503acc1974bccc35bd36b0d867e2f908",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -948,7 +1043,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'c7029fba0a1c2dbe6b15be2e5adce8579f813d5ac6af31eae52eb323cf25f24a', 'native-context': 'cbb31f23fd408e95f6b464cf99eae1c3b63841fed02d168e0892902a739e4318'}
+    expected = {'native-release': 'd4911ad59da55607826c1b378c23aa4b8bd23db472063df0f7781d381a7046f7', 'native-context': 'd499820b45ff17c6683f6f830b96022fbe6a397d3be716d8fb69bd80a322ee93'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -973,9 +1068,9 @@ def guard_tool_source(root, policy_ref):
     source = subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
     functions = [node for node in ast.parse(source).body
-                 if isinstance(node, ast.FunctionDef) and node.name == "nextest_binary"]
-    if len(functions) != 1:
-        raise RuntimeError("Protected nextest_binary must have exactly one top-level definition before building the guard image")
+                 if isinstance(node, ast.FunctionDef) and node.name in {"github_asset_download", "nextest_binary"}]
+    if sorted(node.name for node in functions) != ["github_asset_download", "nextest_binary"]:
+        raise RuntimeError("Protected GitHub downloader and nextest_binary must each have one definition before building the guard image")
     prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
               "from pathlib import Path\n\n")
     main = '''
@@ -1014,7 +1109,7 @@ if __name__ == "__main__":
         **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
     }), flush=True)
 '''
-    return (prefix + ast.get_source_segment(source, functions[0]) + main).encode("utf-8")
+    return (prefix + '\n\n'.join(ast.get_source_segment(source, node) for node in functions) + main).encode("utf-8")
 
 
 def guard_image_context(root, policy_ref, context):

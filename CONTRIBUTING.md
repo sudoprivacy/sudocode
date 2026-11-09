@@ -596,8 +596,27 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces retain eight workers on hosts with at least eight logical
+Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
+resize and service dispatch verify its original pinned archive and
+executable before compilation. A missing download or corrupt cache fails before
+Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
+corrupt-archive process controls protect this ordering. Missing nextest/protoc
+archives resolve their exact tag and filename through GitHub's public release
+metadata and asset API. The existing nextest archive/executable digests and
+protoc executable version still qualify the result. This avoids failing browser
+download redirects; the canonical artifact URL in the tool receipt stays stable.
+The Docker image provisions the same protected downloader. Tool preparation stays
+inside the invocation's total elapsed time; test selection and retries are unchanged.
+On Windows/macOS the native guard also prepares the original protoc 3.20.2
+before its matrix and checks the real executable's version. The isolated cohost
+canary copies only that tool cache into its private HOME and runs offline;
+it retains private Git/lease state and the original feature/stamp refusals.
+Real proxy 504 controls require protoc failure before cohost Cargo or any full
+native guard command. Tool preparation and failures remain in total timing.
+Tool controls keep their isolated HOME short on Windows and run from the real
+nested policy/evidence layout, preserving raw logs without exceeding native
+executable path limits.
+Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
@@ -1540,6 +1559,17 @@ cargo test --workspace
 ./scripts/fmt.sh           # auto-format
 ./scripts/fmt.sh --check   # CI-equivalent check
 ```
+
+The managed native acceptance runner checks the same Cargo target roots and
+recursive local path dependencies with rustfmt batches bounded to 24,000 UTF-16
+command units. This avoids Windows' process argument limit as the workspace
+grows. Every edition, target kind, module traversal and package-local rustfmt
+configuration remains selected. Real Cargo/rustfmt controls compare formatting
+failures and exercise an oversized workspace, including failure in a later batch.
+Private enforcement homes copy the prepared nextest cache, which every reader
+still verifies against the pinned archive. The real old-checkout guard requires
+offline tool reuse and rejects a corrupted private executable while proving
+the enclosing tool cache retains its original bytes.
 
 The workspace enables `clippy::all` and `clippy::pedantic` at
 `warn` level. A few pedantic lints are allowed globally

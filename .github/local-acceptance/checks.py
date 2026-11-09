@@ -89,6 +89,29 @@ def nextest_binary(output):
     return executable
 
 
+def cohost_protoc():
+    """Prepare the original platform-pinned compiler without changing global PATH."""
+    if platform.system() not in {"Windows", "Darwin"}:
+        return None
+    architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
+    archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
+    folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
+    executable = folder / "bin" / ("protoc.exe" if os.name == "nt" else "protoc")
+    if not executable.exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        archive = folder / "protoc.zip"
+        urllib.request.urlretrieve(
+            f"https://github.com/protocolbuffers/protobuf/releases/download/v3.20.2/protoc-3.20.2-{archive_name}.zip",
+            archive)
+        with zipfile.ZipFile(archive) as stream:
+            stream.extractall(folder)
+        executable.chmod(0o755)
+    version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    if version != "libprotoc 3.20.2":
+        raise RuntimeError(f"Cohost protoc version differs from the pinned 3.20.2: {version}")
+    return executable
+
+
 def nextest_options(output):
     """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
     configuration = output / 'nextest.toml'
@@ -636,6 +659,11 @@ def run(name, root, output, base, execute):
         return command(str(nextest_binary(output)), "nextest", "run",
                        *nextest_options(output), *args, cwd=rust)
 
+    if name in {"native-workspace", "native-resize", "native-services"}:
+        print("NATIVE_TOOL_PREFLIGHT: verify the checksum-pinned nextest archive and executable "
+              "before compilation; all original tests remain required.", flush=True)
+        nextest_binary(output)
+
     if os.name == "nt" and name in NATIVE_RUST_PTY_CHECKS:
         try:
             prepared = run.prepared_native.get(name)
@@ -785,18 +813,8 @@ def run(name, root, output, base, execute):
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
-        if platform.system() in {"Windows", "Darwin"}:
-            architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
-            archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
-            folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
-            executable = folder / "bin" / ("protoc" + suffix)
-            if not executable.exists():
-                folder.mkdir(parents=True, exist_ok=True)
-                archive = folder / "protoc.zip"
-                urllib.request.urlretrieve(f"https://github.com/protocolbuffers/protobuf/releases/download/v3.20.2/protoc-3.20.2-{archive_name}.zip", archive)
-                with zipfile.ZipFile(archive) as stream:
-                    stream.extractall(folder)
-                executable.chmod(0o755)
+        executable = cohost_protoc()
+        if executable is not None:
             env["PROTOC"] = str(executable)
         print("Native cohost acceptance uses the workspace dev graph with daemon, model and egress features. "
               "Optimized builds and platform size budgets run on nexusd-cohost release tags.", flush=True)
@@ -862,7 +880,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "27d365bbf47f0bea0095f8f0a308e80849eebd62ce8f4d1cee990966f4ab6268",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "1b1b0745cb791ab6650edf2086ae876b982cc4f362056d6c97e68a75071d860b",
+        ".github/local-acceptance/native_guard.py": "78508b7fe8fe5840fac4b499fc43e8e42bbb2250e53fdc7847e0bc8eef14ced6",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
@@ -873,7 +891,7 @@ def native_guard_files():
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "18837b5fa7635f74a65af6645a15a8e0bb5dd9b80434a8cac3c800c519ca6d7d",
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
-        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
+        "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "c5c0b065991d3834cc4fbc61f286f9853e59d1251350d291285602e9ffcc69c0",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
@@ -883,7 +901,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "6dbdd847c991fb6695951b7fe441a0e7e76b3ea205e1f161a7e912dbae63c1e9",
+        "e2e/local-acceptance/native_lint_acceptance.py": "931d8bb9be646e869bce1d887840ab6d1d0e86292daec7813cf914492d6f8a5a",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d879d4737966b4b48446bfd82c394072eab09baa103316fdac9086b27b6f97d8",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",

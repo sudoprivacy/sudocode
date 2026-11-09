@@ -29,6 +29,48 @@ const MODEL_LABEL: &str = "model";
 /// Model used when the descriptor carries no `model` label.
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
+/// The model a managed agent runs: its descriptor's `model` label, or the
+/// default when it carries none.
+#[must_use]
+pub fn managed_model(desc: &runtime::spawn_task::AgentDescriptor) -> String {
+    desc.labels
+        .get(MODEL_LABEL)
+        .filter(|model| !model.is_empty())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+/// Why a managed session could not be prepared. The text is the host's
+/// refusal message; the variants are what a protocol host must tell apart.
+#[derive(Debug)]
+pub enum PrepareError {
+    /// A resume named a well-formed id its store confirmed was never
+    /// persisted. Nothing was loaded or created.
+    SessionNotFound(String),
+    /// A resume named something that is not a durable session id.
+    InvalidSessionId(String),
+    /// Any other failure; its outcome is not a definite absence.
+    Failed(String),
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotFound(message)
+            | Self::InvalidSessionId(message)
+            | Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for PrepareError {}
+
+impl From<String> for PrepareError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
 /// Prepared transcript and host resources. A renderer supplies the initial
 /// session options and adopts this into the shared `SessionEngine`.
 pub struct PreparedManagedAgent {
@@ -90,7 +132,7 @@ impl PreparedManagedAgent {
 pub fn prepare_managed_agent(
     ctx: &ManagedRuntimeContext,
     resume_id: Option<&str>,
-) -> Result<PreparedManagedAgent, String> {
+) -> Result<PreparedManagedAgent, PrepareError> {
     let desc = &ctx.desc;
     // Nothing in this daemon ticks `crons.json`: the scode scheduler is the
     // `scode cron daemon` / OS-cron path, which is a CLI process. A `CronCreate`
@@ -104,12 +146,7 @@ pub fn prepare_managed_agent(
         "this host runs the agent inside nexusd, which does not fire scode crons          — schedule the work from the cluster instead",
     );
 
-    let model = desc
-        .labels
-        .get(MODEL_LABEL)
-        .filter(|m| !m.is_empty())
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = managed_model(desc);
 
     // Through the same named constructor family the CLI uses, for the same
     // reason the engine is shared: the hosts' shapes sit next to each other in

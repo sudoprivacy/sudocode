@@ -144,10 +144,6 @@ impl HostContext {
     ///   is one; otherwise a per-agent host directory for VFS-only workspaces.
     pub fn for_managed(ctx: &crate::managed_context::ManagedRuntimeContext) -> io::Result<Self> {
         let name = &ctx.desc.name;
-        let mailbox = Arc::new(
-            runtime::mailbox::Mailbox::daemon_absolute(Arc::clone(&ctx.fs), name.clone())
-                .with_authenticated_senders(ctx.authenticated_senders),
-        );
         let shell_root = ctx
             .shell_root
             .clone()
@@ -158,7 +154,7 @@ impl HostContext {
             shell_root,
             config_root: std::env::current_dir()?,
             agent_name: Some(name.clone()),
-            mailbox: Some(mailbox),
+            mailbox: Some(ctx.mailbox()),
             require_model_mount: true,
         })
     }

@@ -98,7 +98,7 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
         .err()
         .expect("a leased session must not be resumed");
     assert_eq!(
-        refused,
+        refused.to_string(),
         "co-host: session is still running; stop it before resuming"
     );
     kernel.sys_unlock(&lease_path, &held, false).unwrap();

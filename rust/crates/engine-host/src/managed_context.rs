@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtime::fs_backend::FsLock;
+use runtime::mailbox::Mailbox;
 use runtime::spawn_task::{AgentDescriptor, KernelConvenience};
-use runtime::{FsBackend, KernelFsAccess, KernelFsBackend};
+use runtime::{FsBackend, KernelFsAccess, KernelFsBackend, NexusVfsFsBackend};
 
 /// How long a session lease outlives its last renewal; renewed every 10 s.
 pub(crate) const SESSION_LEASE_TTL_SECS: u64 = 60;
@@ -33,9 +34,9 @@ pub struct ManagedRuntimeContext {
     /// The native directory backing the workspace, when it has one; the
     /// shell runs there. `None` gives the agent a host directory of its own.
     pub(crate) shell_root: Option<PathBuf>,
-    /// Whether every conversation writer is authenticated and stamped, so
-    /// peers' senders this agent reads are verified.
-    pub(crate) authenticated_senders: bool,
+    /// The agent's conversations, over the same backend: its identity, so
+    /// every session and the host's receiver share this one instance.
+    pub(crate) mailbox: Arc<Mailbox>,
     /// Who fences a session's writers. A co-host takes the lease as the host,
     /// on its own kernel; an out-of-process agent can only take it under its
     /// own credential, on the daemon that stores the session.
@@ -71,6 +72,8 @@ impl ManagedRuntimeContext {
     ///
     /// File tools reach the kernel, not local disk: a write passes the hooks,
     /// the audit trail and the permission checks a `std::fs` write never sees.
+    /// `authenticated_senders` is the daemon's auth posture: when armed, its
+    /// stamping hook authenticates every conversation writer.
     pub fn cohost<K>(
         kernel: &Arc<K>,
         desc: &AgentDescriptor,
@@ -119,18 +122,97 @@ impl ManagedRuntimeContext {
                 }) as Arc<dyn FsLock>
             }))
         });
-        Ok(Self {
-            desc: desc.clone(),
+        Ok(Self::assemble(
+            desc,
             fs,
-            shell_root: local_directory,
+            local_directory,
             authenticated_senders,
             session_locks,
-        })
+        ))
+    }
+
+    /// An agent hosted out of process, on `client`: an already-authenticated
+    /// connection to the daemon that stores its state, resolved by the host
+    /// for this agent instance together with `desc`. `workspace_root` is the
+    /// VFS path of the agent's workspace; `shell_root` the native directory
+    /// its shell runs in, when the workspace has one.
+    ///
+    /// Refuses unless the daemon answers for the workspace over this
+    /// connection, before any session, file or model effect. The daemon
+    /// reports a refused credential as absence, so an unanswered workspace is
+    /// a context that cannot be used. There is no fallback to local disk, a
+    /// private kernel or a direct model endpoint.
+    pub fn remote(
+        desc: &AgentDescriptor,
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        workspace_root: &str,
+        shell_root: Option<PathBuf>,
+        authenticated_senders: bool,
+    ) -> Result<Self, String> {
+        let fs: Arc<dyn FsBackend> = Arc::new(NexusVfsFsBackend::for_managed_workspace(
+            client,
+            &desc.zone_id,
+            &desc.name,
+            workspace_root,
+        ));
+        match fs.stat(workspace_root) {
+            Ok(metadata) if metadata.is_dir => {}
+            Ok(_) => {
+                return Err(format!(
+                    "managed workspace {workspace_root} is not a directory"
+                ))
+            }
+            Err(error) => {
+                return Err(format!(
+                    "managed connection cannot reach workspace {workspace_root}: {error}"
+                ))
+            }
+        }
+        let lock_fs = Arc::clone(&fs);
+        let session_locks: SessionLocks = Arc::new(move |path: &str| {
+            lock_fs
+                .try_lock(path, SESSION_LEASE_TTL_SECS * 1000)
+                .map_err(|e| e.to_string())
+        });
+        Ok(Self::assemble(
+            desc,
+            fs,
+            shell_root,
+            authenticated_senders,
+            session_locks,
+        ))
+    }
+
+    fn assemble(
+        desc: &AgentDescriptor,
+        fs: Arc<dyn FsBackend>,
+        shell_root: Option<PathBuf>,
+        authenticated_senders: bool,
+        session_locks: SessionLocks,
+    ) -> Self {
+        let mailbox = Arc::new(
+            Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone())
+                .with_authenticated_senders(authenticated_senders),
+        );
+        Self {
+            desc: desc.clone(),
+            fs,
+            shell_root,
+            mailbox,
+            session_locks,
+        }
     }
 
     /// The agent instance this context is bound to.
     #[must_use]
     pub fn descriptor(&self) -> &AgentDescriptor {
         &self.desc
+    }
+
+    /// The agent's conversations: the one mailbox every session sends on
+    /// and the host receives on.
+    #[must_use]
+    pub fn mailbox(&self) -> Arc<Mailbox> {
+        Arc::clone(&self.mailbox)
     }
 }

@@ -9,6 +9,7 @@ use runtime::session_control::SessionStore;
 use runtime::HostedSessionIdentity;
 use runtime::{HookAbortSignal, Session};
 
+use crate::managed_agent::PrepareError;
 use crate::managed_context::ManagedRuntimeContext;
 
 /// Serialize initialization. Legacy transcripts retain this admission guard
@@ -69,7 +70,7 @@ pub(crate) fn prepare_session(
     resume_id: Option<&str>,
     model: &str,
     abort: HookAbortSignal,
-) -> Result<(Session, Option<SessionLease>), String> {
+) -> Result<(Session, Option<SessionLease>), PrepareError> {
     let desc = &ctx.desc;
     let fs = Arc::clone(&ctx.fs);
     let workspace = fs
@@ -86,7 +87,9 @@ pub(crate) fn prepare_session(
             .collect(),
     };
     if identity.repos.len() != desc.repos.len() {
-        return Err("co-host: repository aliases must be unique".into());
+        return Err(PrepareError::Failed(
+            "co-host: repository aliases must be unique".into(),
+        ));
     }
     let store = SessionStore::from_cwd_with(&workspace, Arc::clone(&fs))
         .map_err(|e| format!("co-host: open session store: {e}"))?
@@ -95,14 +98,24 @@ pub(crate) fn prepare_session(
     let mut session = Session::new();
     let id = resume_id.unwrap_or(&session.session_id).to_string();
     if runtime::session_control::validate_session_id(&id).is_err() {
-        return Err("co-host: resume_session_id must be a durable ID, not a path".into());
+        return Err(PrepareError::InvalidSessionId(
+            "co-host: resume_session_id must be a durable ID, not a path".into(),
+        ));
     }
     let root = store.sessions_dir().to_string_lossy();
     let lease = SessionLease::acquire(ctx, &format!("{root}/{id}"), abort)?;
     if resume_id.is_some() {
         session = store
             .load_exact(&id)
-            .map_err(|e| format!("co-host: restore session: {e}"))?
+            .map_err(|error| {
+                let message = format!("co-host: restore session: {error}");
+                match error {
+                    runtime::session_control::SessionControlError::NotFound(_) => {
+                        PrepareError::SessionNotFound(message)
+                    }
+                    _ => PrepareError::Failed(message),
+                }
+            })?
             .session;
     }
     if session.identity.is_none() {

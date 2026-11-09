@@ -217,22 +217,36 @@ impl SessionStore {
         })
     }
 
+    /// The transcript persisted under `session_id`. `NotFound` means the
+    /// backend answered that no layout holds it; a backend that could not
+    /// answer (transport, permission) is an I/O error, never "not found".
     pub fn resolve_managed_path(&self, session_id: &str) -> Result<PathBuf, SessionControlError> {
         // Current per-session-directory layout first.
         let dir_path = session_transcript_path(&self.sessions_root, session_id);
-        if self.fs.exists(&dir_path.to_string_lossy()).unwrap_or(false) {
+        if self.is_present(&dir_path)? {
             return Ok(dir_path);
         }
         // Legacy flat layout — never broken for sessions created before the migration.
         for extension in [PRIMARY_SESSION_EXTENSION, LEGACY_SESSION_EXTENSION] {
             let path = legacy_session_path_with_ext(&self.sessions_root, session_id, extension);
-            if self.fs.exists(&path.to_string_lossy()).unwrap_or(false) {
+            if self.is_present(&path)? {
                 return Ok(path);
             }
         }
         Err(SessionControlError::NotFound(
             format_missing_session_reference(session_id, &self.sessions_root),
         ))
+    }
+
+    /// Whether `path` exists, as the backend answers it. Not `exists()`: a
+    /// remote backend reads every failed stat as absence so existence cannot
+    /// leak to an unauthenticated prober, which is the wrong answer here.
+    fn is_present(&self, path: &Path) -> std::io::Result<bool> {
+        match self.fs.stat(&path.to_string_lossy()) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Completion tombstones remain addressable after native transcript deletion.

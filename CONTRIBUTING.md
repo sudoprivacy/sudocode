@@ -608,6 +608,9 @@ canary copies only that tool cache into its private HOME and runs offline;
 it retains private Git/lease state and the original feature/stamp refusals.
 Real proxy 504 controls require protoc failure before cohost Cargo or any full
 native guard command. Tool preparation and failures remain in total timing.
+Tool controls keep their isolated HOME short on Windows and run from the real
+nested policy/evidence layout, preserving raw logs without exceeding native
+executable path limits.
 Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its

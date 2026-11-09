@@ -9,6 +9,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 
@@ -31,6 +32,7 @@ def nextest_preflight(output, profiles):
     binary = profiles.nextest_binary(seed)
     archive = next(path for path in binary.parent.glob("cargo-nextest-*")
                    if path.name.endswith((".zip", ".tar.gz")))
+    homes = tempfile.TemporaryDirectory(prefix="scode-tool-homes-")
     requests = []
 
     class UnavailableProxy(BaseHTTPRequestHandler):
@@ -98,7 +100,8 @@ finally:
             selections += [("native-cohost", "missing"), ("native-guard", "missing")]
         for name, state in selections:
             directory = output / (name + "-" + state)
-            home, root, evidence = directory / "home", directory / "source", directory / "evidence"
+            home = Path(homes.name) / (name + "-" + state)
+            root, evidence = directory / "source", directory / "evidence"
             for path in [home, root / "rust", evidence]:
                 path.mkdir(parents=True)
             if state != "missing":
@@ -138,6 +141,7 @@ finally:
         proxy.shutdown()
         proxy.server_close()
         thread.join(timeout=5)
+        homes.cleanup()
     print("PASS: real nextest proxy504 and corrupted archives refuse before Cargo on all three profiles; "
           "the checksum-verified cached executable runs offline; Windows/macOS protoc proxy504 refuses "
           "before cohost Cargo or full native guard commands", flush=True)

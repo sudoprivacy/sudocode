@@ -1555,6 +1555,17 @@ cargo test --workspace
 ./scripts/fmt.sh --check   # CI-equivalent check
 ```
 
+The managed native acceptance runner checks the same Cargo target roots and
+recursive local path dependencies with rustfmt batches bounded to 24,000 UTF-16
+command units. This avoids Windows' process argument limit as the workspace
+grows. Every edition, target kind, module traversal and package-local rustfmt
+configuration remains selected. Real Cargo/rustfmt controls compare formatting
+failures and exercise an oversized workspace, including failure in a later batch.
+Private enforcement homes copy the prepared nextest cache, which every reader
+still verifies against the pinned archive. The real old-checkout guard requires
+offline tool reuse and rejects a corrupted private executable while proving
+the enclosing tool cache retains its original bytes.
+
 The workspace enables `clippy::all` and `clippy::pedantic` at
 `warn` level. A few pedantic lints are allowed globally
 (`module_name_repetitions`, `missing_panics_doc`,

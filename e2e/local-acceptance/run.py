@@ -35,6 +35,13 @@ def fixture_environment():
     environment["PYTHONIOENCODING"] = "utf-8"
     environment.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
     environment.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
+    # Keep the prepared nextest cache when isolating HOME. Every consumer still
+    # verifies its pinned archive and executable. Copy bytes so corruption
+    # controls cannot modify the enclosing cache, Git state or lease files.
+    cache = Path(".cache/sudocode-local-acceptance/tools/nextest")
+    prepared = Path.home() / cache
+    if prepared.is_dir():
+        shutil.copytree(prepared, Path(FIXTURE_HOME.name) / cache)
     environment.pop("SUDOCODE_ACCEPTANCE_HOST_LEASE", None)
     # Callers also merge this mapping into os.environ; an empty value clears
     # their inherited claim in both that path and an explicit subprocess env.

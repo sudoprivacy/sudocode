@@ -329,6 +329,120 @@ def grouped_lint(output, helper, profiles):
             "scope": "Actual production lint argv, real Cargo and Clippy. No product execution or timing claim."}
 
 
+def formatting_scope(output, helper, profiles):
+    """Exercise Cargo roots, module/config lookup and long native argv with real rustfmt."""
+    root = output / "source with spaces 格式"
+    rust = root / "rust"
+    files = {
+        "rust/Cargo.toml": '[workspace]\nresolver="2"\nmembers=["first","second"]\n',
+        "rust/first/Cargo.toml": '[package]\nname="format-first"\nversion="0.0.0"\nedition="2021"\n'
+                                 '[dependencies]\nformat-external={path="../../external"}\n'
+                                 '[features]\noptional=[]\n'
+                                 '[[test]]\nname="disabled"\npath="tests/disabled.rs"\ntest=false\n'
+                                 '[[test]]\nname="feature_gated"\npath="tests/feature_gated.rs"\nrequired-features=["optional"]\n',
+        "rust/first/src/lib.rs": 'pub mod nested;\npub fn value()->u8 {42}\n',
+        "rust/first/src/nested.rs": 'pub fn value()->u8 {42}\n',
+        "rust/first/src/main.rs": 'fn main() {}\n',
+        "rust/first/build.rs": 'fn main() {}\n',
+        "rust/first/tests/ordinary.rs": '#[test]\nfn ordinary() {}\n',
+        "rust/first/tests/disabled.rs": '#[test]\nfn disabled() {}\n',
+        "rust/first/tests/feature_gated.rs": '#[test]\nfn feature_gated() {}\n',
+        "rust/first/examples/example.rs": 'fn main() {}\n',
+        "rust/first/benches/bench.rs": 'fn main() {}\n',
+        "rust/second/Cargo.toml": '[package]\nname="format-second"\nversion="0.0.0"\nedition="2024"\n',
+        "rust/second/rustfmt.toml": 'hard_tabs = true\n',
+        "rust/second/src/lib.rs": 'pub async fn value()->u8 {42}\n',
+        "external/Cargo.toml": '[package]\nname="format-external"\nversion="0.0.0"\nedition="2018"\n'
+                               '[workspace]\n[dependencies]\nformat-leaf={path="../external-leaf"}\n',
+        "external/src/lib.rs": 'pub fn value()->u8 {42}\n',
+        "external-leaf/Cargo.toml": '[package]\nname="format-leaf"\nversion="0.0.0"\nedition="2015"\n[workspace]\n',
+        "external-leaf/src/lib.rs": 'pub fn value()->u8 {42}\n',
+    }
+    for name, contents in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    commands = []
+
+    def execute(*arguments, cwd=rust, **_kwargs):
+        log = output / "commands" / f"{len(commands):03d}.log"
+        try:
+            record = helper.run_command(arguments, cwd, log)
+        except RuntimeError:
+            record = json.loads(log.with_suffix(".command.json").read_text())
+        commands.append({**record, "log": str(log)})
+        if record["exit_code"]:
+            raise RuntimeError(f"Expected formatter refusal retained in {log}")
+        return log
+
+    def cargo(*arguments):
+        return execute("cargo", *arguments)
+
+    # Cargo supplies the reference formatting on a small multi-workspace graph.
+    cargo("fmt", "--all")
+    reference = {name: (root / name).read_bytes() for name in files if name.endswith(".rs")}
+    assert b"\t42" in reference["rust/second/src/lib.rs"], "Package-local rustfmt config was ignored"
+    profiles.native_workspace_format(root, cargo, execute)
+    diagnostics = {}
+    for name, original in reference.items():
+        path = root / name
+        path.write_bytes(original + b"\npub fn formatting_probe( )->u8{42}\n")
+        diagnostics[name] = {}
+        try:
+            for kind, invocation in {
+                "cargo": lambda: cargo("fmt", "--all", "--check"),
+                "bounded": lambda: profiles.native_workspace_format(root, cargo, execute),
+            }.items():
+                try:
+                    invocation()
+                except RuntimeError:
+                    record = commands[-1]
+                    assert record["exit_code"] != 0
+                    assert "formatting_probe" in Path(record["log"]).read_text(encoding="utf-8"), record
+                    diagnostics[name][kind] = record["exit_code"]
+                else:
+                    raise AssertionError(f"Unformatted Cargo input passed: {kind} {name}")
+        finally:
+            path.write_bytes(original)
+    long_roots = []
+    for index in range(260):
+        path = rust / "first/tests" / f"long_native_argument_{index:03d}_{'x' * 35}.rs"
+        path.write_text('#[test]\nfn native_format_probe() {}\n', encoding="utf-8")
+        long_roots.append(str(path.resolve()))
+    legacy_units = len(subprocess.list2cmdline(["rustfmt", *long_roots]).encode("utf-16-le")) // 2 + 1
+    assert legacy_units > 32_767, legacy_units
+    if os.name == "nt":
+        try:
+            cargo("fmt", "--all", "--check")
+        except RuntimeError:
+            assert "os error 206" in Path(commands[-1]["log"]).read_text(encoding="utf-8", errors="replace")
+        else:
+            raise AssertionError("Windows control did not reproduce the original oversized command")
+    else:
+        cargo("fmt", "--all", "--check")
+    first = len(commands)
+    profiles.native_workspace_format(root, cargo, execute)
+    batches = [record for record in commands[first:] if "--check" in record["command"]]
+    checked = [argument for record in batches for argument in record["command"] if argument.endswith(".rs")]
+    expected = [str((root / name).resolve()) for name in reference if not name.endswith("/nested.rs")]
+    assert sorted(checked) == sorted([*expected, *long_roots]), checked
+    assert len(batches) > 4, "The four editions did not exercise bounded splitting"
+    assert all(len(subprocess.list2cmdline(row["command"]).encode("utf-16-le")) // 2 + 1 <= 24_000 for row in batches)
+    # A later batch's real error must still fail the complete formatting gate.
+    later = Path(batches[-1]["command"][-1])
+    later.write_bytes(later.read_bytes() + b"\npub fn formatting_probe( )->u8{42}\n")
+    try:
+        profiles.native_workspace_format(root, cargo, execute)
+    except RuntimeError:
+        assert "formatting_probe" in Path(commands[-1]["log"]).read_text(encoding="utf-8")
+    else:
+        raise AssertionError("A later formatting batch failure was ignored")
+    return {"status": "PASS", "cargo_equivalent_refusals": diagnostics, "roots": len(checked),
+            "legacy_command_utf16_units": legacy_units, "bounded_batches": len(batches),
+            "later_batch_failure_preserved": True, "commands": commands,
+            "scope": "Real Cargo and rustfmt, mixed editions, recursive external path dependencies, module/config discovery and native argv limit."}
+
+
 def run(output, executor=None):
     output.mkdir(parents=True, exist_ok=False)
     parent = load("lint_fixture_environment", SOURCE / "e2e/local-acceptance/run.py")
@@ -413,9 +527,11 @@ def run(output, executor=None):
             prepared = prepared_lint(output / kind / "prepared-success", root, base, helper, profiles,
                                      {"CARGO_TARGET_DIR": os.environ["CARGO_TARGET_DIR"]})
     grouped = grouped_lint(output / "grouped", helper, profiles)
+    formatting = formatting_scope(output / "formatting", helper, profiles)
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
               "nextest_preflight": tool_preflight,
               "grouped_lint": grouped,
+              "formatting": formatting,
               "prepared_lint": prepared,
               "long_validation_and_nextest_unrun": True,
               "scope": "Actual native dispatcher, Git, Cargo and compiler warnings. Tiny enforcement fixture; no product journey coverage."}

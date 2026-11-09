@@ -139,8 +139,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         observer: &mut Option<&mut dyn RuntimeObserver>,
         turn_id: String,
     ) -> Result<std::time::Instant, RuntimeError> {
-        let blocks = self.inject_date_context(blocks);
-        let blocks = self.inject_model_context(blocks);
+        // The label is what the caller handed in. Taken after the injectors, a
+        // turn that carried a reminder analysed the reminder for file intent
+        // and traced it as the user's input.
         let label = blocks
             .iter()
             .find_map(|b| match b {
@@ -148,6 +149,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 _ => None,
             })
             .unwrap_or_default();
+        let blocks = self.inject_date_context(blocks);
+        let blocks = self.inject_model_context(blocks);
+        let blocks = self.inject_todo_context(blocks);
 
         if self.session.compaction.is_some() {
             if let Err(error) = self.run_session_health_probe().await {

@@ -21,26 +21,27 @@ async function main(){
   if(process.platform!=='win32'){console.log('SKIP Windows handle adapter on non-Windows; shared MCP tests remain required');return;}
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'scode-receiver-owner-'));
   const config=path.join(directory,'runtime.json');fs.writeFileSync(config,'{}');
+  const sessionId=path.basename(directory);
   const original=originalProcess();let lease;
   try{
     const identity=await captureReceiverOwner(original.child.pid);
     assert.equal(identity.pid,original.child.pid);assert.match(identity.createdFiletime100ns,/^[0-9]+$/);
-    lease=await acquireReceiverOwner(identity,config);
+    lease=await acquireReceiverOwner(identity,sessionId);
     let ended=false;void lease.ended.then(()=>{ended=true;});
     await delay(6200);assert.equal(ended,false,'Live owner survives old5000ms false-death boundary');
-    await assert.rejects(acquireReceiverOwner(identity,config),/EADDRINUSE/);
+    await assert.rejects(acquireReceiverOwner({...identity},sessionId),/EADDRINUSE/);
     await lease.close();lease=undefined;
     assert.equal(original.child.exitCode,null,'Guard close never terminates original owner');
-    await assert.rejects(acquireReceiverOwner({...identity,createdFiletime100ns:String(BigInt(identity.createdFiletime100ns)+1n)},config),/identity differs/);
-    lease=await acquireReceiverOwner(identity,config);
+    await assert.rejects(acquireReceiverOwner({...identity,createdFiletime100ns:String(BigInt(identity.createdFiletime100ns)+1n)},sessionId),/identity differs/);
+    lease=await acquireReceiverOwner(identity,sessionId);
     process.kill(lease.monitorPid); // Only this test's actual returned child.
     assert.equal((await deadline(lease.ended)).reason,'monitor_failed');
     assert.equal(original.child.exitCode,null);
     await lease.close();lease=undefined;
-    lease=await acquireReceiverOwner(identity,config);await original.close();
+    lease=await acquireReceiverOwner(identity,sessionId);await original.close();
     assert.equal((await deadline(lease.ended)).reason,'owner_exited');
     await lease.close();lease=undefined;
-    await assert.rejects(acquireReceiverOwner(identity,config));
+    await assert.rejects(acquireReceiverOwner(identity,sessionId));
     console.log('PASS real Windows handles: idle, duplicate, stale birth, monitor failure, owner exit, EOF cleanup');
 
     const owner=originalProcess(),log=path.join(directory,'fixture.jsonl'),auditLog=path.join(directory,'audit.jsonl');

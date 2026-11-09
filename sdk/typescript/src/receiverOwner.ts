@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
 import { createServer } from 'node:net';
 import * as path from 'node:path';
 import { windowsProcessOwnerSource } from './windowsProcessOwnerSource';
@@ -128,13 +127,19 @@ export async function captureReceiverOwner(pid: number): Promise<ReceiverOwnerId
   finally { await adapter.close(); }
 }
 
-/** One receiver per canonical configuration, with OS-owned lock cleanup.
+/** One receiver per original process and ACP session, with OS-owned locking.
+ * A copied/renamed config cannot create a second receiver for the same owner.
  * No persisted PID/heartbeat is used as a second liveness authority.
  */
-export async function acquireReceiverOwner(identity: ReceiverOwnerIdentity, configFile: string,
+export async function acquireReceiverOwner(identity: ReceiverOwnerIdentity, acpSessionId: string,
   signal?: AbortSignal): Promise<ReceiverOwnerLease> {
   validateReceiverOwner(identity); windowsPowerShell(); signal?.throwIfAborted();
-  const key = createHash('sha256').update(realpathSync.native(configFile).toLowerCase()).digest('hex');
+  if (typeof acpSessionId !== 'string' || !acpSessionId.trim() || /[\0\r\n]/.test(acpSessionId)) {
+    throw new Error('Receiver ownership requires the existing ACP session ID');
+  }
+  const key = createHash('sha256').update(JSON.stringify([
+    identity.pid, identity.createdFiletime100ns, identity.exe.toLowerCase(), acpSessionId,
+  ])).digest('hex');
   const lock = createServer(socket => socket.destroy());
   await new Promise<void>((resolve, reject) => {
     lock.once('error', reject);

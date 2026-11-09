@@ -26,8 +26,10 @@ The shared adapter verifies the exact identity and holds the original Windows
 process handle. A timeout during initial qualification reports liveness UNKNOWN;
 once ready, only the kernel exit event proves that the original owner exited.
 Monitor failure is separately recorded and closes the receiver without claiming
-owner exit. It never adopts a replacement PID. A per-canonical-config named pipe
-prevents duplicate receivers and is released only after owned monitor cleanup.
+owner exit. It never adopts a replacement PID. A named pipe keyed by the original
+process identity and existing ACP session prevents duplicate receivers even when
+the config is copied or renamed. Unconfirmed child cleanup retains ownership;
+the lock is released after the owned receiver and monitor close successfully.
 The monitor requests synchronization and limited query access, never termination
 rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
 used from the OS installation, with no Python/psutil or native Node addon needed.

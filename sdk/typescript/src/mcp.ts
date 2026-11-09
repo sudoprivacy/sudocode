@@ -118,7 +118,7 @@ export async function runScodeMcp(file: string, lifecycle: {
     // dead connection is never replayed; the callback's durable inbox survives.
     ownerTask = (async () => {
       if (config.receiverOwner) {
-        ownerLease = await acquireReceiverOwner(config.receiverOwner, file, abort.signal);
+        ownerLease = await acquireReceiverOwner(config.receiverOwner, config.acpSessionId!, abort.signal);
         audit({ phase: 'receiver_owner_bound', identity: config.receiverOwner, monitorPid: ownerLease.monitorPid });
         void ownerLease.ended.then(result => {
           // A monitor error means UNKNOWN, never proof that the frontend died.

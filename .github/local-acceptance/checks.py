@@ -491,6 +491,62 @@ def native_workspace_lint_arguments(root, base, scope):
             "--", "-D", "warnings"]
 
 
+def native_workspace_format(root, cargo, command):
+    """Keep cargo fmt --all's roots, path dependencies and editions in bounded argv."""
+    pending = [root / "rust/Cargo.toml"]
+    visited = set()
+    targets = {}
+    while pending:
+        manifest = pending.pop().resolve()
+        if manifest in visited:
+            continue
+        metadata_log = cargo("metadata", "--no-deps", "--format-version=1",
+                             "--manifest-path", str(manifest))
+        packages = json.loads(metadata_log.read_text(encoding="utf-8"))["packages"]
+        visited.update(Path(package["manifest_path"]).resolve() for package in packages)
+        for package in packages:
+            for target in package["targets"]:
+                path = str(Path(target["src_path"]).resolve())
+                edition = target["edition"]
+                if path in targets and targets[path] != edition:
+                    raise RuntimeError(f"Conflicting Rust editions for formatting target: {path}")
+                targets[path] = edition
+            for dependency in package["dependencies"]:
+                if dependency.get("path"):
+                    local = Path(dependency["path"]) / "Cargo.toml"
+                    if local.is_file() and local.resolve() not in visited:
+                        pending.append(local)
+    if not targets:
+        raise RuntimeError("No Cargo formatting targets found; formatting remains required")
+    formatter = os.environ.get("RUSTFMT") or shutil.which("rustfmt")
+    if not formatter:
+        raise RuntimeError("Native acceptance requires the active toolchain's rustfmt")
+
+    def command_units(arguments):
+        # CreateProcessW counts UTF-16 units including quoting and the final NUL.
+        return len(subprocess.list2cmdline(arguments).encode("utf-16-le")) // 2 + 1
+
+    batches = []
+    for edition in sorted(set(targets.values())):
+        prefix = [formatter, "--edition", edition, "--check"]
+        batch = prefix.copy()
+        for path in sorted(path for path, selected in targets.items() if selected == edition):
+            if command_units([*prefix, path]) > 24_000:
+                raise RuntimeError(f"Formatting target exceeds the native command budget: {path}")
+            if command_units([*batch, path]) > 24_000:
+                batches.append(batch)
+                batch = prefix.copy()
+            batch.append(path)
+        batches.append(batch)
+    print("NATIVE_FORMAT_SCOPE=" + json.dumps({
+        "cargo_target_roots": len(targets), "manifests": len(visited), "batches": len(batches),
+        "max_command_utf16_units": max(map(command_units, batches)),
+        "scope": "All Cargo targets and recursive local path dependencies; normal module/config discovery.",
+    }), flush=True)
+    for arguments in batches:
+        command(*arguments, cwd=root / "rust")
+
+
 def native_workspace_lint(root, output, base, cargo, command):
     """Run the original lint prefix; a pass alone never completes workspace acceptance."""
     if os.name == "nt" and not shutil.which("pwsh.exe"):
@@ -498,7 +554,7 @@ def native_workspace_lint(root, output, base, cargo, command):
                            "Add your existing PowerShell 7 directory to PATH, or install it with "
                            "`winget install --id Microsoft.PowerShell --exact --source winget`, "
                            "then rerun the same acceptance command. No workspace compilation started.")
-    cargo("fmt", "--all", "--check")
+    native_workspace_format(root, cargo, command)
     tests = changed_cli_test_targets(root, base)
     scope = {"tests": tests, "targets": None}
     (output / "test-scope.json").write_text(json.dumps({
@@ -883,7 +939,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "6dbdd847c991fb6695951b7fe441a0e7e76b3ea205e1f161a7e912dbae63c1e9",
+        "e2e/local-acceptance/native_lint_acceptance.py": "b09f64375525d563921fda986438435669dba6556528e6b4c3dd2aace805d0c5",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d879d4737966b4b48446bfd82c394072eab09baa103316fdac9086b27b6f97d8",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",

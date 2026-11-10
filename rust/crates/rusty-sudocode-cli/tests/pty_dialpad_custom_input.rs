@@ -102,7 +102,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
         }
         panic!(
             "dialog should appear; screen:\n{}",
-            sess.render(|screen| screen.contents())
+            sess.render(common::screen_contents)
         );
     }
 
@@ -165,7 +165,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
         }
         panic!(
             "dialog should appear; screen:\n{}",
-            sess.render(|screen| screen.contents())
+            sess.render(common::screen_contents)
         );
     }
 

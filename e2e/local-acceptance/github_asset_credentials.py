@@ -18,10 +18,65 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 
 PAYLOAD = b'published-asset-fixture\x00\xff\n'
 TOKEN = 'GITHUB_ASSET_DUMMY_CREDENTIAL'
+
+
+def candidate_isolation(root, output):
+    """Exercise the final native child environment and the old-filter refusal."""
+    helper = root / '.github/scripts/local_acceptance.py'
+    original = helper.read_text(encoding='utf-8')
+    cleanup = ('    environment = {key: value for key, value in environment.items()\n'
+               '                   if key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}\n')
+    assert original.count(cleanup) == 1
+    checks = []
+    with tempfile.TemporaryDirectory(prefix='asset-candidate-isolation-') as temporary:
+        private = Path(temporary)
+        probe = private / 'candidate.py'
+        probe.write_text('''import json, os, sys
+from pathlib import Path
+present = sorted({name.upper() for name in os.environ if name.upper() in {"GH_TOKEN", "GITHUB_TOKEN"}})
+Path(sys.argv[1]).write_text(json.dumps({"credential_names_present": present}))
+assert not present, "Candidate inherited GitHub authority"
+''', encoding='utf-8')
+        executor = private / 'execute.py'
+        executor.write_text('''import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("executor", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+overrides = {name: os.environ["GH_TOKEN"] for name in
+             ["GH_TOKEN", "GITHUB_TOKEN", "gh_token", "github_token", "Gh_ToKeN", "GitHub_Token"]}
+helper.run_command([sys.executable, sys.argv[2], sys.argv[3]], Path(sys.argv[4]), Path(sys.argv[5]), overrides)
+''', encoding='utf-8')
+        old_helper = private / 'old-case-sensitive-executor.py'
+        old_helper.write_text(original.replace(cleanup,
+            '    for name in ("GH_TOKEN", "GITHUB_TOKEN"):\n        environment.pop(name, None)\n'), encoding='utf-8')
+        environment = {key: value for key, value in os.environ.items()
+                       if key.upper() not in {'GH_TOKEN', 'GITHUB_TOKEN'}}
+        environment.update(GH_TOKEN=TOKEN, GITHUB_TOKEN=TOKEN)
+        for name, source, expected_names in [
+            ('candidate_subprocess_isolation', helper, []),
+            ('case_sensitive_override_refused', old_helper, ['GH_TOKEN', 'GITHUB_TOKEN']),
+        ]:
+            child_receipt = output / f'{name}.json'
+            result = subprocess.run([sys.executable, str(executor), str(source), str(probe),
+                str(child_receipt), str(private), str(output / f'{name}.child.log')],
+                env=environment, capture_output=True, timeout=90)
+            captured = result.stdout + result.stderr
+            (output / f'{name}.log').write_bytes(captured)
+            assert TOKEN.encode() not in captured
+            assert TOKEN.encode() not in (output / f'{name}.child.log').read_bytes()
+            assert (result.returncode == 0) == (not expected_names), captured.decode(errors='replace')
+            assert json.loads(child_receipt.read_text()) == {'credential_names_present': expected_names}
+            checks.append({'case': name, 'passed': True, 'exit_code': result.returncode,
+                           'credential_names_present': expected_names,
+                           'explicit_name_variants': ['uppercase', 'lowercase', 'mixed-case'],
+                           'token_logged': False})
+    return checks
 
 
 def driver(root, output, case, policy_ref=None):
@@ -171,6 +226,7 @@ authorityKeyIdentifier=keyid:always
         assert result.returncode != 0
         assert b'Native candidate execution must not receive release-download credentials' in result.stderr
         checks.append({'case':'native_entry_refuses_download_token', 'passed':True})
+        checks.extend(candidate_isolation(args.root, output))
     finally:
         for server in (proxy, api):
             server.shutdown()

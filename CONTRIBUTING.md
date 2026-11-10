@@ -1159,6 +1159,25 @@ Existing PRs do not need a cosmetic merge from main to acquire the hook files:
 the managed hook loads protected-main command definitions. Registering another
 public device key does not invalidate other devices' current receipts.
 
+#### Native tool API credentials
+
+Complementary native CI prepares selected pinned tools in a separate trusted
+step with the read-only GitHub token. Both release metadata and binary API
+requests authenticate only at `https://api.github.com`; credentials are omitted
+from redirected requests, including release-asset storage. Public downloads
+without a token remain supported. Tool tags, asset selection, hashes, versions,
+caches and request timeouts retain their existing checks.
+
+The trusted preparation step receives the read-only API credential. Tool
+subprocesses and the candidate step receive neither `GH_TOKEN` nor `GITHUB_TOKEN`.
+The native command
+executor also strips both after SDK discovery and explicit environment overrides,
+including mixed-case keys that Windows treats as the same variable names.
+The native contract guard exercises real private HTTPS requests, redirect refusals,
+candidate subprocess isolation and refusal of a case-sensitive cleanup that leaks
+explicit lowercase or mixed-case overrides. These controls
+establish credential transport behavior; they do not measure live GitHub quota.
+
 #### Acceptance contract changes
 
 For ordinary frozen source with complementary native hosts, the protected

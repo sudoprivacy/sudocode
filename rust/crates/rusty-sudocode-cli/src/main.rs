@@ -5146,13 +5146,17 @@ impl LiveCli {
             return;
         };
         let active = self.lifecycle.session_handle().id;
+        // Evaluated on the input thread when Tab is pressed, so it must stay
+        // cheap: ids only, never the full listing, which parses every
+        // transcript and classifies the workspace with git and tmux.
         let sessions: commands::ValueList = Arc::new(move || {
             let mut ids = vec![active.clone()];
             ids.extend(
-                list_managed_sessions()
+                engine_host::session::current_session_store()
+                    .ok()
+                    .and_then(|store| store.recent_session_ids(21).ok())
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|session| session.id)
                     .filter(|id| *id != active)
                     .take(20),
             );

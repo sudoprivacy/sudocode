@@ -16,17 +16,32 @@ SOURCE = Path(__file__).resolve().parents[2]
 PRODUCT = {"native-context", "native-services", "native-cohost"}
 
 
+def git_for_windows_bash(path=None):
+    """Git for Windows' own Bash, located from the git on PATH and never WSL's.
+
+    A git hook runs with Git's mingw64/libexec/git-core first on PATH, three
+    levels below the bin/bash.exe of the same installation, so look in every
+    ancestor of the resolved git rather than its parent and grandparent only.
+    """
+    git = shutil.which("git", path=path)
+    if not git:
+        return None
+    for directory in Path(git).resolve().parents:
+        for candidate in (directory / "bash.exe", directory / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def workflow_scope(output, environment):
     """Execute the actual workflow guards and bind their conditional steps."""
     output.mkdir()
-    bash = shutil.which("bash", path=environment.get("PATH"))
     if os.name == "nt":
         # CreateProcess can resolve a bare bash against the parent's PATH,
         # selecting WSL even when the explicit child environment lists Git first.
-        git = shutil.which("git", path=environment.get("PATH"))
-        candidates = [Path(git).resolve().parent / "bash.exe",
-                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
-        bash = next((str(path) for path in candidates if path.is_file()), None)
+        bash = git_for_windows_bash(environment.get("PATH"))
+    else:
+        bash = shutil.which("bash", path=environment.get("PATH"))
     if not bash:
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")

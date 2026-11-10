@@ -545,14 +545,26 @@ def validate_before_host_lease(names, root, output):
           flush=True)
 
 
+def git_for_windows_bash(path=None):
+    """Git for Windows' own Bash, located from the git on PATH and never WSL's.
+
+    A git hook runs with Git's mingw64/libexec/git-core first on PATH, three
+    levels below the bin/bash.exe of the same installation, so look in every
+    ancestor of the resolved git rather than its parent and grandparent only.
+    """
+    git = shutil.which("git", path=path)
+    if not git:
+        return None
+    for directory in Path(git).resolve().parents:
+        for candidate in (directory / "bash.exe", directory / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def native_services_tool(root, output, execute):
     """Resolve the existing service client before compilation, retaining its bytes."""
-    bash = shutil.which("bash")
-    if os.name == "nt":
-        git = shutil.which("git")
-        candidates = [Path(git).resolve().parent / "bash.exe",
-                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
-        bash = next((str(path) for path in candidates if path.is_file()), None)
+    bash = git_for_windows_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
         raise RuntimeError("Git Bash is required for shared-service credential acceptance")
     probe = '''import hashlib,json,subprocess,sys
@@ -1050,7 +1062,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "c5c0b065991d3834cc4fbc61f286f9853e59d1251350d291285602e9ffcc69c0",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "2ca54776b68d0df2f43d03cbdb089d598b96e1f5241d7308afb6e379c980275a",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",

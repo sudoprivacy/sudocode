@@ -956,7 +956,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/local-acceptance/github_asset_credentials.py": "ef10bd73d760f45662db067ee8709248a5e1b9136789d89d47eb87f1cad65fa5",
+        "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
@@ -976,7 +976,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "4ef0d9ac543bf5c3ede6bb9ba94090cc20ab318d0b3b701743ad235bafe01500",
+        ".github/scripts/local_acceptance.py": "a4dbdbcab45440eb1a3fcc3a026f476a7a842de4c6b2b0e0c04a57873f8e3a98",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1057,7 +1057,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '4a68b433a2d1c3b7c553bb8ce99383e24dd516c488a29ce50291ecad96c35b79', 'native-context': '5cfe42e98d129618d97e63295b55f740cc559a35b7deaab4bb7b0361c63c002f'}
+    expected = {'native-release': '2c751e4c6f6f807b0333e58c38eabb72e4317b47f71377bb8b20aad08ddb4497', 'native-context': '2e1ea30eff75a2d99d3bdf9ed700026cef47af9fc764f13b5a70c91c2900699e'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

@@ -86,6 +86,17 @@ pub async fn serve_managed(
     let result = run_acp_on_transport(&config, Arc::clone(&registry), transport).await;
     registry.cancel_all();
     let closing = Arc::clone(&registry);
-    tokio::task::spawn_blocking(move || closing.close_all()).await?;
-    result
+    let cleanup = tokio::task::spawn_blocking(move || closing.close_all())
+        .await
+        .unwrap_or_else(|error| Err(format!("session cleanup did not finish: {error}")));
+    // The transport's own error stays the primary one; a cleanup failure is
+    // reported when the transport ended cleanly and logged otherwise.
+    match (result, cleanup) {
+        (Ok(()), Err(cleanup)) => Err(cleanup.into()),
+        (Err(primary), Err(cleanup)) => {
+            eprintln!("managed session cleanup unconfirmed: {cleanup}");
+            Err(primary)
+        }
+        (result, Ok(())) => result,
+    }
 }

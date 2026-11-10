@@ -110,6 +110,38 @@ const MODEL_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>You are running as
 /// counts as a valid model announcement when scanning the session.
 const MODEL_CHANGE_REMINDER_MARKER: &str = "The active model has changed";
 
+/// Turns the model may finish without seeing its todo list before
+/// [`ConversationRuntime::inject_todo_context`] shows it again. A list the user
+/// keeps on screen while the model has long scrolled past it is how the two
+/// stop agreeing on what is still open.
+const TODO_REMINDER_QUIET_TURNS: usize = 10;
+/// Canonical name of the tool whose call and result show the model its list.
+const TODO_WRITE_TOOL: &str = "TodoWrite";
+
+/// `true` when this block put the whole todo list in front of the model: a
+/// `TodoWrite` call or result, a compaction's continuity block, or a reminder
+/// [`ConversationRuntime::inject_todo_context`] prepended earlier.
+///
+/// The reminder is matched by its exact opening, not by its text appearing
+/// anywhere: a message that only quotes it must not count as the list being
+/// shown. Nobody else can write that opening, because peer messages arrive with
+/// `<system-reminder>` escaped (`agent_mailbox::HARNESS_OWNED_TAGS`). The
+/// continuity block sits inside a longer compaction message, so it is found
+/// by its marker.
+fn shows_todo_list(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::ToolUse { name, .. }
+        | ContentBlock::ToolResult {
+            tool_name: name, ..
+        } => crate::tool_names::canonicalize_tool_name(name) == TODO_WRITE_TOOL,
+        ContentBlock::Text { text } => {
+            text.starts_with(crate::compact::TODO_TURN_REMINDER_PREFIX)
+                || text.contains(crate::compact::TODO_CONTINUITY_MARKER)
+        }
+        _ => false,
+    }
+}
+
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -1250,6 +1282,15 @@ pub struct ConversationRuntime<C, T> {
     /// Override for "today" used in tests. Always `None` outside tests.
     #[cfg(test)]
     today_override: Option<String>,
+    /// Todo list used in tests instead of the persisted store. Always `None`
+    /// outside tests.
+    #[cfg(test)]
+    todos_override: Option<Vec<crate::todo_store::Todo>>,
+    /// Where the todo store was last read and had nothing open: the session's
+    /// compaction count and the history length then.
+    /// [`Self::todo_list_out_of_view`] scans only what came after it, so the
+    /// store is not read again for another quiet stretch.
+    todo_checked_at: Option<(u32, usize)>,
     max_iterations: usize,
     max_steps: Option<u32>,
     usage_tracker: UsageTracker,
@@ -1337,6 +1378,9 @@ where
             prompt_known_model: None,
             #[cfg(test)]
             today_override: None,
+            #[cfg(test)]
+            todos_override: None,
+            todo_checked_at: None,
             max_iterations: usize::MAX,
             max_steps: feature_config.max_steps(),
             usage_tracker,
@@ -1611,6 +1655,101 @@ where
         combined.push(ContentBlock::Text { text });
         combined.extend(blocks);
         combined
+    }
+
+    /// Keep the model's open todos in front of it WITHOUT touching the cached
+    /// prefix. The list lives in the persisted store, which the user sees the
+    /// whole time; the model only sees it where a `TodoWrite` call or result,
+    /// a compaction's continuity block or an earlier reminder sits in history.
+    /// Once the model finishes [`TODO_REMINDER_QUIET_TURNS`] turns with none of
+    /// those, the list is prepended to this turn's input, which is the one
+    /// place it can go without rewriting anything a prompt cache already holds:
+    /// the system prompt and every earlier message stay byte-identical.
+    fn inject_todo_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+        if !self.todo_list_out_of_view() {
+            return blocks;
+        }
+        let Some(text) = crate::compact::format_todo_turn_reminder(
+            &self.current_todos(),
+            TODO_REMINDER_QUIET_TURNS,
+        ) else {
+            // Nothing is open. Without this mark every later turn would read
+            // the store again, which for a co-hosted agent is a remote read.
+            self.todo_checked_at = Some((self.compaction_count(), self.session.messages.len()));
+            return blocks;
+        };
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
+        combined.push(ContentBlock::Text { text });
+        combined.extend(blocks);
+        combined
+    }
+
+    /// `true` when the model finished the last [`TODO_REMINDER_QUIET_TURNS`]
+    /// turns without anything in history showing it the todo list.
+    ///
+    /// A turn runs up to a model reply that calls no tool, and everything
+    /// between two such replies is one turn; a turn with the list anywhere in
+    /// it saw the list. Turns are told apart by the model's replies, not by
+    /// user-role messages, because the harness writes in that role too
+    /// (bash-mode transcript lines, its own nudges) without asking for a turn.
+    ///
+    /// The scan starts no earlier than the last check that found nothing open,
+    /// and stops at the first sign the list was shown or after that many turns.
+    /// Reading it off the session rather than keeping a counter holds across
+    /// resume and compaction. The check's mark is a position in the history,
+    /// so it stops applying once a compaction rewrites that history.
+    fn todo_list_out_of_view(&self) -> bool {
+        let messages = &self.session.messages;
+        let from = self
+            .todo_checked_at
+            .filter(|&(compactions, at)| {
+                compactions == self.compaction_count() && at <= messages.len()
+            })
+            .map_or(0, |(_, at)| at);
+        let mut quiet_turns = 0;
+        // Walking backwards, a turn is open from its closing reply until the
+        // previous turn's closing reply shows it was complete.
+        let mut in_turn = false;
+        for message in messages[from..].iter().rev() {
+            if message.blocks.iter().any(shows_todo_list) {
+                return false;
+            }
+            let ends_turn = message.role == MessageRole::Assistant
+                && !message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+            if ends_turn {
+                if in_turn {
+                    quiet_turns += 1;
+                    if quiet_turns >= TODO_REMINDER_QUIET_TURNS {
+                        return true;
+                    }
+                }
+                in_turn = true;
+            }
+        }
+        // The oldest turn scanned runs back to where the scan started.
+        in_turn && quiet_turns + 1 >= TODO_REMINDER_QUIET_TURNS
+    }
+
+    /// How many times this session's history has been compacted.
+    fn compaction_count(&self) -> u32 {
+        self.session
+            .compaction
+            .as_ref()
+            .map_or(0, |compaction| compaction.count)
+    }
+
+    /// The persisted todo list, or the list a test supplies.
+    fn current_todos(&self) -> Vec<crate::todo_store::Todo> {
+        #[cfg(test)]
+        {
+            if let Some(ref todos) = self.todos_override {
+                return todos.clone();
+            }
+        }
+        crate::todo_store::TodoStore::open(&self.session.fs_handle()).list()
     }
 
     /// Fallback model label for clients that do not expose a wire model ID.
@@ -7064,6 +7203,382 @@ mod tests {
             &user_blocks[1],
             ContentBlock::Text { text } if text == "hello"
         ));
+    }
+
+    fn todo(content: &str, status: crate::todo_store::TodoStatus) -> crate::todo_store::Todo {
+        crate::todo_store::Todo {
+            content: content.to_string(),
+            status,
+            active_form: content.to_string(),
+        }
+    }
+
+    fn todo_runtime(
+        captured: &Arc<std::sync::Mutex<Vec<ApiRequest>>>,
+        todos: Vec<crate::todo_store::Todo>,
+    ) -> ConversationRuntime<CapturingApi, StaticToolExecutor> {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        runtime.todos_override = Some(todos);
+        runtime
+    }
+
+    /// The turn input each request carried, by turn.
+    fn turn_inputs(requests: &[ApiRequest]) -> Vec<Vec<ContentBlock>> {
+        requests
+            .iter()
+            .map(|request| {
+                request
+                    .messages
+                    .iter()
+                    .rfind(|message| message.role == MessageRole::User)
+                    .expect("every request carries a user turn")
+                    .blocks
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn carries_todo_reminder(blocks: &[ContentBlock]) -> bool {
+        blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.starts_with(crate::compact::TODO_TURN_REMINDER_PREFIX))
+        })
+    }
+
+    /// Append `n` finished turns: the user's input and a reply that calls no
+    /// tool, which is where a turn ends.
+    fn push_turns(runtime: &mut ConversationRuntime<CapturingApi, StaticToolExecutor>, n: usize) {
+        use crate::session::ConversationMessage;
+        for i in 0..n {
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::user_text(format!("input {i}")));
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: format!("reply {i}"),
+                }]));
+        }
+    }
+
+    #[tokio::test]
+    async fn open_todos_are_prepended_after_quiet_turns_and_then_wait_again() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![
+                todo("Write parser", crate::todo_store::TodoStatus::Completed),
+                todo("Ship it", crate::todo_store::TodoStatus::Pending),
+            ],
+        );
+        for turn in 0..=2 * quiet + 2 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        let inputs = turn_inputs(&requests);
+        let reminder_turns: Vec<usize> = (0..inputs.len())
+            .filter(|&turn| carries_todo_reminder(&inputs[turn]))
+            .collect();
+        // Shown after `quiet` turns without it, and the reminder itself counts
+        // as showing it, so the next one waits another `quiet` turns.
+        assert_eq!(reminder_turns, [quiet, 2 * quiet + 1]);
+
+        let input = &inputs[quiet];
+        assert_eq!(
+            input.len(),
+            2,
+            "one reminder block plus the user's text: {input:?}"
+        );
+        let ContentBlock::Text { text: reminder } = &input[0] else {
+            panic!("the reminder must be the first block: {input:?}");
+        };
+        assert!(reminder.contains("- [pending] Ship it"), "{reminder}");
+        assert!(
+            reminder.contains("- [completed] Write parser"),
+            "{reminder}"
+        );
+        assert!(
+            matches!(&input[1], ContentBlock::Text { text } if *text == format!("turn {quiet}")),
+            "the user's own text must come LAST, so nothing the harness wrote \
+             trails it (sudocode#623): {input:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_reminder_leaves_system_prompt_and_history_byte_identical() {
+        // The reminder may only add to the newest message. A change to the
+        // system prompt or to any earlier message would cost the prompt cache
+        // everything after it.
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+        );
+        for turn in 0..=quiet + 1 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        assert!(carries_todo_reminder(&turn_inputs(&requests)[quiet]));
+        for turn in 1..requests.len() {
+            assert_eq!(
+                requests[turn].system_prompt, requests[0].system_prompt,
+                "turn {turn} changed the system prompt"
+            );
+            assert!(
+                requests[turn]
+                    .messages
+                    .starts_with(&requests[turn - 1].messages),
+                "turn {turn} rewrote history the previous request already sent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_todo_list_is_never_reminded() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo(
+                "Write parser",
+                crate::todo_store::TodoStatus::Completed,
+            )],
+        );
+        for turn in 0..=quiet + 1 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        assert!(!turn_inputs(&requests)
+            .iter()
+            .any(|input| carries_todo_reminder(input)));
+    }
+
+    #[test]
+    fn todo_list_counts_as_shown_by_todo_write_continuity_block_or_reminder() {
+        use crate::session::ConversationMessage;
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(&captured, Vec::new());
+
+        push_turns(&mut runtime, quiet - 1);
+        assert!(!runtime.todo_list_out_of_view(), "fewer than {quiet} turns");
+        push_turns(&mut runtime, 1);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "{quiet} turns without the list"
+        );
+
+        let reminder = crate::compact::format_todo_turn_reminder(
+            &[todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+            quiet,
+        )
+        .expect("an open item yields a reminder");
+        let shown_by = [
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "toolu_1".to_string(),
+                name: "TodoWrite".to_string(),
+                input: "{}".to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage::tool_result("toolu_1", "TodoWrite", "{}", false),
+            ConversationMessage::user_text(format!(
+                "<system-reminder>\n{} above.\n</system-reminder>",
+                crate::compact::TODO_CONTINUITY_MARKER
+            )),
+            ConversationMessage::user_text(reminder),
+        ];
+        for message in shown_by {
+            runtime.session.messages.push(message.clone());
+            assert!(!runtime.todo_list_out_of_view(), "shown by {message:?}");
+            // The reply that closes the turn the list was shown in. That turn
+            // saw the list, so it is not one of the quiet ones.
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }]));
+            assert!(!runtime.todo_list_out_of_view(), "shown by {message:?}");
+            // None of these finish a turn: tool rounds, and what the harness
+            // writes in the user role (bash-mode lines, its own nudges).
+            for _ in 0..2 * quiet {
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::assistant(vec![
+                        ContentBlock::ToolUse {
+                            id: "toolu_x".to_string(),
+                            name: "bash".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                    ]));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::tool_result(
+                        "toolu_x", "bash", "ok", false,
+                    ));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::user_text(
+                        "<bash-input>ls</bash-input>",
+                    ));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::user_text(
+                        "<system-reminder>\nContinue from where it stopped.\n</system-reminder>",
+                    ));
+            }
+            push_turns(&mut runtime, quiet - 1);
+            assert!(!runtime.todo_list_out_of_view(), "after {message:?}");
+            push_turns(&mut runtime, 1);
+            assert!(runtime.todo_list_out_of_view(), "after {message:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_quoting_the_todo_reminder_does_not_count_as_showing_the_list() {
+        use crate::session::ConversationMessage;
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(&captured, Vec::new());
+        let reminder = crate::compact::format_todo_turn_reminder(
+            &[todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+            quiet,
+        )
+        .expect("an open item yields a reminder");
+
+        push_turns(&mut runtime, quiet - 1);
+        runtime
+            .session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "Earlier you were sent this:\n{reminder}"
+            )));
+        runtime
+            .session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "noted".to_string(),
+            }]));
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "only the reminder itself shows the list, not a quote of it"
+        );
+    }
+
+    #[test]
+    fn a_todo_list_with_nothing_open_is_not_read_again_until_another_quiet_stretch() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo(
+                "Write parser",
+                crate::todo_store::TodoStatus::Completed,
+            )],
+        );
+        let input = vec![ContentBlock::Text {
+            text: "next".to_string(),
+        }];
+
+        push_turns(&mut runtime, quiet);
+        assert!(runtime.todo_list_out_of_view());
+        assert_eq!(runtime.inject_todo_context(input.clone()), input);
+        // That read found nothing open, so the next ones wait a quiet stretch.
+        assert!(!runtime.todo_list_out_of_view(), "checked just now");
+        push_turns(&mut runtime, quiet - 1);
+        assert!(
+            !runtime.todo_list_out_of_view(),
+            "fewer than {quiet} turns since"
+        );
+        push_turns(&mut runtime, 1);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "{quiet} turns since the check"
+        );
+
+        // A compaction rewrites the history the mark points into.
+        assert_eq!(runtime.inject_todo_context(input.clone()), input);
+        assert!(!runtime.todo_list_out_of_view(), "checked just now");
+        runtime.session.record_compaction("summary", 0);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "the mark no longer applies after a compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_label_is_the_user_input_not_an_injected_reminder() {
+        // The label feeds file-intent analysis and the trace's `user_input`.
+        // Taken after the injectors, a turn that carried a reminder analysed
+        // the reminder instead of what the user asked for.
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15")
+        .with_session_tracer(SessionTracer::new("session-turn-label", sink.clone()));
+        runtime.today_override = Some("2026-05-15".to_string());
+
+        runtime
+            .run_turn("create process_data.py", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        assert_eq!(
+            requests[0].messages[0].blocks.len(),
+            2,
+            "the turn must carry the date reminder for this test to mean anything"
+        );
+        let traced: Vec<String> = sink
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                TelemetryEvent::SessionTrace(trace) if trace.name == "turn_started" => trace
+                    .attributes
+                    .get("user_input")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(traced, ["create process_data.py"]);
     }
 
     #[tokio::test]

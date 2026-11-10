@@ -89,18 +89,53 @@ pub fn scode_bin() -> PathBuf {
 
 /// Spawn `scode <args...>` under a PTY with the default timeout.
 #[inline]
-pub fn spawn_scode(args: &[&str]) -> Result<PtySession> {
+pub fn spawn_scode(args: &[&str]) -> Result<IsolatedSession> {
     spawn_scode_with_timeout(args, DEFAULT_TIMEOUT)
 }
 
-/// Spawn `scode <args...>` under a PTY with an explicit timeout.
+/// Spawn `scode <args...>` under a PTY with an explicit timeout, in a scratch
+/// workspace with its own home and config home. Without them it reads the
+/// developer's own settings and the checkout's project config, so a key the
+/// developer's settings still carry fails these tests on that machine only.
 #[inline]
-pub fn spawn_scode_with_timeout(args: &[&str], timeout: Duration) -> Result<PtySession> {
-    let bin = scode_bin();
-    let bin_str = bin.to_string_lossy();
-    let mut sess = PtySession::spawn(&bin_str, args)?;
-    sess.set_default_timeout(at_least(timeout));
-    Ok(sess)
+pub fn spawn_scode_with_timeout(args: &[&str], timeout: Duration) -> Result<IsolatedSession> {
+    let workspace = HarnessWorkspace::new("scode");
+    let session = spawn_binary_in_dir_with_env(
+        &scode_bin(),
+        &workspace.root,
+        args,
+        timeout,
+        &[
+            ("HOME", &workspace.home),
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+        ],
+    )?;
+    Ok(IsolatedSession {
+        session,
+        _workspace: workspace,
+    })
+}
+
+/// A session that owns its scratch workspace. The session is declared first
+/// so it drops first: the process ends before its directory is removed.
+pub struct IsolatedSession {
+    session: PtySession,
+    _workspace: HarnessWorkspace,
+}
+
+impl Deref for IsolatedSession {
+    type Target = PtySession;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl DerefMut for IsolatedSession {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
 }
 
 /// Spawn the caller's selected CLI in an explicit directory.

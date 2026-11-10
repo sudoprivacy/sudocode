@@ -1024,6 +1024,15 @@ product journey counts and acceptance budgets retain their current values.
 A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
 of command execution; this is a measured scheduling incident, not a forecast
 of whole-PR savings.</p>
+<p><strong>Prepare the service client before compilation (2026-11-10).</strong>
+Selected native service checks resolve the original grpcurl client and execute
+<code>--version</code> in the first preparation slot. Windows uses Git for Windows
+Bash explicitly. A download or executable failure stops before compilation;
+the actual service journey later uses the same file after verifying its hash.
+Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselected
+profile controls cover this ordering. Both original service journeys remain
+required; product coverage counts and budgets are unchanged. This adds
+infrastructure fault coverage and makes no whole-PR speedup claim.</p>
 <p><strong>Rejoin the FIFO between fresh profiles (2026-11-06).</strong>
 Each running profile keeps the existing exclusive host lease through execution
 and its signed checkpoint. Its next fresh profile rejoins the queue after existing

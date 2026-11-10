@@ -9866,11 +9866,14 @@ async fn assert_shared_completion_deletion(
 fn assert_reclaimed_session_load_refused(response: &Value, sid: &str) {
     // Fresh SID lookup can report an absent transcript after automatic GC.
     // Retained runtime writes still require the exact session_deleted fence.
-    let detail = response["error"]["data"].as_str().unwrap_or_default();
+    let error = &response["error"];
+    let is_missing = error["code"] == -32002 && error["data"]["sessionId"] == sid;
+    let is_deleted = error["code"] == -32603
+        && error["data"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("session_deleted"));
     assert!(
-        response.get("result").is_none()
-            && (detail.contains("session_deleted")
-                || detail.contains(&format!("session not found: {sid}"))),
+        response.get("result").is_none() && (is_missing || is_deleted),
         "reclaimed Session load must fail for its deleted identity: {response}"
     );
 }

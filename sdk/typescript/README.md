@@ -115,6 +115,12 @@ or current-node compatibility.
 The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
 defines that remaining integration boundary and rollout gates.
 
+Initial Node queries validate the native audit and actor/session binding before
+reporting an operation failure. An authenticated `agent_list` failure retains
+its original result as `Error.cause`; it does not imply an identity mismatch.
+The owner reconnects with the same durable binding after confirmed child cleanup.
+Unknown cleanup keeps the binding disconnected and prevents a replacement.
+
 Reception defaults to the exact configured peer allowlist. A network-wide
 installation can explicitly select `--peer-policy node-namespace` during
 `--init-codex`; after its owned Node actor/session audit succeeds, other

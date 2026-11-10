@@ -54,11 +54,14 @@ export function scodeNativeA2aAudit(result: ScodeA2aResult): Record<string, unkn
  */
 export function requireScodeNodeIdentity(connection: ScodeConnection, result: ScodeA2aResult, actor?: string): Record<string, unknown> {
   const audit=scodeNativeA2aAudit(result);
-  if(directCapability(connection)?.hostAudit!==1 || result.isError || !audit || audit.version!==1
+  if(directCapability(connection)?.hostAudit!==1 || !audit || audit.version!==1
       || audit.tool!=='agent_list' || typeof audit.actor!=='string' || !audit.actor
       || (actor!==undefined && audit.actor!==actor) || audit.sessionId!==connection.sessionId || audit.namespaceRoot!=='') {
     throw new Error('Loaded ACP actor/session does not match its authenticated Node context');
   }
+  // An authenticated operation failure does not mean the actor or SID changed.
+  // Preserve the original result; no write-outcome or retry-safety claim follows.
+  if (result.isError) throw new Error(`Owned Node identity query failed: ${result.content}`, { cause: result });
   return audit;
 }
 

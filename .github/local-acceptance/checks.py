@@ -1031,7 +1031,7 @@ def native_guard_files():
         "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
         ".github/scripts/ci_input_scope.py": "7eb141f2658c43450d6e0548b3fa8e8097fb829c7fb88df77198ecdbb475e59a",
-        ".github/workflows/rust-ci.yml": "8b5d0757f163a08768cdc103df3b04215ba16f29bc644d4c4ede2f2ac5c4a2db",
+        ".github/workflows/rust-ci.yml": "e9ae33f67a92ba1d79d2cb30cceef0c6ee454dbbd27357ff5ccf128b6b36744e",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",

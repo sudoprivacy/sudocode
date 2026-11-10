@@ -370,6 +370,13 @@ jobs:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
 
+      # The same managed agent hosted OUT of the daemon: the public
+      # nexusd-cluster and an owner credential, with every session effect over
+      # that one authenticated connection. This is the co-host's replacement.
+      - name: Managed scode against the public nexusd-cluster
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        run: e2e/nexus-a2a/run-managed-subprocess.sh
+
       - name: Conditional owner content survives a co-host process restart
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         working-directory: rust

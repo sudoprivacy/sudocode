@@ -71,6 +71,10 @@ impl HostedSessionFactory for ManagedSessions {
 /// `context`. The host resolves the context once — its registry binding and
 /// its one authenticated backend — and this is the only way in, so no session
 /// can reach local disk, a private kernel or a direct model endpoint.
+///
+/// Returns once the transport ends, after every session is closed. A line
+/// transport ends on an error from its incoming side, not on a bare EOF while
+/// its output is still open, so the host ends the connection with an error.
 pub async fn serve_managed(
     context: ManagedRuntimeContext,
     transport: impl ConnectTo<Agent>,

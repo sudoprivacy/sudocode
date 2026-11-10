@@ -358,6 +358,16 @@ the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
 existing paths.
 
+Fresh Windows contract guards and native workspaces check their required
+Windows PowerShell and PowerShell 7 paths before joining the queue. Missing
+tools report how to fix this process's PATH and rerun the same command.
+The native lint and release compiler checks share the same path validator and
+check again at execution; readiness grants no completed-check credit.
+Real Git/SSH/native-process controls remove PowerShell 7 only from a private
+child's PATH while a private holder stays active. Guard and workspace source
+must refuse without a queue ticket, while metadata-only source still completes.
+This adds no product journey coverage and changes no test deadlines.
+
 When both a fresh contract guard and native workspace are required, the workspace's
 existing formatting, metadata and warning-denying lint commands run before the
 contract matrix. `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports

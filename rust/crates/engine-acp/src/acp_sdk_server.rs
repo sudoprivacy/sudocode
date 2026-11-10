@@ -1679,6 +1679,10 @@ pub struct SessionRegistry {
     /// Own the worker until it has stopped; an abort signal alone does not
     /// release its remote receiver seat.
     peer_receivers: Mutex<HashMap<String, Arc<PeerReceiver>>>,
+    /// The first `close_all` outcome. Held for the whole teardown, so
+    /// concurrent callers serialize, and latched, so a later call over the
+    /// already-drained maps cannot report success after a failure.
+    close_outcome: Mutex<Option<Result<(), String>>>,
 }
 
 struct PeerReceiver {
@@ -1934,35 +1938,45 @@ impl SessionRegistry {
         }
     }
 
-    pub fn close_all(&self) {
+    /// Close every session and peer receiver and report whether all of them
+    /// confirmed: each engine reaped, bridge stopped and completion retired,
+    /// each receiver joined. Every one is driven even after a failure; the
+    /// result names the first. The first call's result is latched and
+    /// returned to every caller.
+    pub fn close_all(&self) -> Result<(), String> {
+        let mut outcome = self
+            .close_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(result) = outcome.as_ref() {
+            return result.clone();
+        }
+        let mut first: Option<String> = None;
         self.stop_peer_receivers();
-        let entries: Vec<_> = self
-            .lock_sessions()
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect();
-        for entry in entries {
+        let entries: Vec<_> = self.lock_sessions().drain().collect();
+        for (session_id, entry) in entries {
             let _ = entry.driver.send(engine_core::EngineCommand::Cancel);
             entry.abort.abort();
             drop(entry.engine);
             drop(entry.subagents);
-            if !entry.driver.shutdown() {
-                eprintln!("ACP session teardown timed out");
+            if let Err(stage) = entry.driver.shutdown() {
+                eprintln!("ACP session {session_id} teardown unconfirmed: {stage}");
+                first.get_or_insert_with(|| format!("session {session_id}: {stage}"));
             }
         }
-        let receivers: Vec<_> = self
-            .lock_peer_receivers()
-            .drain()
-            .map(|(_, receiver)| receiver)
-            .collect();
-        for receiver in receivers {
+        let receivers: Vec<_> = self.lock_peer_receivers().drain().collect();
+        for (agent, receiver) in receivers {
             if let Err(error) = receiver.stop_and_join() {
-                eprintln!("ACP peer receiver teardown failed: {error}");
+                eprintln!("ACP peer receiver {agent} teardown failed: {error}");
+                first.get_or_insert_with(|| format!("peer receiver {agent}: {error}"));
             }
         }
         if let Some(factory) = &self.hosted_factory {
             factory.close();
         }
+        let result = first.map_or(Ok(()), Err);
+        *outcome = Some(result.clone());
+        result
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
@@ -2981,8 +2995,10 @@ pub(crate) async fn run_acp_on_transport(
                                 let driver_stopped = driver.shutdown();
                                 let receiver_stopped =
                                     receiver.map_or(Ok(()), |receiver| receiver.stop_and_join());
-                                if !driver_stopped {
-                                    return Err(AcpError::internal("session teardown timed out"));
+                                if let Err(stage) = driver_stopped {
+                                    return Err(AcpError::internal(format!(
+                                        "session teardown timed out: {stage}"
+                                    )));
                                 }
                                 receiver_stopped.map_err(AcpError::internal)?;
                             }

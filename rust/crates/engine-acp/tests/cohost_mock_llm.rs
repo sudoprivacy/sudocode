@@ -11,8 +11,8 @@ mod common;
 mod managed_harness;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
@@ -22,6 +22,7 @@ use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox, MailboxScope};
+use runtime::spawn_task::AgentState;
 use runtime::{FsBackend, KernelFsBackend, WorkspaceRootScope};
 use serde_json::json;
 
@@ -211,9 +212,81 @@ fn run_cohost_turn_with(
     // turn cost is a DELTA. Counting the total made the assertion depend on how
     // many tests ran before it — green alone, red in the suite.
     let asked_before = harness.requests_seen();
+    let CohostWorld {
+        kernel,
+        model_writes,
+        user_fs,
+        workspace,
+        transcript,
+        user_mb,
+        desc,
+        model_storage: _model_storage,
+    } = cohost_world(pid, agent_id, transcript_is_stream);
+
+    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state, reason| {
+        eprintln!("[agent state] {state:?} reason={reason:?}");
+    })
+    .expect("this host can run an agent: the mock test supplies a config home");
+
+    let ctx = user_ctx();
+    send_prompt(&user_mb, agent_id, prompt);
+    if let Err(error) = arrange(&kernel, &workspace) {
+        handle.abort_signal.abort();
+        let _ = handle.join.join();
+        panic!("arranging the cohost workflow failed: {error}");
+    }
+
+    let reply = wait_for_agent_reply(&kernel, &transcript, &ctx, agent_id, Duration::from_mins(1));
+    // A send tool can deliver the reply before its turn finishes. Wait for the
+    // durable receive acknowledgement before terminating the host.
+    if reply.is_some() {
+        wait_for_delivery_ack(&user_fs, agent_id);
+    }
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    let asked = assert_model_traffic(
+        harness,
+        model_writes.load(Ordering::SeqCst),
+        asked_before,
+        agent_id,
+        &workspace,
+    );
+    let reply = reply.unwrap_or_else(|| {
+        let raw = user_fs.read(&transcript).map_or_else(
+            |e| format!("<unreadable: {e}>"),
+            |b| String::from_utf8_lossy(&b).into_owned(),
+        );
+        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
+    });
+    let body = reply
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("[agent -> user] {body}");
+    (body, asked, user_fs)
+}
+
+/// One co-host's world: a kernel with the agent's mounts and the scripted
+/// model, the user's side of the VFS with the workspace fixture planted, and
+/// the conversation the user talks to the agent on.
+struct CohostWorld {
+    kernel: Arc<Kernel>,
+    model_writes: Arc<AtomicUsize>,
+    user_fs: Arc<dyn FsBackend>,
+    workspace: String,
+    transcript: String,
+    user_mb: Arc<Mailbox>,
+    desc: AgentDescriptor,
+    model_storage: tempfile::TempDir,
+}
+
+fn cohost_world(pid: &str, agent_id: &str, transcript_is_stream: bool) -> CohostWorld {
+    let harness = harness();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
-    let _model = common::mount_model(
+    let model_storage = common::mount_model(
         &kernel,
         "anthropic",
         &harness.service.base_url(),
@@ -264,50 +337,16 @@ fn run_cohost_turn_with(
     user_mb
         .ensure_conversation(agent_id)
         .expect("provision the conversation with the co-host");
-
-    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state, reason| {
-        eprintln!("[agent state] {state:?} reason={reason:?}");
-    })
-    .expect("this host can run an agent: the mock test supplies a config home");
-
-    let ctx = user_ctx();
-    send_prompt(&user_mb, agent_id, prompt);
-    if let Err(error) = arrange(&kernel, &workspace) {
-        handle.abort_signal.abort();
-        let _ = handle.join.join();
-        panic!("arranging the cohost workflow failed: {error}");
+    CohostWorld {
+        kernel,
+        model_writes,
+        user_fs,
+        workspace,
+        transcript,
+        user_mb,
+        desc,
+        model_storage,
     }
-
-    let reply = wait_for_agent_reply(&kernel, &transcript, &ctx, agent_id, Duration::from_mins(1));
-    // A send tool can deliver the reply before its turn finishes. Wait for the
-    // durable receive acknowledgement before terminating the host.
-    if reply.is_some() {
-        wait_for_delivery_ack(&user_fs, agent_id);
-    }
-    handle.abort_signal.abort();
-    let _ = handle.join.join();
-
-    let asked = assert_model_traffic(
-        harness,
-        model_writes.load(Ordering::SeqCst),
-        asked_before,
-        agent_id,
-        &workspace,
-    );
-    let reply = reply.unwrap_or_else(|| {
-        let raw = user_fs.read(&transcript).map_or_else(
-            |e| format!("<unreadable: {e}>"),
-            |b| String::from_utf8_lossy(&b).into_owned(),
-        );
-        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
-    });
-    let body = reply
-        .get("body")
-        .and_then(|b| b.as_str())
-        .unwrap_or_default()
-        .to_string();
-    eprintln!("[agent -> user] {body}");
-    (body, asked, user_fs)
 }
 
 fn wait_for_delivery_ack(fs: &Arc<dyn FsBackend>, agent_id: &str) {
@@ -968,4 +1007,245 @@ fn assert_restored_managed_history(
     );
     assert_eq!(fs.readdir("/sessions").unwrap().len(), 1);
     after
+}
+
+/// Every lifecycle state the host published, in order.
+#[derive(Clone, Default)]
+struct PublishedStates(Arc<Mutex<Vec<AgentState>>>);
+
+impl PublishedStates {
+    fn observer(&self) -> impl Fn(AgentState, Option<String>) + Send + Sync + 'static {
+        let states = self.clone();
+        move |state, reason| {
+            eprintln!("[agent state] {state:?} reason={reason:?}");
+            states
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(state);
+        }
+    }
+
+    fn terminated_within(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            let terminated = self
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&AgentState::Terminated);
+            if terminated || Instant::now() >= deadline {
+                return terminated;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Holds the agent's read of one path inside the kernel until released, so
+/// the tool that issued it cannot finish however the turn is cancelled.
+struct HeldRead {
+    path: String,
+    agent: String,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl kernel::core::dispatch::NativeInterceptHook for HeldRead {
+    fn name(&self) -> &'static str {
+        "cleanup-held-read"
+    }
+    fn on_pre(
+        &self,
+        ctx: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Read(read) = ctx {
+            if read.path == self.path && read.identity.agent_id == self.agent {
+                let _ = self.entered.send(());
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv_timeout(Duration::from_mins(5));
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
+/// Releases a held read when dropped, including when the test panics.
+struct ReleaseRead(mpsc::Sender<()>);
+impl Drop for ReleaseRead {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Another writer breaks the session's lease: force-release it from inside a
+/// write into the session's directory. Writes made before the host holds the
+/// lease (the harness seeds the session) find nothing to break, so the hook
+/// keeps trying until a release takes a held lease.
+struct LeaseBreaker {
+    kernel: Weak<Kernel>,
+    agent: String,
+    broken: Arc<Mutex<Option<String>>>,
+}
+
+impl kernel::core::dispatch::NativeInterceptHook for LeaseBreaker {
+    fn name(&self) -> &'static str {
+        "cleanup-lease-breaker"
+    }
+    fn on_pre(
+        &self,
+        ctx: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Write(write) = ctx {
+            let mut broken = self.broken.lock().unwrap_or_else(PoisonError::into_inner);
+            let segments: Vec<&str> = write.path.split('/').collect();
+            let session_dir = segments[..segments.len().saturating_sub(1)]
+                .iter()
+                .position(|segment| segment.starts_with("session-"))
+                .map(|at| segments[..=at].join("/"));
+            if let (None, Some(lease), true) = (
+                broken.as_ref(),
+                session_dir,
+                write.identity.agent_id == self.agent,
+            ) {
+                let kernel = self.kernel.upgrade().ok_or("kernel dropped")?;
+                if kernel
+                    .sys_unlock(&lease, "", true)
+                    .map_err(|error| format!("{error:?}"))?
+                {
+                    *broken = Some(lease);
+                }
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
+/// Run one read-then-reply turn to its reply, then stop the host.
+fn complete_turn_then_stop(world: &CohostWorld, agent_id: &str, handle: managed_harness::TestHost) {
+    send_prompt(&world.user_mb, agent_id, READ_THEN_REPLY);
+    let reply = wait_for_agent_reply(
+        &world.kernel,
+        &world.transcript,
+        &user_ctx(),
+        agent_id,
+        Duration::from_mins(1),
+    );
+    if reply.is_some() {
+        wait_for_delivery_ack(&world.user_fs, agent_id);
+    }
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+    assert!(
+        reply.is_some(),
+        "the co-host answered its turn before it was stopped"
+    );
+}
+
+#[test]
+fn a_cohost_that_closes_cleanly_is_terminated() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let agent_id = "cohost-clean-close";
+    let world = cohost_world("pid-cohost-clean-close", agent_id, true);
+    let states = PublishedStates::default();
+    let handle = spawn_managed_agent(
+        Arc::clone(&world.kernel),
+        world.desc.clone(),
+        states.observer(),
+    )
+    .expect("spawn the co-host");
+    complete_turn_then_stop(&world, agent_id, handle);
+    assert!(
+        states.terminated_within(Duration::from_secs(30)),
+        "a confirmed teardown publishes Terminated"
+    );
+}
+
+#[test]
+fn a_cohost_whose_engine_is_stuck_in_a_tool_is_not_terminated() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let agent_id = "cohost-stuck-tool";
+    let world = cohost_world("pid-cohost-stuck-tool", agent_id, true);
+    let (entered_tx, entered) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let hook = world
+        .kernel
+        .enlist_hook_only_service("cleanup-held-read")
+        .expect("held read");
+    world.kernel.register_service_hook(
+        &hook,
+        Box::new(HeldRead {
+            path: format!("{}/fixture.txt", world.workspace),
+            agent: agent_id.to_string(),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }),
+    );
+    let release = ReleaseRead(release_tx);
+    let states = PublishedStates::default();
+    let handle = spawn_managed_agent(
+        Arc::clone(&world.kernel),
+        world.desc.clone(),
+        states.observer(),
+    )
+    .expect("spawn the co-host");
+    send_prompt(&world.user_mb, agent_id, READ_THEN_REPLY);
+    entered
+        .recv_timeout(Duration::from_mins(1))
+        .expect("the agent's read tool reached the held read");
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+    // Engine reap, bridge stop and completion retirement wait 30 s each.
+    assert!(
+        !states.terminated_within(Duration::from_secs(120)),
+        "a host whose engine is still inside a tool must not be reported terminated"
+    );
+    // Had the outcome still been pending, the release would now let teardown
+    // confirm; the latched unconfirmed result must stay.
+    drop(release);
+    assert!(
+        !states.terminated_within(Duration::from_secs(20)),
+        "a late release must not turn an unconfirmed teardown into Terminated"
+    );
+}
+
+#[test]
+fn a_cohost_whose_session_lease_was_broken_is_not_terminated() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let agent_id = "cohost-broken-lease";
+    let world = cohost_world("pid-cohost-broken-lease", agent_id, true);
+    let broken = Arc::new(Mutex::new(None));
+    let hook = world
+        .kernel
+        .enlist_hook_only_service("cleanup-lease-breaker")
+        .expect("lease breaker");
+    world.kernel.register_service_hook(
+        &hook,
+        Box::new(LeaseBreaker {
+            kernel: Arc::downgrade(&world.kernel),
+            agent: agent_id.to_string(),
+            broken: Arc::clone(&broken),
+        }),
+    );
+    let states = PublishedStates::default();
+    let handle = spawn_managed_agent(
+        Arc::clone(&world.kernel),
+        world.desc.clone(),
+        states.observer(),
+    )
+    .expect("spawn the co-host");
+    let lease = broken
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .expect("a write into the session ran while the host held its lease");
+    eprintln!("[test] broke the session lease {lease}");
+    complete_turn_then_stop(&world, agent_id, handle);
+    assert!(
+        !states.terminated_within(Duration::from_secs(30)),
+        "a host that could not release its lease must not be reported terminated"
+    );
 }

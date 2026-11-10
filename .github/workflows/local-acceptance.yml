@@ -112,6 +112,13 @@ jobs:
           subprocess.run([sys.executable,
                           '../.trusted-acceptance/e2e/local-acceptance/inherited_lease_acceptance.py',
                           '--output', os.environ['INHERITED_LEASE_OUTPUT']], check=True)
+      - name: Prepare pinned tools through the authenticated GitHub API
+        if: matrix.family == 'native'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
+        run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
       - name: Run the same native commands on the missing platform
         env:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}

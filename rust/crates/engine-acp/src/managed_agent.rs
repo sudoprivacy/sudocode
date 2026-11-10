@@ -8,30 +8,18 @@ use std::sync::{Arc, Mutex};
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
 use engine_host::managed_agent::{prepare_managed_agent, PreparedManagedAgent};
+use engine_host::managed_context::ManagedRuntimeContext;
 use engine_host::SessionEngine;
 use managed_agent::{SpawnHandle, SpawnOptions, SpawnTask};
 use runtime::spawn_task::{AgentDescriptor, AgentState, KernelConvenience};
 use runtime::{agent_operation_context, HookAbortSignal, KernelFsAccess};
 
 use crate::acp_sdk_server::{
-    run_acp_on_transport, AcpError, HostedSessionFactory, SdkAcpConfig, SessionRegistry,
+    run_acp_on_transport, AcpError, HostedSessionFactory, SessionRegistry,
 };
+use crate::managed::managed_session_config;
 
 type StateObserver = Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>;
-
-fn managed_session_config(prepared: &PreparedManagedAgent) -> SdkAcpConfig {
-    SdkAcpConfig {
-        agent_version: env!("CARGO_PKG_VERSION").into(),
-        model: prepared.model().to_string(),
-        model_flag_raw: Some(prepared.model().to_string()),
-        permission_mode_override: Some(runtime::PermissionMode::Prompt),
-        reasoning_effort: None,
-        allowed_tools: None,
-        auth_mode: None,
-        git_sha: None,
-        build_target: None,
-    }
-}
 
 struct Factory {
     prepared: Mutex<Option<PreparedManagedAgent>>,
@@ -123,13 +111,15 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
             .session_endpoint
             .clone()
             .ok_or("managed session has no mailbox endpoint")?;
-        let prepared = prepare_managed_agent(&kernel, &desc, &options, self.authenticated_senders)?;
+        let context = ManagedRuntimeContext::cohost(&kernel, &desc, self.authenticated_senders)?;
+        let prepared = prepare_managed_agent(&context, options.resume_session_id.as_deref())
+            .map_err(|error| error.to_string())?;
         let peer_mailbox = prepared.mailbox();
         let session_id = prepared.durable_session_id().to_string();
         // This signal terminates the HOST. Turn cancellation belongs to each
         // SessionEngine and is reset only when that engine starts another turn.
         let stopped = prepared.abort_signal();
-        let config = managed_session_config(&prepared);
+        let config = managed_session_config(prepared.model());
         let ctx = agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
         let mailbox = Arc::new(SessionMailbox::open(
             kernel,

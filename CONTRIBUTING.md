@@ -387,6 +387,15 @@ Its first failed service profile stops the job before release execution; jobs
 selecting only release still run it. Real production-entrypoint child-process
 controls cover failure, complete success and release-only selection.
 
+When native services are selected, preparation resolves their existing grpcurl
+client and actually runs `--version` before native compilation. Windows selects
+Git for Windows Bash explicitly, so an earlier WSL launcher cannot take its place.
+Download and executable failures stop at `NATIVE_SERVICE_TOOL_PREFLIGHT`.
+The later service journey uses that exact resolved file and verifies its bytes
+again; both original service journeys still run. Real Bash/curl proxy-504,
+invalid-executable, offline-cache and unselected-profile controls protect this
+ordering. These are infrastructure checks and add no product journey credit.
+
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
 deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on

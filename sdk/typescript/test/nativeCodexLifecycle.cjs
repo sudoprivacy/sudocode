@@ -629,7 +629,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         }
         assert.equal(receipt.modelRequests.length,startupModelRequests,'autojoin must not start the native model');
       }
-      const receivePeer = async (peer,original,epoch) => {
+      const receivePeer = async (peer,original,epoch,{resumeInterrupted=false}={}) => {
         const {sendScodeMessage}=require(library);
         phase='peer-inbound';
         const before=receipt.modelRequests.length;
@@ -642,7 +642,8 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         const sent=await sendScodeMessage(peer,{to:original.actor,
           message:expectedPeerInput,summary:'Isolated automatic peer reception'});
         assert.equal(sent.isError,false,JSON.stringify(sent));
-        const end=Date.now()+15000;
+        let end=Date.now()+15000;
+        let interruptedQueue;
         while(true){
           const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:true});
           const queued=queuedRows().slice(queuedBefore);
@@ -652,6 +653,31 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
             .filter(item=>item.type==='userMessage'&&item.clientId===arrival.eventId)
             .map(item=>({turn,item}))):[];
           assert.ok(consumed.length<=1,'the original callback event must be consumed exactly once');
+          if(resumeInterrupted&&!interruptedQueue){
+            // Native cancellation deliberately survives cold resume. Peer data
+            // must not override that user decision, even after a watcher tick.
+            assert.equal(receipt.modelRequests.length,before,'Interrupted history must not infer from queued peer data');
+            assert.equal(consumed.length,0,'Interrupted history must retain the queued peer message');
+            assert.equal(thread.status.type,'idle');
+            if(Date.now()>end){
+              assert.ok(arrival,'The peer must reach durable ingress while interrupted');
+              const pending=await request(observer,'interrupted peer queue','thread/queue/list',{threadId:original.threadId});
+              assert.equal(pending.nextCursor,null,'The private interrupted queue must be complete');
+              assert.equal(pending.data.length,1);
+              assert.equal(pending.data[0].id,arrival.queueItemId);
+              assert.equal(pending.data[0].clientUserMessageId,arrival.eventId);
+              // Explicit fixture operator action, never callback recovery.
+              const started=await request(observer,'fixture user resumes queued peer','thread/queue/start',{
+                threadId:original.threadId,queuedSubmissionId:arrival.queueItemId});
+              interruptedQueue={automaticWake:false,pausedObservationMs:15000,
+                pending:pending.data[0],explicitUserQueueStart:started};
+              // Keep the original 15-second consumption bound after the new
+              // explicit user action; do not extend an automatic-wake timeout.
+              end=Date.now()+15000;
+            }
+            await new Promise(resolve=>setTimeout(resolve,50));
+            continue;
+          }
           if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
               &&consumed.length===1&&consumed[0].turn.status==='completed'&&thread.status.type==='idle'){
             assert.equal(arrival.method,'thread/queue/addOnce');
@@ -670,7 +696,9 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
             const binding=receipt.realNodeEnrollment.find(row=>row.threadId===thread.id);
             assert.equal(peerInput.message.sessionId,binding.sessionId,'same original ACP SID receives the peer input');
             assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
+            if(interruptedQueue)assert.equal(consumed[0].turn.id,interruptedQueue.explicitUserQueueStart.turn.id);
             return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
+              ...(interruptedQueue?{interruptedQueue}:{}),
               targetThreadId:thread.id,targetActor:original.actor,queued:arrival,
               nativeConsumption:{turnId:consumed[0].turn.id,status:consumed[0].turn.status,
                 completedAt:consumed[0].turn.completedAt,item:consumed[0].item},
@@ -838,7 +866,8 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
             receipt.coldHistoryResume.originalAcpSidRetained=true;
             receipt.coldHistoryResume.acpLoad={sessionId:expected.sessionId,totalLoads:methods.filter(method=>method==='session/load').length};
             const peer=await require(library).connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
-            try{receipt.coldHistoryResume.peerReception=await receivePeer(peer,claim,'after cold history resume');}
+            try{receipt.coldHistoryResume.peerReception=await receivePeer(peer,claim,'after cold history resume',{
+              resumeInterrupted:cancelledResume});}
             finally{await peer.close();}
             assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'Cold resume and inbound wake retain both original claims');
           }

@@ -296,6 +296,15 @@ unchanged cold-daemon and legacy-import cases; it does not modify a live user
 home or certify a production migration. A setup result alone still reports
 `a2aJourneyVerified: false`.
 
+The installed fixture also accepts `CODEX_ENROLLMENT_INSTALLED_COLD=1`,
+`CODEX_ENROLLMENT_CROSS_WORKSPACE=1` and `CODEX_ENROLLMENT_RESUME_COLD=1`
+to exercise an absent backend, a second workspace and original history after
+backend shutdown. Completed history receives peer input automatically. Cancelled
+history preserves native interruption: the fixture observes the same durable
+queued message and zero new model requests for 15 seconds, then explicitly
+starts that queued item as a fixture user action and checks consumption exactly
+once. This explicit action is not performed by the callback or by startup.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:

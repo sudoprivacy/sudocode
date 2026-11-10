@@ -507,8 +507,34 @@ def terminal_installer_scope(root, base):
     return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
 
 
+def windows_native_shells():
+    """Share the existing shell requirements before admission and at execution."""
+    if os.name != "nt":
+        return []
+    system_root = os.environ.get("SystemRoot")
+    legacy = Path(system_root) / "System32/WindowsPowerShell/v1.0/powershell.exe" if system_root else None
+    pwsh = shutil.which("pwsh.exe")
+    shells = [legacy, Path(pwsh) if pwsh else None]
+    missing = [name for name, path in zip(["Windows PowerShell", "PowerShell 7 (pwsh.exe)"], shells)
+               if path is None or not path.is_file()]
+    if missing:
+        raise RuntimeError("Windows native acceptance requires " + ", ".join(missing) + ". "
+                           "Add the existing PowerShell 7 directory to this process's PATH, or install it with "
+                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                           "then rerun the same acceptance command. Full acceptance remains required.")
+    return shells
+
+
 def validate_before_host_lease(names, root, output):
     """Reject invalid guard inputs early; execution still stages its own copy."""
+    if set(names) & {"guard-contract", "native-workspace"}:
+        shells = windows_native_shells()
+        if shells:
+            print("NATIVE_HOST_PREREQUISITES=" + json.dumps({
+                "windows_shells": list(map(str, shells)),
+                "stage": "before host queue; execution rechecks these paths",
+                "full_acceptance_required": True,
+            }), flush=True)
     if "guard-contract" not in names:
         return
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
@@ -640,11 +666,7 @@ def native_workspace_format(root, cargo, command):
 
 def native_workspace_lint(root, output, base, cargo, command):
     """Run the original lint prefix; a pass alone never completes workspace acceptance."""
-    if os.name == "nt" and not shutil.which("pwsh.exe"):
-        raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
-                           "Add your existing PowerShell 7 directory to PATH, or install it with "
-                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
-                           "then rerun the same acceptance command. No workspace compilation started.")
+    windows_native_shells()
     native_workspace_format(root, cargo, command)
     tests = changed_cli_test_targets(root, base)
     scope = {"tests": tests, "targets": None}
@@ -1006,7 +1028,7 @@ def native_guard_files():
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
-        "e2e/local-acceptance/release_artifact_acceptance.py": "157fae30f7fd278e0a44ef6a44b018a5d15429dcb9de6f025bebfc86b7253e00",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
         ".github/scripts/ci_input_scope.py": "aa49ee8b7b2a8b40087679803c41f4ae0f318a32fa8ef587a9d6c3eb044bef37",
         ".github/workflows/rust-ci.yml": "8b5d0757f163a08768cdc103df3b04215ba16f29bc644d4c4ede2f2ac5c4a2db",
@@ -1032,7 +1054,7 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/host_lease_acceptance.py": "8928b11c2448258f0ee0fbf6a9713aa8a71c5dddb4e0485b7c90ac23f903c9ba",
+        "e2e/local-acceptance/host_lease_acceptance.py": "54426be8abe9d5d0810e4ddb3d24b0ff763758c4575b5b699807b1970fde0c9e",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",

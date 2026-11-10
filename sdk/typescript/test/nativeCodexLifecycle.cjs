@@ -17,9 +17,12 @@ const options = parseArgs({ options: {
   'legacy-import': {type:'boolean'},
   'human-review-entry': {type:'boolean'},
   'installed-command': {type:'boolean'},
+  'installed-cold': {type:'boolean'},
+  'cross-workspace': {type:'boolean'},
+  'resume-cold': {type:'boolean'},
 } }).values;
 if (options.help) {
-  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>] [--human-review-entry] [--installed-command --autojoin --operator-context <private fixture context>]');
+  console.log('node test/nativeCodexLifecycle.cjs --codex <native executable> --output <evidence directory> [--case idle|cancelled-resume|completed-resume] [--driver <JSON argv>] [--temp-root <private directory>] [--managed-package-root <official npm package>] [--human-review-entry] [--installed-command --autojoin --operator-context <private fixture context>] [--installed-cold] [--cross-workspace] [--resume-cold (resume cases only)]');
   process.exit(0);
 }
 const executable = options.codex ?? process.env.CODEX_TEST_BIN;
@@ -31,6 +34,13 @@ const managedPackageRoot=options['managed-package-root'];
 if(managedPackageRoot)assert(path.isAbsolute(managedPackageRoot)
   && fs.statSync(path.join(managedPackageRoot,'bin/codex.js')).isFile(),'Select the existing official npm package root');
 const installedCommand=options['installed-command']===true;
+const crossWorkspace=options['cross-workspace']===true;
+assert(!crossWorkspace || installedCommand,'Cross-workspace acceptance requires --installed-command');
+const resumeCold=options['resume-cold']===true;
+assert(!resumeCold || (installedCommand && options.case!=='idle'),
+  'Cold history resume requires an installed-command resume case');
+const installedCold=options['installed-cold']===true;
+assert(!installedCold || installedCommand,'Cold installed acceptance requires --installed-command');
 const humanReviewEntry=options['human-review-entry']===true || installedCommand;
 if(humanReviewEntry)assert(managedPackageRoot,'The human-review entry must exercise the official managed native package');
 if(humanReviewEntry)assert(!options['legacy-import'],'The explicit remote legacy frontend is a separate launch mode');
@@ -69,6 +79,9 @@ const readAutojoinClaims=()=>operatorContext
 const isolatedHome = path.join(root,'home');
 const workspace = path.join(root,'work');
 fs.mkdirSync(isolatedHome);fs.mkdirSync(workspace);
+const secondWorkspace=crossWorkspace?path.join(root,'other-work'):workspace;
+if(crossWorkspace)fs.mkdirSync(secondWorkspace);
+const nativeWorkspaces=[workspace,secondWorkspace];
 const cancelledResume = options.case==='cancelled-resume';
 const seededResume = options.case!=='idle';
 const selectedSocket = path.join(isolatedHome,'app-server-control/app-server-control.sock');
@@ -91,6 +104,9 @@ const receipt = {
   ordinaryManagedLaunch:!!managedPackageRoot,
   humanReviewEntry,
   installedCommand,
+  installedColdStartupRequested:installedCold,
+  crossWorkspaceRequested:crossWorkspace,
+  coldHistoryResumeRequested:resumeCold,
   ...(managedPackageRoot?{launcherWrapperSha256:crypto.createHash('sha256')
     .update(fs.readFileSync(path.join(managedPackageRoot,'bin/codex.js'))).digest('hex')}:{}),
   at: new Date().toISOString(), scenario:options.case, platform:process.platform, driverArgv,
@@ -182,13 +198,13 @@ const closeTui = async own => {
   assert(final && final.returncode===0 && !own.lines.some(line=>['terminate','kill','normal_exit_timeout','unsafe_update_prompt'].includes(line.event)),
     'Actual TUI must exit normally; forced cleanup is not lifecycle acceptance');
 };
-const spawnTui = async (label,args=[],env=childEnv) => {
+const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) => {
   // Reuse this fixture's history, unload and request-count assertions for the
   // actual habitual command, rather than implementing another resume harness.
   const command=userEntryArgv??configured.codexArgv;
-  const launch=[...command,...args,'--no-alt-screen','--cd',workspace];
+  const launch=[...command,...args,'--no-alt-screen','--cd',launchWorkspace];
   if(humanReviewEntry)(receipt.userEntryLaunches??=[]).push({label,argv:launch});
-  const driver=spawn(driverArgv[0],[...driverArgv.slice(1),...launch],{cwd:workspace,
+  const driver=spawn(driverArgv[0],[...driverArgv.slice(1),...launch],{cwd:launchWorkspace,
       env:{...env,NATIVE_LIFECYCLE_PTY_TRACE:path.join(root,'tui-'+label+'.trace.json')},stdio:['pipe','pipe','pipe']});
   const own={label,driver,exit:once(driver,'close'),lines:[],stderr:''};tuis.push(own);
   let buffer='';driver.stdout.on('data',bytes=>{buffer+=bytes;let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);own.lines.push(JSON.parse(line));}});
@@ -230,7 +246,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         :'approval_policy = "never"\nsandbox_mode = "read-only"\n')+
       '[features]\napps = false\nplugins = false\n[analytics]\nenabled = false\n[model_providers.lifecycle_fixture]\nname = "No inference lifecycle fixture"\n'+
       'base_url = "http://127.0.0.1:'+apiPort+'/v1"\nwire_api = "responses"\nenv_key = "NATIVE_LIFECYCLE_FIXTURE_KEY"\n'+
-      '[projects.'+JSON.stringify(workspace)+']\ntrust_level = "trusted"\n'+
+      [...new Set(nativeWorkspaces)].map(directory=>'[projects.'+JSON.stringify(directory)+']\ntrust_level = "trusted"\n').join('')+
       (options['mcp-context'] ? '[mcp_servers.context_probe]\ncommand = '+JSON.stringify(process.execPath)+
         '\nargs = ['+JSON.stringify(path.join(__dirname,'fixtures/mcpStartupContext.cjs'))+']\nrequired = true\n'+
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
@@ -381,7 +397,10 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       // its own default daemon within the original listener deadline. The
       // installed-command variant instead exercises the daemon started by its
       // one setup command, including first-use registration without a restart.
-      for(const action of installedCommand?[]:['start','stop']){
+      // Keep the original first-install journey. The separate cold case
+      // stops only the daemon just installed in this fixture's private
+      // home; the next ordinary command must start it without setup again.
+      for(const action of installedCommand?(installedCold?['stop']:[]):['start','stop']){
         const before=Date.now();
         const result=spawnSync(configured.codexArgv[0],['app-server','daemon',action],
           {cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
@@ -395,7 +414,15 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           receipt.preparedNativeVersion=value.managedCodexVersion;
         }
       }
-      if(!installedCommand)assert(!socketEntryPresent(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
+      if(!installedCommand || installedCold)assert(!socketEntryPresent(selectedSocket),'prepared native daemon must stop before ordinary cold startup');
+      if(installedCold){
+        const stop=JSON.parse(receipt.oneTimeNativePreparation[0].stdout);
+        assert.equal(stop.status,'stopped','Cold case must stop the daemon started by this installation');
+        assert.equal(canonicalSocketPath(stop.socketPath),canonicalSocketPath(selectedSocket));
+        assert.equal(crypto.createHash('sha256').update(fs.readFileSync(stop.managedCodexPath)).digest('hex'),receipt.nativeSha256);
+        receipt.installedColdPreparation={stop,socketAbsent:!socketEntryPresent(selectedSocket)};
+        assert.equal(receipt.installedColdPreparation.socketAbsent,true);
+      }
     }else{
       native=spawn(configured.codexArgv[0],[...configured.codexArgv.slice(1),'app-server','--listen','unix://'],
         {cwd:workspace,env:childEnv,stdio:['ignore','ignore','pipe']});
@@ -405,7 +432,8 @@ const spawnTui = async (label,args=[],env=childEnv) => {
     {
       let observer;
       for(const label of ['first','second']){
-        await spawnTui(label,label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[]);
+        await spawnTui(label,label==='first'&&receipt.legacyImport?['resume',receipt.legacyImport.originalThreadId]:[],
+          childEnv,label==='second'?secondWorkspace:workspace);
         if(label==='first'&&managedPackageRoot&&operatorContext&&!seededResume&&!receipt.legacyImport){
           const audit=path.join(root,'autojoin-audit.jsonl');
           await waitUntil(()=>{
@@ -466,10 +494,13 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         if(Date.now()>deadline)throw new Error('Two actual idle TUIs not visible on default endpoint');
         await new Promise(resolve=>setTimeout(resolve,150));
       }while(true);
+      assert.deepEqual(loadedThreads.map(thread=>fs.realpathSync(thread.cwd)).sort(),
+        nativeWorkspaces.map(directory=>fs.realpathSync(directory)).sort(),
+        'Both actual roots must belong to the selected native workspaces');
       receipt.created=[];
       for(const thread of loadedThreads){
         const id=thread.id;
-        assert.equal(fs.realpathSync(thread.cwd),fs.realpathSync(workspace));assert.equal(thread.status.type,'idle');
+        assert.equal(thread.status.type,'idle');
         if(humanReviewEntry){
           assert.equal(thread.threadSource,'user');assert.equal(thread.parentThreadId,null);
           assert.equal(thread.canAcceptDirectInput,true,'the actual user entry must join the shared root inventory');
@@ -508,9 +539,14 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           ? fs.existsSync(path.join(root,'bindings'))&&readAutojoinClaims().length===2
           : fs.existsSync(claims)&&fs.readFileSync(claims,'utf8').trim().split('\n').length===2,15000,'two independent autojoin claims');
         receipt.autojoinClaims=readAutojoinClaims();
-        assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'same-cwd roots need distinct Agents');
+        assert.equal(new Set(receipt.autojoinClaims.map(claim=>claim.actor)).size,2,'independent native roots need distinct Agents');
         assert.deepEqual(receipt.autojoinClaims.map(claim=>claim.threadId).sort(),receipt.inventory.slice().sort());
         assert(receipt.autojoinClaims.every(claim=>!claim.actor.includes(claim.threadId)),'Agent name is not a transcript id');
+        for(const claim of receipt.autojoinClaims){
+          const original=receipt.created.find(thread=>thread.id===claim.threadId);
+          assert.equal(fs.realpathSync(claim.workspace),fs.realpathSync(original.cwd),
+            'Each actor must bind its actual native root workspace');
+        }
         if(!operatorContext){
           const log=path.join(root,'acp.jsonl');
           await waitUntil(()=>fs.existsSync(log)&&fs.readFileSync(log,'utf8').trim().split('\n').filter(line=>JSON.parse(line).method==='_sudocode/a2a/agent_list').length===2,10000,'authenticated ACP identity checks');
@@ -580,12 +616,46 @@ const spawnTui = async (label,args=[],env=childEnv) => {
             return {actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,
               sessionId:profile.acpSessionId,calls,ownerAttachmentRequests};
           });
-          assert(!fs.existsSync(path.join(workspace,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
+          for(const directory of new Set(nativeWorkspaces))
+            assert(!fs.existsSync(path.join(directory,'.nexus/sudocode/settings.json')),'native project configuration is never provisioned by enrollment');
         }
         assert.equal(receipt.modelRequests.length,startupModelRequests,'autojoin must not start the native model');
       }
+      const receivePeer = async (peer,original,epoch) => {
+        const {sendScodeMessage}=require(library);
+        phase='peer-inbound';
+        const before=receipt.modelRequests.length;
+        const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
+        const acceptedRows=()=>fs.existsSync(callback)?fs.readFileSync(callback,'utf8').split('\n').filter(Boolean)
+          .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
+        const acceptedBefore=acceptedRows().length;
+        await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
+        expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
+        const sent=await sendScodeMessage(peer,{to:original.actor,
+          message:expectedPeerInput,summary:'Isolated automatic peer reception'});
+        assert.equal(sent.isError,false,JSON.stringify(sent));
+        const end=Date.now()+15000;
+        while(true){
+          const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
+          const accepted=acceptedRows();
+          if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
+              &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
+            assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
+            return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
+              targetThreadId:thread.id,targetActor:original.actor,accepted:accepted.at(-1),
+              modelRequestsAfterArrival:receipt.modelRequests.length,nativeRequestsAdded:receipt.modelRequests.length-before,
+              untrustedPeerMarkerReachedNativeModel:true,sent};
+          }
+          if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
+          await new Promise(resolve=>setTimeout(resolve,50));
+        }
+      };
       if(seededResume){
-        const original=receipt.created[0];
+        // Exercise resume in the second workspace, independent of inventory order.
+        const original=crossWorkspace
+          ? receipt.created.find(thread=>fs.realpathSync(thread.cwd)===fs.realpathSync(secondWorkspace))
+          : receipt.created[0];
+        assert(original,'The selected resume root must exist');
         // Control the fixture name before seeding so the TUI does not create an
         // unrelated title-generation worker. Every HTTP request still counts.
         receipt.seedThreadName='Native lifecycle fixture';
@@ -619,13 +689,60 @@ const spawnTui = async (label,args=[],env=childEnv) => {
         receipt.loadedAfterFrontendClose=(await request(observer,'observer','thread/loaded/list',{})).data;
         if(managedPackageRoot){
           await bounded((async()=>{
-            while((await request(observer,'native unload before resume','thread/loaded/list',{})).data.includes(original.id))
+            for(;;){
+              const snapshot=await request(observer,'native unload before resume','thread/loaded/list',{});
+              assert.equal(snapshot.nextCursor,null,'Pre-resume inventory must be complete');
+              if(resumeCold?snapshot.data.length===0:!snapshot.data.includes(original.id))break;
               await new Promise(resolve=>setTimeout(resolve,100));
+            }
           })(),5000,'native unload before actual resume');
           receipt.originalRootUnloadedBeforeResume=true;
         }
+        if(resumeCold){
+          const owner=receipt.autojoinOwner[0];
+          const restart=receipt.coldHistoryResume={originalThreadId:original.id,
+            workspace:original.cwd,originalOwnerPid:owner.pid};
+          await waitUntil(()=>!processAlive(owner.pid),15000,'original owner exits before cold history resume');
+          restart.originalOwnerExitedBeforeStop=true;
+          // Close the original observer proxy before stopping its private daemon.
+          // An unresolved close fails here, before any replacement frontend.
+          await observer.close();
+          restart.originalObserverClosed=true;
+          const raw=spawnSync(configured.codexArgv[0],['app-server','daemon','stop'],
+            {cwd:original.cwd,encoding:'utf8',env:childEnv,timeout:35000});
+          restart.stopCommand={status:raw.status,stdout:raw.stdout,stderr:raw.stderr,error:raw.error?.message};
+          assert.equal(raw.status,0,'original private backend stop must succeed');
+          const stopped=JSON.parse(raw.stdout);
+          assert.equal(stopped.status,'stopped');
+          assert.equal(canonicalSocketPath(stopped.socketPath),canonicalSocketPath(selectedSocket));
+          assert(fs.realpathSync(stopped.managedCodexPath).startsWith(fs.realpathSync(isolatedHome)+path.sep));
+          assert.equal(crypto.createHash('sha256').update(fs.readFileSync(stopped.managedCodexPath)).digest('hex'),receipt.nativeSha256);
+          restart.stop=stopped;
+          restart.socketAbsentBeforeResume=!socketEntryPresent(selectedSocket);
+          assert.equal(restart.socketAbsentBeforeResume,true);
+          assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'Stopping the backend never re-enrolls a root');
+          assert.equal(receipt.modelRequests.length,receipt.seedModelRequests);
+        }
         phase='resume';
-        const resumer=await spawnTui('resume',['resume',original.id]);
+        const resumer=await spawnTui('resume',['resume',original.id],childEnv,original.cwd);
+        if(resumeCold){
+          await waitUntil(()=>socketEntryPresent(selectedSocket),10000,'ordinary resume starts the original private endpoint');
+          observer=await connect('cold resume observer',receipt.observerNotifications);
+          await waitUntil(()=>{
+            const rows=fs.readFileSync(path.join(root,'autojoin-audit.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
+            receipt.autojoinOwner=rows.filter(row=>row.phase==='listening');
+            return receipt.autojoinOwner.length>=2;
+          },10000,'cold resume elects its one replacement owner after original exit');
+          assert.equal(receipt.autojoinOwner.length,2,'Exactly one new owner after the completed old owner');
+          receipt.coldHistoryResume.replacementOwner=receipt.autojoinOwner[1];
+          assert(!processAlive(receipt.coldHistoryResume.originalOwnerPid),'The old owner must remain exited');
+          const version=JSON.parse(execFileSync(configured.codexArgv[0],['app-server','daemon','version'],
+            {cwd:original.cwd,encoding:'utf8',env:childEnv,timeout:10000}));
+          assert.equal(version.status,'running');
+          assert.equal(canonicalSocketPath(version.socketPath),canonicalSocketPath(selectedSocket));
+          assert.equal(crypto.createHash('sha256').update(fs.readFileSync(version.managedCodexPath)).digest('hex'),receipt.nativeSha256);
+          receipt.coldHistoryResume.resumedNativeVersion=version;
+        }
         const readyEnd=Date.now()+15000;
         let restored;
         while(true){
@@ -638,7 +755,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           if(Date.now()>readyEnd)throw new Error('Actual resume did not restore original ID/history while idle');
           await new Promise(resolve=>setTimeout(resolve,50));
         }
-        assert.equal(fs.realpathSync(restored.cwd),fs.realpathSync(workspace),'Resume must retain the canonical workspace');
+        assert.equal(fs.realpathSync(restored.cwd),fs.realpathSync(original.cwd),'Resume must retain the canonical workspace');
         receipt.resumed={id:restored.id,cwd:restored.cwd,status:restored.status,actualTuiHistoryRestored:true};
         assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'Resume must add zero model requests');
         receipt.resumeAdditionalModelRequests=0;
@@ -660,42 +777,35 @@ const spawnTui = async (label,args=[],env=childEnv) => {
           }
           receipt.autojoinResume={actor:claim.actor,threadId:restored.id,result};
           assert.equal(receipt.modelRequests.length,receipt.seedModelRequests,'resumed direct send adds no inference');
+          if(resumeCold){
+            const binding=JSON.parse(fs.readFileSync(path.join(root,'bindings',restored.id+'.json'),'utf8'));
+            const profile=JSON.parse(fs.readFileSync(binding.configFile,'utf8'));
+            const expected=receipt.realNodeEnrollment.find(row=>row.threadId===restored.id);
+            assert.equal(profile.acpSessionId,expected.sessionId);
+            const rows=protocolRows(profile);
+            const methods=rows.filter(row=>row.direction==='outgoing').map(row=>row.message.method);
+            assert.equal(methods.filter(method=>method==='session/new').length,1,'Cold resume must not create an ACP session');
+            assert.equal(methods.filter(method=>method==='session/load').length,
+              expected.calls.filter(method=>method==='session/load').length+1,'Cold owner adds one original SID load');
+            const epoch=rows.slice(rows.findLastIndex(row=>row.direction==='outgoing'&&row.message.method==='initialize'));
+            const loads=epoch.filter(row=>row.direction==='outgoing'&&row.message.method==='session/load');
+            assert.equal(loads.length,1);assert.equal(loads[0].message.params.sessionId,expected.sessionId);
+            assert(!methods.includes('session/prompt'),'The inner ACP owner must not infer');
+            receipt.coldHistoryResume.originalAcpSidRetained=true;
+            receipt.coldHistoryResume.acpLoad={sessionId:expected.sessionId,totalLoads:methods.filter(method=>method==='session/load').length};
+            const peer=await require(library).connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
+            try{receipt.coldHistoryResume.peerReception=await receivePeer(peer,claim,'after cold history resume');}
+            finally{await peer.close();}
+            assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'Cold resume and inbound wake retain both original claims');
+          }
         }
         await closeTui(resumer);
       }
       if(operatorContext && !seededResume && !receipt.legacyImport){
-        const {connectScode,sendScodeMessage}=require(library);
+        const {connectScode}=require(library);
         const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
         try{
-          const receivePeer = async (original,epoch) => {
-            phase='peer-inbound';
-            const before=receipt.modelRequests.length;
-            const callback=path.join(root,'bindings',original.threadId+'.callback.jsonl');
-            const acceptedRows=()=>fs.existsSync(callback)?fs.readFileSync(callback,'utf8').split('\n').filter(Boolean)
-              .map(line=>JSON.parse(line)).filter(row=>row.phase==='accepted'):[];
-            const acceptedBefore=acceptedRows().length;
-            await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
-            expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
-            const sent=await sendScodeMessage(peer,{to:original.actor,
-              message:expectedPeerInput,summary:'Isolated automatic peer reception'});
-            assert.equal(sent.isError,false,JSON.stringify(sent));
-            const end=Date.now()+15000;
-            while(true){
-              const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
-              const accepted=acceptedRows();
-              if(receipt.modelRequests.slice(before).some(row=>row.exactPeerInputSeen)
-                  &&accepted.length===acceptedBefore+1&&thread.status.type==='idle'){
-                assert.equal(receipt.modelRequests.length,before+1,'one actual peer input adds exactly one native inference');
-                return {epoch,peerPolicy:'node-namespace',senderProfileOutsideConfiguredAllowlist:true,
-                  targetThreadId:thread.id,targetActor:original.actor,accepted:accepted.at(-1),
-                  modelRequestsAfterArrival:receipt.modelRequests.length,nativeRequestsAdded:receipt.modelRequests.length-before,
-                  untrustedPeerMarkerReachedNativeModel:true,sent};
-              }
-              if(Date.now()>end)throw new Error('Real Node peer did not wake the original native root exactly once');
-              await new Promise(resolve=>setTimeout(resolve,50));
-            }
-          };
-          receipt.actualPeerReception=await receivePeer(receipt.autojoinClaims[0],'before frontend close');
+          receipt.actualPeerReception=await receivePeer(peer,receipt.autojoinClaims[0],'before frontend close');
           assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
           if(managedPackageRoot){
             const first=tuis.find(own=>own.label==='first');
@@ -742,7 +852,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
               .filter(row=>row.phase==='returned'&&row.nativeThreadId===thread.id).at(-1);
             assert.equal(returned.nativeAudit.sessionId,expected.sessionId,'surviving frontend keeps the original real ACP SID');
             assert.equal(receipt.modelRequests.length,beforeSend,'surviving direct send adds no inference');
-            observation.peerReception=await receivePeer(claim,'after first frontend unload');
+            observation.peerReception=await receivePeer(peer,claim,'after first frontend unload');
             assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'frontend close never creates another actor or operation');
             assert.equal(receipt.modelRequests.length,startupModelRequests+2,'two distinct explicit peer arrivals, one native request each');
           }
@@ -750,7 +860,7 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       }
       if(managedPackageRoot && options.autojoin){
         for(const own of tuis)await closeTui(own);
-        const pid=receipt.autojoinOwner[0].pid;
+        const pid=receipt.autojoinOwner.at(-1).pid;
         let ownerExitObservedAt;
         await waitUntil(()=>{
           if(processAlive(pid))return false;
@@ -773,7 +883,9 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       }
       receipt.result='PASS';
       receipt.notProven=[...(seededResume?[]:['existing-history resume']),...(cancelledResume?['completed assistant-history resume']:[]),
-        ...(installedCommand?['native daemon cold startup after installation']:[]),
+        ...(installedCommand&&!installedCold?['native daemon cold startup after installation']:[]),
+        ...(crossWorkspace?[]:['cross-workspace native roots']),
+        ...(resumeCold?[]:['existing-history resume after native backend stop']),
         ...(operatorContext?[]:['automatic authenticated Nexus enrollment']),...(process.platform==='win32'?[]:['Windows actual TUI/default endpoint']),
         'current production private frontend migration','all Codex application launch modes'];
       return;
@@ -808,6 +920,15 @@ const spawnTui = async (label,args=[],env=childEnv) => {
       // Windows maps SIGTERM to TerminateProcess too; its signal name cannot
       // establish graceful shutdown, even without reaching the SIGKILL phase.
       if(process.platform==='win32' || native.signalCode==='SIGKILL')receipt.notProven=[...new Set([...(receipt.notProven??[]),'graceful native server shutdown'])];
+    }
+    if(resumeCold && receipt.managedStartupAttempted){
+      // Capture an owner created before a failed readiness assertion too.
+      // Cleanup cannot silently keep checking only the retired first owner.
+      try{
+        const audit=path.join(root,'autojoin-audit.jsonl');
+        if(fs.existsSync(audit))receipt.autojoinOwner=fs.readFileSync(audit,'utf8').trim().split('\n')
+          .filter(Boolean).map(line=>JSON.parse(line)).filter(row=>row.phase==='listening');
+      }catch(error){receipt.cleanup.push(String(error));receipt.result='FAIL';process.exitCode=1;}
     }
     if(receipt.autojoinOwner){
       try{

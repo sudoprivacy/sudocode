@@ -26,7 +26,12 @@ export interface ReceiverOwnerLease {
   close(): Promise<void>;
 }
 
-export class ReceiverOwnerCleanupUnknownError extends Error {}
+export class ReceiverOwnerCleanupUnknownError extends Error {
+  constructor(message: string, initializationError?: Error) {
+    super(initializationError ? `${message}; original qualification failure: ${String(initializationError)}` : message,
+      { cause: initializationError });
+  }
+}
 
 export function validateReceiverOwner(value: ReceiverOwnerIdentity): void {
   if (!value || Object.keys(value).sort().join(',') !== 'createdFiletime100ns,exe,pid,platform'
@@ -55,7 +60,17 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };
   let ready!: (identity: ReceiverOwnerIdentity) => void, refuse!: (error: Error) => void;
-  const initialized = new Promise<ReceiverOwnerIdentity>((resolve, reject) => { ready = resolve; refuse = reject; });
+  let initializationSettled = false, initializationError: Error | undefined;
+  const initialized = new Promise<ReceiverOwnerIdentity>((resolve, reject) => {
+    ready = identity => {
+      if (initializationSettled) return;
+      initializationSettled = true; resolve(identity);
+    };
+    refuse = error => {
+      if (initializationSettled) return;
+      initializationSettled = true; initializationError = error; reject(error);
+    };
+  });
   // Initial qualification can refuse; it is never used as a recurring liveness
   // timer. After readiness the OS wait, not elapsed wall time, decides exit.
   const startup = setTimeout(() => refuse(new Error('Receiver owner qualification timed out; liveness UNKNOWN')), 10000);
@@ -116,12 +131,12 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
       // Only our returned helper handle may be terminated. Never signal the
       // selected owner, a PID discovered later, an original server or a peer.
       child.kill();
-      if (!await wait(2000)) throw new ReceiverOwnerCleanupUnknownError('Owned monitor exit unobserved; no replacement receiver permitted');
+      if (!await wait(2000)) throw new ReceiverOwnerCleanupUnknownError('Owned monitor exit unobserved; no replacement receiver permitted', initializationError);
     }
     // Windows PowerShell may invoke its compiler while Add-Type initializes.
     // Its explicit completion marker distinguishes an identity refusal from
     // termination during compilation, including unexpected external exit.
-    if (child.pid !== undefined && !bootstrapComplete) throw new ReceiverOwnerCleanupUnknownError('Monitor bootstrap interrupted; descendant cleanup UNKNOWN; no replacement receiver permitted');
+    if (child.pid !== undefined && !bootstrapComplete) throw new ReceiverOwnerCleanupUnknownError('Monitor bootstrap interrupted; descendant cleanup UNKNOWN; no replacement receiver permitted', initializationError);
   })();
   return { initialized, ended, close, pid: child.pid };
 }

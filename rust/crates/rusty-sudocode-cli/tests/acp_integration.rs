@@ -777,20 +777,37 @@ async fn scenario_session_list(client: &mut AcpTestClient, expected_session_id: 
     );
 }
 
-/// `session/load` of an id that was never persisted must fail cleanly (it
-/// must not mint a fresh session under that id).
-async fn scenario_session_load_unknown_session_errors(client: &mut AcpTestClient) {
+/// `session/load` of a well-formed id that was never persisted is a definite
+/// ACP "resource not found" naming the requested id, so a host can tell it
+/// apart from an unknown outcome. It must not mint a session under that id.
+async fn scenario_session_load_unknown_session_errors(
+    client: &mut AcpTestClient,
+    cwd: &std::path::Path,
+) {
     let (notifs, resp) = client
-        .send_request("session/load", json!({ "sessionId": "nonexistent" }))
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": "session-never-persisted",
+                "cwd": cwd.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
         .await;
 
     assert!(
         notifs.is_empty(),
         "session/load should not produce notifications"
     );
+    assert_eq!(resp["error"]["code"], -32002, "definite not-found: {resp}");
+    assert_eq!(
+        resp["error"]["data"]["sessionId"], "session-never-persisted",
+        "the error names the exact requested id: {resp}"
+    );
+    let (_, listed) = client.send_request("session/list", json!({})).await;
     assert!(
-        resp.get("error").is_some(),
-        "session/load should return an error response"
+        !listed.to_string().contains("session-never-persisted"),
+        "a failed load must not create the session: {listed}"
     );
 }
 
@@ -1502,7 +1519,7 @@ async fn run_all_scenarios(
     scenario_session_prompt_streaming(client, &session_id).await;
     scenario_session_prompt_with_image_attachment(client, &session_id).await;
     scenario_session_list(client, &session_id).await;
-    scenario_session_load_unknown_session_errors(client).await;
+    scenario_session_load_unknown_session_errors(client, &workspace.root).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
     scenario_slash_help_and_unknown(client, &session_id).await;
@@ -1723,6 +1740,9 @@ async fn acp_stdio_resume_restores_history_across_reconnect() {
     // --- Process B: a brand-new server process over the same workspace ---
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
+    // Before the real load: a persisted session exists, so a load that still
+    // resolved aliases or paths would land on it here.
+    scenario_session_load_is_exact(&mut client, &workspace, &session_id).await;
 
     // session/load of a session created by the previous process must SUCCEED.
     let (load_notifs, load_resp) = client
@@ -1818,6 +1838,36 @@ async fn scenario_session_load_rejects_other_cwd(
         cross_resp.get("error").is_some(),
         "session/load from another cwd must be rejected, got: {cross_resp}"
     );
+}
+
+/// `session/load` addresses exactly one durable id. The CLI's `latest` alias
+/// and paths are not ids: even with a persisted session present they are
+/// invalid params, so a load can never land on a session it did not name.
+async fn scenario_session_load_is_exact(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+    session_id: &str,
+) {
+    for reference in ["latest".to_string(), format!("./{session_id}")] {
+        let (notifs, resp) = client
+            .send_request(
+                "session/load",
+                json!({
+                    "sessionId": reference,
+                    "cwd": workspace.root.to_string_lossy().to_string(),
+                    "mcpServers": []
+                }),
+            )
+            .await;
+        assert!(
+            notifs.is_empty(),
+            "a rejected load sends no notifications: {reference}"
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "{reference:?} is not a session id: {resp}"
+        );
+    }
 }
 
 /// Regression: a long history must be compacted before the request is sent,

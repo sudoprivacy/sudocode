@@ -105,12 +105,22 @@ fn write_certificates(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     paths
 }
 
+/// The client reaches the gateway directly: `NO_PROXY=*` bypasses a proxy
+/// configured for every scheme, here a dead one, so a request that went
+/// through it would fail as a proxy error instead of reaching the TLS check.
+/// The gateway is dialled by name and by IP literal, which proxy matching
+/// treats differently.
 fn spawn_tls_client(env: &common::TestEnv, args: &[&str], ca: &Path) -> pty_expect::PtySession {
+    const DEAD_PROXY: &str = "http://127.0.0.1:9";
     env.spawn_with_env(
         args,
         &[
             ("SSL_CERT_FILE", ca.to_str().unwrap()),
             ("SSL_CERT_DIR", ""),
+            ("HTTPS_PROXY", DEAD_PROXY),
+            ("https_proxy", DEAD_PROXY),
+            ("HTTP_PROXY", DEAD_PROXY),
+            ("http_proxy", DEAD_PROXY),
             ("NO_PROXY", "*"),
             ("no_proxy", "*"),
         ],

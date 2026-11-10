@@ -22,7 +22,7 @@ use engine_core::engine_events::{
 use engine_core::{EngineEvent, TurnComplete};
 use engine_host::prompt::build_acp_system_prompt;
 use engine_host::session::{
-    canonical_session_cwd, create_managed_session_handle_for, load_session_reference,
+    canonical_session_cwd, create_managed_session_handle_for, load_session_exact,
 };
 use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::WorkspaceRootScope;
@@ -392,8 +392,18 @@ pub(crate) fn open_loaded_session(
             .map_err(crate::AcpError::internal)?;
         return Ok((engine, cwd));
     }
-    let (handle, session) = load_session_reference(session_id)
-        .map_err(|e| crate::AcpError::internal(format!("failed to load session: {e}")))?;
+    // Only a well-formed id that was never persisted is a definite not-found.
+    // Unreadable or mismatched transcripts stay internal: the caller cannot
+    // treat them as proof that nothing exists.
+    let (handle, session) = load_session_exact(session_id).map_err(|error| match error {
+        runtime::session_control::SessionControlError::NotFound(_) => {
+            crate::AcpError::session_not_found(session_id)
+        }
+        runtime::session_control::SessionControlError::InvalidId(_) => {
+            crate::AcpError::invalid_params(error.to_string())
+        }
+        error => crate::AcpError::internal(format!("failed to load session: {error}")),
+    })?;
     registry.attach_completion_writer(&session, &cwd)?;
     let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides, memory)
         .map_err(crate::AcpError::internal)?;

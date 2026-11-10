@@ -27,6 +27,8 @@ struct State {
     background: crate::background_completion::Completions,
     lifecycle_held: Option<(u64, bool)>,
     active_turn_id: Option<u64>,
+    /// The session's turn inbox, for steering a completion into the running turn.
+    inbox: Option<TurnInputInbox>,
 }
 
 impl Default for State {
@@ -40,6 +42,7 @@ impl Default for State {
             background: crate::background_completion::Completions::default(),
             lifecycle_held: None,
             active_turn_id: None,
+            inbox: None,
         }
     }
 }
@@ -148,24 +151,34 @@ impl State {
             if self.accepted.contains_key(&client_id) {
                 return false;
             }
-            let id = self
-                .queue
-                .enqueue(QueuedInput {
-                    input: TurnInput {
-                        id: 0,
-                        text,
-                        display,
-                        source,
-                        pasted: Vec::new(),
-                        attachments: Vec::new(),
-                    },
-                    receipt: Some(Receipt {
-                        client_id: client_id.clone(),
-                        draft: None,
-                        context: None,
-                    }),
-                })
-                .id;
+            let item = QueuedInput {
+                input: TurnInput {
+                    id: 0,
+                    text,
+                    display,
+                    source,
+                    pasted: Vec::new(),
+                    attachments: Vec::new(),
+                },
+                receipt: Some(Receipt {
+                    client_id: client_id.clone(),
+                    draft: None,
+                    context: None,
+                }),
+            };
+            // A completion is steered like a human steer: into the running
+            // turn at its next model boundary, or queued when no turn can take
+            // it. The REPL decides the same way. A turn that closes first
+            // refuses the admit, and the input goes back to the queue.
+            let id = if self.queue.can_deliver() {
+                let input = self.queue.steer(item);
+                let id = input.id;
+                let inbox = self.inbox.clone();
+                self.admit(vec![input], inbox.as_ref());
+                id
+            } else {
+                self.queue.enqueue(item).id
+            };
             self.accepted.insert(client_id, id);
             return true;
         }
@@ -298,6 +311,12 @@ impl SessionInputs {
         self.1.notified().await;
     }
 
+    /// The session's turn inbox. A completion that arrives while a turn is
+    /// running is steered into it.
+    pub(crate) fn attach_inbox(&self, inbox: Option<TurnInputInbox>) {
+        self.lock().inbox = inbox;
+    }
+
     pub(crate) fn watch_background(&self) -> bool {
         let mut state = self.lock();
         if !state.native || state.background_watched {
@@ -418,5 +437,74 @@ impl SessionInputs {
             },
             state.snapshot(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_events::{BackgroundTaskEvent, InputDelivery};
+    use runtime::background_tasks::{BackgroundTask, BackgroundTaskKind, BackgroundTaskStatus};
+
+    fn finished_shell(id: &str) -> EngineEvent {
+        let mut task = BackgroundTask::new(id.into(), BackgroundTaskKind::Terminal, "sleep".into());
+        task.status = BackgroundTaskStatus::Completed;
+        task.exit_code = Some(0);
+        EngineEvent::BackgroundTask(BackgroundTaskEvent::Updated(task))
+    }
+
+    fn native_session() -> SessionInputs {
+        let inputs = SessionInputs::default();
+        inputs.action(InputAction::Snapshot, None).unwrap();
+        inputs
+    }
+
+    fn running(inputs: &SessionInputs, inbox: &TurnInputInbox) {
+        inputs.attach_inbox(Some(inbox.clone()));
+        inbox.begin();
+        inputs.observe(&EngineEvent::TurnStarted {
+            label: "turn".into(),
+        });
+    }
+
+    fn delivery(state: &InputState) -> Vec<InputDelivery> {
+        state.pending.iter().map(|item| item.delivery).collect()
+    }
+
+    /// While a turn runs, a finished background shell reaches it at the next
+    /// model boundary instead of waiting for the turn to end.
+    #[test]
+    fn a_completion_during_a_turn_is_steered_into_it() {
+        let inputs = native_session();
+        let inbox = TurnInputInbox::default();
+        running(&inputs, &inbox);
+        let state = inputs.observe(&finished_shell("shell-1")).unwrap();
+        assert!(inbox.has_pending(), "the running turn's inbox holds it");
+        assert_eq!(delivery(&state), [InputDelivery::Steer], "{state:?}");
+    }
+
+    /// With no turn running there is nothing to steer into: it is queued, and
+    /// starts the next turn as before.
+    #[test]
+    fn a_completion_while_idle_is_queued() {
+        let inputs = native_session();
+        let inbox = TurnInputInbox::default();
+        inputs.attach_inbox(Some(inbox.clone()));
+        let state = inputs.observe(&finished_shell("shell-1")).unwrap();
+        assert!(!inbox.has_pending());
+        assert_eq!(delivery(&state), [InputDelivery::Queue], "{state:?}");
+    }
+
+    /// A turn that closed before the completion reached it refuses the admit;
+    /// the completion goes back to the queue rather than being lost.
+    #[test]
+    fn a_completion_refused_by_a_closing_turn_is_queued() {
+        let inputs = native_session();
+        let inbox = TurnInputInbox::default();
+        running(&inputs, &inbox);
+        let _ = inbox.finish();
+        let state = inputs.observe(&finished_shell("shell-1")).unwrap();
+        assert!(!inbox.has_pending());
+        assert_eq!(delivery(&state), [InputDelivery::Queue], "{state:?}");
     }
 }

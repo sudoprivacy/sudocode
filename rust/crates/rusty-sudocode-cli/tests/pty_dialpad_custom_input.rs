@@ -86,7 +86,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
         ],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "repl ready");
 
     let prompt = env.prompt(
         "Call write_plan with a short markdown plan as `content`. Just call the tool.",
@@ -100,7 +100,10 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
             eprintln!("SKIP: live model did not call write_plan");
             return;
         }
-        panic!("dialog should appear");
+        panic!(
+            "dialog should appear; screen:\n{}",
+            sess.render(|screen| screen.contents())
+        );
     }
 
     // Arrow down past the 4 options onto the `[+]` custom-input row, then type
@@ -146,7 +149,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
         ],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "repl ready");
 
     let prompt = env.prompt(
         "Call write_plan with a short markdown plan as `content`. Just call the tool.",
@@ -160,7 +163,10 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
             eprintln!("SKIP: live model did not call write_plan");
             return;
         }
-        panic!("dialog should appear");
+        panic!(
+            "dialog should appear; screen:\n{}",
+            sess.render(|screen| screen.contents())
+        );
     }
 
     // Arrow onto the `[+]` row, then paste multi-line content via the bracketed

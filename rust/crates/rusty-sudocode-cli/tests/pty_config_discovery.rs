@@ -67,6 +67,55 @@ fn tab_completion_shows_slash_commands() {
 /// Tab completes a command's arguments from its usage hint and from runtime
 /// values: a literal choice, a subcommand followed by a session id, a file in
 /// the working directory, and a model.
+/// Tab on a session id stays instant however slowly a stored transcript reads.
+/// Completion runs on the input thread, so it lists ids from the store's names
+/// alone. Here one stored transcript is a FIFO with no writer: opening it
+/// would block forever, so reading any transcript would freeze the REPL at
+/// this Tab, as a slow disk, a locked file or a network filesystem would.
+#[cfg(unix)]
+#[test]
+fn session_id_completion_never_reads_a_transcript() {
+    let env = TestEnv::new("tab-complete-unreadable-session");
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
+
+    let sessions = env.workspace_root().join(".scode/sessions");
+    let store = std::fs::read_dir(&sessions)
+        .expect("the running session created its store")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("one workspace store");
+    let blocked = store.join("session-unreadable");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let fifo = blocked.join("transcript.jsonl");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo {}", fifo.display());
+
+    sess.send("/session switch ").expect("type the command");
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/session switch",
+        common::DEFAULT_TIMEOUT,
+        "command reached the editor",
+    );
+    sess.send("\t").expect("send Tab");
+    common::expect_screen(
+        &sess,
+        |screen| {
+            common::input_line_of(screen)
+                .strip_prefix("/session switch ")
+                .is_some_and(|id| !id.is_empty() && !id.contains(' '))
+        },
+        common::DEFAULT_TIMEOUT,
+        "a session id, without opening the unreadable transcript",
+    );
+    // Dropping the session kills the child, even one blocked opening the FIFO.
+}
+
 #[test]
 fn tab_completion_completes_arguments() {
     let env = TestEnv::new("tab-complete-args");

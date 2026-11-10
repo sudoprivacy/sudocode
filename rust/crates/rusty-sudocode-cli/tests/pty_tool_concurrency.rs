@@ -243,7 +243,12 @@ fn concurrent_shell_capture_is_private_during_the_pipe_cloexec_window() {
     let log = directory.path().join("pipe-window.log");
     let compiler_log = directory.path().join("compiler.log");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pipe_window.c");
-    let compiler = std::process::Command::new("/usr/bin/clang")
+    let mut compiler = std::process::Command::new("/usr/bin/clang");
+    // The interposer reaches both Rust's arm64 process and Apple's arm64e
+    // shell binaries. Each must load a matching slice of this test library.
+    #[cfg(target_arch = "aarch64")]
+    compiler.args(["-arch", "arm64", "-arch", "arm64e"]);
+    let compiler = compiler
         .args(["-dynamiclib", "-Wall", "-Wextra", "-Werror", "-o"])
         .arg(&library)
         .arg(&source)

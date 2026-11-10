@@ -284,6 +284,7 @@ pub struct McpRemoteServerConfig {
     pub headers: BTreeMap<String, String>,
     pub headers_helper: Option<String>,
     pub oauth: Option<McpOAuthConfig>,
+    pub tool_call_timeout_ms: Option<u64>,
 }
 
 /// Configuration for an MCP server reached over WebSocket.
@@ -2459,6 +2460,7 @@ fn parse_mcp_remote_server_config(
         headers: optional_string_map(object, "headers", context)?.unwrap_or_default(),
         headers_helper: optional_string(object, "headersHelper", context)?.map(str::to_string),
         oauth: parse_optional_mcp_oauth_config(object, context)?,
+        tool_call_timeout_ms: optional_u64(object, "toolCallTimeoutMs", context)?,
     })
 }
 

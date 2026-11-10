@@ -373,6 +373,9 @@ fn tab_queues_for_the_next_turn_without_affecting_the_current_tool_continuation(
                 && view.contains("ctx ")
                 && view.contains("/help")
                 && !view.contains("queued: NEXT_TURN_ONLY")
+                // The queue leaves the screen before prompt preparation sends
+                // the next request. Observe that handoff within the same budget.
+                && (!env.is_mock() || requests(&env).len() == 3)
         },
         common::LIVE_TURN_BUDGET,
         "queued input starts a separate turn",

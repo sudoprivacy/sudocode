@@ -16,7 +16,25 @@ mod common;
 
 use std::time::Duration;
 
-use common::{spawn_scode, TestEnv};
+use common::TestEnv;
+
+fn spawn_without_credentials(env: &TestEnv, args: &[&str]) -> pty_expect::PtySession {
+    let config = env.workspace_root().join("empty-config");
+    std::fs::create_dir_all(&config).expect("empty informational config");
+    let config = config.to_string_lossy();
+    env.spawn_binary_with_env(
+        &env.binary_path(),
+        args,
+        &[
+            ("SCODE_GLOBAL_CONFIG_DIR", config.as_ref()),
+            ("SCODE_PROJECT_CONFIG_DIR", config.as_ref()),
+            ("ANTHROPIC_API_KEY", ""),
+            ("ANTHROPIC_AUTH_TOKEN", ""),
+            ("PROXY_AUTH_TOKEN", ""),
+            ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+        ],
+    )
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // 1. Tab completion shows slash command candidates
@@ -319,7 +337,8 @@ fn permissions_switch_in_repl() {
 /// agents array.
 #[test]
 fn agents_list_renders_json() {
-    let mut sess = spawn_scode(&["agents", "--output-format", "json"]).expect("spawn scode agents");
+    let env = TestEnv::new_mock("agents-list-without-credentials");
+    let mut sess = spawn_without_credentials(&env, &["agents", "--output-format", "json"]);
 
     sess.expect("agents").expect("should contain agents key");
     sess.expect("kind").expect("should contain kind field");
@@ -336,7 +355,8 @@ fn agents_list_renders_json() {
 /// skills listing.
 #[test]
 fn skills_list_renders_json() {
-    let mut sess = spawn_scode(&["skills", "--output-format", "json"]).expect("spawn scode skills");
+    let env = TestEnv::new_mock("skills-list-without-credentials");
+    let mut sess = spawn_without_credentials(&env, &["skills", "--output-format", "json"]);
 
     sess.expect("skills").expect("should contain skills key");
 
@@ -378,8 +398,15 @@ fn compact_flag_shows_only_final_text() {
 /// These commands don't call the API.
 #[test]
 fn informational_commands_bypass_credentials() {
+    let env = TestEnv::new_mock("informational-without-credentials");
     for subcmd in &["version", "help", "doctor", "status", "sandbox", "config"] {
-        let mut sess = spawn_scode(&[subcmd]).unwrap_or_else(|_| panic!("spawn scode {subcmd}"));
+        // Diagnose the command's credential-free behavior, independent of a
+        // developer's saved credentials, invalid settings or active workspace.
+        let mut sess = spawn_without_credentials(&env, &[subcmd]);
+        if *subcmd == "doctor" {
+            sess.expect("no supported auth env vars were found")
+                .expect("doctor must observe the credential-free fixture");
+        }
 
         let exit = sess
             .expect_eof()

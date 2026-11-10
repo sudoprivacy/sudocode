@@ -54,6 +54,14 @@ fn run_system_prompt(cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output 
         .env_remove("SUDOCODE_MEMORY_DIR")
         .env("HOME", cwd.join("home"))
         .env("SUDO_CODE_CONFIG_HOME", common::throwaway_config_home(cwd));
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "PROXY_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        cmd.env_remove(key);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -236,6 +244,48 @@ fn memory_resilient_on_missing_or_malformed() {
 // ──────────────────────────────────────────────────────────────────────
 // 3. Budget enforcement: large entries get dropped
 // ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn memory_budget_ignores_operator_configuration() {
+    let root = unique_temp_dir("operator-config");
+    let operator = root.join("operator");
+    fs::create_dir_all(&operator).expect("create isolated operator fixture");
+    fs::write(operator.join("sudocode.json"), "{}").expect("write operator config");
+    fs::write(
+        operator.join("settings.json"),
+        r#"{"experimental":{"cacheTtlAdvisor":true}}"#,
+    )
+    .expect("write stale operator setting");
+
+    // Run the existing real CLI budget journey in a separate test process so
+    // the fixture's operator environment never changes another test's globals.
+    let thread = std::thread::current();
+    let prefix = thread
+        .name()
+        .expect("named test thread")
+        .strip_suffix("memory_budget_ignores_operator_configuration")
+        .expect("current test name");
+    let target = format!("{prefix}memory_budget_truncates_large_entries");
+    let output = Command::new(std::env::current_exe().expect("test driver"))
+        .args(["--exact", &target, "--nocapture"])
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
+        .env("SUDO_CODE_CONFIG_HOME", &operator)
+        .output()
+        .expect("launch native memory budget journey");
+    assert!(
+        output.status.success(),
+        "isolated native memory journey failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    assert_eq!(
+        root.canonicalize().unwrap().parent(),
+        Some(std::env::temp_dir().canonicalize().unwrap().as_path())
+    );
+    fs::remove_dir_all(root).expect("remove owned operator fixture");
+}
 
 /// Create many large memory files whose total exceeds the 16 000-char
 /// budget. Verify the output stays within budget and includes a

@@ -124,6 +124,15 @@ pub fn scoped_mcp_config_hash(config: &ScopedMcpServerConfig) -> String {
             format!("claudeai-proxy|{}|{}", proxy.url, proxy.id)
         }
     };
+    // Preserve existing connection identities when the optional setting is
+    // absent, but rebuild a cached connection if its call budget changes.
+    let timeout = match &config.config {
+        McpServerConfig::Sse(remote) | McpServerConfig::Http(remote) => remote.tool_call_timeout_ms,
+        _ => None,
+    };
+    if let Some(value) = timeout {
+        return stable_hex_hash(&format!("{rendered}|toolCallTimeoutMs={value}"));
+    }
     stable_hex_hash(&rendered)
 }
 
@@ -277,6 +286,7 @@ mod tests {
     #[test]
     fn scoped_hash_ignores_scope_but_tracks_config_content() {
         let base_config = McpServerConfig::Http(McpRemoteServerConfig {
+            tool_call_timeout_ms: None,
             url: "https://vendor.example/mcp".to_string(),
             headers: BTreeMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
             headers_helper: Some("helper.sh".to_string()),
@@ -298,6 +308,7 @@ mod tests {
         let changed = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
             config: McpServerConfig::Http(McpRemoteServerConfig {
+                tool_call_timeout_ms: None,
                 url: "https://vendor.example/v2/mcp".to_string(),
                 headers: BTreeMap::new(),
                 headers_helper: None,

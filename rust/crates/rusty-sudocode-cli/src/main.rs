@@ -3361,6 +3361,31 @@ fn run_repl_iocraft_dispatch(
         })
     };
     let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
+    // Taken before `cli` moves into the shared lock, and used by the local
+    // mailbox poller below: reading it back through the lock would have the
+    // coordinator thread contend with every turn for a value that cannot change.
+    let session_agent_name = cli.lifecycle.agent_name();
+    // The session's one receiver, further down, runs on this peer namespace,
+    // the same one its `send` tool writes through.
+    //
+    // Keyed by the name the LIVE SESSION answers to rather than re-derived
+    // here: the session already resolved it (config `agentName`, else derived
+    // from its workspace) and signs outbound messages with it, and a second
+    // derivation from the process directory is how a peer's reply arrives at
+    // an inbox nothing is polling. `attach` reuses the session's selected
+    // mailbox, including a pending binding that this receiver retries.
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message. Started
+    // before the UI takes keys: its Scheduled tab runs a job now through this
+    // scheduler, and the startup work between here and the coordinator loop
+    // (git position, completions) can take seconds on a loaded machine. A fire
+    // before the receiver below starts waits in the mailbox like any message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
@@ -3382,10 +3407,6 @@ fn run_repl_iocraft_dispatch(
     // Route LiveCli output through iocraft's OutputSender so it goes
     // through split_for_iocraft and renders correctly in raw mode.
     cli.iocraft_output = Some(repl_output.clone());
-    // Taken before `cli` moves into the shared lock, and used by the local
-    // mailbox poller below: reading it back through the lock would have the
-    // coordinator thread contend with every turn for a value that cannot change.
-    let session_agent_name = cli.lifecycle.agent_name();
     spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
@@ -3493,24 +3514,9 @@ fn run_repl_iocraft_dispatch(
         })
         .expect("spawn input bridge");
 
-    // The session's one receiver, on the same peer namespace its `send` tool
-    // writes through, sharing the coordinator's delivery and shutdown boundary.
-    //
-    // Keyed by the name the LIVE SESSION answers to rather than re-derived
-    // here: the session already resolved it (config `agentName`, else derived
-    // from its workspace) and signs outbound messages with it, and a second
-    // derivation from the process directory is how a peer's reply arrives at
-    // an inbox nothing is polling. `attach` reuses the session's selected
-    // mailbox, including a pending binding that this receiver retries.
+    // The session's one receiver, sharing the coordinator's delivery and
+    // shutdown boundary.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let peer = engine_host::peer::attach(&session_agent_name);
-    // Scheduled jobs fire through this same mailbox, so a job this agent
-    // created comes back into this coordinator like a peer message.
-    if !tools::cron_tools_disabled() {
-        runtime::cron_scheduler::start_once(|| {
-            runtime::cron_scheduler::Firing::new(peer.mailbox())
-        });
-    }
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(

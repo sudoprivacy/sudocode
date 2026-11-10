@@ -584,7 +584,7 @@ print(json.dumps({"executable": str(binary), "version": version,
     log = output / "000.log"
     result = execute(arguments, root, log)
     tool = json.loads(log.read_text(encoding="utf-8"))
-    return {"root": str(root.resolve()), "command": result, "tool": tool}
+    return {"root": str(root.resolve()), "command": result, "tool": tool, "log": str(log)}
 
 
 def prepare_native_checks(names, root, output, execute):
@@ -963,6 +963,10 @@ def run(name, root, output, base, execute):
         if hashlib.sha256(grpcurl.read_bytes()).hexdigest() != tool["sha256"]:
             raise RuntimeError("Prepared grpcurl bytes changed; repeat native tool preparation")
         results.append(preparation["command"])
+        # The receipt lists the probe with this profile's commands, and resume
+        # verifies a profile's logs inside its own directory. Keep the probe's
+        # original bytes there, at its result index.
+        (output / f"{len(results) - 1:03d}.log").write_bytes(Path(preparation["log"]).read_bytes())
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
         # Keep Cargo's freshness check, without executing the driver twice.

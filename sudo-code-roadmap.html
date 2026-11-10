@@ -215,6 +215,17 @@ verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
+<p><strong>Selection-script changes (2026-11-11).</strong>
+Edits confined to <code>.github/scripts/ci_input_scope.py</code> omit unchanged
+CLI/co-host daemon journeys and three-platform workspace Clippy. Real Git
+PR/push/queue selection, existing scoped executor controls and the complete
+native/Docker contract guard remain required. The mandatory CI JSON reports
+<code>selector_only_product_checks_skipped</code>. Workflow edits, mixed product
+or daemon-harness changes and moves across the product boundary retain their
+checks. This deliberately removes general product smoke coverage from
+selector-only queue revisions; it does not shorten any selected case or add
+feature coverage. Savings depend on the changed inputs and queue load.</p>
+
 <p><strong>Bind transitive shared tool inputs (2026-11-11).</strong>
 The daemon/A2A selector binds the functions reached by the shared nextest
 helpers, including GitHub API authorization and asset download. Unrelated

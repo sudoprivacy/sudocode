@@ -9595,10 +9595,59 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        env_lock()
+    /// Serialise a test that changes the process environment, and point the
+    /// home directory at an empty scratch one while it holds the lock.
+    /// Without that, a test that builds an agent's prompt or a session loads
+    /// the developer's own settings, and a key those still carry fails it on
+    /// that machine only. A test that needs a fixture home sets its own.
+    fn env_guard() -> EnvGuard {
+        let lock = env_lock()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = ENV_GUARD_KEYS.map(|key| (key, std::env::var_os(key)));
+        let home = scratch_home();
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+        std::env::remove_var(runtime::config::GLOBAL_CONFIG_DIR_ENV);
+        EnvGuard { saved, _lock: lock }
+    }
+
+    const ENV_GUARD_KEYS: [&str; 4] = [
+        "HOME",
+        "USERPROFILE",
+        "SUDO_CODE_CONFIG_HOME",
+        runtime::config::GLOBAL_CONFIG_DIR_ENV,
+    ];
+
+    /// One per test process, so a test that runs without the lock and reads
+    /// the home while another holds it never sees a directory that is gone.
+    fn scratch_home() -> &'static Path {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let home =
+                std::env::temp_dir().join(format!("sudocode-tools-home-{}", std::process::id()));
+            fs::create_dir_all(&home).expect("scratch home");
+            home
+        })
+    }
+
+    /// Restores the environment before releasing the lock: `drop` runs before
+    /// the fields are dropped.
+    struct EnvGuard {
+        saved: [(&'static str, Option<std::ffi::OsString>); 4],
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -9788,7 +9837,7 @@ mod tests {
     /// cannot "schedule" a task that would persist but never fire — an orphan.
     #[test]
     fn cron_create_delivers_back_to_this_agent_by_default() {
-        let _guard = env_lock();
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!("cron-tool-default-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
@@ -9822,9 +9871,7 @@ mod tests {
 
     #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
         let default_names: Vec<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
         assert!(
@@ -10302,9 +10349,7 @@ mod tests {
         // sets SUDOCODE_WEB_SEARCH_BASE_URL. Without the lock, parallel test
         // runners can interleave the set/remove calls and cause assertion
         // failures on the wrong port.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -10351,9 +10396,7 @@ mod tests {
 
     #[test]
     fn web_search_handles_generic_links_and_invalid_base_url() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /fallback?q=generic+links "));
             HttpResponse::html(
@@ -10406,9 +10449,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_returns_results_with_snippets() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|_request_line: &str| {
             HttpResponse::json(
                 200,
@@ -10473,9 +10514,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_missing_api_key_returns_error() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
 
         std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "tavily");
         std::env::set_var("SUDOCODE_TAVILY_API_KEY", "<PLACEHOLDER>");
@@ -10611,9 +10650,7 @@ mod tests {
 
     #[test]
     fn todo_write_replaces_the_whole_list() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("todos-write.json");
         std::env::set_var("SUDOCODE_TODO_STORE", &path);
 
@@ -11377,9 +11414,7 @@ mod tests {
         // on a missing definition — a race that shows up on one runner and not
         // another. The mutating test already takes this lock; a reader that
         // depends on what it changes has to take it too.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = GlobalToolRegistry::builtin();
 
         // Nothing searched for yet: core on, the rest deferred.
@@ -11424,9 +11459,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_persists_handoff_metadata() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-store");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
@@ -11515,9 +11548,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn agent_fake_runner_can_persist_completion_and_failure() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-runner");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         // Cron is now persistent; point its dedicated store env at this temp
@@ -12245,9 +12276,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn subagent_runtime_executes_tool_loop_with_isolated_session() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("subagent-input.txt");
         std::fs::write(&path, "hello from child").expect("write input file");
 
@@ -13172,9 +13201,7 @@ mod tests {
 
     #[test]
     fn bash_workspace_tests_are_blocked_when_branch_is_behind_main() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-test-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13224,9 +13251,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bash_targeted_tests_skip_branch_preflight() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("targeted-test-no-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13258,9 +13283,7 @@ mod tests {
 
     #[test]
     fn file_tools_cover_read_write_and_edit_behaviors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("fs-suite");
         fs::create_dir_all(&root).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13369,9 +13392,7 @@ mod tests {
 
     #[test]
     fn glob_and_grep_tools_cover_success_and_errors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("search-suite");
         fs::create_dir_all(root.join("nested")).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13512,9 +13533,7 @@ mod tests {
 
     #[test]
     fn config_reads_and_writes_supported_values() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "sudocode-config-{}",
             std::time::SystemTime::now()
@@ -13641,9 +13660,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn powershell_runs_via_stub_shell() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "sudocode-pwsh-bin-{}",
             std::time::SystemTime::now()
@@ -13882,9 +13899,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn powershell_errors_when_shell_is_missing() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_path = std::env::var("PATH").unwrap_or_default();
         let empty_dir = std::env::temp_dir().join(format!(
             "sudocode-empty-bin-{}",
@@ -13963,9 +13978,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn given_read_only_enforcer_when_read_file_then_not_permission_denied() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("perm-read");
         fs::create_dir_all(&root).expect("create root");
         let file = root.join("readable.txt");
@@ -13992,9 +14005,7 @@ printf 'pwsh:%s' "$1"
     #[cfg(unix)]
     #[test]
     fn given_no_enforcer_when_bash_then_executes_normally() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = super::GlobalToolRegistry::builtin();
         let result = registry
             .execute("bash", &json!({ "command": "printf 'ok'" }))

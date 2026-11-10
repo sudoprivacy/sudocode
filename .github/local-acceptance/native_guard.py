@@ -63,6 +63,10 @@ def main():
         "--output", str(output / "contract-reads"),
     ], SOURCE, output / "contract-reads.log")
     fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/github_asset_credentials.py"),
+        "--output", str(output / "github-asset-credentials"),
+    ], SOURCE, output / "github-asset-credentials.log")
+    fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
         "--output", str(output / "parallel-acceptance"),
     ], SOURCE, output / "parallel-acceptance.log")
@@ -119,7 +123,7 @@ def main():
     ], SOURCE, output / "native-lint.log")
     protocol = [row for row in fixtures if Path(row["command"][1]).name == "parallel_acceptance.py"]
     native = [row for row in fixtures if row not in protocol]
-    assert len(protocol) == 1 and len(native) == 13
+    assert len(protocol) == 1 and len(native) == 14
     configuration = output / "native-parallel.json"
     configuration.write_text(json.dumps({
         "version": 1, "kind": "native-policy", "root": str(SOURCE), "branches": [

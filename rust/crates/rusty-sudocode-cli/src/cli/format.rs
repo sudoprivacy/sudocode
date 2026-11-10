@@ -510,6 +510,7 @@ pub(crate) enum ToolKind {
     PidStatus,
     PidKill,
     TodoWrite,
+    Monitor,
 }
 
 impl ToolKind {
@@ -537,6 +538,7 @@ impl ToolKind {
             Self::PidStatus => "PidStatus",
             Self::PidKill => "PidKill",
             Self::TodoWrite => "TodoWrite",
+            Self::Monitor => "Monitor",
         }
     }
 
@@ -573,6 +575,7 @@ impl ToolKind {
             "pid_status" | "PidStatus" => Some(Self::PidStatus),
             "pid_kill" | "PidKill" => Some(Self::PidKill),
             "TodoWrite" => Some(Self::TodoWrite),
+            "Monitor" => Some(Self::Monitor),
             _ => None,
         }
     }
@@ -691,6 +694,7 @@ pub(crate) fn tool_card_content(
         Some(ToolKind::ReadToolOutput) => read_tool_output_card(input, output, status),
         Some(ToolKind::WebSearch) => web_search_card(input, output, status),
         Some(ToolKind::TodoWrite) => todo::card(name, output),
+        Some(ToolKind::Monitor) => monitor_card(input, output),
         None => generic_tool_card(name, input, output, status),
     }
 }
@@ -981,33 +985,12 @@ pub(crate) fn shell_card(
 ) -> ToolCardContent {
     use std::fmt::Write as _;
 
-    // Command lives in `input` (never echoed in the result payload).
-    let command = input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
     let language = if label == "PowerShell" {
         "powershell"
     } else {
         "bash"
     };
-
-    let label = tool_label(label);
-    // Pending cards only display the title; avoid highlighting an entire
-    // script until its completed card needs the full command body.
-    let visible_command = if output.is_none() {
-        first_visible_line(command)
-    } else {
-        command
-    };
-    let highlighted =
-        crate::render::TerminalRenderer::new().highlight_code(visible_command, language);
-    let mut header = if command.is_empty() {
-        label
-    } else {
-        format!("{label}({})", first_visible_line(&highlighted))
-    };
-    header.push_str(&identity_annotation(input));
+    let (mut header, highlighted) = command_identity(label, language, input, output.is_some());
 
     let Some(output) = output else {
         // Staging: no result yet — identity only.
@@ -1042,7 +1025,61 @@ pub(crate) fn shell_card(
         .unwrap_or_default();
 
     let mut content = stdout_stderr_card(header, stdout_text, stderr_text, status.is_some());
-    content.command = (!command.is_empty()).then_some(highlighted);
+    content.command = highlighted;
+    content
+}
+
+/// The identity of a card that runs a shell command: `Label(<first line,
+/// highlighted>) · <description>`, and the whole highlighted command for a
+/// card whose header cannot hold it. The command lives in `input`; no result
+/// echoes it. A pending card highlights only the first line: its title is all
+/// it shows.
+fn command_identity(
+    label: &str,
+    language: &str,
+    input: &serde_json::Value,
+    finished: bool,
+) -> (String, Option<String>) {
+    let command = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let label = tool_label(label);
+    let visible_command = if finished {
+        command
+    } else {
+        first_visible_line(command)
+    };
+    let highlighted =
+        crate::render::TerminalRenderer::new().highlight_code(visible_command, language);
+    let mut header = if command.is_empty() {
+        label
+    } else {
+        format!("{label}({})", first_visible_line(&highlighted))
+    };
+    header.push_str(&identity_annotation(input));
+    (header, (!command.is_empty()).then_some(highlighted))
+}
+
+/// `Monitor` watches a shell command in the background, through the same
+/// launcher as a backgrounded `Bash`, so its card is the same command identity
+/// plus the task it started. The rest of its result tells the model to keep
+/// working and not poll; that is for the model, not the user. A result that
+/// names no task is shown raw rather than dropped.
+fn monitor_card(input: &serde_json::Value, output: Option<&serde_json::Value>) -> ToolCardContent {
+    let (mut header, highlighted) = command_identity("Monitor", "bash", input, output.is_some());
+    let Some(output) = output else {
+        return ToolCardContent::header_only(header);
+    };
+    let Some(task) = output
+        .as_str()
+        .and_then(tools::monitor_task_from_tool_result)
+    else {
+        return value_card(header, output);
+    };
+    let _ = std::fmt::Write::write_fmt(&mut header, format_args!(" watching ({task})"));
+    let mut content = ToolCardContent::header_only(header);
+    content.command = highlighted;
     content
 }
 /// Prefix an already highlighted script without reparsing it at paint time.
@@ -2873,6 +2910,37 @@ mod tests {
     /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
     fn ok_card_plain(content: &ToolCardContent) -> String {
         strip_ansi(&render_tool_card(content, ToolStatus::Ok))
+    }
+
+    /// A `Monitor` card is the watched command and its label, like a shell
+    /// card, plus the task it started; the instruction to the model stays off it.
+    #[test]
+    fn monitor_card_shows_the_watch_not_the_model_instruction() {
+        let input = r#"{"command":"until grep -q ready log; do sleep 2; done","description":"Wait for ready"}"#;
+        let output = "Monitor started (task shell-7f3a, output /tmp/o.log). You will be notified \
+                      when it finishes or fires. Keep working — do not poll or sleep.";
+        let plain = strip_ansi(&format_tool_result("Monitor", input, output, false));
+        for shown in [
+            "Monitor(until grep -q ready log; do sleep 2; done)",
+            "Wait for ready",
+            "watching (shell-7f3a)",
+        ] {
+            assert!(plain.contains(shown), "missing {shown:?}:\n{plain}");
+        }
+        for hidden in ["Keep working", "do not poll", "/tmp/o.log"] {
+            assert!(!plain.contains(hidden), "leaked {hidden:?}:\n{plain}");
+        }
+    }
+
+    #[test]
+    fn monitor_card_shows_an_unrecognised_result_raw() {
+        let plain = strip_ansi(&format_tool_result(
+            "Monitor",
+            r#"{"command":"true","description":"x"}"#,
+            "something else entirely",
+            false,
+        ));
+        assert!(plain.contains("something else entirely"), "{plain}");
     }
 
     /// A `TodoWrite` card shows the saved list the way the todo panel does,

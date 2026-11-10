@@ -519,9 +519,44 @@ def validate_before_host_lease(names, root, output):
           flush=True)
 
 
+def native_services_tool(root, output, execute):
+    """Resolve the existing service client before compilation, retaining its bytes."""
+    bash = shutil.which("bash")
+    if os.name == "nt":
+        git = shutil.which("git")
+        candidates = [Path(git).resolve().parent / "bash.exe",
+                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
+        bash = next((str(path) for path in candidates if path.is_file()), None)
+    if not bash:
+        raise RuntimeError("Git Bash is required for shared-service credential acceptance")
+    probe = '''import hashlib,json,subprocess,sys
+from pathlib import Path
+binary = Path(sys.argv[1]).resolve(strict=True)
+version = subprocess.check_output([str(binary), "--version"], stderr=subprocess.STDOUT,
+                                  text=True, timeout=5).strip()
+print(json.dumps({"executable": str(binary), "version": version,
+                  "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
+'''
+    # Git for Windows can check shell helpers out as CRLF. Its Bash provides
+    # igncr; keep the original helper's location and normal Unix invocation.
+    arguments = [bash, *(["-o", "igncr"] if os.name == "nt" else []), "-ec",
+                 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
+                 '"$1" -c "$2" "$(native_path "$GRPCURL")"', "scode-services-tool",
+                 sys.executable.replace("\\", "/"), probe]
+    log = output / "000.log"
+    result = execute(arguments, root, log)
+    tool = json.loads(log.read_text(encoding="utf-8"))
+    return {"root": str(root.resolve()), "command": result, "tool": tool}
+
+
 def prepare_native_checks(names, root, output, execute):
-    """Install selected Windows terminal inputs before long native compilation."""
+    """Resolve selected native tools before long native compilation."""
     prepared = {}
+    if "native-services" in names:
+        print("NATIVE_SERVICE_TOOL_PREFLIGHT: resolving the existing grpcurl client and running "
+              "--version before compilation. A download or executable failure stops here; "
+              "both original service journeys remain required.", flush=True)
+        run.prepared_services_tool = native_services_tool(root, output / "native-service-tool", execute)
     selected = [name for name in names if name in NATIVE_RUST_PTY_CHECKS]
     if os.name == "nt" and selected:
         print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
@@ -881,6 +916,19 @@ def run(name, root, output, base, execute):
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         native_compiler_context(root, target / "debug" / ("scode" + suffix), output, command)
     elif name == "native-services":
+        try:
+            preparation = run.prepared_services_tool
+        except AttributeError:
+            preparation = None
+        if preparation is None:
+            preparation = native_services_tool(root, output / "service-tool", execute)
+        if preparation["root"] != str(root.resolve()):
+            raise RuntimeError("Prepared service client belongs to a different source directory")
+        tool = preparation["tool"]
+        grpcurl = Path(tool["executable"])
+        if hashlib.sha256(grpcurl.read_bytes()).hexdigest() != tool["sha256"]:
+            raise RuntimeError("Prepared grpcurl bytes changed; repeat native tool preparation")
+        results.append(preparation["command"])
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
         # Keep Cargo's freshness check, without executing the driver twice.
@@ -892,13 +940,8 @@ def run(name, root, output, base, execute):
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
-        # The existing harness resolves the pinned native grpcurl for each OS.
-        bash = shutil.which("bash")
-        if not bash:
-            raise RuntimeError("Git Bash is required for shared-service credential acceptance")
-        command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
+        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -956,6 +999,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/nexus-a2a/lib.sh": "becaa87de0aeadc466de2626dad554ca3df9cd9b10b2ce6612214b7c4b373c70",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
@@ -992,13 +1036,13 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "91cf10d403051be6394574b0a92e46e2153e1a0f8aa72965b08a8517392e8c72",
+        "e2e/local-acceptance/native_lint_acceptance.py": "6e57fa4c286f52f7d70b2a7135fd7e2d52230c678f74531c5464b5da35a05779",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "5242a95e8c71c7f25fa6323044dd9925b0dc6de1452986c59fd9c78d0482afe4",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
-        "e2e/local-acceptance/release_acceptance.py": "a58b820d2dc74d1a1828e38f34a3606440df8f941ff9b9f22bf7b6d761c8db87",
+        "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "5ff76c4737b83ef65c4d4076822b61cf503acc1974bccc35bd36b0d867e2f908",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",

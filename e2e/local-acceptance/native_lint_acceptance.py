@@ -148,6 +148,120 @@ finally:
     return cases
 
 
+def grpcurl_preflight(output, profiles, helper):
+    """Exercise the original Bash/curl resolver and actual cached native client."""
+    output.mkdir(parents=True)
+    seed = profiles.native_services_tool(SOURCE, output / "seed", helper.run_command)
+    binary = Path(seed["tool"]["executable"])
+    assert "1.9.4" in seed["tool"]["version"], seed
+    requests = []
+
+    class UnavailableProxy(BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            requests.append(self.path)
+            self.send_error(504, "Fixture gateway unavailable")
+
+        def log_message(self, _format, *_args):
+            pass
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), UnavailableProxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    driver = output / "actual-service-tool-preparation.py"
+    driver.write_text('''import importlib.util,json,sys
+from pathlib import Path
+def load(name,path):
+    spec=importlib.util.spec_from_file_location(name,path)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+profiles=load("actual_profiles",sys.argv[1])
+helper=load("actual_commands",sys.argv[2])
+root,output=map(Path,sys.argv[3:5])
+helper.ROOT=root
+commands=[]
+def execute(command,cwd,log,env=None):
+    commands.append(list(command))
+    return helper.run_command(command,cwd,log,env)
+try:
+    if sys.argv[5]=="valid":
+        tool=profiles.native_services_tool(root,output,execute)
+        result={"status":"PASS","tool":tool}
+    else:
+        profiles.prepare_native_checks([] if sys.argv[5]=="unselected" else
+                                      ["native-services","native-workspace"],root,output,execute)
+        result={"status":"UNSELECTED" if sys.argv[5]=="unselected" else "UNEXPECTED_PASS"}
+except Exception as error:
+    result={"status":"REFUSED","error":str(error)}
+finally:
+    result["commands"]=commands
+    (output/"child-result.json").write_text(json.dumps(result,indent=2),encoding="utf-8")
+''', encoding="utf-8")
+    cases = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="scode-service-tool-cache-") as temporary:
+            for state in ["missing", "invalid", "valid", "unselected"]:
+                directory = output / state
+                root, evidence = directory / "source", directory / "evidence"
+                (root / "e2e/nexus-a2a").mkdir(parents=True)
+                evidence.mkdir(parents=True)
+                library = (SOURCE / "e2e/nexus-a2a/lib.sh").read_bytes().replace(b"\r\n", b"\n")
+                (root / "e2e/nexus-a2a/lib.sh").write_bytes(
+                    library.replace(b"\n", b"\r\n") if os.name == "nt" else library)
+                cache = Path(temporary) / state
+                if state in {"invalid", "valid"}:
+                    executable = cache / "1.9.4" / binary.name
+                    executable.parent.mkdir(parents=True)
+                    executable.write_bytes(binary.read_bytes() if state == "valid" else b"invalid native executable\n")
+                    executable.chmod(0o755)
+                path = os.pathsep.join([str(Path(shutil.which("git")).resolve().parent),
+                                       *([str(Path(shutil.which("git")).resolve().parents[1] / folder)
+                                          for folder in ["bin", "usr/bin", "mingw64/bin"]] if os.name == "nt" else []),
+                                       os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32")
+                                       if os.name == "nt" else "/usr/bin", "/bin"])
+                address = f"http://127.0.0.1:{proxy.server_port}"
+                environment = {**os.environ, "PATH": path, "GRPCURL_CACHE": str(cache),
+                               "HTTPS_PROXY": address, "https_proxy": address, "NO_PROXY": "", "no_proxy": ""}
+                before = len(requests)
+                process = subprocess.run([sys.executable, str(driver), str(Path(profiles.__file__).resolve()),
+                                          str(SOURCE / ".github/scripts/local_acceptance.py"), str(root),
+                                          str(evidence), state], env=environment, capture_output=True, timeout=45)
+                (directory / "stdout.log").write_bytes(process.stdout)
+                (directory / "stderr.log").write_bytes(process.stderr)
+                assert process.returncode == 0, process.stderr.decode(errors="replace")
+                result = json.loads((evidence / "child-result.json").read_text(encoding="utf-8"))
+                contacted = requests[before:]
+                assert not any(Path(command[0]).stem.lower() in {"cargo", "rustc"}
+                               for command in result["commands"]), result
+                if state == "missing":
+                    assert result["status"] == "REFUSED" and contacted, result
+                    assert all(value == "github.com:443" for value in contacted), contacted
+                    failure = (evidence / "native-service-tool/000.log").read_text(encoding="utf-8", errors="replace")
+                    assert "504" in failure and "could not fetch" in failure, failure
+                    assert "PermissionError" not in failure and "cygpath: can't convert empty path" not in failure, failure
+                elif state == "invalid":
+                    assert result["status"] == "REFUSED" and not contacted, result
+                elif state == "valid":
+                    assert result["status"] == "PASS" and not contacted, result
+                    assert result["tool"]["tool"]["sha256"] == seed["tool"]["sha256"], result
+                    assert result["tool"]["tool"]["version"] == seed["tool"]["version"], result
+                    if os.name == "nt":
+                        assert "git" in result["commands"][0][0].lower(), result
+                        assert result["commands"][0][1:3] == ["-o", "igncr"], result
+                else:
+                    assert result["status"] == "UNSELECTED" and not contacted and not result["commands"], result
+                cases.append({"cache": state, "actual_proxy_requests": contacted, "result": result,
+                              "shell_helper_crlf": os.name == "nt",
+                              "compiler_commands_started": 0})
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
+    print("PASS: actual grpcurl proxy504/invalid executable refuse before native compilation; "
+          "the unchanged cached client runs offline and unselected profiles do not resolve it", flush=True)
+    return cases
+
+
 def prepared_lint(output, root, base, helper, profiles, environment):
     """Exercise real lint reuse and refusal without signing a partial workspace."""
     output.mkdir(parents=True)
@@ -452,6 +566,7 @@ def run(output, executor=None):
     helper.ROOT = SOURCE
     profiles = load("lint_fixture_profiles", executor or SOURCE / ".github/local-acceptance/checks.py")
     tool_preflight = nextest_preflight(output / "nextest-preflight", profiles)
+    service_tool_preflight = grpcurl_preflight(output / "grpcurl-preflight", profiles, helper)
     prepared = None
     for kind in ["workspace", "selected"]:
         root = output / kind / "source"
@@ -530,6 +645,7 @@ def run(output, executor=None):
     formatting = formatting_scope(output / "formatting", helper, profiles)
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
               "nextest_preflight": tool_preflight,
+              "grpcurl_preflight": service_tool_preflight,
               "grouped_lint": grouped,
               "formatting": formatting,
               "prepared_lint": prepared,

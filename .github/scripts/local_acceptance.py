@@ -124,10 +124,16 @@ def contract_hash(ref):
 
 
 def executor_source(ref):
+    """run_command and the build_jobs it applies, so either change binds evidence.
+
+    A ref without build_jobs yields exactly its run_command source, keeping
+    earlier recipe hashes and their reviewed equivalences unchanged.
+    """
     source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
-    return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
+    lines = source.splitlines()
+    functions = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)}
+    selected = [functions[name] for name in ["build_jobs", "run_command"] if name in functions]
+    return "\n\n\n".join("\n".join(lines[node.lineno - 1:node.end_lineno]) for node in selected)
 
 
 def commands_hash(ref):

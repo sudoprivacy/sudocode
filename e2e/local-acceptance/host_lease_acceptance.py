@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -388,16 +389,16 @@ def verify_static_before_queue(fixture, authority, run, environment):
     env.update(HOME=str(home), USERPROFILE=str(home))
     processes = []
 
-    def start(label, policy):
+    def start(label, policy, selected_path="input.txt", settings=None):
         work = directory / ("source-" + label)
         run("git", "worktree", "add", "--detach", work, policy, cwd=repository)
-        (work / "input.txt").write_text(label)
+        (work / selected_path).write_text(label)
         run("git", "add", ".", cwd=work)
         run("git", "commit", "-m", "Candidate " + label, cwd=work)
         with (directory / (label + ".log")).open("wb") as stream:
             process = subprocess.Popen([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
                 "check", "--base", policy, "--policy-ref", policy, "--output", str(directory / label)],
-                cwd=work, env=env, stdout=stream, stderr=subprocess.STDOUT)
+                cwd=work, env=env if settings is None else settings, stdout=stream, stderr=subprocess.STDOUT)
         processes.append(process)
         return process
 
@@ -421,6 +422,49 @@ def verify_static_before_queue(fixture, authority, run, environment):
         while not events.exists() or events.read_text().splitlines() != ["start:Holder"]:
             assert time.monotonic() < deadline, "Private holder never entered its profile"
             time.sleep(0.05)
+        if sys.platform == "win32":
+            # Only the subprocess PATH changes. The actual protected validator
+            # must refuse both profile shapes before touching the held queue.
+            (repository / ".github/local-acceptance/checks.py").write_text(contents, encoding="utf-8")
+            policy = repository / "spec/local_acceptance.json"
+            rules = json.loads(policy.read_text())
+            rules["checks"] = {
+                "preflight": {"include": ["*"]},
+                "guard-contract": {"include": ["guard.txt"]},
+                "native-workspace": {"include": ["workspace.txt"]},
+            }
+            policy.write_text(json.dumps(rules))
+            run("git", "add", ".", cwd=repository)
+            run("git", "commit", "-m", "Protected Windows prerequisite fixture", cwd=repository)
+            shell_policy = run("git", "rev-parse", "HEAD", cwd=repository)
+            git_directory = Path(shutil.which("git")).resolve().parent
+            windows = Path(os.environ["SystemRoot"])
+            path = os.pathsep.join(map(str, [git_directory, git_directory.parent / "usr/bin",
+                                            windows / "System32", windows / "System32/OpenSSH"]))
+            assert not shutil.which("pwsh.exe", path=path), path
+            no_pwsh = {**env, "PATH": path}
+            for label, selected_path in [("NoShellGuard", "guard.txt"), ("NoShellWorkspace", "workspace.txt")]:
+                child = start(label, shell_policy, selected_path, no_pwsh)
+                assert child.wait(timeout=30) == 1
+                log = (directory / (label + ".log")).read_text(encoding="utf-8")
+                assert "PowerShell 7 (pwsh.exe)" in log and "rerun the same acceptance command" in log, log
+                assert "Waiting for this host" not in log and "Acquired this host" not in log, log
+                assert "DOCKER_ENGINE_PROBE" not in log, log
+                attempt = json.loads((directory / label / "attempt.json").read_text())
+                assert attempt["outcome"] == "failure" and attempt["host_lease_wait_seconds"] == 0, attempt
+                assert attempt["host_lease_acquisitions"] == [], attempt
+                assert not (directory / label / "envelope.json").exists()
+                checkpoint = sorted((directory / label / "checkpoints").iterdir())[-1]
+                assert set(json.loads((checkpoint / "receipt.json").read_text())["checks"]) == {"preflight"}
+                assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+                assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+            metadata = start("NoShellMetadata", shell_policy, "notes.txt", no_pwsh)
+            assert metadata.wait(timeout=30) == 0
+            receipt = json.loads((directory / "NoShellMetadata/receipt.json").read_text())
+            assert set(receipt["checks"]) == {"preflight"}
+            assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+            print("PASS: missing real Windows shell refuses guard/workspace before the held FIFO; "
+                  "metadata-only source still completes without that prerequisite", flush=True)
         (repository / ".github/local-acceptance/checks.py").write_text(contents, encoding="utf-8")
         # This is the first input staged by native_guard_files. Its real pin
         # remains unchanged; a committed mismatch must fail before host admission.

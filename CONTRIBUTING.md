@@ -358,6 +358,16 @@ the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
 existing paths.
 
+Fresh Windows contract guards and native workspaces check their required
+Windows PowerShell and PowerShell 7 paths before joining the queue. Missing
+tools report how to fix this process's PATH and rerun the same command.
+The native lint and release compiler checks share the same path validator and
+check again at execution; readiness grants no completed-check credit.
+Real Git/SSH/native-process controls remove PowerShell 7 only from a private
+child's PATH while a private holder stays active. Guard and workspace source
+must refuse without a queue ticket, while metadata-only source still completes.
+This adds no product journey coverage and changes no test deadlines.
+
 When both a fresh contract guard and native workspace are required, the workspace's
 existing formatting, metadata and warning-denying lint commands run before the
 contract matrix. `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports
@@ -960,6 +970,14 @@ The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
 archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
 repository disables automatic line-ending conversion without changing author settings.
+
+For shared nextest execution, the CI scope response includes
+`nextest_dependency_scope`: the decision and bound function names, or the reason
+an unknown dependency requires full A2A. It binds transitive module functions
+including the GitHub API/download helpers. Unrelated function bodies omit this
+journey; changed imported context, reachable code, unknown data, rebinding or
+reflection retain it. Real Git/CLI cases exercise actual Windows-helper,
+authorization and asset-identity changes alongside the existing scope matrix.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

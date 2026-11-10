@@ -642,6 +642,35 @@ fn urgent_tip_shares_the_footer_and_survives_task_browsing_and_resize() {
     close(session);
 }
 
+/// A `Monitor` call is carded like a backgrounded shell: the watched command,
+/// its label and the task it started. The rest of its result is an instruction
+/// to the model and stays off the screen.
+#[test]
+fn monitor_card_shows_the_watch_not_the_model_instruction() {
+    let (env, _release) = task_env("monitor-card");
+    if env.is_live() {
+        return;
+    }
+    let session = start(
+        &env,
+        &[json!({
+            "id": "watch",
+            "name": "Monitor",
+            "input": {"command": "echo MONITOR_FIRED", "description": "Watch for the marker"},
+        })],
+    );
+    let view = screen(&session, "watching (");
+    for shown in ["Monitor(echo MONITOR_FIRED)", "Watch for the marker"] {
+        assert!(view.contains(shown), "card is missing {shown:?}:\n{view}");
+    }
+    // The card body is capped, so check the start of the model text: a body
+    // that showed it would be cut off before "Keep working".
+    for hidden in ["Monitor started", "You will be"] {
+        assert!(!view.contains(hidden), "card shows {hidden:?}:\n{view}");
+    }
+    close_after_unread(session);
+}
+
 /// An unread failure is red on the status row at the turn ends around it, not
 /// at every later turn end: after that it is one of the footer's new results.
 #[test]

@@ -50,7 +50,9 @@ async function checkMcp(scenario: string): Promise<void> {
       assert.equal(JSON.parse((output.content as Array<{text: string}>)[0].text).text, text,
         'MCP wraps the native string once without rewriting or double encoding');
       assert.equal((journal(log).find(row => row.method === '_sudocode/a2a/send')?.input as {message: string}).message, text);
-      await client.callTool({ name: 'scode_agent_list', arguments: { activeOnly: false } });
+      await client.callTool({ name: 'scode_agent_list', arguments: {} });
+      const activeOnly = await client.callTool({ name: 'scode_agent_list', arguments: { activeOnly: true } });
+      assert.equal(activeOnly.isError, true, 'peers have no liveness to filter on; the bridge refuses activeOnly');
       const forged = await client.callTool({ name: 'scode_send', arguments: { to: 'peer', message: 'bad', summary: 'bad sender', sender: 'other' } });
       assert.equal(forged.isError, true, 'unknown sender field must fail before forwarding');
       const structured = await client.callTool({ name: 'scode_send', arguments: { to: 'peer', message: { type: 'shutdown' }, summary: 'bad shape' } });

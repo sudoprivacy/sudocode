@@ -63,7 +63,7 @@ let a,b,client,transport;
   const audit=sent._meta.sudocode.directA2a.audit;
   assert.equal(audit.actor,config.actors[0].name);assert.equal(audit.sessionId,sid);
   assert.match(audit.commandId,/^external-a2a-/);
-  const agents=await client.callTool({name:'scode_agent_list',arguments:{activeOnly:false}});
+  const agents=await client.callTool({name:'scode_agent_list',arguments:{}});
   assert.equal(agents.isError,false,JSON.stringify(agents));
   assert.ok(agents.content[0].text.includes(config.actors[1].name));
   const forged=await client.callTool({name:'scode_send',arguments:{to:config.actors[1].name,message:'must-not-append',summary:'invalid sender',sender:'forged'}});

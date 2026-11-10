@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use runtime::{ContentBlock, MessageRole, Session};
 use serde_json::json;
 
-use super::format::{text_from_blocks, truncate_for_summary};
+use super::format::{is_system_reminder_text, text_from_blocks, truncate_for_summary};
 use crate::CliOutputFormat;
 use engine_host::session::load_session_reference;
 
@@ -195,12 +195,17 @@ pub(crate) fn run_export(
 }
 
 pub(crate) fn default_export_filename(session: &Session) -> String {
+    // Named after what the user first typed. The runtime prepends its own
+    // reminders (today's date, the model) to that turn, and every echo of
+    // user text already skips them.
     let stem = session
         .messages()
         .iter()
         .find_map(|message| match message.role {
             MessageRole::User => message.blocks.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text } if !is_system_reminder_text(text) => {
+                    Some(text.as_str())
+                }
                 _ => None,
             }),
             _ => None,
@@ -428,5 +433,45 @@ pub(crate) fn truncate_for_prompt(value: &str, limit: usize) -> String {
     } else {
         let truncated = value.chars().take(limit).collect::<String>();
         format!("{}\n…[truncated]", truncated.trim_end())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_export_filename;
+    use runtime::{ContentBlock, Session};
+
+    fn text(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_export_is_named_after_what_the_user_typed_not_the_reminders_before_it() {
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                text("<system-reminder>Today's date is 2026-11-09.</system-reminder>"),
+                text("<system-reminder>You are running as claude-sonnet-4-6.</system-reminder>"),
+                text("Fix the login bug\nwith details on a second line"),
+            ])
+            .expect("user message");
+        assert_eq!(default_export_filename(&session), "fix-the-login-bug.txt");
+
+        let mut reminders_only = Session::new();
+        reminders_only
+            .push_user_blocks(vec![text(
+                "<system-reminder>Today's date is 2026-11-09.</system-reminder>",
+            )])
+            .expect("reminder-only message");
+        assert_eq!(default_export_filename(&reminders_only), "conversation.txt");
+        reminders_only
+            .push_user_text("Then the user asked this")
+            .expect("typed message");
+        assert_eq!(
+            default_export_filename(&reminders_only),
+            "then-the-user-asked-this.txt"
+        );
     }
 }

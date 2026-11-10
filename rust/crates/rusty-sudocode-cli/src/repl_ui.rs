@@ -1159,6 +1159,9 @@ struct ReplContext {
     /// ids, the working directory). The coordinator refreshes it between turns,
     /// so a key press only filters what is already here.
     completions: Arc<Mutex<commands::CompletionContext>>,
+    /// The status line a resumed session opens with. Part of the first frame,
+    /// not a later command, so the editor never accepts input without it.
+    initial_turn_result: Option<(u32, Arc<StyledText>)>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1184,6 +1187,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
     let todo_items = Arc::clone(&ctx.todo_items);
+    let initial_turn_result = ctx.initial_turn_result.clone();
     let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
@@ -1208,7 +1212,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut background_animation = hooks.use_ref_default::<bool>();
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
-    let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
+    let mut turn_result = hooks.use_state(move || initial_turn_result);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
@@ -2606,6 +2610,7 @@ pub fn spawn_repl_ui(
     input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
     completions: Arc<Mutex<commands::CompletionContext>>,
+    turn_result: Option<(&crate::render::StyledLine, u32)>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2633,6 +2638,7 @@ pub fn spawn_repl_ui(
         pending: Arc::new(Mutex::new(Vec::new())),
         input_history: Arc::new(input_history),
         completions,
+        initial_turn_result: turn_result.map(|(text, turn)| (turn, Arc::new(text.structured()))),
         dequeue_hook,
     };
 

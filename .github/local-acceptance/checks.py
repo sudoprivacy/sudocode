@@ -1042,7 +1042,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "4a3b51e0710891f1721f6e14e5fa57d0e2dd5e099d6645d1e01625c3d6fd9baf",
+        ".github/scripts/local_acceptance.py": "8a0b2202b7d4c1d32dca561eac9e018126eb6189fd7f95a7aa264ced4628c42d",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1123,7 +1123,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'a91460ca93b0ac494febfb8b38a5014f43d6713ac0e20d13b5d1050c801f3956', 'native-context': '56da8a527bfd6542d8fae8bf504abce3f767e970143f501af4e1121f238246bd'}
+    expected = {'native-release': 'd9bc97c1bf57b38dcc0ba93da9409a5a0128ab752ea2c3373cca0da4b51b4846', 'native-context': 'c45f93c4039308cb7f49466dd31d4dcb58f74a1cf7eff6823556a97151eec5ab'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

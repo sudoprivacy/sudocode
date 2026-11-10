@@ -1442,10 +1442,11 @@ where
 
     /// Records the date (`YYYY-MM-DD`) the session should treat as "today".
     /// The runtime announces it to the model via a `<system-reminder>`
-    /// content block on the first user turn, and each later turn compares it
-    /// against the local date, emitting a rollover reminder when the date
-    /// has changed — the system prompt itself never carries the date, so its
-    /// prompt-cache prefix stays warm across days.
+    /// content block on the first user turn, and each later turn compares the
+    /// date the transcript last announced (this one, until it announced any)
+    /// against the local date, emitting a rollover reminder when it differs.
+    /// The system prompt itself never carries the date, so its prompt-cache
+    /// prefix stays warm across days.
     #[must_use]
     pub fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
         self.prompt_known_date = Some(date.into());
@@ -1546,9 +1547,11 @@ where
     ///   or after compaction dropped the message that carried it), a
     ///   `<system-reminder>` content block stating today's date is PREPENDED to
     ///   the user's content.
-    /// - When the local date no longer matches the session's known date, a
-    ///   rollover reminder is prepended and the known date advanced so the
-    ///   reminder fires only once per rollover.
+    /// - When the local date no longer matches the date the session last
+    ///   announced (or, before it announced any, the date the runtime was
+    ///   stamped with), a rollover reminder is prepended and the known date
+    ///   advanced, so the reminder fires once per rollover, including when a
+    ///   process resumes the session on a later day.
     ///
     /// Both shapes live in user-side content blocks, leaving the system
     /// prompt byte-stable across days so its prompt-cache prefix stays warm.
@@ -1568,10 +1571,17 @@ where
     /// (`engine-core::session`, its only caller) is computed from the blocks
     /// handed to the turn, upstream of every injector here.
     fn inject_date_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-        let Some(known) = self.prompt_known_date.clone() else {
+        let Some(stamped) = self.prompt_known_date.clone() else {
             return blocks;
         };
         let today = self.current_local_date();
+        // A runtime is stamped with the day it is built, and a process that
+        // resumes a session builds a new one: stamped today, over a transcript
+        // that last told the model an earlier day. The transcript records what
+        // the model was told, so it decides; the stamp stands in only while
+        // the session has announced no date.
+        let announced = self.session_date_context().map(str::to_string);
+        let known = announced.clone().unwrap_or(stamped);
         if today != known {
             let reminder = ContentBlock::Text {
                 text: format!(
@@ -1586,7 +1596,7 @@ where
             combined.extend(blocks);
             return combined;
         }
-        if self.session_has_date_context() {
+        if announced.is_some() {
             return blocks;
         }
         let mut combined = Vec::with_capacity(blocks.len() + 1);
@@ -1597,21 +1607,31 @@ where
         combined
     }
 
-    /// `true` when some message already announced the current date to the
-    /// model — either the first-turn announcement or a rollover reminder.
-    /// Scanning the session (rather than tracking a flag) self-heals after
-    /// compaction removes the message that carried the announcement.
-    fn session_has_date_context(&self) -> bool {
-        self.session.messages.iter().any(|message| {
-            message.blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Text { text }
-                        if text.contains(DATE_CONTEXT_REMINDER_PREFIX)
-                            || text.contains(DATE_ROLLOVER_REMINDER_MARKER)
-                )
+    /// The date the model was last told: the one in the latest first-turn
+    /// announcement or rollover reminder in the session. Reading it off the
+    /// session rather than keeping it holds across resume and rebuilds, and a
+    /// compaction that drops every announcement makes it `None` again.
+    fn session_date_context(&self) -> Option<&str> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == MessageRole::User)
+            .flat_map(|message| message.blocks.iter().rev())
+            .find_map(|block| {
+                let ContentBlock::Text { text } = block else {
+                    return None;
+                };
+                if let Some(rest) = text.strip_prefix(DATE_CONTEXT_REMINDER_PREFIX) {
+                    return rest.split_once('.').map(|(date, _)| date);
+                }
+                text.strip_prefix("<system-reminder>")?
+                    .strip_prefix(DATE_ROLLOVER_REMINDER_MARKER)?
+                    .split_once("; today is now ")?
+                    .1
+                    .split_once(". ")
+                    .map(|(date, _)| date)
             })
-        })
     }
 
     /// Keep the assistant informed of which model it is WITHOUT ever putting
@@ -7626,6 +7646,104 @@ mod tests {
             &second_turn_user_blocks[0],
             ContentBlock::Text { text } if text == "second"
         ));
+    }
+
+    fn date_runtime(
+        session: Session,
+        captured: &Arc<std::sync::Mutex<Vec<ApiRequest>>>,
+        day: &str,
+    ) -> ConversationRuntime<CapturingApi, StaticToolExecutor> {
+        let mut runtime = ConversationRuntime::new(
+            session,
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date(day);
+        runtime.today_override = Some(day.to_string());
+        runtime
+    }
+
+    /// A process that resumes a session builds a new runtime stamped with
+    /// today. The transcript still says what the model was last told, so a
+    /// resume on a later day is a rollover like any other.
+    #[tokio::test]
+    async fn a_session_resumed_on_a_later_day_is_told_the_date_changed() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                ContentBlock::Text {
+                    text: "<system-reminder>Today's date is 2026-05-15.</system-reminder>"
+                        .to_string(),
+                },
+                ContentBlock::Text {
+                    text: "earlier work".to_string(),
+                },
+            ])
+            .expect("seed message");
+        let mut resumed = date_runtime(session, &captured, "2026-05-17");
+
+        resumed
+            .run_turn("first", None, None)
+            .await
+            .expect("first turn");
+        resumed
+            .run_turn("second", None, None)
+            .await
+            .expect("second turn");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        let first = &inputs[0];
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(
+            matches!(&first[0], ContentBlock::Text { text }
+                if text.contains("The previously announced date was 2026-05-15; today is now 2026-05-17")),
+            "the resumed turn must name the last announced day: {first:?}"
+        );
+        assert_eq!(inputs[1].len(), 1, "told once per rollover");
+    }
+
+    /// The latest announcement wins, whichever shape carried it: a resume on
+    /// the day the transcript last named says nothing, and a later one counts
+    /// from that day.
+    #[tokio::test]
+    async fn the_last_date_the_transcript_announced_is_the_known_date() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut original = date_runtime(Session::new(), &captured, "2026-05-15");
+        original
+            .run_turn("day one", None, None)
+            .await
+            .expect("announce");
+        original.today_override = Some("2026-05-16".to_string());
+        original
+            .run_turn("day two", None, None)
+            .await
+            .expect("rollover");
+
+        let mut same_day = date_runtime(original.session().clone(), &captured, "2026-05-16");
+        same_day
+            .run_turn("resumed", None, None)
+            .await
+            .expect("same-day resume");
+        let mut later = date_runtime(same_day.session().clone(), &captured, "2026-05-18");
+        later
+            .run_turn("resumed later", None, None)
+            .await
+            .expect("later resume");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs[2].len(), 1, "same-day resume adds nothing");
+        let later = &inputs[3];
+        assert!(
+            matches!(&later[0], ContentBlock::Text { text }
+                if text.contains("The previously announced date was 2026-05-16; today is now 2026-05-18")),
+            "counts from the rollover, not the first announcement: {later:?}"
+        );
     }
 
     #[tokio::test]

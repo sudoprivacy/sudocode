@@ -19,8 +19,8 @@ def git(*args):
     return subprocess.check_output(["git", *args]).decode().strip()
 
 
-def mailbox_executor_changed(base, head):
-    """Bind the shared nextest helpers, retaining unknown module dependencies."""
+def mailbox_executor_changed(base, head, details=None):
+    """Bind reachable nextest functions, retaining unknown module dependencies."""
     path = ".github/local-acceptance/checks.py"
     helpers = {"nextest_binary", "nextest_options"}
 
@@ -33,11 +33,18 @@ def mailbox_executor_changed(base, head):
         pathlib_path = any(isinstance(node, ast.ImportFrom) and node.module == "pathlib"
                            and any(alias.name == "Path" and not alias.asname for alias in node.names)
                            for node in tree.body)
+        context_manager = any(isinstance(node, ast.ImportFrom) and node.module == "contextlib"
+                              and any(alias.name == "contextmanager" and not alias.asname for alias in node.names)
+                              for node in tree.body)
         imports = set()
+        rebound = set()
+        reflective = {"eval", "exec", "globals", "locals", "vars", "__import__",
+                      "getattr", "setattr", "delattr", "import_module"}
         context = []
         for node in tree.body:
             if isinstance(node, ast.FunctionDef):
                 if any(not isinstance(decorator, ast.Name) or decorator.id != "contextmanager"
+                       or not context_manager
                        for decorator in node.decorator_list):
                     raise ValueError("Unknown import-time decorator execution")
                 for default in [*node.args.defaults, *node.args.kw_defaults]:
@@ -55,15 +62,38 @@ def mailbox_executor_changed(base, head):
                 imports.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imports.update(alias.asname or alias.name for alias in node.names)
+                reflective.update(alias.asname or alias.name for alias in node.names
+                                  if alias.name in reflective)
             if not isinstance(node, ast.FunctionDef) and not (
                     isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
                 context.append(ast.dump(node, include_attributes=False))
+                rebound.update(item.id for item in ast.walk(node)
+                               if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store))
+                rebound.update(item.name for item in ast.walk(node)
+                               if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)))
+        if {"Path", "contextmanager"} & (functions.keys() | rebound):
+            raise ValueError("Rebound import-time constructor or decorator")
         symbols = symtable.symtable(source, path, "exec")
-        for name in helpers:
+        required = set(helpers)
+        bound = {}
+        while required:
+            name = required.pop()
+            if name in bound:
+                continue
             function = functions[name]
+            if name in imports | rebound:
+                raise ValueError("Shared function has another module binding")
             if function.decorator_list or function.args.defaults or function.args.kw_defaults:
                 raise ValueError("Unknown helper decorator/default execution")
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Call)
+                        and ((isinstance(node.func, ast.Name) and node.func.id in reflective)
+                             or (isinstance(node.func, ast.Attribute) and node.func.attr in reflective))):
+                    raise ValueError("Shared helper resolves dynamic dependencies")
+                if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__globals__", "f_globals", "f_locals", "_getframe"}:
+                    raise ValueError("Shared helper inspects a runtime namespace")
+            bound[name] = ast.dump(function, include_attributes=False)
             table = symbols.lookup(name).get_namespace()
             globals_used = set()
             pending = [table]
@@ -71,13 +101,24 @@ def mailbox_executor_changed(base, head):
                 current = pending.pop()
                 globals_used.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
                 pending.extend(current.get_children())
-            if not globals_used <= imports | set(dir(builtins)):
-                raise ValueError("Shared helper now depends on another module global")
-        return context, {name: ast.dump(functions[name], include_attributes=False) for name in helpers}
+            for used in globals_used:
+                if used in rebound:
+                    raise ValueError("Shared helper depends on a rebound module global")
+                if used in functions:
+                    required.add(used)
+                elif used not in imports | set(dir(builtins)):
+                    raise ValueError("Shared helper depends on an unknown module global")
+        return context, bound
 
     try:
-        return identity(base) != identity(head)
-    except (ValueError, SyntaxError, TypeError, KeyError, AttributeError, subprocess.CalledProcessError):
+        before, after = identity(base), identity(head)
+        changed = before != after
+        if details is not None:
+            details.update(decision="changed" if changed else "unchanged", bound_functions=sorted(after[1]))
+        return changed
+    except (ValueError, SyntaxError, TypeError, KeyError, AttributeError, subprocess.CalledProcessError) as error:
+        if details is not None:
+            details.update(decision="unknown", reason=str(error), full_a2a_required=True)
         return True
 
 
@@ -133,6 +174,7 @@ def independent_cli_sources(*refs):
 
 
 def main():
+    nextest_scope = {}
     ignored_product_inputs = []
     ignored_cohost_cli_sources = []
     ignored_disabled_test_sources = []
@@ -204,7 +246,7 @@ def main():
                             and (path in native_specs
                                  or any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs))]
             executor_path = ".github/local-acceptance/checks.py"
-            if executor_path in normal_inputs and mailbox_executor_changed(base, head):
+            if executor_path in normal_inputs and mailbox_executor_changed(base, head, nextest_scope):
                 daemon_paths.append(executor_path)
             # These helpers only prepare the separate fixed search driver.
             # They cannot change the CLI, its pinned daemon or A2A harness.
@@ -262,7 +304,7 @@ def main():
             stream.write(f"{key}={value}\n")
     print(json.dumps({**result, "changed_paths": paths, "normal_product_ignored": ignored_product_inputs,
                       "daemon_disabled_test_sources_ignored": ignored_disabled_test_sources,
-                      "cohost_cli_source_ignored": ignored_cohost_cli_sources}))
+                      "cohost_cli_source_ignored": ignored_cohost_cli_sources, "nextest_dependency_scope": nextest_scope}))
 
 
 if __name__ == "__main__":

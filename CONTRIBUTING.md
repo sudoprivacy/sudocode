@@ -971,6 +971,14 @@ archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
 repository disables automatic line-ending conversion without changing author settings.
 
+For shared nextest execution, the CI scope response includes
+`nextest_dependency_scope`: the decision and bound function names, or the reason
+an unknown dependency requires full A2A. It binds transitive module functions
+including the GitHub API/download helpers. Unrelated function bodies omit this
+journey; changed imported context, reachable code, unknown data, rebinding or
+reflection retain it. Real Git/CLI cases exercise actual Windows-helper,
+authorization and asset-identity changes alongside the existing scope matrix.
+
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
 summary job repeats those checks. Scheduling-only edits keep valid completed

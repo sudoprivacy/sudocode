@@ -7,6 +7,12 @@ const {execFileSync,spawn}=require('node:child_process');
 const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 if(config.nativeInstalledCommand)assert(config.nativeCodex && config.nativePackageRoot,
   'Installed-command composition requires the real native managed package');
+if(config.nativeResumeCold)assert(config.nativeInstalledCommand===true,
+  'Cold history resume requires one installed ordinary command');
+if(config.nativeCrossWorkspace)assert(config.nativeInstalledCommand===true,
+  'Cross-workspace acceptance requires one installed ordinary command');
+if(config.nativeInstalledCold)assert(config.nativeInstalledCommand===true,
+  'Cold installed acceptance requires one installed ordinary command');
 const sdk=require(path.join(config.install,'node_modules/@sudocode/acp/dist/index.cjs'));
 const entry=path.join(config.install,'node_modules/@sudocode/acp/dist/server.cjs');
 const digest=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -85,10 +91,35 @@ async function main(){
         '--case',scenario,'--autojoin','--operator-context',context,'--temp-root',config.root];
       if(config.nativePackageRoot)args.push('--managed-package-root',config.nativePackageRoot);
       if(config.nativeInstalledCommand)args.push('--installed-command');
+      if(config.nativeInstalledCold)args.push('--installed-cold');
+      if(config.nativeCrossWorkspace)args.push('--cross-workspace');
+      if(config.nativeResumeCold && scenario!=='idle')args.push('--resume-cold');
       if(config.nativeDriver)args.push('--driver',JSON.stringify(config.nativeDriver));
       const result=await runAsync(process.execPath,args);
       fs.writeFileSync(path.join(config.root,`native-operator-${scenario}.json`),JSON.stringify(result,null,2)+'\n');
       assert.equal(result.result,'PASS',JSON.stringify(result));
+      if(config.nativeResumeCold && scenario!=='idle'){
+        const actual=JSON.parse(fs.readFileSync(result.receipt,'utf8'));
+        assert.equal(actual.coldHistoryResumeRequested,true);
+        assert.equal(actual.coldHistoryResume.socketAbsentBeforeResume,true);
+        assert.equal(actual.coldHistoryResume.originalOwnerExitedBeforeStop,true);
+        assert.equal(actual.coldHistoryResume.originalAcpSidRetained,true);
+        assert.equal(actual.coldHistoryResume.peerReception.nativeRequestsAdded,1);
+        assert(!actual.notProven.includes('existing-history resume after native backend stop'));
+      }
+      if(config.nativeCrossWorkspace){
+        const actual=JSON.parse(fs.readFileSync(result.receipt,'utf8'));
+        assert.equal(actual.crossWorkspaceRequested,true);
+        assert.equal(new Set(actual.created.map(row=>fs.realpathSync(row.cwd))).size,2);
+        assert(!actual.notProven.includes('cross-workspace native roots'));
+      }
+      if(config.nativeInstalledCold){
+        const actual=JSON.parse(fs.readFileSync(result.receipt,'utf8'));
+        assert.equal(actual.installedColdStartupRequested,true);
+        assert.equal(actual.installedColdPreparation.stop.status,'stopped');
+        assert.equal(actual.installedColdPreparation.socketAbsent,true);
+        assert(!actual.notProven.includes('native daemon cold startup after installation'));
+      }
     }
     if(config.nativePackageRoot && !config.nativeInstalledCommand){
       const migrationArgs=[path.join(__dirname,'nativeCodexLifecycle.cjs'),'--codex',config.nativeCodex,'--output',config.root,

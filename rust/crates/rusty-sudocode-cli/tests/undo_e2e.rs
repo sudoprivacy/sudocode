@@ -71,6 +71,7 @@ fn resumed_undo_restores_file_modified_by_edit_file_tool() {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .expect("tool_use persisted");
     session
@@ -86,6 +87,7 @@ fn resumed_undo_restores_file_modified_by_edit_file_tool() {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .expect("tool_result persisted");
 
@@ -150,6 +152,7 @@ fn resumed_undo_deletes_file_when_write_file_originally_created_it() {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .expect("tool_result persisted");
 
@@ -253,6 +256,7 @@ fn resumed_undo_survives_hook_feedback_suffix_in_tool_result() {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .expect("tool_result persisted");
 
@@ -311,6 +315,7 @@ fn resumed_undo_emits_structured_json_when_requested() {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         })
         .expect("tool_result persisted");
 

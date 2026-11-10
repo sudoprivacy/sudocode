@@ -25,6 +25,7 @@ fn prompt(handle: &EngineHandle, calls: &Value) {
                 text: format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}"),
             }],
             context: None,
+            shown: Vec::new(),
         })
         .unwrap();
 }
@@ -143,7 +144,7 @@ fn cancelling_permission_and_question_releases_input_before_the_turn_drains() {
                 }}])
             } else {
                 json!([{"id":"cancelled-question", "name":"AskUserQuestion",
-                    "input":{"question":"Which value should this fresh session use?"}}])
+                    "input":{"questions":[{"id":"q1","prompt":"Which value should this fresh session use?"}]}}])
             },
         );
         let deadline = Instant::now() + Duration::from_secs(30);

@@ -167,13 +167,12 @@ pub(crate) fn request_history(path: &Path) -> RequestHistory {
 
 /// Both local statistics views share a single read and snapshot selection.
 #[must_use]
-pub fn session_report(directory: &Path, include_advisor: bool) -> Value {
+pub fn session_report(directory: &Path) -> Value {
     let history = request_history(&directory.join("requests.jsonl"));
-    let mut report = json!({"completion_intervals": intervals(&history)});
-    if include_advisor {
-        report["ttl_advisor"] = crate::cache_advisor::report_from_history(directory, &history);
-    }
-    report
+    json!({
+        "completion_intervals": intervals(&history),
+        "ttl_advisor": crate::cache_advisor::report_from_history(directory, &history),
+    })
 }
 
 #[derive(Debug, Default, Serialize)]

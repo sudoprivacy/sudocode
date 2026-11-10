@@ -99,6 +99,53 @@ def verify_profile_compatibility(directory, work, command):
         # Selected commands, common state, process execution and images must
         # reject the genuinely signed prior execution, in both receipt formats.
         helper_source = helper.read_text()
+        # A reviewed priority-only migration may preserve exact old recipes.
+        # The private hook still authenticates the original real-process run;
+        # no previous result is converted into a new command's execution.
+        run("git", "checkout", "-b", "compat-priority", future)
+        priority_source = helper_source.replace('"clippy-driver", "clippy-driver.exe", ', '', 1)
+        assert priority_source != helper_source
+        helper.write_text(priority_source)
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Change only compiler scheduling priority")
+        priority_hash = json.loads(run(sys.executable, "-c",
+            "import json,runpy; h=runpy.run_path('.github/scripts/local_acceptance.py'); "
+            "print(json.dumps(h['reachable_profile_commands_hashes']('HEAD',['real-process'])))"))["real-process"]
+        priority_rules = json.loads(policy.read_text())
+        priority_rules["equivalent_profile_commands"] = {"real-process": {priority_hash: [
+            original_payload["reachable_profile_commands_sha256"]["real-process"]]}}
+        policy.write_text(json.dumps(priority_rules))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Approve only the exact priority recipe pair")
+        priority_policy = run("git", "rev-parse", "HEAD")
+        run("git", "fetch", str(work), "compat-priority:refs/heads/main", cwd=origin)
+        run("git", "checkout", original_branch)
+        run("git", "fetch", "origin", "main")
+        for label, note in variants.items():
+            install_note(note)
+            output = run("git", "push", "origin", f"HEAD:refs/heads/compat-priority-{label}")
+            assert f"Verified {head[:12]}" in output, output
+            assert "Running real-process" not in output, "Priority migration repeated completed execution"
+            assert run("git", "notes", "--ref=local-acceptance", "show", head) == note
+        run("git", "checkout", "-b", "compat-priority-changed-command", priority_policy)
+        helper.write_text(priority_source.replace('    import psutil\n',
+            '    import psutil\n    raise RuntimeError("CHANGED_PROCESS_EXECUTION")\n', 1))
+        run("git", "add", ".")
+        run("git", "commit", "-m", "Refuse a changed executor outside the exact pair")
+        changed_priority = run("git", "rev-parse", "HEAD")
+        for note in variants.values():
+            install_note(note)
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", changed_priority,
+                success=False, error="Acceptance commands changed")
+        run("git", "fetch", str(work), f"+{future}:refs/heads/main", cwd=origin)
+        run("git", "checkout", original_branch)
+        run("git", "fetch", "origin", "main")
+        (fixture / "priority-compat-result.json").write_text(json.dumps({
+            "status": "PASS", "original_head": head, "approved_policy": priority_policy,
+            "refused_changed_executor": changed_priority, "receipt_formats": list(variants),
+            "original_signed_note_and_execution_preserved": True,
+            "scope": "Real private Git/SSH/hook migration; no additional product journey coverage.",
+        }, indent=2) + "\n")
         image = work / ".github/local-acceptance/Dockerfile"
         image_source = image.read_text()
         mutations = [

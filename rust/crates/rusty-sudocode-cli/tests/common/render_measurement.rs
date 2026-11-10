@@ -4,6 +4,7 @@ use pty_expect::PtySession;
 use std::time::{Duration, Instant};
 
 /// Fixed real-shell producer shared by manual and CI rendering measurements.
+#[must_use]
 pub fn background_output_command(batches: Option<u64>) -> String {
     let condition = batches.map_or_else(
         || "! -f release".into(),

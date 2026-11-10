@@ -187,9 +187,13 @@ fn system_prompt_renders() {
 #[test]
 fn system_prompt_carries_no_model_identity() {
     let bin = common::scode_bin();
+    let workspace = common::HarnessWorkspace::new("system-prompt-model");
     let render = |model: &str| {
         let output = std::process::Command::new(&bin)
             .args(["system-prompt", "--model", model])
+            .current_dir(&workspace.root)
+            .env("HOME", &workspace.home)
+            .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
             .output()
             .expect("spawn scode system-prompt");
         assert!(output.status.success(), "scode system-prompt should exit 0");

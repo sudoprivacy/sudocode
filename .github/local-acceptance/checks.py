@@ -21,6 +21,38 @@ import urllib.request
 import zipfile
 
 
+def github_api_request(url, accept):
+    """Keep credentials on the original GitHub API request, never redirects."""
+    if not url.startswith('https://api.github.com/repos/'):
+        raise RuntimeError('Release credentials may only address the GitHub API')
+    request = urllib.request.Request(url, headers={'Accept': accept})
+    token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    if token:
+        request.add_unredirected_header('Authorization', f'Bearer {token}')
+    return request
+
+
+def github_asset_download(repository, tag, filename, destination):
+    """Fetch one named release asset through GitHub's public metadata/binary API."""
+    endpoint = f'https://api.github.com/repos/{repository}'
+    request = github_api_request(f'{endpoint}/releases/tags/{tag}', 'application/vnd.github+json')
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    assets = [asset for asset in release['assets'] if asset['name'] == filename]
+    if release['tag_name'] != tag or len(assets) != 1:
+        raise RuntimeError(f'Expected exactly one pinned GitHub release asset: {repository}/{tag}/{filename}')
+    asset_id = assets[0]['id']
+    if not isinstance(asset_id, int) or asset_id <= 0:
+        raise RuntimeError('The pinned GitHub release returned an invalid asset identity')
+    download = f'{endpoint}/releases/assets/{asset_id}'
+    print('GITHUB_ASSET_DOWNLOAD=' + json.dumps({
+        'repository': repository, 'tag': tag, 'filename': filename, 'api': download,
+    }), flush=True)
+    request = github_api_request(download, 'application/octet-stream')
+    with urllib.request.urlopen(request, timeout=30) as response:
+        destination.write_bytes(response.read())
+
+
 def nextest_binary(output):
     """Use a pinned, checksum-verified tool without replacing a user's installation."""
     version = '0.9.150'
@@ -53,7 +85,7 @@ def nextest_binary(output):
         with tempfile.NamedTemporaryFile(dir=cache, suffix='.download', delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            urllib.request.urlretrieve(source, temporary_path)
+            github_asset_download('nextest-rs/nextest', f'cargo-nextest-{version}', filename, temporary_path)
             if hashlib.sha256(temporary_path.read_bytes()).hexdigest() != hashes[triplet]:
                 raise RuntimeError(f'nextest archive checksum mismatch: {source}')
             os.replace(temporary_path, archive)
@@ -89,6 +121,30 @@ def nextest_binary(output):
     return executable
 
 
+def cohost_protoc():
+    """Prepare the original platform-pinned compiler without changing global PATH."""
+    if platform.system() not in {"Windows", "Darwin"}:
+        return None
+    architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
+    archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
+    folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
+    executable = folder / "bin" / ("protoc.exe" if os.name == "nt" else "protoc")
+    if not executable.exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        archive = folder / "protoc.zip"
+        github_asset_download('protocolbuffers/protobuf', 'v3.20.2',
+                              f'protoc-3.20.2-{archive_name}.zip', archive)
+        with zipfile.ZipFile(archive) as stream:
+            stream.extractall(folder)
+        executable.chmod(0o755)
+    tool_env = {key: value for key, value in os.environ.items()
+                if key not in {'GH_TOKEN', 'GITHUB_TOKEN'}}
+    version = subprocess.check_output([str(executable), "--version"], text=True, env=tool_env).strip()
+    if version != "libprotoc 3.20.2":
+        raise RuntimeError(f"Cohost protoc version differs from the pinned 3.20.2: {version}")
+    return executable
+
+
 def nextest_options(output):
     """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
     configuration = output / 'nextest.toml'
@@ -100,15 +156,50 @@ def nextest_options(output):
             '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
 
 
-def workspace_nextest_options(output, grouped):
-    """Raise only the full grouped workspace pool; preserve explicit lower limits."""
+def docker_engine_probe_command(timeout):
+    """Bound the Engine version request without discovering optional CLI plugins."""
+    script = """import subprocess,sys
+try:
+    result = subprocess.run(sys.argv[2:], timeout=float(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    sys.exit(f"DOCKER_ENGINE_PROBE_TIMEOUT: Docker Engine did not answer within {sys.argv[1]} seconds. Check Docker Desktop and this shell's DOCKER_HOST/context; container/native guards have not started.")
+sys.exit(result.returncode)
+"""
+    return [sys.executable, "-c", script, str(timeout), shutil.which("docker") or "docker",
+            "version", "--format", "{{.Server.Version}}"]
+
+
+def supports_hosted_eight_workers(root):
+    """Qualify the measured hosted increase; old or unknown fixtures keep four."""
+    path = Path(root) / "rust/crates/rusty-sudocode-cli/tests/pty_bash_compact_results.rs"
+    try:
+        contents = path.read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return False
+    return hashlib.sha256(contents).hexdigest() == "8c157cf9088b931a7d98ad3434a48a3fe2ab0cf23d1ea61be395da6c45bc7ed6"
+
+
+def workspace_nextest_options(output, grouped, hosted_source_ready):
+    """Raise the qualified grouped pool and preserve existing explicit limits."""
     options = nextest_options(output)
-    if grouped and (os.cpu_count() or 0) >= 8 and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
+    cpus = os.cpu_count() or 0
+    hosted = os.environ.get('GITHUB_ACTIONS') == 'true'
+    hosted_minimum = 3 if platform.system() == 'Darwin' else 4
+    eligible = cpus >= 8 or (hosted and cpus >= hosted_minimum and hosted_source_ready)
+    if grouped and eligible and 'SCODE_ACCEPTANCE_TEST_THREADS' not in os.environ:
         options[options.index('--test-threads') + 1] = '8'
+    if grouped and hosted and hosted_minimum <= cpus < 8:
+        print('NATIVE_TEST_SOURCE_COMPATIBILITY=' + json.dumps({
+            'qualified_resume_source': hosted_source_ready,
+            'scope': 'Known measured source enables eight; old/unknown source retains four. '
+                     'No source update is required to keep using four.',
+        }), flush=True)
     print('NATIVE_TEST_WORKERS: ' + options[options.index('--test-threads') + 1]
           + ' test processes; compiler jobs/priorities, case isolation, retries and deadlines unchanged. '
-          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool; hosts below eight logical CPUs or unknown CPU '
-          'counts, legacy/isolated/other profiles retain four.',
+          'SCODE_ACCEPTANCE_TEST_THREADS=1..4 lowers the pool. Grouped suites retain eight on hosts '
+          'with at least eight logical CPUs; qualified hosted sources also use eight from four CPUs, '
+          'or three on macOS. Old/unknown hosted sources below eight CPUs, smaller/unknown hosts '
+          'and legacy/isolated/other profiles retain four.',
           flush=True)
     return options
 
@@ -356,11 +447,52 @@ def stable_performance_power(output):
     return monitor_window()
 
 
-def prepare_windows_terminal(root, output, execute):
-    """Retain the actual installer command/log for the selected resize receipt."""
-    output.mkdir(parents=True, exist_ok=True)
+NATIVE_RUST_PTY_CHECKS = {"native-workspace", "native-resize", "native-release", "native-services"}
+
+
+def native_target_directory(root):
+    return Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target")).resolve()
+
+
+def windows_terminal_command(root):
+    """Share the exact installer invocation with preparation and its receipt."""
     terminal = Path.home() / ".cache/sudocode-terminal-host"
-    return execute([sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal)], root, output / "000.log")
+    return [sys.executable, "e2e/terminal-resize/setup_windows.py", str(terminal),
+            "--native-target", str(native_target_directory(root))]
+
+
+def prepare_windows_terminal(root, output, execute):
+    """Retain one verified provider for ordinary Rust PTYs and visual journeys."""
+    output.mkdir(parents=True, exist_ok=True)
+    return execute(windows_terminal_command(root), root, output / "000.log")
+
+
+def verify_native_terminal(log, target):
+    """Refuse successful legacy installers that did not provision the drivers."""
+    records = [json.loads(line.removeprefix("NATIVE_CONPTY_HOST="))
+               for line in log.read_text(encoding="utf-8").splitlines()
+               if line.startswith("NATIVE_CONPTY_HOST=")]
+    if len(records) != 1:
+        raise RuntimeError("Native terminal preparation did not report exactly one verified provider. "
+                           "Include the current terminal installer in this source before qualifying it.")
+    identity = records[0]
+    directory = target.resolve() / "debug/deps"
+    if (Path(identity["driver_directory"]).resolve() != directory
+            or identity["architecture"] not in {"x64", "arm64"}
+            or not re.fullmatch(r"[0-9a-f]{40}", identity["distribution_commit"])
+            or not re.fullmatch(r"[0-9a-f]{64}", identity["archive_sha256"])
+            or (os.name == "nt" and identity["dynamic_load_checked"] is not True)):
+        raise RuntimeError("Native terminal preparation did not verify this target/provider ABI")
+    files = identity["files"]
+    if len(files) != 2 or {Path(item["path"]).name for item in files} != {"conpty.dll", "OpenConsole.exe"}:
+        raise RuntimeError("Native terminal preparation must report both native sidecars")
+    for item in files:
+        path = Path(item["path"])
+        if (path.resolve() != directory / path.name
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]):
+            raise RuntimeError(f"Native terminal sidecar differs from the prepared provider: {path}")
+    return identity
 
 
 def terminal_installer_scope(root, base):
@@ -375,21 +507,268 @@ def terminal_installer_scope(root, base):
     return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
 
 
+def validate_before_host_lease(names, root, output):
+    """Reject invalid guard inputs early; execution still stages its own copy."""
+    if "guard-contract" not in names:
+        return
+    print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
+          "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
+    stage_profile_executor(root, execution_policy_ref(), "guard-contract",
+                           output / "guard-contract" / "prequeue-static-policy")
+    print("GUARD_STATIC_PREFLIGHT: passed; execution will restage and revalidate the protected Git inputs.",
+          flush=True)
+
+
+def native_services_tool(root, output, execute):
+    """Resolve the existing service client before compilation, retaining its bytes."""
+    bash = shutil.which("bash")
+    if os.name == "nt":
+        git = shutil.which("git")
+        candidates = [Path(git).resolve().parent / "bash.exe",
+                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
+        bash = next((str(path) for path in candidates if path.is_file()), None)
+    if not bash:
+        raise RuntimeError("Git Bash is required for shared-service credential acceptance")
+    probe = '''import hashlib,json,subprocess,sys
+from pathlib import Path
+binary = Path(sys.argv[1]).resolve(strict=True)
+version = subprocess.check_output([str(binary), "--version"], stderr=subprocess.STDOUT,
+                                  text=True, timeout=5).strip()
+print(json.dumps({"executable": str(binary), "version": version,
+                  "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
+'''
+    # Git for Windows can check shell helpers out as CRLF. Its Bash provides
+    # igncr; keep the original helper's location and normal Unix invocation.
+    arguments = [bash, *(["-o", "igncr"] if os.name == "nt" else []), "-ec",
+                 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
+                 '"$1" -c "$2" "$(native_path "$GRPCURL")"', "scode-services-tool",
+                 sys.executable.replace("\\", "/"), probe]
+    log = output / "000.log"
+    result = execute(arguments, root, log)
+    tool = json.loads(log.read_text(encoding="utf-8"))
+    return {"root": str(root.resolve()), "command": result, "tool": tool}
+
+
 def prepare_native_checks(names, root, output, execute):
-    """Install selected Windows terminal inputs before long native compilation."""
+    """Resolve selected native tools before long native compilation."""
     prepared = {}
-    if os.name == "nt" and "native-resize" in names:
+    if "native-services" in names:
+        print("NATIVE_SERVICE_TOOL_PREFLIGHT: resolving the existing grpcurl client and running "
+              "--version before compilation. A download or executable failure stops here; "
+              "both original service journeys remain required.", flush=True)
+        run.prepared_services_tool = native_services_tool(root, output / "native-service-tool", execute)
+    selected = [name for name in names if name in NATIVE_RUST_PTY_CHECKS]
+    if os.name == "nt" and selected:
         print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
               "before compilation; original installer checks and terminal tests remain required.", flush=True)
-        prepared["native-resize"] = [prepare_windows_terminal(root, output / "native-resize", execute)]
+        first = selected[0]
+        directory = output / first
+        prepared[first] = [prepare_windows_terminal(root, directory, execute)]
+        verify_native_terminal(directory / "000.log", native_target_directory(root))
     return prepared
+
+
+def native_workspace_lint_arguments(root, base, scope):
+    """Keep prepared and direct workspace lint on one argument recipe."""
+    if scope["tests"] is not None:
+        arguments = ["--locked", *native_cli_test_package_args(root, base),
+                     "--features", "engine-acp/mailbox"]
+        for test in scope["tests"]:
+            arguments += ["--test", test]
+        return ["clippy", *arguments, "--", "-D", "warnings"]
+    targets = scope["targets"]
+    lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
+    return ["clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
+            "--", "-D", "warnings"]
+
+
+def native_workspace_format(root, cargo, command):
+    """Keep cargo fmt --all's roots, path dependencies and editions in bounded argv."""
+    pending = [root / "rust/Cargo.toml"]
+    visited = set()
+    targets = {}
+    while pending:
+        manifest = pending.pop().resolve()
+        if manifest in visited:
+            continue
+        metadata_log = cargo("metadata", "--no-deps", "--format-version=1",
+                             "--manifest-path", str(manifest))
+        packages = json.loads(metadata_log.read_text(encoding="utf-8"))["packages"]
+        visited.update(Path(package["manifest_path"]).resolve() for package in packages)
+        for package in packages:
+            for target in package["targets"]:
+                path = str(Path(target["src_path"]).resolve())
+                edition = target["edition"]
+                if path in targets and targets[path] != edition:
+                    raise RuntimeError(f"Conflicting Rust editions for formatting target: {path}")
+                targets[path] = edition
+            for dependency in package["dependencies"]:
+                if dependency.get("path"):
+                    local = Path(dependency["path"]) / "Cargo.toml"
+                    if local.is_file() and local.resolve() not in visited:
+                        pending.append(local)
+    if not targets:
+        raise RuntimeError("No Cargo formatting targets found; formatting remains required")
+    formatter = os.environ.get("RUSTFMT") or shutil.which("rustfmt")
+    if not formatter:
+        raise RuntimeError("Native acceptance requires the active toolchain's rustfmt")
+
+    def command_units(arguments):
+        # CreateProcessW counts UTF-16 units including quoting and the final NUL.
+        return len(subprocess.list2cmdline(arguments).encode("utf-16-le")) // 2 + 1
+
+    batches = []
+    for edition in sorted(set(targets.values())):
+        prefix = [formatter, "--edition", edition, "--check"]
+        batch = prefix.copy()
+        for path in sorted(path for path, selected in targets.items() if selected == edition):
+            if command_units([*prefix, path]) > 24_000:
+                raise RuntimeError(f"Formatting target exceeds the native command budget: {path}")
+            if command_units([*batch, path]) > 24_000:
+                batches.append(batch)
+                batch = prefix.copy()
+            batch.append(path)
+        batches.append(batch)
+    print("NATIVE_FORMAT_SCOPE=" + json.dumps({
+        "cargo_target_roots": len(targets), "manifests": len(visited), "batches": len(batches),
+        "max_command_utf16_units": max(map(command_units, batches)),
+        "scope": "All Cargo targets and recursive local path dependencies; normal module/config discovery.",
+    }), flush=True)
+    for arguments in batches:
+        command(*arguments, cwd=root / "rust")
+
+
+def native_workspace_lint(root, output, base, cargo, command):
+    """Run the original lint prefix; a pass alone never completes workspace acceptance."""
+    if os.name == "nt" and not shutil.which("pwsh.exe"):
+        raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
+                           "Add your existing PowerShell 7 directory to PATH, or install it with "
+                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                           "then rerun the same acceptance command. No workspace compilation started.")
+    native_workspace_format(root, cargo, command)
+    tests = changed_cli_test_targets(root, base)
+    scope = {"tests": tests, "targets": None}
+    (output / "test-scope.json").write_text(json.dumps({
+        "mode": "changed-cli-targets" if tests is not None else "full-workspace", "targets": tests,
+    }, indent=2))
+    if tests is not None:
+        print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
+    else:
+        command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
+        command(sys.executable, "scripts/check_cache_usage_fixtures.py")
+        metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
+        targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
+        scope["targets"] = targets
+        selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
+        (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
+        print("Native workspace target selection: " + json.dumps(selection), flush=True)
+        print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
+              "targets, examples and benches before long builds and PTY execution. "
+              "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
+        if targets:
+            print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
+                  "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
+        else:
+            print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
+                  "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
+    cargo(*native_workspace_lint_arguments(root, base, scope))
+    return scope
+
+
+def workspace_preparation_identity(root, output, base):
+    """Bind in-process preparation to the same clean source, output and executor."""
+    try:
+        refs = run.execution_refs
+    except AttributeError:
+        refs = None
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+    dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=root)
+    if dirty:
+        raise RuntimeError("Workspace lint preparation requires the same clean source; unfinished tests remain required")
+    return {"root": str(root.resolve()), "output": str(output.resolve()), "base": base,
+            "head": head, "execution_refs": refs, "target": str(native_target_directory(root))}
+
+
+def prepare_native_workspace_lint(root, output, base, execute):
+    """Prepare only real lint commands before the contract matrix, under the host lease."""
+    directory = output / "native-workspace"
+    run.workspace_lint_request = workspace_preparation_identity(root, directory, base)
+    print("NATIVE_LINT_PREPARATION: execute the selected workspace lint before guard-contract. "
+          "The later workspace profile consumes these original logs once; native tests and the full guard remain required.", flush=True)
+    try:
+        return run("native-workspace", root, directory, base, execute)
+    except RuntimeError as error:
+        raise RuntimeError("Early native workspace lint failed before guard-contract started. "
+                           f"Workspace acceptance remains incomplete; retain these logs and repair the reported error: {error}") from error
+    finally:
+        del run.workspace_lint_request
+
+
+def consume_workspace_lint(preparation, root, output, base, existing):
+    """Refuse stale/tampered preparation; it is not a completed signed profile."""
+    if preparation["identity"] != workspace_preparation_identity(root, output, base):
+        raise RuntimeError("Workspace lint preparation belongs to another source, output, target or executor; "
+                           "run the supported check with fresh output and preserve the original evidence")
+    commands, scope = preparation["commands"], preparation["scope"]
+    if commands[:len(existing)] != existing or scope["tests"] != changed_cli_test_targets(root, base):
+        raise RuntimeError("Workspace lint preparation differs from this provider or selected test scope")
+    for index, entry in enumerate(commands):
+        log = output / f"{index:03d}.log"
+        receipt = log.with_suffix(".command.json")
+        if (entry["exit_code"] != 0 or json.loads(receipt.read_text()) != entry
+                or hashlib.sha256(log.read_bytes()).hexdigest() != entry["log_sha256"]):
+            raise RuntimeError(f"Workspace lint preparation evidence changed: {log}; unfinished tests remain required")
+    lint = commands[-1]["command"]
+    if Path(lint[0]).stem.lower() != "cargo" or lint[1:] != native_workspace_lint_arguments(root, base, scope):
+        raise RuntimeError("Prepared workspace lint did not use the current selected arguments with warnings denied")
+    print("NATIVE_LINT_PREPARATION: verified and consumed the original lint commands; "
+          "running all remaining workspace commands now.", flush=True)
+    return scope, commands
+
+
+def native_compiler_context(root, binary, output, command):
+    """Use the same connected context journey for source and release artifacts."""
+    if compiler_context_driver_present(root):
+        command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
+                "--directory", str(output / "compiler-context"))
+    else:
+        print("This historical source predates the host-context compiler driver; "
+              "its existing native checks remain required.", flush=True)
+
+
+def native_release_journeys(root, binary, output, base, cargo, command, env):
+    """Judge the actual optimized artifact without compiling another CLI for its driver."""
+    import tomllib
+
+    env["SCODE_TEST_BIN"] = str(binary)
+    manifest = root / "rust/crates/scode-benchmark-drivers/Cargo.toml"
+    targets = tomllib.loads(manifest.read_text(encoding="utf-8")).get("test", []) if manifest.is_file() else []
+    declared = [target for target in targets if target.get("name") == "release_stream_capture"]
+    if declared:
+        if (len(declared) != 1 or declared[0].get("test") is not False
+                or declared[0].get("path") != "../rusty-sudocode-cli/tests/pty_model_stream_close.rs"
+                or declared[0].get("required-features")):
+            raise RuntimeError("Release driver must use the original stream/capture workflow without feature exclusions")
+        arguments = ["-p", "scode-benchmark-drivers", "--test", "release_stream_capture"]
+        print("RELEASE_TEST_DRIVER: standalone original stream/capture workflow; "
+              "SCODE_TEST_BIN launches the copied optimized artifact. No unused debug CLI build.", flush=True)
+    else:
+        arguments = [*native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox",
+                     "--test", "pty_model_stream_close"]
+        print("RELEASE_TEST_DRIVER: legacy source retains its original native CLI test target.", flush=True)
+    cargo("test", "--locked", *arguments, "raw_stream_capture_keeps_streaming_and_resume_responsive",
+          "--", "--exact", "--nocapture")
+    with stable_performance_power(output):
+        command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
+                "--report", str(output / "startup.json"))
+    native_compiler_context(root, binary, output, command)
 
 
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
     rust = root / "rust"
-    target = Path(os.environ.get("CARGO_TARGET_DIR", rust / "target")).resolve()
+    target = native_target_directory(root)
     suffix = ".exe" if os.name == "nt" else ""
     env = {"SCODE_TEST_BACKEND": "mock", "CARGO_TARGET_DIR": str(target)}
 
@@ -404,6 +783,23 @@ def run(name, root, output, base, execute):
         return command(str(nextest_binary(output)), "nextest", "run",
                        *nextest_options(output), *args, cwd=rust)
 
+    if name in {"native-workspace", "native-resize", "native-services"}:
+        print("NATIVE_TOOL_PREFLIGHT: verify the checksum-pinned nextest archive and executable "
+              "before compilation; all original tests remain required.", flush=True)
+        nextest_binary(output)
+
+    if os.name == "nt" and name in NATIVE_RUST_PTY_CHECKS:
+        try:
+            prepared = run.prepared_native.get(name)
+        except AttributeError:
+            prepared = None
+        if prepared:
+            # These are this invocation's actual early preparation commands.
+            if len(prepared) != 1 or prepared[0]["command"] != windows_terminal_command(root):
+                raise RuntimeError("Native terminal preparation differs from this profile's target/provider")
+            verify_native_terminal(output / "000.log", target)
+            results.extend(prepared)
+
     if name == "preflight":
         command(sys.executable, ".github/scripts/check_doc_source_of_truth.py")
         entry = stage_preflight_executor(root, execution_policy_ref(), output / "history-policy")
@@ -411,25 +807,24 @@ def run(name, root, output, base, execute):
         command(sys.executable, str(entry), base, "HEAD")
     elif name == "guard-contract":
         print("Local contract validation: full private Docker matrix, with Git/signature checks before Cargo; "
-              "then author-host native recovery, nextest, release, grouping and example guards. "
+              "independent author-host native recovery, nextest, release, grouping and example guards overlap "
+              "after the original Docker/tool preflight. Both full results are required. "
               "No product build or benchmark lease.", flush=True)
         if not shutil.which("docker"):
             raise RuntimeError("Contract validation requires local Docker. Install/start Docker Desktop, "
                                "then retry this push or the printed acceptance command.")
         try:
-            command("docker", "info", "--format", "{{.ServerVersion}}")
+            print("DOCKER_ENGINE_PROBE: require a server version within 30 seconds before starting "
+                  "container/native validation. Optional CLI plugin discovery is outside this probe.",
+                  flush=True)
+            command(*docker_engine_probe_command(30))
         except (RuntimeError, OSError) as error:
             raise RuntimeError("Contract validation cannot reach local Docker. Start Docker Desktop or correct "
                                "this shell's DOCKER_HOST/context, then retry; the daemon error is in the "
                                f"guard log above. Native smoke and matrix have not started: {error}") from error
         policy_ref = execution_policy_ref()
         entry = stage_profile_executor(root, policy_ref, name, output / "native-guard-policy")
-        contract_container(root, output, command)
-        command(sys.executable, str(entry), "--repository", str(root),
-                "--output", str(output / "native-guard"),
-                "--executable", str(nextest_binary(output)),
-                "--source-receipt", str(output / "nextest-source.json"),
-                "--options", json.dumps(nextest_options(output)))
+        parallel_contract_guards(root, output, entry, command, results)
     elif name == "native-sdk":
         sdk = root / "sdk/typescript"
         command("node", "--version", cwd=sdk)
@@ -437,50 +832,39 @@ def run(name, root, output, base, execute):
         command("npm", "test", cwd=sdk)
         command("npm", "run", "pack:runtime", cwd=sdk)
     elif name == "native-workspace":
-        if os.name == "nt" and not shutil.which("pwsh.exe"):
-            raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
-                               "Add your existing PowerShell 7 directory to PATH, or install it with "
-                               "`winget install --id Microsoft.PowerShell --exact --source winget`, "
-                               "then rerun the same acceptance command. No workspace compilation started.")
-        cargo("fmt", "--all", "--check")
-        tests = changed_cli_test_targets(root, base)
-        (output / "test-scope.json").write_text(json.dumps({
-            "mode": "changed-cli-targets" if tests is not None else "full-workspace",
-            "targets": tests,
-        }, indent=2))
+        try:
+            request = run.workspace_lint_request
+        except AttributeError:
+            request = None
+        try:
+            preparation = run.prepared_workspace
+        except AttributeError:
+            preparation = None
+        if preparation is not None and request is None:
+            scope, original = consume_workspace_lint(preparation, root, output, base, results)
+            results[:] = original
+            del run.prepared_workspace
+        else:
+            scope = native_workspace_lint(root, output, base, cargo, command)
+        if request is not None:
+            if request != workspace_preparation_identity(root, output, base):
+                raise RuntimeError("Workspace lint source changed during preparation")
+            return {"identity": request, "commands": results, "scope": scope}
+        tests = scope["tests"]
         if tests is not None:
             arguments = ["--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox"]
             for test in tests:
                 arguments += ["--test", test]
-            print("Linting selected CLI targets with warnings denied before compiling/running their tests.", flush=True)
-            cargo("clippy", *arguments, "--", "-D", "warnings")
             native_tests(*arguments)
         else:
-            command(sys.executable, "scripts/generate_cache_metrics.py", "--check")
-            command(sys.executable, "scripts/check_cache_usage_fixtures.py")
-            metadata_log = cargo("metadata", "--no-deps", "--locked", "--format-version=1")
-            targets, selection = grouped_workspace_test_targets(root, json.loads(metadata_log.read_text(encoding="utf-8")))
-            selection["library_and_binary_unit_harnesses_selected"] = not bool(targets)
-            (output / "test-scope.json").write_text(json.dumps(selection, indent=2))
-            print("Native workspace target selection: " + json.dumps(selection), flush=True)
-            print("Workspace lint with warnings denied uses the validated test groups plus library/bin "
-                  "targets, examples and benches before long builds and PTY execution. "
-                  "The integrated queue additionally checks all features; QUEUE_CLIPPY_SCOPE reports its target inventory.", flush=True)
-            if targets:
-                print("NATIVE_TEST_LAYER: every selected integration/PTY target remains required; legacy library/bin "
-                      "unit harnesses are not executed. Queue all-feature lint and workspace doctests remain.", flush=True)
-            else:
-                print("NATIVE_TEST_LAYER: older source without committed groups retains Cargo's default full suite, "
-                      "including legacy units and original disabled/feature-gated target exclusions.", flush=True)
-            lint_targets = [*targets, "--examples", "--benches"] if targets else ["--all-targets"]
-            cargo("clippy", "--workspace", *lint_targets, "--locked", "--features", "engine-acp/mailbox",
-                  "--", "-D", "warnings")
+            targets = scope["targets"]
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
             cargo("check", "--workspace", "--benches", "--locked")
             command(str(nextest_binary(output)), "nextest", "run",
-                    *workspace_nextest_options(output, bool(targets)),
+                    *workspace_nextest_options(output, bool(targets),
+                                              hosted_source_ready=supports_hosted_eight_workers(root)),
                     "--workspace", "--locked", "--features", "engine-acp/mailbox",
                     *workspace_integration_test_targets(targets), cwd=rust)
             # Stable nextest excludes doctests; retain Cargo's separate path.
@@ -495,15 +879,10 @@ def run(name, root, output, base, execute):
         print("WINDOWS_TERMINAL_INSTALLER_SCOPE=" + json.dumps(installer_scope), flush=True)
         if os.name == "nt":
             terminal = Path.home() / ".cache/sudocode-terminal-host"
-            try:
-                prepared = run.prepared_native.get(name)
-            except AttributeError:
-                prepared = None
-            if prepared:
-                # These are actual commands from this invocation, not a cached
-                # successful profile. Append them to the normal signed receipt.
-                results.extend(prepared)
-            else:
+            # The author/CI dispatcher prepares every selected Rust PTY
+            # profile. Direct resize guard fixtures retain their existing
+            # controlled installer boundary and command inventory.
+            if not prepared:
                 results.append(prepare_windows_terminal(root, output, execute))
             if installer_scope["fault_injection_required"]:
                 command(sys.executable, "e2e/terminal-resize/check_windows_setup.py", str(terminal / "host.zip"))
@@ -527,23 +906,29 @@ def run(name, root, output, base, execute):
         cargo("build", "--release", "--locked", "-p", "rusty-sudocode-cli", "--bin", "scode")
         binary = output / ("scode" + suffix)
         shutil.copy2(target / "release" / ("scode" + suffix), binary)
-        env["SCODE_TEST_BIN"] = str(binary)
-        # Reuse the native workspace's test graph. Only the driver is debug;
-        # SCODE_TEST_BIN still launches the copied normal release executable.
-        print("Release acceptance: the native test driver launches the copied release scode; "
-              "reusing workspace test artifacts instead of rebuilding release dev-dependencies.", flush=True)
-        cargo("test", "--locked", *native_cli_test_package_args(root, base), "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close",
-              "raw_stream_capture_keeps_streaming_and_resume_responsive", "--", "--exact", "--nocapture")
-        with stable_performance_power(output):
-            command(sys.executable, "e2e/startup/run.py", "--bin", str(binary), "--budget-ms", "100",
-                    "--report", str(output / "startup.json"))
-        if compiler_context_driver_present(root):
-            command(sys.executable, "e2e/compiler-context/run.py", "--engine", str(binary),
-                    "--directory", str(output / "compiler-context"))
-        else:
-            print("This historical source predates the host-context compiler driver; "
-                  "its existing native release checks remain required.", flush=True)
+        native_release_journeys(root, binary, output, base, cargo, command, env)
+    elif name == "native-context":
+        print("NATIVE_CONTEXT_SCOPE: connected compiler-context acceptance uses the current workspace "
+              "dev/mailbox binary. Optimized stream/resume,100ms startup and compiler context are "
+              "mandatory on every newly built release artifact before packaging/publication. "
+              "Ordinary source acceptance can miss optimization-specific regressions until release.", flush=True)
+        cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
+              "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
+        native_compiler_context(root, target / "debug" / ("scode" + suffix), output, command)
     elif name == "native-services":
+        try:
+            preparation = run.prepared_services_tool
+        except AttributeError:
+            preparation = None
+        if preparation is None:
+            preparation = native_services_tool(root, output / "service-tool", execute)
+        if preparation["root"] != str(root.resolve()):
+            raise RuntimeError("Prepared service client belongs to a different source directory")
+        tool = preparation["tool"]
+        grpcurl = Path(tool["executable"])
+        if hashlib.sha256(grpcurl.read_bytes()).hexdigest() != tool["sha256"]:
+            raise RuntimeError("Prepared grpcurl bytes changed; repeat native tool preparation")
+        results.append(preparation["command"])
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
         # Keep Cargo's freshness check, without executing the driver twice.
@@ -555,28 +940,13 @@ def run(name, root, output, base, execute):
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
-        # The existing harness resolves the pinned native grpcurl for each OS.
-        bash = shutil.which("bash")
-        if not bash:
-            raise RuntimeError("Git Bash is required for shared-service credential acceptance")
-        command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
+        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
-        if platform.system() in {"Windows", "Darwin"}:
-            architecture = "aarch_64" if platform.machine().lower() == "arm64" else "x86_64"
-            archive_name = "win64" if os.name == "nt" else f"osx-{architecture}"
-            folder = Path.home() / ".cache/sudocode-protoc-3.20.2" / archive_name
-            executable = folder / "bin" / ("protoc" + suffix)
-            if not executable.exists():
-                folder.mkdir(parents=True, exist_ok=True)
-                archive = folder / "protoc.zip"
-                urllib.request.urlretrieve(f"https://github.com/protocolbuffers/protobuf/releases/download/v3.20.2/protoc-3.20.2-{archive_name}.zip", archive)
-                with zipfile.ZipFile(archive) as stream:
-                    stream.extractall(folder)
-                executable.chmod(0o755)
+        executable = cohost_protoc()
+        if executable is not None:
             env["PROTOC"] = str(executable)
         print("Native cohost acceptance uses the workspace dev graph with daemon, model and egress features. "
               "Optimized builds and platform size budgets run on nexusd-cohost release tags.", flush=True)
@@ -629,34 +999,52 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/nexus-a2a/lib.sh": "becaa87de0aeadc466de2626dad554ca3df9cd9b10b2ce6612214b7c4b373c70",
+        "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
+        ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
+        ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
+        ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
+        ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
+        ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "157fae30f7fd278e0a44ef6a44b018a5d15429dcb9de6f025bebfc86b7253e00",
+        "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
+        ".github/scripts/ci_input_scope.py": "aa49ee8b7b2a8b40087679803c41f4ae0f318a32fa8ef587a9d6c3eb044bef37",
+        ".github/workflows/rust-ci.yml": "8b5d0757f163a08768cdc103df3b04215ba16f29bc644d4c4ede2f2ac5c4a2db",
+        "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "6e750c2b1bdfa5171c5c4fce36292f03d20067468603b9b6d8051a17b1f69a10",
-        ".github/local-acceptance/gate.py": "aa14a70ee90b43cb5924e76255636598993145aabb08e5c65337bcee8592ef78",
-        ".github/local-acceptance/native_guard.py": "30a37e20649d2a9fb336d0ea3906b09a8536f5ce203fe696801536b9aa9e4801",
+        ".github/local-acceptance/cross_platform.py": "db3e7843e3db4c08ef755e6fb15896bcc622764b4ad1dd13d96c768ae2458120",
+        ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
+        ".github/local-acceptance/native_guard.py": "fbd4662ddbb417e1a429bef551ef55e018b0b254024cd151db1de294a370a27b",
+        "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
+        ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
-        ".github/local-acceptance/publish.py": "1677269fafaf755cc5df3da7ced837fc7050a62d5c8bd610c3af36bfc8f3ab28",
-        ".github/scripts/local_acceptance.py": "6fd29d3cc0e18f2892193adf445ffb12b85dce36fa960c57b01216ed9ec5de1b",
+        ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
+        ".github/scripts/local_acceptance.py": "a4dbdbcab45440eb1a3fcc3a026f476a7a842de4c6b2b0e0c04a57873f8e3a98",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
-        ".github/workflows/local-acceptance-publish.yml": "d838cd0c36f42a9485102e31384ea5101f980b5f64a3d4229b74d97f34ff0a1a",
-        ".github/workflows/local-acceptance.yml": "2053834f3090092c2096f9903b05ddcdd97422d369ce1e89c60fb55f95b67f01",
-        "e2e/local-acceptance/carryover_acceptance.py": "3249cb47c0dc416c915f3080d27e42184d58566a80ab58433ee03e066ed1aab9",
-        "e2e/local-acceptance/cohost_acceptance.py": "6c673492ed988566fd7e8ff7686ea5d5c6e199fe374fae258a3bfd21315d6d81",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "64e3e07ecd2e01c768c726755d237c1386ea584560aff56d284bd86aa597008d",
-        "e2e/local-acceptance/examples_acceptance.py": "2dd117fb90141a8b5242f87c3fa56e00f0ba366e6b25cd460455614817b469cc",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "59a06613a779b9b48c4994aeede6916cadcff8f6f87c9ee1fda7885fbdcb2202",
-        "e2e/local-acceptance/host_lease_acceptance.py": "c6eadb50fda038f07b6d1c511f9d6417d2347f3e8caf2d47ae8046d3fee7facf",
+        ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
+        ".github/workflows/local-acceptance.yml": "c793582d8df09ee461d250454bd111f4ce39d427ba9cfd691dc682ae95b5f4a5",
+        "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
+        "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
+        "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "c5c0b065991d3834cc4fbc61f286f9853e59d1251350d291285602e9ffcc69c0",
+        "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
+        "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8928b11c2448258f0ee0fbf6a9713aa8a71c5dddb4e0485b7c90ac23f903c9ba",
+        "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "57144d094da8b4fbf3b4d03e495fcfad8758af94b373353d3ea64267a9eb6835",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "fadb194ff6645e79a398528c756766e5cb203672a5fd490058d1eeb1ffaf098b",
+        "e2e/local-acceptance/native_lint_acceptance.py": "6e57fa4c286f52f7d70b2a7135fd7e2d52230c678f74531c5464b5da35a05779",
+        "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "6be8ada26b111c586a7acd7a028c0ae14a89c2b4bfe7b65cba4ff566c2955542",
-        "e2e/local-acceptance/publication_acceptance.py": "b814cf43d3322c2edc50ff015beddfca8d356e7553b6a560e2fa35888bc61e76",
-        "e2e/local-acceptance/release_acceptance.py": "b1f286302ae76c961855efacae4fd4772771e55afb93980eb4e2c8fca511dc78",
-        "e2e/local-acceptance/resume_acceptance.py": "5144633ecffa714d7f56dc991826cdccad5a338a5e828e75e0540254aa249ccd",
-        "e2e/local-acceptance/run.py": "411ebed2da8436504d1db5669f358e94539a3d696a2ec9e829fa1326c13abc72",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "5242a95e8c71c7f25fa6323044dd9925b0dc6de1452986c59fd9c78d0482afe4",
+        "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
+        "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
+        "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
+        "e2e/local-acceptance/run.py": "5ff76c4737b83ef65c4d4076822b61cf503acc1974bccc35bd36b0d867e2f908",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -700,7 +1088,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "6353d4b13ab2a119e502dc0748a8b01479860223027b17bcb44cc82ea3619f54":
+    if actual_scope != "a485949e946bd8788994b911171c194fec10f006d630377f87684b419336bc5a":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -713,9 +1101,12 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = "7bf79728e2ec8d1115fb357ead698f0b24ab9bbb8bda6c3972fce89d188bafbf"
-    if helper.reachable_profile_commands_hashes(policy_ref, ["native-release"])["native-release"] != expected:
-        raise RuntimeError("Native release guard recipe changed; update its protected execution pin")
+    expected = {'native-release': '2c751e4c6f6f807b0333e58c38eabb72e4317b47f71377bb8b20aad08ddb4497', 'native-context': '2e1ea30eff75a2d99d3bdf9ed700026cef47af9fc764f13b5a70c91c2900699e'}
+    observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
+    for name, digest in expected.items():
+        if observed[name] != digest:
+            label = "Native release" if name == "native-release" else "Native compiler-context"
+            raise RuntimeError(f"{label} guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))
     return policy_root / ".github/local-acceptance/native_guard.py"
@@ -728,8 +1119,95 @@ def container_image_tag(repository, digest):
     return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
-def contract_container(root, output, command):
-    """Keep the full decision matrix local without serial Windows Git startup costs."""
+def guard_tool_source(root, policy_ref):
+    """Provision the frozen tool function without duplicating its URL/checksums."""
+    import ast
+
+    source = subprocess.check_output(
+        ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
+    definitions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
+    required = {"github_asset_download", "nextest_binary"}
+    downloaders = [node for node in definitions if node.name == "github_asset_download"]
+    if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+           and node.func.id == "github_api_request" for definition in downloaders for node in ast.walk(definition)):
+        required.add("github_api_request")
+    functions = [node for node in definitions if node.name in required]
+    if sorted(node.name for node in functions) != sorted(required):
+        raise RuntimeError("Protected GitHub request/downloader and nextest_binary must each have one definition before building the guard image")
+    prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
+              "from pathlib import Path\n\n")
+    main = '''
+
+if __name__ == "__main__":
+    socket.setdefaulttimeout(30)
+    output = Path("/opt/nextest-provision")
+    output.mkdir(parents=True, exist_ok=True)
+    executable = nextest_binary(output)
+    receipt = json.loads((output / "nextest-source.json").read_text())
+    version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+    assert " " + receipt["version"] in version, version
+    refused = []
+    if "--verify-cache" in sys.argv:
+        archive = executable.parent / receipt["url"].rsplit("/", 1)[1]
+        for label, path, message in [
+            ("archive", archive, "Cached nextest archive checksum mismatch"),
+            ("executable", executable, "Cached nextest executable differs from the verified archive"),
+        ]:
+            original = path.read_bytes()
+            path.write_bytes(original + b"controlled guard cache corruption")
+            try:
+                try:
+                    nextest_binary(output)
+                except RuntimeError as error:
+                    assert message in str(error), str(error)
+                    refused.append(label)
+                else:
+                    raise AssertionError("Modified guard tool cache was accepted: " + label)
+            finally:
+                path.write_bytes(original)
+        assert nextest_binary(output) == executable
+        assert json.loads((output / "nextest-source.json").read_text()) == receipt
+        assert subprocess.check_output([str(executable), "--version"], text=True).strip() == version
+    print("GUARD_NEXTEST_PROVISION=" + json.dumps({
+        **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
+    }), flush=True)
+'''
+    return (prefix + '\n\n'.join(ast.get_source_segment(source, node) for node in functions) + main).encode("utf-8")
+
+
+def guard_image_context(root, policy_ref, context):
+    """Build the canonical image context used by production and Docker controls."""
+    context.mkdir()
+    inputs_hash = hashlib.sha256()
+    # Keep image bindings inside the existing executable fingerprint format.
+    # A changed image/entrypoint must update its pin before any Docker work.
+    pins = {
+        "Dockerfile.guard": "31205fa178d40cf2ffcd1df0650f0f848db544436f119d57a87ee52a03774704",
+        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+    }
+    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:.github/local-acceptance/{name}", "--"], cwd=root)
+        actual = hashlib.sha256(contents).hexdigest()
+        if actual != pins[name]:
+            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its protected pin in "
+                               ".github/local-acceptance/checks.py guard_image_context, then rerun the installed "
+                               "contract-update command; no image build started.")
+        (context / destination).write_bytes(contents)
+        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    seed = guard_tool_source(root, policy_ref)
+    (context / "nextest_seed.py").write_bytes(seed)
+    inputs_hash.update(b"nextest_seed.py\0" + seed + b"\0")
+    return inputs_hash.hexdigest()
+
+
+def verify_guard_image(image, command):
+    """Recheck the image's verified tool offline before the decision matrix."""
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
+            image, "/opt/nextest_seed.py")
+
+
+def prepare_contract_container(root, output, command):
+    """Finish the original image, tool and source checks before either guard starts."""
     try:
         policy_ref, candidate_ref = run.execution_refs
     except AttributeError:
@@ -739,38 +1217,87 @@ def contract_container(root, output, command):
     protected = revision(policy_ref or "origin/main")
     candidate = revision(candidate_ref or "HEAD")
     context = output / "guard-image"
-    context.mkdir()
-    inputs_hash = hashlib.sha256()
-    # Keep image bindings inside the existing executable fingerprint format.
-    # A changed image/entrypoint must update its pin before any Docker work.
-    pins = {
-        "Dockerfile.guard": "6e43e2b96e7da5bc4515fce3579a91e3ceab7da0a29894dd52d52f8694b8bad7",
-        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
-    }
-    for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
-        contents = subprocess.check_output(["git", "show", f"{protected}:.github/local-acceptance/{name}"], cwd=root)
-        actual = hashlib.sha256(contents).hexdigest()
-        if actual != pins[name]:
-            raise RuntimeError(f"Guard input {name} changed: SHA256 {actual}. Update its contract_container pin "
-                               "with the reviewed input, then rerun acceptance; no image build started.")
-        (context / destination).write_bytes(contents)
-        inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    context_sha256 = guard_image_context(root, protected, context)
     image_receipt = output / "guard-image-id.txt"
-    image_tag = container_image_tag("sudocode-contract-guard", inputs_hash.hexdigest())
-    command("docker", "build", "--iidfile", str(image_receipt), "--tag",
-            image_tag, str(context),
-            extra={"DOCKER_BUILDKIT": "1"})
+    image_tag = container_image_tag("sudocode-contract-guard", context_sha256)
+    print("GUARD_TOOL_PREFLIGHT: prepare the checksum-pinned nextest image layer before test execution; "
+          "the image cache retains verified tools for later runs.", flush=True)
+    try:
+        command("docker", "build", "--iidfile", str(image_receipt), "--tag",
+                image_tag, str(context), extra={"DOCKER_BUILDKIT": "1"})
+    except RuntimeError as error:
+        raise RuntimeError("Guard image/tool preparation failed before the decision matrix and native guards. "
+                           "Inspect the saved Docker build log, correct that error and retry the printed "
+                           f"acceptance command: {error}") from error
     image = image_receipt.read_text().strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise RuntimeError("Contract image build did not return an immutable image ID")
+    print("GUARD_TOOL_PREFLIGHT: verified pinned nextest is provisioned during image build; "
+          "image preparation retains corruption controls; check offline execution before the full matrix.", flush=True)
+    verify_guard_image(image, command)
     inputs = output / "guard-inputs"
     snapshot(root, candidate, inputs)
     (output / "guard-provenance.json").write_text(json.dumps({
         "candidate": candidate, "policy": protected, "image_id": image, "image_tag": image_tag,
-        "context_sha256": inputs_hash.hexdigest()}, indent=2))
+        "context_sha256": context_sha256}, indent=2))
     # This suite uses private temporary Git/Cargo fixtures, not benchmark state.
-    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
+    return ("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "2g", "--pids-limit", "256",
             "--mount", f"type=bind,source={inputs},target=/inputs,readonly", image)
+
+
+def contract_container(root, output, command):
+    """Retain the original complete serial Docker entry for existing callers."""
+    command(*prepare_contract_container(root, output, command))
+
+
+def parallel_contract_guards(root, output, entry, command, results):
+    """Keep original command evidence while supervising both independent guards."""
+    import uuid
+
+    docker_args = prepare_contract_container(root, output, command)
+    native_args = [sys.executable, str(entry), "--repository", str(root),
+                   "--output", str(output / "native-guard"),
+                   "--executable", str(nextest_binary(output)),
+                   "--source-receipt", str(output / "nextest-source.json"),
+                   "--options", json.dumps(nextest_options(output))]
+    runner_path = entry.parent / "parallel_guard.py"
+    spec = importlib.util.spec_from_file_location("protected_parallel_guard", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    owner = uuid.uuid4().hex
+    cidfile = output / "guard-container-id.txt"
+    configuration = output / "parallel-guards.json"
+    image = json.loads((output / "guard-provenance.json").read_text())["image_id"]
+    docker = shutil.which("docker") or "docker"
+    assert docker_args[:2] == ("docker", "run")
+    command(sys.executable, str(entry.parents[2] / "e2e/local-acceptance/parallel_guards_acceptance.py"),
+            "--output", str(output / "parallel-guard-controls"), "--image", image)
+    index = len(results) + 1  # The coordinator command owns the preceding log.
+    data = {"version": 1, "root": str(root), "container": {
+        "docker": docker, "cidfile": str(cidfile), "image": image, "owner": owner,
+    }, "branches": [
+        {"name": "docker", "command": [docker, "run", "--cidfile", str(cidfile),
+            "--label", f"{runner.LABEL}={owner}", *docker_args[2:]],
+         "log": str(output / f"{index:03d}.log")},
+        {"name": "native", "command": native_args,
+         "log": str(output / f"{index + 1:03d}.log")},
+    ]}
+    try:
+        configuration.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        command(sys.executable, str(runner_path), "--configuration", str(configuration))
+        for branch in data["branches"]:
+            log = Path(branch["log"])
+            result = json.loads(log.with_suffix(".command.json").read_text())
+            expected = [shutil.which(branch["command"][0]) or branch["command"][0], *branch["command"][1:]]
+            if (result["command"] != expected or result["exit_code"] != 0
+                    or hashlib.sha256(log.read_bytes()).hexdigest() != result["log_sha256"]):
+                raise RuntimeError(f"Original parallel guard command evidence differs: {log}")
+            results.append(result)
+    finally:
+        # Also runs after the outer executor interrupts/kills the coordinator.
+        # A cleanup error still refuses completed acceptance.
+        cleanup = runner.cleanup_container(data)
+        (output / "parallel-guards-cleanup.json").write_text(json.dumps(cleanup, indent=2) + "\n")
 
 
 def snapshot(root, ref, destination):
@@ -879,7 +1406,16 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
             path = sources / "runner" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(subprocess.check_output(["git", "show", f"{protected}:{relative}"], cwd=root))
-    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048",
+    scratch = []
+    if name == "rendering":
+        scratch = ["--tmpfs", "/benchmark-tmp:rw,nosuid,nodev,exec,size=512m",
+                   "--env", "TMPDIR=/benchmark-tmp"]
+        print("RENDERING_FIXTURE_STORAGE: throwaway sessions use a private 512 MiB tmpfs; "
+              "reports, binaries and build caches retain their existing storage. "
+              "This isolates render measurements from host disk flushes and does not qualify "
+              "persistent-storage performance. Other profiles retain their storage; "
+              "exit assertions, deadlines and performance budgets are unchanged.", flush=True)
+    command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048", *scratch,
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
             "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
@@ -1074,6 +1610,15 @@ def rendering_cases(terminal, arguments, output, command, plan):
             or plan["policy_sha256"] != hashlib.sha256(policy_path.read_bytes()).hexdigest()
             or plan["cases"] != cases):
         raise RuntimeError("Rendering policy changed after its pre-build validation")
+    if policy.get("case_sampling") and set(plan.get("sampling", {})) != set(cases):
+        raise RuntimeError("Rendering sampling overrides require a complete resolved per-case plan")
+    if policy.get("case_sampling") and set(plan.get("observations", {})) != set(cases):
+        raise RuntimeError("Rendering sampling overrides require complete raw observation counts")
+    inventory = None
+    if "observations" in plan:
+        spec = importlib.util.spec_from_file_location("rendering_observation_inventory", terminal / "benchmark.py")
+        inventory = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inventory)
     if not cases or len(cases) != len(set(cases)) or any(
             not re.fullmatch(r"[a-zA-Z0-9_-]+", case) for case in cases):
         raise RuntimeError("Rendering policy must declare distinct, safe scenario names")
@@ -1084,6 +1629,10 @@ def rendering_cases(terminal, arguments, output, command, plan):
               "completed_cases": [], "remaining_cases": list(cases), "case_policy_sha256": {},
               "expected_samples": plan["total_samples"], "case_expected_samples": plan["samples"],
               "unjudged_warmups": 0}
+    if "sampling" in plan:
+        report["sampling"] = plan["sampling"]
+    if inventory is not None:
+        report["observations"] = plan["observations"]
     metadata = None
 
     def save():
@@ -1113,6 +1662,10 @@ def rendering_cases(terminal, arguments, output, command, plan):
                     child = json.loads(child_path.read_text(encoding="utf-8"))
                     if child["policy"] != selected or child["policy_sha256"] != report["case_policy_sha256"][case]:
                         raise RuntimeError(f"Rendering scenario {case} used a different policy")
+                    if "sampling" in plan and child.get("sampling") != {case: plan["sampling"][case]}:
+                        raise RuntimeError(f"Rendering scenario {case} used different resolved sampling")
+                    if inventory is not None and child.get("observations") != {case: plan["observations"][case]}:
+                        raise RuntimeError(f"Rendering scenario {case} declared different raw observation counts")
                     if succeeded and child["status"] == "passed" and len(child["samples"]) != plan["samples"][case]:
                         raise RuntimeError(f"Rendering scenario {case} reported {len(child['samples'])} samples; "
                                            f"required {plan['samples'][case]} judged observations and no extra warm-ups")
@@ -1125,6 +1678,8 @@ def rendering_cases(terminal, arguments, output, command, plan):
                             raise RuntimeError(f"Rendering {key} changed between scenarios")
                         report[key] = child[key]
                     for sample in child["samples"]:
+                        if inventory is not None and inventory.observation_counts(sample["data"]) != plan["observations"][case]:
+                            raise RuntimeError(f"Rendering scenario {case} has missing or extra raw observations")
                         observed = sample["data"]["metadata"]
                         if metadata is not None and metadata != observed:
                             raise RuntimeError("Rendering terminal observer/platform changed between scenarios")

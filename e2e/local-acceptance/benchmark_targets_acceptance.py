@@ -33,6 +33,7 @@ def standalone_layout(command):
     package = next(row for row in metadata["packages"] if row["name"] == "scode-benchmark-drivers")
     expected = {f"benchmark_{name}": SOURCE / f"rust/crates/rusty-sudocode-cli/tests/pty_{name}.rs"
                 for name in ["render_performance", "hyperlinks", "prompt_viewport"]}
+    expected["release_stream_capture"] = SOURCE / "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs"
     assert {row["name"] for row in package["targets"]} == set(expected), "The driver package gained an extra target"
     for row in package["targets"]:
         assert row["kind"] == ["test"] and not row["test"], "Benchmark drivers must be opt-in tests only"
@@ -187,13 +188,14 @@ fn render_performance_workload() {
     assert plan["metrics"] == {case: sorted(shared.judged_metrics(policy["cases"][case])) for case in cases}
     assert {"cpu_ms", "rss_peak_mib"} <= set(plan["metrics"]["heavy"]), "CPU and memory are judged on the heavy stream"
     for case, spec in {**policy["cases"], **legacy_specs}.items():
+        sampling = shared.case_sampling(policy, case)
         phases = ["stream", "history"] if spec["kind"] in {"foreground", "background"} else ["wait", "stream", "history"]
         value = {"version": 1, "status": "complete", "case": case, "spec": spec, "preview": "0",
                  "contracts": policy["contracts"], "turns": [{}] * spec["turns"],
                  "metrics": {name: 1 for name in shared.expected_metrics(spec)},
-                 "input_samples_ms": {phase: [1] * (policy["sampling"]["input"] * spec["turns"]) for phase in phases},
-                 "action_samples_ms": {"resize": [1] * (policy["sampling"]["resize"] * spec["turns"]),
-                     "paste": [1] * spec["turns"], "cancel": [1] * (policy["sampling"]["cancel"] if "wait" in phases else 0)},
+                 "input_samples_ms": {phase: [1] * (sampling["input"] * spec["turns"]) for phase in phases},
+                 "action_samples_ms": {"resize": [1] * (sampling["resize"] * spec["turns"]),
+                     "paste": [1] * spec["turns"], "cancel": [1] * (sampling["cancel"] if "wait" in phases else 0)},
                  "metadata": {"observer": "native-fixture-process"}}
         value["metrics"]["rss_peak_mib"] = 10
         (fixture / f"{case}-base.json").write_text(json.dumps(value))
@@ -208,7 +210,7 @@ fn render_performance_workload() {
     arguments = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[0],
                  "--base", str(fixture / "base"), "--candidate", str(fixture / "candidate")]
     results = {}
-    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "invalid", "metadata", "command"]:
+    for mode in ["pass", "regressed", "short-rss", "incomplete", "missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch", "raw-observations-mismatch", "invalid", "metadata", "command"]:
         events = fixture / "events.txt"
         events.unlink(missing_ok=True)
         destination = output / mode
@@ -218,7 +220,7 @@ fn render_performance_workload() {
                 return command(sys.executable, "-c", "raise SystemExit(23)")
             log = command(*args, extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture),
                                        "SCODE_ACCEPTANCE_RENDER_MODE": mode})
-            if mode in {"missing-sample", "extra-sample", "mispaired-sample"}:
+            if mode in {"missing-sample", "extra-sample", "mispaired-sample", "sampling-mismatch", "raw-observations-mismatch"}:
                 child_path = Path(args[args.index("--output") + 1]) / "report.json"
                 child = json.loads(child_path.read_text())
                 if child["policy"]["profiles"]["core"] == ["heavy"]:
@@ -226,8 +228,12 @@ fn render_performance_workload() {
                         child["samples"].pop()
                     elif mode == "extra-sample":
                         child["samples"].append(dict(child["samples"][0]))
-                    else:
+                    elif mode == "mispaired-sample":
                         child["samples"][0]["side"] = child["samples"][1]["side"]
+                    elif mode == "raw-observations-mismatch":
+                        child["samples"][0]["data"]["input_samples_ms"]["stream"].pop()
+                    else:
+                        child["sampling"]["heavy"]["input"] -= 1
                     child_path.write_text(json.dumps(child))
             return log
 
@@ -273,12 +279,81 @@ fn render_performance_workload() {
             assert len(trace) == 36 and "judged observations and no extra warm-ups" in report["failures"][0]
         elif mode == "mispaired-sample":
             assert len(trace) == 36 and "paired sample inventory differs" in report["failures"][0]
+        elif mode == "sampling-mismatch":
+            assert len(trace) == 36 and "different resolved sampling" in report["failures"][0]
+        elif mode == "raw-observations-mismatch":
+            assert len(trace) == 36 and "missing or extra raw observations" in report["failures"][0]
         elif mode == "incomplete":
             assert len(trace) == 25 and "missing/extra measurements" in report["failures"][0]
         else:
             assert not trace and "no completed scenario report" in report["failures"][0]
         results[mode] = {"status": report["status"], "native_invocations": len(trace),
                          "completed_cases": report["completed_cases"], "failures": report.get("failures", [])}
+    # The public evaluator launches the real compiled driver for every pair.
+    # These constant fixture reports test enforcement, not terminal performance.
+    repeated_policy = {**policy, "profiles": {**policy["profiles"], "stress": ["repeated"]}}
+    repeated_path = output / "repeated-policy.json"
+    repeated_path.write_text(json.dumps(repeated_policy))
+    repeated_source = fixture / "repeated-base.json"
+    original_repeated = repeated_source.read_text()
+    sampling_results = {}
+    for mode in ["pass", "missing-input", "missing-resize", "missing-turn", "input-only", "legacy"]:
+        value = json.loads(original_repeated)
+        selected_policy = dict(repeated_policy)
+        if mode == "legacy":
+            selected_policy.pop("case_sampling", None)
+            value["input_samples_ms"] = {phase: values * 3 for phase, values in value["input_samples_ms"].items()}
+            value["action_samples_ms"]["resize"] *= 20
+        elif mode == "input-only":
+            selected_policy["case_sampling"] = {"repeated": {"input": 20}}
+            value["action_samples_ms"]["resize"] *= 20
+        elif mode == "missing-input":
+            value["input_samples_ms"]["history"].pop()
+        elif mode == "missing-resize":
+            value["action_samples_ms"]["resize"].pop()
+        elif mode == "missing-turn":
+            value["turns"].pop()
+        repeated_source.write_text(json.dumps(value))
+        repeated_path.write_text(json.dumps(selected_policy))
+        destination = output / ("sampling-" + mode)
+        failed = False
+        try:
+            command(*arguments, "--profile", "stress", "--policy", str(repeated_path), "--output", str(destination),
+                    extra={"SCODE_ACCEPTANCE_RENDER_FIXTURE": str(fixture), "SCODE_ACCEPTANCE_RENDER_MODE": "pass"})
+        except RuntimeError:
+            failed = True
+        report = json.loads((destination / "report.json").read_text())
+        passing = mode in {"pass", "input-only", "legacy"}
+        assert failed != passing and report["status"] == ("passed" if passing else "invalid"), report
+        if passing:
+            assert len(report["samples"]) == 24
+            assert report["sampling"]["repeated"] == {"input": 60 if mode == "legacy" else 20,
+                "resize": 40 if mode in {"input-only", "legacy"} else 2, "cancel": 20}
+            assert report["observations"]["repeated"] == shared.case_observations(selected_policy, "repeated")
+            for sample in report["samples"]:
+                assert shared.observation_counts(sample["data"]) == report["observations"]["repeated"]
+                workload = destination / sample["path"]
+                workload = workload.parent / "workload-policy.json"
+                assert shared.digest(workload) == sample["workload_policy_sha256"]
+                applied = json.loads(workload.read_text())
+                assert applied["sampling"] == report["sampling"]["repeated"]
+                assert applied["cases"] == policy["cases"] and applied["metrics"] == policy["metrics"]
+        sampling_results[mode] = {"status": report["status"], "samples": len(report["samples"])}
+    repeated_source.write_text(original_repeated)
+    # Invalid reductions refuse before any driver executes, including when the
+    # requested profile is core and the invalid override names a stress case.
+    invalid_sampling = [{"short": {"input": 20}}, {"repeated": {"input": 19}},
+                        {"repeated": {"input": True}}, {"repeated": {"resize": 20}},
+                        {"repeated": {"input": 20, "cancel": 1}},
+                        *[{"repeated": {"input": 20, "resize": value}} for value in [1, 3, 20, True]]]
+    for index, override in enumerate(invalid_sampling):
+        repeated_path.write_text(json.dumps({**policy, "case_sampling": override}))
+        try:
+            command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--policy", str(repeated_path))
+        except RuntimeError:
+            continue
+        raise AssertionError(f"Unsupported sampling policy {index} was accepted")
+    results["repeated_sampling"] = sampling_results
     # Keep every judged pair from the old full-round six-scenario control:
     # 144 native calls, excluding its former 12 unjudged warmups. Constant
     # fixture observations must reach

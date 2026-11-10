@@ -14,12 +14,16 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use crate::zone_context::{ContextSource, HostZoneContext, ResourceAccessKind, ZoneAuthError};
 use kernel::core::agents::registry::AgentDescriptor;
+use kernel::kernel::conditional_content::{
+    ConditionalContentError, ConditionalContentResult, VersionedContent,
+};
 use kernel::kernel::convenience::KernelConvenience;
 use kernel::kernel::syscall::ReaddirOpts;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::{DT_LINK, DT_STREAM};
 use kernel::Permission;
 
+mod conditional_content;
 mod record_log;
 pub use record_log::{RecordLog, RecordLogMode};
 
@@ -152,6 +156,29 @@ pub enum ManagedRoot {
 /// next to it if that crate ever owns them.
 const SUBAGENTS_SEGMENT: &str = "/subagents";
 const MEMORY_SEGMENT: &str = "/memory";
+
+/// Where a managed agent's state of each concern lives in the VFS namespace.
+/// One definition for every backend that hosts managed agents, so a session
+/// is found at the same path whichever host serves it.
+fn managed_vfs_root(agent: Option<&str>, concern: ManagedRoot) -> Option<String> {
+    // Under the agent. Keyed by the agent rather than by a workspace path,
+    // which is what stops two agents on one daemon from colliding — the host
+    // paths these replace are derived from the daemon's own directory, which
+    // every co-hosted agent shares.
+    let subtree =
+        |segment: &str| agent.map(|agent| format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE));
+    match concern {
+        // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
+        // because isolation here is policy plus `owner`, not path.
+        ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
+        ManagedRoot::SubAgents => subtree(SUBAGENTS_SEGMENT),
+        ManagedRoot::Memory => subtree(MEMORY_SEGMENT),
+        // Beside the agent's other state rather than in a subtree of its own:
+        // a todo list is one small file, and a directory per file is a
+        // namespace nobody browses.
+        ManagedRoot::Todos => subtree(""),
+    }
+}
 
 /// Unified filesystem abstraction.
 ///
@@ -1141,11 +1168,23 @@ pub struct KernelFsBackend<K: KernelConvenience> {
     path_view: KernelPathView,
 }
 
-/// Permission capability needed by the in-process filesystem adapter.
-/// Metadata syscalls carry only a routing zone, so the adapter must admit them
-/// through the kernel's installed policy using the caller's full identity.
-/// Implementations delegate to that policy rather than maintaining another one.
+/// Host operations needed by the in-process filesystem adapter.
+/// Implementations retain the caller's full identity and delegate to the kernel.
 pub trait KernelFsAccess {
+    fn read_versioned_content(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<VersionedContent>, ConditionalContentError>;
+
+    fn replace_content_if_version(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+        content: &[u8],
+        expected_version: Option<&[u8]>,
+    ) -> Result<ConditionalContentResult, ConditionalContentError>;
+
     /// Inspect through the kernel's I/O resolver, preserving operation authority.
     fn inspect_io_target(
         &self,
@@ -1171,6 +1210,24 @@ pub trait KernelFsAccess {
 }
 
 impl KernelFsAccess for Kernel {
+    fn read_versioned_content(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<VersionedContent>, ConditionalContentError> {
+        Kernel::read_versioned_content(self, path, ctx)
+    }
+
+    fn replace_content_if_version(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+        content: &[u8],
+        expected_version: Option<&[u8]>,
+    ) -> Result<ConditionalContentResult, ConditionalContentError> {
+        Kernel::replace_content_if_version(self, path, ctx, content, expected_version)
+    }
+
     fn inspect_io_target(
         &self,
         path: &str,
@@ -1434,11 +1491,6 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// `None` when the context names no agent: a subtree keyed by an agent that
     /// does not exist would be one directory every anonymous caller shared,
     /// which is the bug this shape exists to prevent.
-    fn agent_subtree(&self, segment: &str) -> Option<String> {
-        let agent = self.ctx.agent_id.as_deref()?;
-        Some(format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE))
-    }
-
     /// A VFS path in the spelling this backend ANSWERS in.
     ///
     /// The inverse of [`Self::to_kernel`], needed by the one method that returns
@@ -1590,6 +1642,28 @@ fn kernel_err(error: KernelError) -> io::Error {
 impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     for KernelFsBackend<K>
 {
+    fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = self.to_kernel(path)?;
+        conditional_content::read(self.kernel.read_versioned_content(&path, &self.ctx))
+    }
+
+    fn write_if_version(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = self.to_kernel(path)?;
+        conditional_content::write(self.kernel.replace_content_if_version(
+            &path,
+            &self.ctx,
+            data,
+            expected.map(|token| token.0.as_slice()),
+        ))
+    }
+
     fn record_log(&self, path: &str, mode: RecordLogMode) -> io::Result<Arc<dyn RecordLog>> {
         record_log::open_kernel(self, path, mode)
     }
@@ -1779,22 +1853,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         if matches!(&self.path_view, KernelPathView::HostRoot(_)) {
             return None;
         }
-        let root = match concern {
-            // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
-            // because isolation here is policy plus `owner`, not path.
-            ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
-            // Under the spawning agent. Keyed by the agent rather than by a
-            // workspace path, which is what stops two agents on one daemon from
-            // colliding — the host paths these replace are derived from the
-            // daemon's own directory, which every co-hosted agent shares.
-            ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
-            ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
-            // Beside the agent's other state rather than in a subtree of its
-            // own: a todo list is one small file, and a directory per file is a
-            // namespace nobody browses.
-            ManagedRoot::Todos => self.agent_subtree(""),
-        };
-        root.map(|path| self.to_host(&path))
+        managed_vfs_root(self.ctx.agent_id.as_deref(), concern).map(|path| self.to_host(&path))
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
@@ -2138,6 +2197,15 @@ pub struct NexusVfsFsBackend {
     client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
     auth_token: String,
     zone_context: HostZoneContext,
+    /// Set for a managed agent: its workspace and managed roots. `None`
+    /// passes every path through as given, the mailbox/peer shape.
+    workspace: Option<ManagedWorkspace>,
+}
+
+/// The managed agent a [`NexusVfsFsBackend`] serves.
+struct ManagedWorkspace {
+    agent: String,
+    root: String,
 }
 
 impl NexusVfsFsBackend {
@@ -2147,6 +2215,7 @@ impl NexusVfsFsBackend {
             client: std::sync::Arc::new(client),
             auth_token,
             zone_context: HostZoneContext::from_host_env(),
+            workspace: None,
         }
     }
 
@@ -2167,6 +2236,7 @@ impl NexusVfsFsBackend {
             client,
             auth_token,
             zone_context: HostZoneContext::from_host_env(),
+            workspace: None,
         }
     }
 
@@ -2185,6 +2255,7 @@ impl NexusVfsFsBackend {
             client,
             auth_token,
             zone_context: HostZoneContext::from_verified_transport(zone_id),
+            workspace: None,
         }
     }
 
@@ -2206,11 +2277,39 @@ impl NexusVfsFsBackend {
                 Some(scope_json),
                 ContextSource::TrustedLocal,
             ),
+            workspace: None,
         }
     }
 
-    fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<()> {
-        let normalized = lexical_join("/", path)?.replace('\\', "/");
+    /// A managed agent's backend over its authenticated connection, the same
+    /// transport [`Self::from_arc_mtls`] trusts. Relative paths resolve in
+    /// `workspace_root`, and sessions, sub-agents, memory and todos live under
+    /// the managed roots the in-process kernel uses for the same agent, so a
+    /// managed session reads and writes the same VFS objects on either host.
+    #[must_use]
+    pub fn for_managed_workspace(
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        zone_id: &str,
+        agent: &str,
+        workspace_root: &str,
+    ) -> Self {
+        Self {
+            workspace: Some(ManagedWorkspace {
+                agent: agent.to_owned(),
+                root: workspace_root.to_owned(),
+            }),
+            ..Self::from_arc_mtls(client, String::new(), zone_id)
+        }
+    }
+
+    /// Admit `path` and return the VFS path to operate on: resolved in the
+    /// managed workspace when there is one, otherwise exactly as given.
+    fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<String> {
+        let path = match &self.workspace {
+            Some(workspace) => lexical_join(&workspace.root, path)?,
+            None => path.to_owned(),
+        };
+        let normalized = lexical_join("/", &path)?.replace('\\', "/");
         admit_scope(&self.zone_context, &normalized, access_kind)?;
         // Descriptor/env metadata alone cannot authenticate a remote request.
         if !matches!(self.zone_context.source(), ContextSource::TrustedLocal) {
@@ -2223,7 +2322,7 @@ impl NexusVfsFsBackend {
             let target = self.inspect_target(&normalized, access_kind)?;
             admit_scope(&self.zone_context, &target.path, access_kind)?;
         }
-        Ok(())
+        Ok(path)
     }
 
     fn inspect_target(
@@ -2265,12 +2364,44 @@ impl NexusVfsFsBackend {
 }
 
 impl FsBackend for NexusVfsFsBackend {
+    fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
+        conditional_content::read(self.client.read_versioned(path, &self.auth_token))
+    }
+
+    fn write_if_version(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
+        conditional_content::write(self.client.write_if_version(
+            path,
+            expected.map(|token| token.0.as_slice()),
+            data,
+            &self.auth_token,
+        ))
+    }
+
     fn record_log(&self, path: &str, mode: RecordLogMode) -> io::Result<Arc<dyn RecordLog>> {
         record_log::open_remote(self, path, mode)
     }
 
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        let workspace = self.workspace.as_ref()?;
+        managed_vfs_root(Some(&workspace.agent), concern)
+    }
+
+    fn working_root(&self) -> io::Result<String> {
+        Ok(self
+            .workspace
+            .as_ref()
+            .map_or_else(|| String::from("/"), |workspace| workspace.root.clone()))
+    }
+
     fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         let Some(id) = self.client.lock(path, "", ttl_ms, &self.auth_token)? else {
             return Ok(None);
         };
@@ -2293,7 +2424,7 @@ impl FsBackend for NexusVfsFsBackend {
         })))
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         read_complete_contents(|offset| {
             let result = self.client.read_entry(path, offset, &self.auth_token)?;
             Ok(EntryRead {
@@ -2305,12 +2436,12 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client.write(path, data.to_vec(), &self.auth_token)
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         // Stream identity comes from the server's entry type and uses its
         // atomic frame append. Ordinary files retain their byte append path.
         if self.entry_type(path, ResourceAccessKind::Write)? == Some(i32::from(DT_STREAM)) {
@@ -2329,25 +2460,25 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client
             .ensure_stream(path, "wal,memory", retention, &self.auth_token)
             .map(|_| ())
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         self.entry_type(path, ResourceAccessKind::Read)
             .map(|entry_type| entry_type == Some(i32::from(DT_STREAM)))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client.delete(path, &self.auth_token)
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         let stat = self.remote_stat(path)?;
         Ok(FsMetadata {
             len: stat.size,
@@ -2361,7 +2492,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         let entries = self.client.readdir(path, &self.auth_token)?;
         Ok(entries
             .into_iter()
@@ -2390,7 +2521,7 @@ impl FsBackend for NexusVfsFsBackend {
         // Beyond that, existence must not leak: the server normalizes an
         // authentication refusal to absence and the client reads any stat
         // failure the same way, so an unauthenticated prober learns nothing.
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         Ok(self.remote_stat(path).is_ok())
     }
 
@@ -2406,8 +2537,8 @@ impl FsBackend for NexusVfsFsBackend {
     /// the same shared `link()` call: a `DT_LINK` here and on the in-process kernel, a
     /// pointer file on the host FS where no privilege-free symlink exists.
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
-        self.authorize_target(alias, ResourceAccessKind::Write)?;
-        self.authorize_target(target, ResourceAccessKind::Write)?;
+        let alias = &self.authorize_target(alias, ResourceAccessKind::Write)?;
+        let target = &self.authorize_target(target, ResourceAccessKind::Write)?;
         if let Some(parent) = std::path::Path::new(alias).parent() {
             let _ = self.create_dir_all(&parent.to_string_lossy());
         }
@@ -2419,7 +2550,7 @@ impl FsBackend for NexusVfsFsBackend {
         // it landed is to ask. One stat, on a provisioning path that runs once per
         // conversation.
         match self.read_link(alias) {
-            Ok(got) if got == target => Ok(()),
+            Ok(got) if got == *target => Ok(()),
             Ok(got) => Err(io::Error::other(format!(
                 "{alias}: link target came back as {got:?}, expected {target:?}"
             ))),
@@ -2437,7 +2568,7 @@ impl FsBackend for NexusVfsFsBackend {
     /// unreadable on a mount that keeps metadata and drops bytes, which is the mount
     /// shape federation uses.
     fn read_link(&self, alias: &str) -> io::Result<String> {
-        self.authorize_target(alias, ResourceAccessKind::Read)?;
+        let alias = &self.authorize_target(alias, ResourceAccessKind::Read)?;
         let stat = self.remote_stat(alias)?;
         let target = stat.link_target.ok_or_else(|| {
             io::Error::new(
@@ -2468,7 +2599,7 @@ impl FsBackend for NexusVfsFsBackend {
     /// `setattr` round trips on a path that is already provisioned. A write does
     /// plant its own rows, so the cost this adds to a write is that one `stat`.
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         if self.exists(path)? {
             return Ok(());
         }
@@ -2482,8 +2613,8 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        self.authorize_target(from, ResourceAccessKind::Write)?;
-        self.authorize_target(to, ResourceAccessKind::Write)?;
+        let from = &self.authorize_target(from, ResourceAccessKind::Write)?;
+        let to = &self.authorize_target(to, ResourceAccessKind::Write)?;
         self.client.rename(from, to, &self.auth_token)
     }
 
@@ -2493,9 +2624,9 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = self.authorize_target(path, ResourceAccessKind::Read)?;
         // VFS paths are already canonical over gRPC — no host symlinks.
-        Ok(path.to_string())
+        Ok(path)
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
@@ -2512,7 +2643,7 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         read_tail_with(cursor, block_ms, |wait_ms| {
             let result = match self
                 .client

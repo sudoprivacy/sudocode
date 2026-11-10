@@ -777,20 +777,37 @@ async fn scenario_session_list(client: &mut AcpTestClient, expected_session_id: 
     );
 }
 
-/// `session/load` of an id that was never persisted must fail cleanly (it
-/// must not mint a fresh session under that id).
-async fn scenario_session_load_unknown_session_errors(client: &mut AcpTestClient) {
+/// `session/load` of a well-formed id that was never persisted is a definite
+/// ACP "resource not found" naming the requested id, so a host can tell it
+/// apart from an unknown outcome. It must not mint a session under that id.
+async fn scenario_session_load_unknown_session_errors(
+    client: &mut AcpTestClient,
+    cwd: &std::path::Path,
+) {
     let (notifs, resp) = client
-        .send_request("session/load", json!({ "sessionId": "nonexistent" }))
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": "session-never-persisted",
+                "cwd": cwd.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
         .await;
 
     assert!(
         notifs.is_empty(),
         "session/load should not produce notifications"
     );
+    assert_eq!(resp["error"]["code"], -32002, "definite not-found: {resp}");
+    assert_eq!(
+        resp["error"]["data"]["sessionId"], "session-never-persisted",
+        "the error names the exact requested id: {resp}"
+    );
+    let (_, listed) = client.send_request("session/list", json!({})).await;
     assert!(
-        resp.get("error").is_some(),
-        "session/load should return an error response"
+        !listed.to_string().contains("session-never-persisted"),
+        "a failed load must not create the session: {listed}"
     );
 }
 
@@ -1502,7 +1519,7 @@ async fn run_all_scenarios(
     scenario_session_prompt_streaming(client, &session_id).await;
     scenario_session_prompt_with_image_attachment(client, &session_id).await;
     scenario_session_list(client, &session_id).await;
-    scenario_session_load_unknown_session_errors(client).await;
+    scenario_session_load_unknown_session_errors(client, &workspace.root).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
     scenario_slash_help_and_unknown(client, &session_id).await;
@@ -1723,6 +1740,9 @@ async fn acp_stdio_resume_restores_history_across_reconnect() {
     // --- Process B: a brand-new server process over the same workspace ---
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
+    // Before the real load: a persisted session exists, so a load that still
+    // resolved aliases or paths would land on it here.
+    scenario_session_load_is_exact(&mut client, &workspace, &session_id).await;
 
     // session/load of a session created by the previous process must SUCCEED.
     let (load_notifs, load_resp) = client
@@ -1818,6 +1838,36 @@ async fn scenario_session_load_rejects_other_cwd(
         cross_resp.get("error").is_some(),
         "session/load from another cwd must be rejected, got: {cross_resp}"
     );
+}
+
+/// `session/load` addresses exactly one durable id. The CLI's `latest` alias
+/// and paths are not ids: even with a persisted session present they are
+/// invalid params, so a load can never land on a session it did not name.
+async fn scenario_session_load_is_exact(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+    session_id: &str,
+) {
+    for reference in ["latest".to_string(), format!("./{session_id}")] {
+        let (notifs, resp) = client
+            .send_request(
+                "session/load",
+                json!({
+                    "sessionId": reference,
+                    "cwd": workspace.root.to_string_lossy().to_string(),
+                    "mcpServers": []
+                }),
+            )
+            .await;
+        assert!(
+            notifs.is_empty(),
+            "a rejected load sends no notifications: {reference}"
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "{reference:?} is not a session id: {resp}"
+        );
+    }
 }
 
 /// Regression: a long history must be compacted before the request is sent,
@@ -5845,6 +5895,64 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
     workspace.cleanup();
 }
 
+/// ACP consumes the same resolved defaults as the terminal question editor.
+#[tokio::test]
+async fn acp_questions_receive_default_custom_input_and_explicit_opt_out() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("stdio-question-policy");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    let options = json!([{"label":"First", "value":"first"}, {"label":"Second", "value":"second"}]);
+    let calls = json!([{"id":"question-policy", "name":"AskUserQuestion", "input":{"questions":[
+        {"id":"default", "prompt":"Default policy", "options":options},
+        {"id":"closed", "prompt":"Closed policy", "allowCustomInput":false, "options":options},
+        {"id":"text", "prompt":"Text policy", "kind":"text", "allowCustomInput":false}
+    ]}}]);
+    let prompt = client.send_request_no_wait("session/prompt", json!({
+        "sessionId":session, "prompt":[{"type":"text", "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+    })).await;
+    let (_, question) = client
+        .recv_until(RECV_TIMEOUT, |message| {
+            is_server_request(message, "_scode/ask_user_question")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("missing normalized question: {seen:?}"));
+    let fields = question["params"]["questions"].as_array().unwrap();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field["allowCustomInput"].as_bool().unwrap())
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
+    client
+        .send_raw(
+            &json!({"jsonrpc":"2.0", "id":question["id"], "result":{"answers":[
+                {"id":"default", "value":"ACP_CUSTOM_RESULT", "label":"ACP_CUSTOM_RESULT"},
+                {"id":"closed", "value":"second", "label":"Second"},
+                {"id":"text", "value":"ACP_TEXT_RESULT", "label":"ACP_TEXT_RESULT"}
+            ]}}),
+        )
+        .await;
+    let (_, completed) = client
+        .recv_until(RECV_TIMEOUT, |message| is_response_to(message, prompt))
+        .await
+        .unwrap();
+    assert_eq!(completed["result"]["stopReason"], "end_turn", "{completed}");
+    let requests = server.captured_requests().await;
+    let body = &requests.last().unwrap().raw_body;
+    assert!(
+        body.contains("ACP_CUSTOM_RESULT") && body.contains("ACP_TEXT_RESULT"),
+        "answers must reach the next model request: {body}"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// An unanswered question must not stop tool notifications in the same turn.
 #[tokio::test]
 async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
@@ -5861,7 +5969,7 @@ async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
     scenario_initialize(&mut client).await;
     let session = scenario_session_new(&mut client, &workspace.root).await;
     let calls = json!([
-        {"id":"question", "name":"AskUserQuestion", "input":{"question":"ACP_PARALLEL_QUESTION"}},
+        {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"ACP_PARALLEL_QUESTION"}]}},
         {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
     ]);
     let prompt = client.send_request_no_wait("session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
@@ -5906,7 +6014,7 @@ async fn acp_cancelled_question_does_not_answer_the_next_turn() {
     let mut client = spawn_stdio_client_danger(&workspace);
     scenario_initialize(&mut client).await;
     let sid = scenario_session_new(&mut client, &workspace.root).await;
-    let calls = json!([{ "id":"question", "name":"AskUserQuestion", "input":{"question":"Choose the next action"} }]);
+    let calls = json!([{ "id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"Choose the next action"}]} }]);
     let prompt = json!({"sessionId":sid,"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]});
     let first = client
         .send_request_no_wait("session/prompt", prompt.clone())
@@ -7968,6 +8076,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     let peer = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
     for (agent, _) in &sessions {
         peer.send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: (*agent).to_string(),
@@ -8032,6 +8141,7 @@ async fn acp_peer_message_waits_for_tool_resume() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
@@ -8112,6 +8222,7 @@ async fn acp_client_owned_peer_input_starts_no_session_turn() {
     let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
     runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
@@ -10375,4 +10486,161 @@ const timer = setInterval(() => {
 ",
     )
     .unwrap();
+}
+
+/// Create, refuse, pause; then hear about a job another process adds.
+/// Returns the created job's id.
+async fn cron_edits_and_change_notice(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+) -> String {
+    let (_, created) = client
+        .send_request(
+            "_sudocode/cron/create",
+            json!({"cron": {
+                "schedule": "600", "kind": "every", "prompt": "check the build",
+                "name": "build check", "target": {"type": "agent", "name": "worker"},
+                "delivery": "steer"
+            }}),
+        )
+        .await;
+    let job = &created["result"]["cron"];
+    let id = job["cron_id"].as_str().expect("created").to_string();
+    assert_eq!(job["delivery"], "steer", "{created}");
+    assert_eq!(job["created_by"], "user", "{created}");
+    assert!(job["next_run_at"].is_u64(), "armed: {created}");
+
+    let (_, refused) = client
+        .send_request(
+            "_sudocode/cron/create",
+            json!({"cron": {"schedule": "not a cron", "prompt": "x"}}),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+
+    let (_, paused) = client
+        .send_request(
+            "_sudocode/cron/update",
+            json!({"cronId": id, "changes": {"enabled": false}}),
+        )
+        .await;
+    assert_eq!(paused["result"]["cron"]["enabled"], false, "{paused}");
+
+    // Another process (here: the store's own API, as `scode cron add` uses)
+    // adds a job; the connection hears about it without asking.
+    runtime::cron_registry::CronRegistry::open(workspace.config_home.join("crons.json")).create(
+        "0 9 * * *",
+        "from the cli",
+        None,
+    );
+    let names = |message: &Value| -> Vec<String> {
+        message["params"]["crons"]
+            .as_array()
+            .map(|crons| {
+                crons
+                    .iter()
+                    .filter_map(|c| c["prompt"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (_, changed) = client
+        .recv_until(Duration::from_secs(15), |message| {
+            message["method"] == "_sudocode/cron/changed"
+                && names(message).contains(&"from the cli".to_string())
+        })
+        .await
+        .expect("a change from another process is reported");
+    let ours = changed["params"]["crons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["cron_id"] == id.as_str())
+        .expect("our job is listed");
+    assert_eq!(ours["enabled"], false, "{changed}");
+
+    id
+}
+
+/// "Run now" needs the process's scheduler, which a session starts; it
+/// delivers through that session's mailbox into the target's inbox.
+async fn cron_run_now_through_a_session(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+    id: &str,
+) {
+    let (_, early) = client
+        .send_request("_sudocode/cron/trigger", json!({"cronId": id}))
+        .await;
+    assert!(
+        early["error"]["data"]
+            .as_str()
+            .is_some_and(|data| data.contains("not running the scheduler")),
+        "{early}"
+    );
+
+    // A session starts the process's scheduler; "run now" delivers through it.
+    client
+        .send_request(
+            "session/new",
+            json!({"cwd": workspace.root.to_string_lossy(), "mcpServers": []}),
+        )
+        .await;
+    let (_, fired) = client
+        .send_request("_sudocode/cron/trigger", json!({"cronId": id}))
+        .await;
+    assert_eq!(fired["result"]["status"], "ok", "{fired}");
+    assert_eq!(fired["result"]["cron"]["run_count"], 1, "{fired}");
+    let worker = runtime::mailbox::Mailbox::workspace_local(
+        &runtime::mailbox::local_pair_root_in(&workspace.config_home),
+        "worker".into(),
+    );
+    let peers = worker.list_conversations().expect("worker inbox");
+    assert_eq!(peers.len(), 1, "one sender: {peers:?}");
+    let (delivered, _) = worker.poll_conversation(&peers[0], 0, 0).unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].kind, runtime::agent_mailbox::kinds::SCHEDULED);
+    assert_eq!(delivered[0].body, "check the build");
+    assert_eq!(
+        delivered[0].delivery,
+        runtime::turn_input::InputDelivery::Steer
+    );
+}
+
+/// A desktop host manages cron through `_sudocode/cron/*`: the same store and
+/// rules as `scode cron`, a change notification for its own edits and for any
+/// other process's, and "run now" through the session's scheduler.
+#[tokio::test]
+async fn acp_cron_methods_manage_the_shared_store_and_report_changes() {
+    let server = MockAnthropicService::spawn().await.expect("mock service");
+    let workspace = TestWorkspace::new("cron-api");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client(&workspace);
+    client
+        .send_request("initialize", json!({ "protocolVersion": 1 }))
+        .await;
+    let id = cron_edits_and_change_notice(&mut client, &workspace).await;
+    cron_run_now_through_a_session(&mut client, &workspace, &id).await;
+
+    let (_, removed) = client
+        .send_request("_sudocode/cron/remove", json!({"cronId": id}))
+        .await;
+    assert_eq!(
+        removed["result"]["cron"]["cron_id"],
+        id.as_str(),
+        "{removed}"
+    );
+    let (_, listed) = client.send_request("_sudocode/cron/list", json!({})).await;
+    assert!(
+        !listed["result"]["crons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["cron_id"] == id.as_str()),
+        "{listed}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
 }

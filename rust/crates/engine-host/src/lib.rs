@@ -64,6 +64,7 @@ pub mod peer;
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
 pub mod managed_agent;
+pub mod managed_context;
 mod managed_session;
 pub mod runtime_build;
 

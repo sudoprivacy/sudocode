@@ -69,6 +69,42 @@ def paired_samples(rounds):
             for side in (["base", "candidate"] if number % 2 == 0 else ["candidate", "base"])]
 
 
+def case_sampling(policy, case):
+    """Resolve repeated interaction density; retain dense single-turn measurements."""
+    overrides = policy.get("case_sampling", {})
+    assert isinstance(overrides, dict) and set(overrides) <= {"repeated"}, "unsupported sampling override"
+    for name, values in overrides.items():
+        assert name in policy["cases"] and policy["cases"][name]["turns"] >= 30, "repeated sampling requires at least 30 turns"
+        assert isinstance(values, dict) and set(values) in ({"input"}, {"input", "resize"}), "only repeated input/resize sampling may change"
+        assert type(values["input"]) is int and values["input"] in {20, 60}, "repeated input sampling must be 20 or 60"
+        if "resize" in values:
+            assert type(values["resize"]) is int and values["resize"] in {2, 40}, "repeated resize sampling must be 2 or 40"
+    return {**policy["sampling"], **overrides.get(case, {})}
+
+
+def case_observations(policy, case):
+    """Describe raw counts once for both the evaluator and its parent runner."""
+    sampling, spec = case_sampling(policy, case), policy["cases"][case]
+    tool = spec["kind"] in {"foreground", "background"}
+    phases = ["stream", "history"] if tool else ["wait", "stream", "history"]
+    return {"turns": spec["turns"],
+            "input": {phase: sampling["input"] * spec["turns"] for phase in phases},
+            "actions": {"resize": sampling["resize"] * spec["turns"], "paste": spec["turns"],
+                        "cancel": 0 if tool else sampling["cancel"]}}
+
+
+def observation_counts(sample):
+    """Count actual arrays, refusing malformed records rather than trusting summaries."""
+    def count(values):
+        if not isinstance(values, list):
+            raise ValueError("Rendering observations must be arrays")
+        return len(values)
+
+    return {"turns": count(sample["turns"]),
+            "input": {phase: count(values) for phase, values in sample["input_samples_ms"].items()},
+            "actions": {action: count(values) for action, values in sample["action_samples_ms"].items()}}
+
+
 def policy_plan(policy, profile):
     """Validate and describe the same workload before building or executing it."""
     assert policy["version"] == 1
@@ -77,35 +113,34 @@ def policy_plan(policy, profile):
     cases = policy["profiles"][profile]
     assert cases and len(cases) == len(set(cases)), "empty/duplicate matrix"
     rounds = {case: comparison_rounds(policy, case) for case in cases}
+    sampling = {case: case_sampling(policy, case) for case in cases}
     metrics = {case: sorted(judged_metrics(policy["cases"][case])) for case in cases}
     assert all(set(names) <= policy["metrics"].keys() for names in metrics.values())
     pairs = {case: paired_samples(value) for case, value in rounds.items()}
     samples = {case: len(value) for case, value in pairs.items()}
     return {"version": 1, "profile": profile, "cases": cases, "rounds": rounds,
-            "metrics": metrics, "pairs": pairs, "unjudged_warmups": 0,
+            "metrics": metrics, "pairs": pairs, "sampling": sampling,
+            "observations": {case: case_observations(policy, case) for case in cases}, "unjudged_warmups": 0,
             "samples": samples, "total_samples": sum(samples.values())}
 
 
 def validate(sample, case, policy):
+    expected = case_observations(policy, case)
     assert sample["version"] == 1 and sample["status"] == "complete", "incomplete workload"
     assert sample["case"] == case and sample["spec"] == policy["cases"][case], "changed workload"
-    assert len(sample["turns"]) == sample["spec"]["turns"], "missing turns"
+    observed = observation_counts(sample)
+    assert observed["turns"] == expected["turns"], "missing turns"
     assert sample["contracts"] == policy["contracts"], f"render contract failed: {sample['contracts']}"
     assert set(sample["metrics"]) == expected_metrics(sample["spec"]), "missing/extra measurements"
     for metric, value in sample["metrics"].items():
         assert isinstance(value, (int, float)) and math.isfinite(value) and value >= 0, metric
         assert metric in policy["metrics"], f"unbudgeted measurement {metric}"
-    for phase in ["wait", "stream", "history"]:
-        if f"input_{phase}_p95_ms" not in sample["metrics"]:
-            continue
+    assert observed["input"] == expected["input"], "missing input observations"
+    for phase in expected["input"]:
         values = sample["input_samples_ms"][phase]
-        assert len(values) == policy["sampling"]["input"] * sample["spec"]["turns"], "missing input observations"
         assert all(math.isfinite(value) and value >= 0 for value in values), "invalid input observations"
     actions = sample["action_samples_ms"]
-    assert len(actions["resize"]) == policy["sampling"]["resize"] * sample["spec"]["turns"]
-    assert len(actions["paste"]) == sample["spec"]["turns"]
-    assert len(actions["cancel"]) == (0 if sample["spec"]["kind"] in ["background", "foreground"]
-                                      else policy["sampling"]["cancel"])
+    assert observed["actions"] == expected["actions"], "missing action observations"
     assert all(math.isfinite(value) and value >= 0 for values in actions.values() for value in values)
 
 
@@ -181,6 +216,11 @@ def main():
         parser.error("measurement requires --driver, --base, --candidate and --output")
     cases, rounds_by_case = plan["cases"], plan["rounds"]
     print("Rendering paired rounds, with no extra unjudged workloads: " + json.dumps(rounds_by_case), flush=True)
+    print("RENDERING_SAMPLING=" + json.dumps(plan["sampling"]) +
+          "; repeated uses 600 observations per input phase across 30 turns when input=20. "
+          "Resize=2 keeps one narrow/wide pair per turn, reducing repeated resize/leak stress; "
+          "single-turn cases retain input=60/resize=40. Paired processes, turns, cancels and budgets are unchanged.", flush=True)
+    print("RENDERING_OBSERVATIONS=" + json.dumps(plan["observations"]), flush=True)
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output directory is not empty; choose a fresh path to preserve earlier evidence")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -188,7 +228,8 @@ def main():
               "policy_sha256": digest(args.policy), "policy": policy,
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
               "driver_sha256": digest(args.driver), "expected_driver_sha256": os.environ.get("SCODE_EXPECTED_DRIVER_SHA256"),
-              "samples": [], "status": "running", "unjudged_warmups": 0}
+              "samples": [], "sampling": plan["sampling"], "observations": plan["observations"],
+              "status": "running", "unjudged_warmups": 0}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name))
                                 for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs", "resources.cjs"]}
     controls, comparisons = {case: [] for case in cases}, {case: [] for case in cases}
@@ -203,9 +244,15 @@ def main():
         location = args.output / label
         location.mkdir()
         output = location / "sample.json"
+        # Existing drivers consume one global sampling object. Materialize the
+        # resolved workload for this process; keep the original judged policy
+        # and its hash in the parent report. Older policies resolve unchanged.
+        workload_policy = location / "workload-policy.json"
+        workload_policy.write_text(json.dumps({**policy, "sampling": case_sampling(policy, case)}) + "\n")
+        workload_digest = digest(workload_policy)
         env = dict(os.environ, SCODE_TEST_BACKEND="mock", SCODE_TEST_BIN=str(binary.resolve()),
                    SUDOCODE_EXPERIMENT_PROSE_PREVIEW=args.preview, SCODE_RENDER_CASE=case,
-                   SCODE_RENDER_POLICY=str(args.policy.resolve()), SCODE_RENDER_REPORT=str(output.resolve()),
+                   SCODE_RENDER_POLICY=str(workload_policy.resolve()), SCODE_RENDER_REPORT=str(output.resolve()),
                    SCODE_TERMINAL_LOG_DIR=str(location.resolve()))
         print(label, flush=True)
         with (location / "driver.log").open("w") as log:
@@ -214,6 +261,7 @@ def main():
                                     env=env, stdout=log, stderr=subprocess.STDOUT,
                                     timeout=120 + 15 * policy["cases"][case]["turns"])
         assert result.returncode == 0, f"{label}: workload failed; see {location / 'driver.log'}"
+        verify_digest(digest(workload_policy), workload_digest, "workload policy")
         value = json.loads(output.read_text())
         validate(value, case, policy)
         assert value["preview"] == args.preview, "experiment state changed"
@@ -221,6 +269,7 @@ def main():
             metadata = value["metadata"]
         assert metadata == value["metadata"], "terminal observer/platform changed"
         report["samples"].append({"stage": stage, "round": round_number, "side": side,
+                                  "workload_policy_sha256": workload_digest,
                                   "path": str(output.relative_to(args.output)), "data": value})
         save()
         return value

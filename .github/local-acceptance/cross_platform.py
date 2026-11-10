@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 
+if any(os.environ.get(name) for name in ('GH_TOKEN', 'GITHUB_TOKEN')):
+    raise RuntimeError('Native candidate execution must not receive release-download credentials')
+
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -57,6 +60,11 @@ prepare = getattr(checks, "prepare_native_checks", None)
 if prepare:
     checks.run.prepared_native = prepare(native_checks, root, output, execute)
 
-for name in native_checks:
+ordered_checks = helper.scheduled_checks(native_checks)
+print("CI_NATIVE_EXECUTION_ORDER=" + json.dumps({
+    "declared_checks": native_checks, "execution_order": ordered_checks,
+    "failure": "First failed profile stops this job; later profiles remain required.",
+}), flush=True)
+for name in ordered_checks:
     checks.run(name, root, output / name,
                os.environ["ACCEPTANCE_BASE"], execute)

@@ -69,6 +69,60 @@ fn todo_write_roundtrips_a_list() {
     assert_eq!(exit, 0, "todo_write turn should exit 0; got {exit}");
 }
 
+/// The card for a `TodoWrite` shows the saved list as the todo panel draws it,
+/// not the result JSON. The verification nudge in the result is addressed to
+/// the model: it must reach the model and stay off the screen.
+#[test]
+fn todo_write_card_shows_the_list_and_keeps_the_nudge_for_the_model() {
+    let env = TestEnv::new("todo-write-card");
+    if env.is_live() {
+        return;
+    }
+    let calls = serde_json::json!([{
+        "id": "todo-card",
+        "name": "TodoWrite",
+        "input": {"todos": [
+            {"content": "Ship the card", "status": "completed", "activeForm": "Shipping the card"},
+            {"content": "Write the test", "status": "in_progress", "activeForm": "Writing the test"},
+            {"content": "Open the PR", "status": "pending", "activeForm": "Opening the PR"},
+        ]},
+    }]);
+    let prompt = env.prompt(
+        "Update the todo list with the supplied TodoWrite call.",
+        &format!("tool_concurrency TOOL_BATCH:{calls}"),
+    );
+    // One completion crosses a threshold of 1, so the result carries the nudge.
+    let mut cli = env.spawn_with_env(
+        &["--permission-mode", "workspace-write", &prompt],
+        &[("SUDOCODE_VERIFICATION_STREAK_THRESHOLD", "1")],
+    );
+    cli.expect("Concurrency batch done.")
+        .expect("the TodoWrite call completes");
+    let screen = cli.render(common::screen_contents);
+    for shown in [
+        "TodoWrite",
+        "3 todos (1 done, 1 in progress, 1 open)",
+        "\u{2713} Ship the card",
+        "\u{25a0} Writing the test",
+        "\u{25a1} Open the PR",
+    ] {
+        assert!(
+            screen.contains(shown),
+            "card is missing {shown:?}:\n{screen}"
+        );
+    }
+    for hidden in ["verificationStreakNudge", "system-reminder", "activeForm"] {
+        assert!(!screen.contains(hidden), "card shows {hidden:?}:\n{screen}");
+    }
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    assert!(
+        env.captured_message_bodies()
+            .iter()
+            .any(|body| body.contains("verificationStreakNudge")),
+        "the nudge must still reach the model"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2. TodoWrite persists the list to the store (verbatim), and an empty
 //    list wipes it — whole-list replace semantics on disk.

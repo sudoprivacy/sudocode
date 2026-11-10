@@ -20,6 +20,7 @@
 /// `pty_mcp_manage`) resolve `sh` through this one SSOT rather than
 /// handing a bare `"sh"` to ``CreateProcessW`` (which fails `os error 2`
 /// on Windows).
+#[must_use]
 pub fn resolve_sh() -> String {
     #[cfg(unix)]
     {

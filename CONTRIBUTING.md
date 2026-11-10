@@ -191,6 +191,12 @@ require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
+the visual and performance journeys. The shared installer provisions native
+sidecars beside the dev-profile test drivers and reports their exact hashes;
+the explicit system-host diagnostic retains its legacy compatibility findings.
+See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
+architecture details.
 Pre-merge co-host acceptance uses the workspace dev profile with the deployed
 `daemon,driver-ai,egress-gate-presidio` features and runs the resulting binary to
 verify its exact source revision stamp. This avoids a separate optimized build
@@ -281,19 +287,134 @@ do not independently select a base from the event. Queue verification retains
 the merge group's exact base. Git/SSH/process acceptance covers stale API bases
 and refuses a signed receipt for the wrong actual base.
 
-One acceptance runs per host at a time. Every `check`, whether from the hook,
-`contract-update` or a manual run, holds `~/.nexus/local-acceptance/host.lock`
-while its profiles run; a later invocation prints the holder from
-`host-lease.json` and its queue position. Waiters start in arrival order when the
-holder exits, including an abrupt exit; each holds a ticket under
+CI compares complete published Nexus dependency tags, including prerelease and
+build suffixes, with the lockfile's unique tag and commit. A prerelease such as
+`v0.8.29-rc.5` must not be truncated to `v0.8.29`. The existing preflight job runs
+the actual Bash workflow step against fresh valid, mismatched, ambiguous and
+missing inputs. These infrastructure checks add no product journey coverage.
+
+For a publisher rerun, queue verification checks the current attempt's actual
+completed jobs and binds the success status's creation time to that execution.
+GitHub's aggregate run conclusion can retain an earlier failed attempt. Older
+jobs are excluded; missing, pending, failed or mismatched current jobs and old
+success statuses still block the queue. The gate prints the run and recovery
+command when publication is incomplete. Real Git/SSH/HTTP process fixtures
+exercise both the stale aggregate and these refusals.
+
+API, runtime and tools use opt-in acceptance wrappers to compile shared test
+code in fewer drivers. Their original individual targets remain available to
+Cargo and the daemon journeys. The canonical nextest path runs each case in its
+own process. Fixed-name self-spawning tests, cache prefix/TTL and compaction
+checks, and model-limit process-global checks retain their independent drivers.
+No test body, assertion, ignored flag, worker count or deadline changes.
+
+Checks that run tests, builds or containers share one host lease.
+The reviewed compiler-priority migration preserves exact earlier recipes for
+ten otherwise unchanged profiles through explicit protected hash pairs. It does
+not approve the changed workspace or contract guard recipes. Original source,
+SSH signatures, current required profiles and original log hashes still apply;
+a changed executor, assertion, image or newly required profile needs validation.
+
+Every `check`, whether from the hook, `contract-update` or a manual run,
+executes metadata preflight before joining that queue. Revisions requiring
+only preflight and runs restoring already verified complete results finish
+without waiting for the host. Partial signed progress still waits and executes
+every missing check. Signatures, source bindings, checkpoint validation and
+the earliest recorded start time keep their existing requirements. The required
+command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
+pending checks. Any pending test, build or container profile holds
+`~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
+`host-lease.json`, its active profile and the queue position. Each fresh profile
+rejoins the FIFO after the previous profile completes, so existing waiters run
+before this invocation's next profile. A running profile keeps the lease through
+its execution and checkpoint. Waiters start in arrival order when that profile
+releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
-Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
-fixture checks nested inside an acceptance run without waiting for their parent.
-`attempt.json` records the wait as `host_lease_wait_seconds`; the receipt format
-is unchanged.
+Processes started under the holder inherit an acquisition-specific
+`SUDOCODE_ACCEPTANCE_HOST_LEASE` claim. Nested checks validate that claim against
+the existing OS-locked file, the owner's process creation time and actual
+ancestry before proceeding without waiting for their parent. Invented, copied,
+released and previous-acquisition claims fail before heavy execution. The record
+inside `host.lock` is authoritative; `host-lease.json` is a diagnostic snapshot.
+Standalone enforcement fixtures use private homes and real private locks, never
+a fabricated claim. Existing older runners can finish naturally; their legacy
+claims do not authorize execution under a newer validator.
+The native author guard and complementary native jobs run the same real-process
+inheritance controls, including Windows byte-range locks, before long compilation.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
+records the total wait across acquisitions as `host_lease_wait_seconds` and each
+profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+
+A fresh `guard-contract` also validates its protected input pins, selection
+digest and release recipe before joining the host queue. The required
+`GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
+A mismatch reports the path and observed hash, retains signed preflight progress,
+and exits without taking a queue ticket or starting Docker/native checks.
+Execution stages and validates a separate copy from the protected Git ref again;
+the preliminary snapshot grants no acceptance or execution credit. Already
+verified results and policies without this optional early validator keep their
+existing paths.
+
+When both a fresh contract guard and native workspace are required, the workspace's
+existing formatting, metadata and warning-denying lint commands run before the
+contract matrix. `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports
+`workspace_lint_before_guard`; `NATIVE_LINT_PREPARATION` explains completion and
+failure on the mandatory command path. Preparation takes the existing host lease,
+then releases it and rejoins the FIFO for the guard. After the guard passes, the
+workspace verifies and consumes those original command records/logs once before
+executing every remaining test. The preparation binds clean HEAD, base, protected
+executor, output and Cargo target; altered logs or mismatched bindings are refused.
+It never signs a completed workspace. A later failure preserves only actually
+completed profiles; a new process repeats unsigned preparation, while a fully
+verified workspace keeps ordinary signed resume. Executors without this optional
+preparation retain their original flow. Actual Git/SSH/child-process and native
+Cargo/Clippy controls cover refusal, consumption, failure order and signed resume.
+
+After the selected native workspace checks, service acceptance runs before
+optimized release builds and rendering/browser measurements. Service bootstrap
+failures therefore stop the attempt before those expensive profiles start.
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` prints this execution order. The declared
+acceptance plan and every profile's commands remain required; completed signed
+results retain their existing restore and carry rules. Real Git/SSH/child-process
+checks cover failure before slow-profile entry, complete success and verified
+restore with the original plan.
+The complementary native CI entrypoint uses the same ordering helper and prints
+`CI_NATIVE_EXECUTION_ORDER` with both the declared checks and actual order.
+Its first failed service profile stops the job before release execution; jobs
+selecting only release still run it. Real production-entrypoint child-process
+controls cover failure, complete success and release-only selection.
+
+When native services are selected, preparation resolves their existing grpcurl
+client and actually runs `--version` before native compilation. Windows selects
+Git for Windows Bash explicitly, so an earlier WSL launcher cannot take its place.
+Download and executable failures stop at `NATIVE_SERVICE_TOOL_PREFLIGHT`.
+The later service journey uses that exact resolved file and verifies its bytes
+again; both original service journeys still run. Real Bash/curl proxy-504,
+invalid-executable, offline-cache and unselected-profile controls protect this
+ordering. These are infrastructure checks and add no product journey credit.
+
+Contract validation requires the Docker Engine version API to answer within
+30 seconds before container/native checks start. Its required output names the
+deadline and prints Docker Desktop and `DOCKER_HOST`/context recovery steps on
+failure. The version request avoids optional CLI plugin discovery. A native
+guard uses the real Docker client against a stalled local HTTP endpoint to
+verify the connection deadline. Its container image includes the official
+Docker CLI pinned by image digest for the nested policy checks. The guard
+preserves an ordinary client error as a
+failure. Healthy Engine execution still requires the full container matrix.
+The guard image provisions nextest before the matrix using the exact frozen
+`nextest_binary` function, including its original URL and checksums. Image
+preparation runs archive/executable corruption-refusal controls and restores the
+verified files. Docker reuses that layer while its tool script and image inputs
+stay unchanged. Each selected attempt rechecks the actual cached CLI with
+`--network none` before running the full matrix and author-native guards.
+`GUARD_TOOL_PREFLIGHT` names these stages. Image/tool preparation errors point
+to the saved build log and installed retry command before tests begin.
+This caches tool preparation; the full matrix and native checks retain their
+original cases, assertions and deadlines.
 
 On macOS, the rendering profile and the release startup measurement require
 external AC power with low-power mode disabled. One shared native probe reads
@@ -340,6 +461,36 @@ and repeated-turn comparisons run in the `stress` profile on every release
 candidate, which also judges dependency-only changes; see
 [Release acceptance coverage](#release-acceptance-coverage). Their functional
 PTY cases keep the native suite's per-PR scope.
+
+The repeated-turn stress scenario samples 20 typed keys per input phase per
+turn, instead of 60. All 24 paired processes and 30 turns per process remain:
+600 observations per phase per process, or 43,200 overall instead of 129,600.
+Single-turn core scenarios retain 60 keys per phase and 40 resizes per turn.
+Repeated turns retain one narrow/wide resize pair: 60 resizes per process,
+1,440 overall instead of 28,800. Cancel (20 per process), paste, resource
+measurements, budgets and the relative evaluator remain unchanged. This reduces
+repeated typing and resize pressure; intermittent latency spikes and small
+resize-dependent memory leaks may be missed. Equivalent sensitivity is not claimed.
+`RENDERING_SAMPLING` prints each effective policy before measurement. Each sample
+retains the exact resolved workload policy and its SHA256; the original judged
+policy remains in the parent report. Policies without overrides retain 60.
+The parent counts raw arrays using the evaluator's shared helper. The public
+process controls refuse missing input, resize or turn observations, tampered
+summaries and unsupported reductions. Fresh product stress execution is required before
+claiming runtime savings; observation counts alone do not prove faster delivery.
+
+Rendering's throwaway sessions use a private 512 MiB tmpfs in its local Docker
+container. Reports, copied binaries and Cargo caches keep their existing storage.
+The frozen historical baseline serialized response-archive disk flushes; real
+debugger stacks show that backlog delaying exit, while a controlled native
+disk/tmpfs comparison isolates the storage cost. Exit assertions, deadlines and
+all performance budgets remain unchanged. This gate now isolates rendering from
+host disk flush latency, reducing coverage of slow persistent storage. It does
+not qualify filesystem durability. Other profiles, including the browser,
+native persistence, response gzip, compaction and cache checks retain their
+storage paths. A real Docker regression executes a native process from the
+temporary directory and verifies the mount type, capacity, frozen sources and
+durable evidence location.
 
 The `browser` profile is a functional smoke. CLI sources, the PTY harness, shared
 PTY helpers, the browser drivers and the browser terminal harness select it. Local
@@ -454,12 +605,40 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces default to eight test workers on hosts with at least eight
-logical CPUs; smaller/unknown hosts, older ungrouped sources, isolated targets
-and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
+Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
+resize and service dispatch verify its original pinned archive and
+executable before compilation. A missing download or corrupt cache fails before
+Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
+corrupt-archive process controls protect this ordering. Missing nextest/protoc
+archives resolve their exact tag and filename through GitHub's public release
+metadata and asset API. The existing nextest archive/executable digests and
+protoc executable version still qualify the result. This avoids failing browser
+download redirects; the canonical artifact URL in the tool receipt stays stable.
+The Docker image provisions the same protected downloader. Tool preparation stays
+inside the invocation's total elapsed time; test selection and retries are unchanged.
+On Windows/macOS the native guard also prepares the original protoc 3.20.2
+before its matrix and checks the real executable's version. The isolated cohost
+canary copies only that tool cache into its private HOME and runs offline;
+it retains private Git/lease state and the original feature/stamp refusals.
+Real proxy 504 controls require protoc failure before cohost Cargo or any full
+native guard command. Tool preparation and failures remain in total timing.
+Tool controls keep their isolated HOME short on Windows and run from the real
+nested policy/evidence layout, preserving raw logs without exceeding native
+executable path limits.
+Full grouped workspaces retain eight workers on hosts with at least eight logical
+CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
+resume-test source fingerprint; macOS also qualifies from three CPUs after its
+matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
+older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
 pool explicitly. Compiler jobs stay at one locally, with only compiler workers
-at BelowNormal priority; test processes stay Normal. A matched Windows run on
+at BelowNormal priority; test processes stay Normal. Before author workspace
+execution and a plan preview for the current host, the mandatory
+`LOCAL_ACCEPTANCE_CONCURRENCY` output reports the current invocation's compiler
+jobs and requested test cap. An explicit cap of one also prints the shell
+command to restore the protected test-pool default. Explicit caps remain honored;
+the signed plan and test selection remain unchanged. Historical signature
+verification omits this current-environment diagnostic, so a verifier's cap is
+never presented as the original author's execution setting. A matched Windows run on
 20 logical CPUs passed the same 1,089 integration cases and 69 ignored markers:
 four workers took 424.5 seconds, eight took 244.7 seconds. Real ConPTY echo P95
 was 0.58/0.74 ms. This warm, single-host execution comparison excludes compilation
@@ -467,6 +646,35 @@ and does not establish whole-PR or cross-hardware savings. A test that previousl
 left its ACP child holding output pipes now awaits its existing shutdown helper.
 Native guards run actual case processes, observe overlap and enforce an explicit
 four-worker limit; they add no product journey coverage.
+The hosted increase checks the canonical resume-test source fingerprint,
+normalizing CRLF. Older branches can retain four without merging main. A later
+fixture edit conservatively restores four until separately qualified; required
+CLI output reports this source decision. Existing eight-core behavior is retained.
+Exact protected recipe pairs retain earlier signed native workspace results
+with their recorded commands and worker counts. Explicit lower counts remain
+allowed; local thresholds, cases, assertions and deadlines are unchanged.
+Earlier execution is never relabelled as an eight-worker field. Changed
+source, signatures, logs, forged recipe maps and later criteria still refuse
+reuse. Pending unmerged origin policies retain strict refusal and print the
+origin/current policy and reviewed-merge recovery on the required interface.
+A single ordered four-then-eight comparison reused identical captured binaries
+and complete case inventories on each hosted VM. Windows (four CPUs, 1,104 cases)
+took 600.998/438.974 seconds; macOS (five CPUs, 1,157 cases) took
+868.141/459.716 seconds. Ignored cases, assertions and deadlines were unchanged.
+These test-stage observations exclude setup/build/queue time and do not establish
+population or whole-PR savings. Separate full eight-worker fields also passed on
+Linux, Windows and macOS. The cold-resume test uses the existing acknowledged-input
+helper before recognizing a new turn; its actual-provider-request and persisted
+result byte assertions remain required. Native controls execute real cases for
+hosted/local CPU thresholds, unknown CPU counts and explicit lower concurrency.
+A standard three-core macOS runner separately passed an ordered eight-then-four
+comparison on clean protected source `cffe7dad`: the same 1,161 cases and 134
+captured binaries took 649.779/1,000.493 seconds, 35.1% less test time at eight.
+Both phases retained 76 ignored cases and the original assertions/deadlines.
+This single-VM comparison excludes setup, compilation and queues and proves no
+population or whole-PR saving. Only qualified hosted macOS gains the three-core
+threshold; three-core Windows/Linux, local hosts and explicit limits retain
+their existing selection. Real native controls execute every threshold branch.
 The runner lives in a private acceptance cache; it does not
 replace a contributor's installed tools. Retries are disabled, the first failure
 stops new work while active cases clean up, and an empty selection fails. Cargo
@@ -551,26 +759,61 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
-Contract validation checks the Docker Git/signature/authorization matrix before
-Cargo fixtures and author-host native guards. Passing runs keep every existing
-check; an early metadata failure leaves later compilation unrun.
-Release acceptance builds the normal release `scode` once, copies it outside
-Cargo outputs, and points the native workspace's test-profile driver at that
-exact executable with `SCODE_TEST_BIN`. The driver keeps the workspace mailbox
-feature graph; release-only dev-dependency compilation is no longer repeated.
-The same stream/resume assertions and 40-sample, 100 ms startup budget remain.
-This profile runs for Cargo manifests/lock/config, build scripts, vendored inputs,
-the CLI entry point, startup/parser modules, runtime configuration, the dedicated
-stream-capture test and startup harness. Other business/source and shared PTY
-helper changes skip the additional native optimized builds on the author and
-complementary hosts. Their applicable native functional, resize and service
-checks remain; selected Docker rendering still builds and measures a real Linux
-release. Optimized-only Windows/macOS behavior and their startup budget are
-judged on every release candidate on Linux, Windows and macOS; see
-[Release acceptance coverage](#release-acceptance-coverage).
-`RELEASE_ACCEPTANCE_SCOPE` and the mandatory plan state this per-PR boundary. Real committed Git plans cover retained/omitted inputs, mixed
-edits, renames and deletions; Cargo/native controls retain the selected release
-artifact and driver identity assertions.
+Changes confined to ordinary individual CLI test files can omit the separate
+example build on both the author and complementary hosts. README and Markdown
+files under `docs/` may accompany them. The selector reads committed Git blobs;
+deleted, redirected or unknown inputs, shared helpers, manifests and production
+sources retain ordinary scope. `EXAMPLE_BUILD_SCOPE` reports `isolated_cli_tests`
+on this path. Native test selection and execution stay required. Real Git/Cargo
+guards execute the changed CLI test, then independently confirm that the example
+artifact remains fresh with the same binary hash. Mixed/shared changes retain
+example compilation and a broken example still fails. This removes unchanged
+compile-only work; it does not add product journey coverage or prove a whole-PR
+time reduction.
+Contract validation finishes protected input staging and Docker/tool preflight
+before overlapping the full Linux matrix with the full author-native guard.
+The Linux matrix keeps its metadata-before-Cargo order. Both complete results
+remain mandatory; the first failed branch cancels only its owned sibling.
+Original commands still use the shared executor, one Cargo worker and reduced
+compiler priority. The original Docker limits, workloads and assertions remain.
+Seven required real Docker/native controls check success, either branch failure,
+native interruption, wrong owner/image refusal and empty container-ID recovery.
+Cleanup verifies the exact image/owner and removal; original child command logs
+and hashes remain in the signed profile. The existing host FIFO stays exclusive.
+An unchanged full-guard experiment completed in 501 seconds; the earlier serial
+author run took 907 seconds. These different runs support further qualification,
+not a fixed or population author-to-merge saving. No check coverage is removed.
+Within the author-native guard, the original Git/SSH/HTTP publication controls
+overlap the original serial compiler/test lane. The same supervisor requires
+every original command log and cancels only its owned descendants on failure or
+interrupt. Five additional real native controls check clean completion, either
+failure direction, serial command order, exited-process history and parent/child
+cleanup while preserving an unrelated sibling. Waiting checks each original
+PID and creation time; inaccessible live identities still refuse cleanup. The existing
+seven Docker controls remain mandatory. Same-source observations recorded 488
+seconds serial and 344 seconds overlapping; this single field does not establish
+a population delivery-time reduction. No compiler concurrency is added.
+Every newly built release artifact must pass native acceptance before packaging
+and publication. Both Linux builds, both Mac builds and both Windows builds use
+their actual native executable. The gate verifies its Git revision, architecture
+and SHA256, then runs the original stream/resume journey, 40-sample 100 ms startup
+budget and compiler-context journey. It does not rebuild the release executable.
+An independent test-profile driver uses the original stream/capture source and
+launches the copied artifact through `SCODE_TEST_BIN`, without building an unused
+debug CLI. Failed or changed artifacts stop their build job and prevent publication.
+Evidence uploads are excluded from the packaged assets. Existing-asset publication
+resumes retain their existing validation; they do not build a new artifact.
+
+Ordinary product edits retain applicable native functional, resize/service and
+selected Linux release-rendering checks. `native-context` reuses the current
+workspace dev/mailbox binary for the connected compiler-context journey.
+`native-release` remains mandatory locally for changes to optimized acceptance
+drivers and harnesses. **Coverage reduction:** ordinary source acceptance can
+miss native optimization-specific failures and startup regressions until release.
+`RELEASE_ACCEPTANCE_SCOPE` and `NATIVE_CONTEXT_SCOPE` explain this at the required
+interface. Real Git plans cover ordinary, retained, mixed, renamed and deleted
+inputs; real Cargo/native controls check identity, failure propagation, changed
+bytes and the publication ordering. See [Release acceptance coverage](#release-acceptance-coverage).
 An actual Cargo/native-process fixture checks driver reuse, the release binary's
 identity and rejection of a substituted debug binary. The test driver and its
 in-process fixture helpers now execute in the test profile; the product process
@@ -629,7 +872,25 @@ receipt/signature/envelope files live in immutable numbered generations; an atom
 abrupt process exit can therefore retain earlier completed profiles without
 running exception cleanup. Failed and unrun profiles remain required. Ordinary pushes
 automatically discover compatible checkpoints for the exact head, base and native
-host; custom output directories can use the printed `check --resume-from` command.
+host, including explicit `--output` directories. Each external output gets one
+atomic discovery reference under `~/.nexus/local-acceptance/results/<head>/`;
+the original receipt, signature and logs remain in their output directory. The
+required command prints `LOCAL_ACCEPTANCE_OUTPUT_INDEX` with both paths. These
+references only locate evidence: reuse still verifies its signature, source,
+host, protected commands and original log hashes. Invalid references cannot
+approve checks. An index write failure prints
+`LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
+explicit `check --resume-from /path/to/output` recovery.
+Older external outputs can be discovered without rerunning or re-signing them:
+
+```bash
+python .github/scripts/local_acceptance.py index-output --directory /path/to/old/output --policy-ref origin/main
+```
+
+This command verifies the original signed receipt/checkpoint and log bytes before
+writing a discovery reference. It changes no original evidence and grants no
+acceptance by itself. Deleted or moved outputs must be restored or indexed at
+their new location; missing required results still run normally.
 A later head of the same branch carries a signed profile from an earlier head of
 that branch when nothing it changed selects the profile. Only the PR's own changes
 count: a path changed since the earlier head counts when it differs from current
@@ -641,6 +902,17 @@ unchanged profile commands and matching original logs; `preflight` always runs.
 The receipt records each origin head with its signed envelope, and the verifier
 re-checks that envelope, its ancestry, the change set and the copied command
 records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+For a contract update, the managed child keeps the candidate command recipe and
+protected signing authority separate. Carry admission, checkpoints, resume and
+publication use the same protected authority; an earlier unmerged candidate
+policy cannot qualify as its own protected ancestor. Ineligible carried profiles
+run fresh. Exact-source recovery still checks compatibility with the candidate
+recipe and verifies its signatures against the protected enrolled keys.
+Older managed parents already name the protected base and exact candidate policy;
+that child argument form keeps the same authority before the parent is upgraded.
+Real Git/SSH/child-process controls retain the former local-pass/publication-refusal
+counterexample and require the actual managed child to refuse that carry before
+executing and publishing fresh checks. They add no product journey coverage.
 When CI refuses an obsolete execution recipe, its `LOCAL_ACCEPTANCE_RECOVERY`
 record includes preparation commands and the author-host runner arguments.
 Run preparation first: mainline recovery fetches protected main before resolving
@@ -700,6 +972,18 @@ preserves that evidence. Legacy receipts require the exact attested executor to
 be recoverable from their immutable signed source or base; their signatures stay unchanged.
 The versioned semantic AST encoding ignores empty optional fields so author and
 CI Python versions compute the same execution fingerprint.
+Modern receipt verification validates both recorded maps against the attested
+original source, then compares its reachable map with the current policy. It
+does not first compute a whole-policy hash that this decision would overwrite.
+Within one verification, identical immutable source/policy references share the
+computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
+receipts retain their original verification path. Signatures, source/base,
+current required checks, equivalence rules and refusal conditions remain.
+Both fingerprint formats share one AST projection helper. It copies the module
+shell and the dispatcher that projection mutates; other nodes remain read-only.
+Each profile and later invocation keeps its own dispatch projection. Fingerprint
+bytes and conservative reflection/import behavior remain unchanged, so this
+computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
 PR, queue and main events never authorize paid calls. Real-daemon queue tests
 still run for changed daemon inputs without a model credential. Documentation/CI-only
@@ -834,6 +1118,16 @@ selector changes; queue/main reuse its result.
 Changing the queue entry itself also selects the real all-feature workspace
 lint on all three queue platforms. Real committed PR/push/queue event controls
 verify this trigger and the exclusion of documentation-only changes.
+New integration grouping files declared with `test=false` also reuse the
+committed Git/TOML proof for their manifests. Only previously absent regular
+files under `tests/acceptance_groups`, with fresh target names and unchanged
+remaining manifest/workspace settings, can skip unchanged daemon/A2A/cohost
+journeys. Existing or ordinary test edits, enabled/unknown declarations,
+missing/indirect sources and mixed production/build changes retain those gates.
+Required preflight JSON prints `daemon_disabled_test_sources_ignored`; full
+native cases, examples, all-feature Clippy and provider/live scope remain.
+Real Git event, Cargo product/hash, nextest inventory and native-process
+controls run in the required Linux Docker and author-native contract guards.
 Draft snapshots use a separate concurrency group and explicit run title. They
 cannot cancel or supersede applicable ready/queue acceptance. Skipped draft
 workflows allocate no publisher runner. A newer applicable ready run and its
@@ -846,14 +1140,23 @@ controls record the child process's actual default file encoding. The gate
 and publisher share one event-file decoder;
 PR text and workflow metadata do not depend on the runner's locale.
 In the queue, independent failure-only callers stop unfinished jobs in the same
-Rust CI run after either Clippy or real daemon acceptance fails. Each caller
+Rust CI run after Clippy, CLI daemon or cohost acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the
 Actions write permission and runs no checkout or candidate executable. Successful
 runs allocate no cancellation runner. The original failed step remains visible;
 the command prints how to inspect it and rerun failed work after repair. A live
-GitHub fixture exercises both failure directions and the uncancelled success
+GitHub fixture exercises all three failure directions and the uncancelled success
 path on a disposable branch. These are CI execution checks and add no product
 journey coverage.
+CLI A2A and cohost journeys use independent fresh-node jobs after the same pin
+preflight. Each selected job must pass; an unselected job must be skipped.
+Their original shell commands, features, cases and fault assertions remain.
+An isolated matched GitHub comparison with identical source and full cache hits
+took 825 seconds sequentially and 506 seconds in parallel. Total runner time
+was 825 versus 837 seconds. This one run demonstrates a shorter daemon path,
+with a small compute increase; it does not establish population or full
+author-to-merge savings. Required output identifies the separate cohost job,
+and native Bash guards reject missing, failed, cancelled or unexpected results.
 A runtime interaction that exists only in the combination of independently verified PRs is therefore outside
 that pre-merge runtime coverage. Main pushes do not repeat deterministic suites.
 Real provider/API assertions remain available through explicit acceptance;
@@ -865,7 +1168,56 @@ Existing PRs do not need a cosmetic merge from main to acquire the hook files:
 the managed hook loads protected-main command definitions. Registering another
 public device key does not invalidate other devices' current receipts.
 
+#### Native tool API credentials
+
+Complementary native CI prepares selected pinned tools in a separate trusted
+step with the read-only GitHub token. Both release metadata and binary API
+requests authenticate only at `https://api.github.com`; credentials are omitted
+from redirected requests, including release-asset storage. Public downloads
+without a token remain supported. Tool tags, asset selection, hashes, versions,
+caches and request timeouts retain their existing checks.
+
+The trusted preparation step receives the read-only API credential. Tool
+subprocesses and the candidate step receive neither `GH_TOKEN` nor `GITHUB_TOKEN`.
+The native command
+executor also strips both after SDK discovery and explicit environment overrides,
+including mixed-case keys that Windows treats as the same variable names.
+The native contract guard exercises real private HTTPS requests, redirect refusals,
+candidate subprocess isolation and refusal of a case-sensitive cleanup that leaks
+explicit lowercase or mixed-case overrides. These controls
+establish credential transport behavior; they do not measure live GitHub quota.
+
 #### Acceptance contract changes
+
+For ordinary frozen source with complementary native hosts, the protected
+runner also supports `start-pr --remote origin`. The normal pre-push output
+prints `LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE` with the executable entry.
+Both installed entries refresh atomically from protected main. The required
+`LOCAL_ACCEPTANCE_RUNNER_REFRESHED` output names that commit and the managed
+entry, then continues the frozen source with all acceptance still required.
+The parallel entry retains the original start/output across the refresh and
+executes the new protected code even if another workline already updated its
+file. Installation uses the same atomic writer, including self-install; it
+preserves the enrolled signer/key and existing managed hook. Candidate scripts
+outside the managed entry are refused without overwriting their source.
+It publishes the exact branch under a separate signed execution plan, readies
+the frozen PR for tests and runs every mandatory author check while native CI
+executes. It never treats the scheduling plan as completed acceptance. The
+required GitHub Actions `Local acceptance` status stays pending until both
+the full author signature and original native jobs pass. Finalization on main
+rechecks the source and reuses those jobs; retries reuse exact-source author
+proof rather than rerunning completed work. Its signed timing includes setup
+and publication before the author checks. Rule changes still use the complete
+`contract-update` route below; ordinary `git push` retains serial acceptance.
+Protected metadata can advance while a plan is running. Its original SSH
+signature and contract hash must still authenticate an ancestor of current
+main, and the source contract must remain unchanged. The current responsibility
+plan, every selected command identity, native workflow and dispatcher must match.
+The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
+permit reuse. Changed commands/assertions, images, native dispatch/workflow,
+required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
+controls verify both completion orders, unchanged notes/logs and native jobs
+executed once. A scheduling plan still cannot satisfy completed acceptance.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and
@@ -890,6 +1242,12 @@ full candidate and trusted contract hashes. That status authorizes the rule
 update; it is not the `Local acceptance` test result. The read-only gate checks
 the actor's current role and uses the approved executor for complementary hosts.
 Failed tests, invalid signatures and missing hosts still fail normal acceptance.
+
+Contract hashing reads one committed tree and batches its immutable Git blobs.
+The byte hashes, signed payloads and required tests remain the same; no mutable
+ref result is cached. The required Docker and author-native contract guards
+exercise binary/empty inputs, Unicode paths, link text, moved refs, missing
+objects and the original per-file hash reference through real Git processes.
 
 The command requires intervening protected contract changes to be integrated.
 Unrelated main updates retain the checked-out head and its existing build outputs.
@@ -1076,14 +1434,15 @@ Accept every release candidate with one dispatch on its commit:
 gh workflow run rust-ci.yml --ref <tag-or-branch> -f live_only=true
 ```
 
-Per-PR acceptance is scoped to each PR's inputs. The release dispatch covers
-the candidate as a whole, comparing against the previous `v*` tag:
+Per-PR acceptance is scoped to each PR's inputs. Newly built artifacts have a
+mandatory gate in their release build jobs. The explicit full-candidate dispatch
+retains its existing rendering and provider comparisons against the previous tag:
 
-| Coverage | Per PR (local + complementary CI) | Release dispatch |
+| Coverage | Per PR (local + complementary CI) | Release acceptance |
 |---|---|---|
 | Rendering matrix against the fixed baseline | `core`: short reply and 12 KiB Markdown, 36 judged observations, for CLI, engine-core, PTY and rendering-driver inputs | `stress`: `core` plus foreground task, background task and repeated turns, 84 judged observations (`release-rendering`, Linux Docker) |
 | Cargo/dependency metadata and unrelated crate source | Native functional checks | Indirect performance effects judged by the same `stress` matrix |
-| Optimized build, stream/resume journey, 100 ms startup budget (`native-release`) | Cargo/build/vendor, CLI entry/startup/parser and runtime configuration inputs | Linux, Windows and macOS on every candidate (`release-native`) |
+| Optimized stream/resume, 100 ms startup and compiler context | Functional native suite and dev/mailbox compiler context; optimized checks for their harness/driver edits | Mandatory on each newly built artifact, on all six native platform jobs, before packaging/publication |
 | Real provider and model journeys | Scripted model transport | Live API smoke and Linux/Windows PTY suites |
 
 The rendering and native jobs use no credentials. Their evidence is uploaded as
@@ -1228,6 +1587,17 @@ cargo test --workspace
 ./scripts/fmt.sh           # auto-format
 ./scripts/fmt.sh --check   # CI-equivalent check
 ```
+
+The managed native acceptance runner checks the same Cargo target roots and
+recursive local path dependencies with rustfmt batches bounded to 24,000 UTF-16
+command units. This avoids Windows' process argument limit as the workspace
+grows. Every edition, target kind, module traversal and package-local rustfmt
+configuration remains selected. Real Cargo/rustfmt controls compare formatting
+failures and exercise an oversized workspace, including failure in a later batch.
+Private enforcement homes copy the prepared nextest cache, which every reader
+still verifies against the pinned archive. The real old-checkout guard requires
+offline tool reuse and rejects a corrupted private executable while proving
+the enclosing tool cache retains its original bytes.
 
 The workspace enables `clippy::all` and `clippy::pedantic` at
 `warn` level. A few pedantic lints are allowed globally
@@ -1410,14 +1780,17 @@ the canonical changes. Keep calculations in this shared contract instead of
 adding separate percentages or TTL price formulas to a renderer or monitor.
 Changes to measurement do not enable telemetry or automatic TTL selection.
 
-### Experimental TTL advice
+### TTL advice
 
-Enable `"experimental": {"cacheTtlAdvisor": true}` in settings, or set
-`SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR=1` for the process. This experiment
-collects local metadata and **never changes the outgoing TTL**, including
-explicit `cache_ttl_1h` overrides. It sends no keepalive or extra model calls.
-Use `scode cache stats --output-format json` to inspect `ttl_advisor` per
-session. The text report points to this view without adding terminal warnings.
+An unpinned session's outgoing TTL follows this advice; `cache_ttl_1h` in
+`sudocode.json` pins it instead (`true` 1h, `false` 5m), and a pinned session
+only gets the recommendation. Before a session has evidence of its own, it
+starts from the TTL this user's sessions last decided from evidence, kept in
+`cache/prompt-cache/ttl-default.json`, or 5m before anything is learned: one
+user's agents tend to work alike, so that is the best guess. Deleting the file
+resets it. The advisor sends no keepalive or extra model calls. Use
+`scode cache stats --output-format json` to inspect `ttl_advisor` per session
+and `ttl_default` for the learned start.
 
 The existing request ledger gains request-start, response-start and logical
 completion times, final client cache-marker TTLs (including the default 5m),
@@ -1433,8 +1806,8 @@ the successful prefix state. Missing or legacy rows break reuse adjacency.
 
 One recommendation is frozen at session creation/resume and each committed
 compaction. Resume of the same model/route/configuration and segment reuses the
-decision. An empty new session keeps its configured TTL until there is enough
-history at a later boundary. This does not reset cumulative session usage.
+decision. An empty new session keeps its starting TTL (the learned default, or 5m) until
+there is enough history at a later boundary. This does not reset cumulative session usage.
 Training reads at most a 512 KiB ledger tail and only completed history available
 before that boundary; derived state retains at most 16 decisions. No full prompt,
 tool payload, URL or credential is added. Public advice omits correlation keys.
@@ -1453,11 +1826,11 @@ prices do not establish gateway billing or subscription-quota economics.
 
 The first version requires eight eligible intervals and a 10% scenario-cost
 margin to suggest changing TTL; otherwise it preserves the configured choice.
-Those are experimental decision thresholds, not statistical confidence bounds.
+Those are heuristic decision thresholds, not statistical confidence bounds.
 `forward_comparison` scores only later requests with a previously frozen
 decision, against both fixed baselines using the same scenario assumptions and
 the shared generated cost function. It does not fit the policy to those later
-requests. Auto-application needs a separate decision after credible validation.
+requests.
 
 Main turns, subagent turns, and compaction share
 `api::session_message_request`. Add session-level request fields there rather

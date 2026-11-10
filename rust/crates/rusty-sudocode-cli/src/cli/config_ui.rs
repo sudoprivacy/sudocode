@@ -26,7 +26,6 @@ pub(crate) fn build_config_tree_handler(
     settings_path: PathBuf,
     sudocode_path: PathBuf,
 ) -> SlashSelectionHandler {
-    let items = vec!["settings.json".to_string(), "sudocode.json".to_string()];
     let question = QuestionPromptView {
         presentation: runtime::QuestionPresentation::Question,
         title: Some("Config".to_string()),
@@ -60,29 +59,26 @@ pub(crate) fn build_config_tree_handler(
 
     let ui2 = ui.clone();
     let picker_paths = (settings_path.clone(), sudocode_path.clone());
-    SlashSelectionHandler(Box::new(move |answer: &str, _cli, _out| {
-        let resolved = resolve_answer(answer, &items);
-        match resolved.as_str() {
-            "settings.json" => Some(show_schema_level(
-                &ui2,
-                config_schema::SETTINGS_SCHEMA,
-                &settings_path,
-                "settings.json",
-                Vec::new(),
-                None,
-                picker_paths.clone(),
-            )),
-            "sudocode.json" => Some(show_schema_level(
-                &ui2,
-                config_schema::SUDOCODE_SCHEMA,
-                &sudocode_path,
-                "sudocode.json",
-                Vec::new(),
-                None,
-                picker_paths.clone(),
-            )),
-            _ => None,
-        }
+    SlashSelectionHandler(Box::new(move |answer: &str, _cli, _out| match answer {
+        "settings.json" => Some(show_schema_level(
+            &ui2,
+            config_schema::SETTINGS_SCHEMA,
+            &settings_path,
+            "settings.json",
+            Vec::new(),
+            None,
+            picker_paths.clone(),
+        )),
+        "sudocode.json" => Some(show_schema_level(
+            &ui2,
+            config_schema::SUDOCODE_SCHEMA,
+            &sudocode_path,
+            "sudocode.json",
+            Vec::new(),
+            None,
+            picker_paths.clone(),
+        )),
+        _ => None,
     }))
 }
 
@@ -115,7 +111,6 @@ fn show_schema_level(
         .filter(|f| !f.is_deprecated && !f.is_compat_only)
         .collect();
 
-    let mut keys: Vec<String> = Vec::new();
     let mut options: Vec<QuestionOptionView> = Vec::new();
 
     for f in &visible {
@@ -124,7 +119,6 @@ fn show_schema_level(
             .map_or_else(|| "(not set)".to_string(), truncate_json_value);
         let is_object = f.children.is_some() && f.field_type == FieldType::Object;
         let hint = if is_object { " \u{25b8}" } else { "" };
-        keys.push(f.key.to_string());
         options.push(QuestionOptionView {
             label: format!("{}{hint}  {DIM}{val_summary}{RESET}", f.key),
             value: f.key.to_string(),
@@ -162,7 +156,7 @@ fn show_schema_level(
     let breadcrumb2 = breadcrumb;
 
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let selected = resolve_answer(answer, &keys);
+        let selected = answer.to_string();
 
         // ← Back
         if selected == crate::repl_ui::QUESTION_BACK {
@@ -293,7 +287,7 @@ fn handle_leaf_edit(
             let field_key = field.key;
             Some(SlashSelectionHandler(Box::new(
                 move |answer: &str, _cli, out| {
-                    let selected = resolve_answer(answer, &items);
+                    let selected = answer.to_string();
                     match write_config_value(
                         &file_path,
                         &breadcrumb,
@@ -356,10 +350,9 @@ fn handle_leaf_edit(
             let file_path = file_path.to_path_buf();
             let breadcrumb = breadcrumb.to_vec();
             let field_key = field.key;
-            let items = models;
             Some(SlashSelectionHandler(Box::new(
                 move |answer: &str, _cli, out| {
-                    let selected = resolve_answer(answer, &items);
+                    let selected = answer.to_string();
                     match write_config_value(
                         &file_path,
                         &breadcrumb,
@@ -442,14 +435,6 @@ fn breadcrumb_display(breadcrumb: &[String]) -> String {
     } else {
         format!("{}.", breadcrumb.join("."))
     }
-}
-
-fn resolve_answer(answer: &str, items: &[String]) -> String {
-    answer
-        .parse::<usize>()
-        .ok()
-        .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-        .unwrap_or_else(|| answer.to_string())
 }
 
 /// Atomically write a value to a config JSON file at the given path.
@@ -591,19 +576,6 @@ mod tests {
     fn truncate_json_value_array() {
         let arr = serde_json::json!([1, 2, 3]);
         assert_eq!(truncate_json_value(&arr), "[3 items]");
-    }
-
-    #[test]
-    fn resolve_answer_numeric() {
-        let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(resolve_answer("1", &items), "a");
-        assert_eq!(resolve_answer("3", &items), "c");
-    }
-
-    #[test]
-    fn resolve_answer_text() {
-        let items = vec!["a".to_string()];
-        assert_eq!(resolve_answer("custom", &items), "custom");
     }
 
     #[test]

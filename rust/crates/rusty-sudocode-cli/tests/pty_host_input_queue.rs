@@ -197,16 +197,16 @@ fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
         .unwrap()
         .iter()
         .all(|item| item["delivery"] == "steer"));
-    let before = fs::read(env.workspace_root().join("input-tool-ticks"))
-        .unwrap()
-        .len();
-    std::thread::sleep(Duration::from_millis(350));
-    assert!(
-        fs::read(env.workspace_root().join("input-tool-ticks"))
-            .unwrap()
-            .len()
-            > before,
-        "flush cancelled the real shell"
+    // The shell appends a tick every 100 ms until released. A loaded host can
+    // delay one well past a fixed window, so wait within the shared budget: a
+    // cancelled shell never ticks again and still fails here.
+    let ticks = env.workspace_root().join("input-tool-ticks");
+    let before = fs::read(&ticks).unwrap().len();
+    common::expect_screen(
+        &host.terminal,
+        |_| fs::read(&ticks).is_ok_and(|bytes| bytes.len() > before),
+        common::DEFAULT_TIMEOUT,
+        "flush cancelled the real shell",
     );
     fs::write(env.workspace_root().join("release-input-tool"), "release").unwrap();
     let idle = host.idle();
@@ -384,6 +384,94 @@ fn native_host_background_completion_wakes_an_idle_model_without_human_input() {
             .unwrap()
             .contains("task-notification"));
     }
+    host.close();
+}
+
+/// A background shell that finishes while a turn is still running is steered
+/// into that turn, as the REPL does: it reaches the model at the turn's next
+/// model boundary, not as a new turn after it ends.
+#[test]
+fn native_host_background_completion_steers_into_the_running_turn() {
+    struct ReleaseBoth(std::path::PathBuf);
+    impl Drop for ReleaseBoth {
+        fn drop(&mut self) {
+            for file in ["release-bg", "release-fg"] {
+                let _ = fs::write(self.0.join(file), "cleanup");
+            }
+        }
+    }
+    let env = TestEnv::new("host-background-steer");
+    if !env.is_mock() {
+        return;
+    }
+    let root = env.workspace_root();
+    let _release = ReleaseBoth(root.to_path_buf());
+    fs::write(
+        root.join("bg-work.sh"),
+        "while [ ! -f release-bg ]; do sleep 0.1; done\necho BG_STEER_DONE\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("fg-work.sh"),
+        "printf started > fg-started\nwhile [ ! -f release-fg ]; do sleep 0.1; done\necho FG_STEER_DONE\n",
+    )
+    .unwrap();
+    let mut host = Host::new(&env);
+    let batch = json!([
+        {"id":"bg","name":"Bash","input":{"command":"sh bg-work.sh","timeout":180_000,"run_in_background":true}},
+        {"id":"fg","name":"Bash","input":{"command":"sh fg-work.sh","timeout":180_000}},
+    ]);
+    host.submit(
+        "initial",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    common::expect_screen(
+        &host.terminal,
+        |_| root.join("fg-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "foreground shell started",
+    );
+
+    // The turn is held open by the foreground shell; the background one ends.
+    fs::write(root.join("release-bg"), "release").unwrap();
+    let deadline = std::time::Instant::now() + common::LIVE_TURN_BUDGET;
+    let pending = loop {
+        let state = host.snapshot();
+        let background: Vec<Value> = state["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["source"] == "background")
+            .cloned()
+            .collect();
+        if !background.is_empty() {
+            break background;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no completion: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["delivery"], "steer", "{pending:?}");
+
+    fs::write(root.join("release-fg"), "release").unwrap();
+    let before_commit = host
+        .terminal
+        .expect(r#""kind":"committed"[^\r\n]*"source":"background""#)
+        .unwrap();
+    assert!(
+        !before_commit.contains(r#""kind":"turn_complete""#),
+        "the completion must commit inside the running turn"
+    );
+    host.idle();
+    let requests = env.captured_message_bodies();
+    assert_eq!(requests.len(), 2, "one turn: the batch, then its follow-up");
+    let follow_up = requests.last().unwrap();
+    assert!(follow_up.contains("task-notification"), "{follow_up}");
+    assert!(follow_up.contains("FG_STEER_DONE"), "{follow_up}");
     host.close();
 }
 

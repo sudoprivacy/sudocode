@@ -19,6 +19,7 @@ pub(crate) mod left_frame;
 mod mermaid;
 pub(crate) mod output;
 pub(crate) mod spinner_progress;
+pub(crate) mod startup;
 use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;
 pub use color_theme::{theme, ColorTheme, TextRole};
@@ -674,6 +675,7 @@ impl TerminalRenderer {
                     .skip(if plan_file.is_empty() { 2 } else { 0 }),
                 width,
                 theme().color(TextRole::Brand),
+                left_frame::Tail::Closed,
             )
         )
     }

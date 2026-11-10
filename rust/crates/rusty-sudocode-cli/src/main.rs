@@ -56,8 +56,8 @@ use cli::format::{
     format_compaction_notice, format_context_report, format_cost_report, format_issue_report,
     format_model_report, format_model_switch_report, format_permission_prompt_box,
     format_permissions_report, format_permissions_switch_report, format_pr_report,
-    format_resume_report, format_sandbox_report, format_ultraplan_report, render_messages,
-    render_version_report, turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
+    format_resume_report, format_sandbox_report, format_ultraplan_report, render_version_report,
+    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_workspace_summary,
@@ -1184,6 +1184,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             "expected_invalidations": expected,
             "breaks_by_cause": by_cause,
             "root": root.display().to_string(),
+            "ttl_default": engine_core::cache_ttl::learned_default(),
             "coverage": "anthropic-provider only",
             "cache_metrics_schema_version": engine_core::cache_metrics::CACHE_METRICS_SCHEMA_VERSION,
             "cache_metrics_spec_sha256": engine_core::cache_metrics::CACHE_METRICS_SPEC_SHA256,
@@ -1199,10 +1200,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
                     metrics.read_share_pct = None;
                     metrics.write_share_pct = None;
                 }
-                let mut report = engine_core::cache_report::session_report(
-                    &root.join(name),
-                    runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor),
-                );
+                let mut report = engine_core::cache_report::session_report(&root.join(name));
                 report["session"] = serde_json::json!(index + 1);
                 report["tracked_requests"] = serde_json::json!(stats.tracked_requests);
                 report["cache_efficiency"] = serde_json::json!(metrics);
@@ -1228,9 +1226,8 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         None => println!("  prompt read     unknown (legacy input-token coverage)"),
     }
     println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
-    if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
-        println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
-    }
+    println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
+    println!("  TTL default     {}", ttl_default_label());
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
         // The counts that tell you what to go fix. "Expected" only means the
@@ -2520,13 +2517,11 @@ fn peer_turn_sink<E: Send + 'static>(
 /// register a callback to handle the answer. The coordinator loop routes
 /// the `QuestionAnswer` event to the returned handler.
 ///
-/// `resolve_answer` maps the raw answer string (1-indexed option number
-/// or custom text) to the value to pass to `on_selected`.
+/// The input view resolves selection gestures; handlers consume the actual value.
 #[inline]
 fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
-    items: Vec<String>,
     on_selected: impl FnOnce(
             String,
             &Arc<Mutex<LiveCli>>,
@@ -2536,12 +2531,7 @@ fn show_slash_selection(
 ) -> SlashSelectionHandler {
     ui.show_question(question);
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
-        let resolved = answer
-            .parse::<usize>()
-            .ok()
-            .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
-            .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out)
+        on_selected(answer.to_string(), cli, out)
     }))
 }
 
@@ -2597,7 +2587,6 @@ fn show_effort_selection(
             back_value: None,
             initial_value: None,
         },
-        items,
         move |level, cli, out| {
             let mut current = cli.lock().expect("LiveCli mutex poisoned");
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2704,25 +2693,17 @@ impl IocraftQuestionPrompter {
         field: &runtime::QuestionField,
         raw_answer: String,
     ) -> runtime::QuestionPromptAnswer {
-        let matched = if field.options.is_empty() {
-            None
-        } else if let Ok(index) = raw_answer.parse::<usize>() {
-            index
-                .checked_sub(1)
-                .and_then(|zero_based| field.options.get(zero_based))
-        } else {
-            field
-                .options
-                .iter()
-                .find(|option| option.label == raw_answer || option.value == raw_answer)
-        };
-
+        let matched = field
+            .options
+            .iter()
+            .find(|option| option.value == raw_answer);
+        let label = matched
+            .map(|option| option.label.clone())
+            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
         runtime::QuestionPromptAnswer {
             id: field.id.clone(),
-            value: matched.map_or_else(|| raw_answer.clone(), |option| option.value.clone()),
-            label: matched
-                .map(|option| option.label.clone())
-                .or_else(|| (!raw_answer.is_empty()).then_some(raw_answer)),
+            value: raw_answer,
+            label,
         }
     }
 }
@@ -2756,9 +2737,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
             while index < request.fields.len() {
                 let rx = this.prepare_answer_receiver()?;
                 this.show_field(&request, index, answers[index].as_ref());
-                let raw = if let Ok(answer) = rx.await {
-                    answer.trim().to_string()
-                } else {
+                let Ok(raw) = rx.await else {
                     this.ui.clear_question();
                     return Err("question prompt cancelled".into());
                 };
@@ -3142,26 +3121,18 @@ impl Drop for ReplTurnCancelMonitor {
     }
 }
 
-/// Write a submitted user input to scrollback as the `❯ text` echo, matching
-/// the format the idle path has always used. Called by the coordinator — the
+/// Write an input to scrollback as it runs. Called by the coordinator — the
 /// only place that knows whether an input runs now or was queued — so a queued
-/// input is echoed when it actually flushes, not when it was typed. Multi-line
-/// input keeps the `❯` on the first line and indents the rest. A trailing blank
-/// line separates the echo from the turn output that follows, matching the
-/// spacing between other scrollback blocks.
-fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
-    output.user_prompt(display);
-}
-
-/// Commit a received envelope through the same formatter used by replay.
-/// Keep model-facing markup in the queue, and project it only at the UI edge.
-fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
-    let rendered = cli::received::render_prompt(
-        prompt,
-        render::query_terminal_width(),
-        &render::TerminalRenderer::new(),
-    );
-    output.print_block(rendered);
+/// input is echoed when it actually flushes, not when it was typed. The drawing
+/// is `received::echo`, the one the turn renderer and transcript replay use; a
+/// sub-agent or background result is a one-line notice.
+fn echo_input(output: &repl_ui::OutputSender, input: &engine_events::InputView) {
+    match input.source {
+        input_queue::QueuedKind::Subagent | input_queue::QueuedKind::Background => {
+            output.println(&input.display);
+        }
+        _ => output.user_prompt(input.echo()),
+    }
 }
 
 /// Peer-messaging health, not raw receiver errors, reaches the footer. An
@@ -3251,13 +3222,6 @@ fn apply_cache_ttl(
         }
         (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
         (TtlChoice::FiveMinutes, _) => "5m from the next request",
-        (TtlChoice::Auto, _)
-            if !runtime::experiments::is_enabled(
-                runtime::experiments::Experiment::CacheTtlAdvisor,
-            ) =>
-        {
-            "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
-        }
         (TtlChoice::Auto, false) => {
             "auto: follows this session's cache stats (to 5m at once, to 1h at the next cold start)"
         }
@@ -3271,10 +3235,23 @@ fn apply_cache_ttl(
     }
 }
 
+/// What a new unpinned session starts from: `1h, learned …` or `5m (nothing learned yet)`.
+fn ttl_default_label() -> String {
+    engine_core::cache_ttl::learned_default().map_or_else(
+        || "5m for new sessions (nothing learned yet)".to_owned(),
+        |learned| {
+            format!(
+                "{} for new sessions, learned from {}",
+                engine_core::cache_advisor::ttl_label(learned.ttl_seconds),
+                learned.session
+            )
+        },
+    )
+}
+
 /// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
 fn cache_ttl_status(session_id: &str, model: &str) -> String {
     use engine_core::cache_advisor::{ttl_label, MIN_INTERVALS};
-    use engine_core::cache_ttl::TtlChoice;
     let status = engine_core::cache_ttl::status(session_id);
     let now = status.effective_seconds.map_or("not sent yet", ttl_label);
     if status.auto {
@@ -3305,15 +3282,13 @@ fn cache_ttl_status(session_id: &str, model: &str) -> String {
                 }
             },
         );
-        return format!("Prompt cache TTL: {now} · auto{verdict}");
+        return format!(
+            "Prompt cache TTL: {now} · auto{verdict} · {}",
+            ttl_default_label()
+        );
     }
     let pending = status.pending.map_or(String::new(), |pending| {
-        let (label, when) = match (pending.choice, pending.force_now) {
-            (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
-            (TtlChoice::OneHour, true) => ("1h", "from the next request"),
-            (TtlChoice::FiveMinutes, _) => ("5m", "from the next request"),
-            (TtlChoice::Auto, _) => ("auto", "from the next suitable request"),
-        };
+        let (label, when) = pending.describe();
         format!(" · pending {label} {when}")
     });
     format!("Prompt cache TTL: {now}{pending}")
@@ -3328,20 +3303,13 @@ fn run_repl_iocraft_dispatch(
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from
     // one println in spawn_repl_ui, before raw mode.
-    let (banner, startup_prompts) = {
+    let banner = {
         let banner = cli.startup_banner();
-        let (history, prompts) = cli.render_restored_scrollback();
+        let history = cli.render_restored_scrollback();
         if history.is_empty() {
-            (banner, Vec::new())
+            banner
         } else {
-            let offset = banner.len() + 1;
-            (
-                format!("{banner}\n{history}"),
-                prompts
-                    .into_iter()
-                    .map(|position| position + offset)
-                    .collect(),
-            )
+            format!("{banner}\n{history}")
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
@@ -3393,21 +3361,45 @@ fn run_repl_iocraft_dispatch(
         })
     };
     let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
+    // Taken before `cli` moves into the shared lock, and used by the local
+    // mailbox poller below: reading it back through the lock would have the
+    // coordinator thread contend with every turn for a value that cannot change.
+    let session_agent_name = cli.lifecycle.agent_name();
+    // The session's one receiver, further down, runs on this peer namespace,
+    // the same one its `send` tool writes through.
+    //
+    // Keyed by the name the LIVE SESSION answers to rather than re-derived
+    // here: the session already resolved it (config `agentName`, else derived
+    // from its workspace) and signs outbound messages with it, and a second
+    // derivation from the process directory is how a peer's reply arrives at
+    // an inbox nothing is polling. `attach` reuses the session's selected
+    // mailbox, including a pending binding that this receiver retries.
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message. Started
+    // before the UI takes keys: its Scheduled tab runs a job now through this
+    // scheduler, and the startup work between here and the coordinator loop
+    // (git position, completions) can take seconds on a loaded machine. A fire
+    // before the receiver below starts waits in the mailbox like any message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
-        startup_prompts,
         seed_todos,
         input_history,
         Some(dequeue_hook),
         Arc::clone(&completions),
+        resume_status
+            .as_ref()
+            .map(|status| (status, cli.lifecycle.usage_snapshot().turns())),
     );
     cli.completions = Some(completions);
     cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
-    if let Some(status) = resume_status {
-        repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
-    }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
     repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
@@ -3415,10 +3407,6 @@ fn run_repl_iocraft_dispatch(
     // Route LiveCli output through iocraft's OutputSender so it goes
     // through split_for_iocraft and renders correctly in raw mode.
     cli.iocraft_output = Some(repl_output.clone());
-    // Taken before `cli` moves into the shared lock, and used by the local
-    // mailbox poller below: reading it back through the lock would have the
-    // coordinator thread contend with every turn for a value that cannot change.
-    let session_agent_name = cli.lifecycle.agent_name();
     spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
@@ -3526,17 +3514,9 @@ fn run_repl_iocraft_dispatch(
         })
         .expect("spawn input bridge");
 
-    // The session's one receiver, on the same peer namespace its `send` tool
-    // writes through, sharing the coordinator's delivery and shutdown boundary.
-    //
-    // Keyed by the name the LIVE SESSION answers to rather than re-derived
-    // here: the session already resolved it (config `agentName`, else derived
-    // from its workspace) and signs outbound messages with it, and a second
-    // derivation from the process directory is how a peer's reply arrives at
-    // an inbox nothing is polling. `attach` reuses the session's selected
-    // mailbox, including a pending binding that this receiver retries.
+    // The session's one receiver, sharing the coordinator's delivery and
+    // shutdown boundary.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let peer = engine_host::peer::attach(&session_agent_name);
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(
@@ -3636,18 +3616,7 @@ fn run_repl_iocraft_dispatch(
                     // kind (`❯` human / message frame for peers). Then clear the queued
                     // messages from the pending overlay: they're leaving the queue.
                     for echo in &next.echoes {
-                        match echo.source {
-                            input_queue::QueuedKind::Human => {
-                                echo_submit_to_scrollback(&repl_output, &echo.display);
-                            }
-                            input_queue::QueuedKind::Peer => {
-                                echo_peer_to_scrollback(&repl_output, &echo.display);
-                            }
-                            input_queue::QueuedKind::Subagent
-                            | input_queue::QueuedKind::Background => {
-                                repl_output.println(&echo.display);
-                            }
-                        }
+                        echo_input(&repl_output, echo);
                     }
                     repl_ui_cmd.pending_inputs_clear();
                     coord.lock().unwrap().start_turn();
@@ -3672,16 +3641,18 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
+                        // A scheduled job's message arrives through the same
+                        // inbox; only its origin differs.
+                        let kind = if msg.kind == runtime::agent_mailbox::kinds::SCHEDULED {
+                            input_queue::QueuedKind::Scheduled
+                        } else {
+                            input_queue::QueuedKind::Peer
+                        };
                         let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(
                             &[msg],
                             peer_verified,
                         );
-                        (
-                            prompt.clone(),
-                            prompt,
-                            input_queue::QueuedKind::Peer,
-                            Some(ack),
-                        )
+                        (prompt.clone(), prompt, kind, Some(ack))
                     }
                     CoordinatorEvent::SubagentCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Subagent, None)
@@ -3703,12 +3674,6 @@ fn run_repl_iocraft_dispatch(
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                         continue;
                     }
-                    match kind {
-                        input_queue::QueuedKind::Subagent | input_queue::QueuedKind::Background => {
-                            repl_output.println(&display);
-                        }
-                        _ => echo_peer_to_scrollback(&repl_output, &display),
-                    }
                     let next =
                         coord
                             .lock()
@@ -3719,6 +3684,9 @@ fn run_repl_iocraft_dispatch(
                                 kind,
                                 ack,
                             ));
+                    for echo in &next.echoes {
+                        echo_input(&repl_output, echo);
+                    }
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -3801,20 +3769,28 @@ fn run_repl_iocraft_dispatch(
                 }
                 event
                 @ (repl_ui::InputEvent::Submit { .. } | repl_ui::InputEvent::Queue { .. }) => {
-                    let (text, display, delivery) = match event {
-                        repl_ui::InputEvent::Submit { text, display } => {
-                            (text, display, engine_events::InputDelivery::Steer)
-                        }
-                        repl_ui::InputEvent::Queue { text, display } => {
-                            (text, display, engine_events::InputDelivery::Queue)
-                        }
+                    let (text, display, pasted, delivery) = match event {
+                        repl_ui::InputEvent::Submit {
+                            text,
+                            display,
+                            pasted,
+                        } => (text, display, pasted, engine_events::InputDelivery::Steer),
+                        repl_ui::InputEvent::Queue {
+                            text,
+                            display,
+                            pasted,
+                        } => (text, display, pasted, engine_events::InputDelivery::Queue),
                         _ => unreachable!(),
+                    };
+                    let human = |text: String| {
+                        input_queue::QueuedInput::human(text, display.clone())
+                            .with_pasted(pasted.clone())
                     };
                     // `!<cmd>` bash mode: run it here, no model turn. The
                     // runner thread holds the `LiveCli` mutex for the whole
                     // turn, so during a turn the line is declined rather than
                     // blocking the dispatch loop behind the lock. The echo is
-                    // the coordinator's job (see `echo_submit_to_scrollback`),
+                    // the coordinator's job (see `echo_input`),
                     // in bash-mode dress, and only when the line actually runs.
                     if let Some(command) = bash_mode::parse_bang_command(&text) {
                         if coord.lock().unwrap().is_running() {
@@ -3838,7 +3814,7 @@ fn run_repl_iocraft_dispatch(
                     // scrollback, as a prompt's turn does. Text that is not a
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
                     if !matches!(parsed, Ok(None)) {
-                        echo_submit_to_scrollback(&repl_output, &display);
+                        echo_input(&repl_output, &human(text.clone()).input.view());
                     }
                     // Task inspection is local UI, so it remains available
                     // during work without taking the session lock.
@@ -3918,7 +3894,6 @@ fn run_repl_iocraft_dispatch(
                                     back_value: None,
                                     initial_value: None,
                                 },
-                                models,
                                 move |model_name, cli, out| {
                                     if let Some(selection) = show_effort_selection(
                                         &effort_ui,
@@ -4062,19 +4037,18 @@ fn run_repl_iocraft_dispatch(
                     if coord.lock().unwrap().has_idle_queue() {
                         prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
-                        coord.lock().unwrap().submit_during_turn(
-                            input_queue::QueuedInput::human(text, display),
-                            input_queue::QueueMode::Queue,
-                        );
+                        coord
+                            .lock()
+                            .unwrap()
+                            .submit_during_turn(human(text), input_queue::QueueMode::Queue);
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     } else if !coord.lock().unwrap().is_running() {
                         prompt_outbox.post(trimmed);
                         coord.lock().unwrap().resume();
-                        echo_submit_to_scrollback(&repl_output, &display);
-                        let next = coord
-                            .lock()
-                            .unwrap()
-                            .submit_when_idle(input_queue::QueuedInput::human(text, display));
+                        let next = coord.lock().unwrap().submit_when_idle(human(text));
+                        for echo in &next.echoes {
+                            echo_input(&repl_output, echo);
+                        }
                         coord.lock().unwrap().start_turn();
                         runner_handle = Some(spawn_iocraft_turn(
                             Arc::clone(&cli_shared),
@@ -4105,13 +4079,7 @@ fn run_repl_iocraft_dispatch(
                                 delivery
                             }
                         };
-                        stage_turn_input(
-                            &coord,
-                            input_queue::QueuedInput::human(text, display),
-                            delivery,
-                            &commands,
-                            &repl_ui_cmd,
-                        );
+                        stage_turn_input(&coord, human(text), delivery, &commands, &repl_ui_cmd);
                     }
                 }
                 repl_ui::InputEvent::QuestionAnswer(text) => {
@@ -4279,6 +4247,7 @@ fn spawn_iocraft_turn(
             cli.record_prompt_history();
             match cli.run_turn_iocraft(
                 &next.prompt,
+                &next.echoes,
                 &output,
                 &ui,
                 &spinner,
@@ -4408,24 +4377,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
         "off" | "false" | "0" => Some(false),
         _ => None,
     }
-}
-
-/// Measure visible string width by stripping ANSI escape sequences.
-fn strip_ansi_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c == 'm' {
-                in_escape = false;
-            }
-        } else {
-            width += 1;
-        }
-    }
-    width
 }
 
 /// The renderer-side capture of one turn: the `TurnComplete` aggregate plus the
@@ -4574,6 +4525,8 @@ struct TurnPresentation<'a> {
     output: Option<&'a repl_ui::OutputSender>,
     ui: Option<&'a repl_ui::UiCommandSender>,
     is_rendered: bool,
+    /// How the host already drew this turn's inputs; saved with the prompt.
+    shown: &'a [engine_events::InputView],
 }
 
 impl LiveCli {
@@ -4773,20 +4726,7 @@ impl LiveCli {
                 .map(|r| r.base_url)
                 .unwrap_or_default();
 
-        let t = theme();
-        let logo_fg = t.fg_seq(TextRole::Brand);
-        let accent_fg = t.fg_seq(TextRole::Accent);
-        let logo = format!(
-            "{logo_fg}\
-███████╗██╗   ██╗██████╗  ██████╗ \n\
-██╔════╝██║   ██║██╔══██╗██╔═══██╗\n\
-███████╗██║   ██║██║  ██║██║   ██║\n\
-╚════██║██║   ██║██║  ██║██║   ██║\n\
-███████║╚██████╔╝██████╔╝╚██████╔╝\n\
-╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}"
-        );
-
-        let lines = [
+        render::startup::banner(&[
             format!("  {DIM}Model{RESET}            {}", model),
             format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
             format!("  {DIM}Endpoint{RESET}         {}", endpoint),
@@ -4799,57 +4739,18 @@ impl LiveCli {
             format!("  {DIM}Directory{RESET}        {}", cwd),
             format!("  {DIM}Session{RESET}          {}", handle.id),
             format!("  {DIM}Auto-save{RESET}        {}", session_path),
-        ];
-
-        let max_width = lines.iter().map(|l| strip_ansi_width(l)).max().unwrap_or(0);
-        let box_width = max_width + 2; // 1 space padding on each side
-
-        let grey = t.fg_seq(TextRole::Border);
-        let reset = RESET;
-
-        let top = format!("{grey}╭{}╮{reset}", "─".repeat(box_width));
-        let bottom = format!("{grey}╰{}╯{reset}", "─".repeat(box_width));
-
-        let boxed_lines: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                let visible_width = strip_ansi_width(line);
-                let padding = max_width - visible_width;
-                format!(
-                    "{grey}│{reset} {}{} {grey}│{reset}",
-                    line,
-                    " ".repeat(padding)
-                )
-            })
-            .collect();
-
-        format!(
-            "{}\n\n{}\n{}\n{}",
-            logo,
-            top,
-            boxed_lines.join("\n"),
-            bottom,
-        )
+        ])
     }
 
     /// Render the restored conversation history to a scrollback string, or an
-    /// empty string when there is none (a fresh session), through the shared
-    /// `render_messages`, so a resumed session's history stays visible.
-    fn render_restored_scrollback(&self) -> (String, Vec<usize>) {
+    /// empty string when there is none (a fresh session), through the live
+    /// turn renderer, so a resumed session looks as it did before the restart.
+    fn render_restored_scrollback(&self) -> String {
         let session = self.lifecycle.session_snapshot();
         if session.messages().is_empty() {
-            return (String::new(), Vec::new());
+            return String::new();
         }
-        let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-        let renderer = render::TerminalRenderer::new();
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            cli::format::render_messages_with_prompts(session.messages(), term_width, &renderer)
-        } else {
-            (
-                render_messages(session.messages(), term_width, &renderer),
-                Vec::new(),
-            )
-        }
+        render_engine::replay(session.messages())
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -4914,6 +4815,7 @@ impl LiveCli {
             output,
             ui,
             is_rendered,
+            shown,
         } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -4930,6 +4832,7 @@ impl LiveCli {
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
             context: None,
+            shown: shown.iter().map(engine_events::InputView::echo).collect(),
         })?;
 
         let mut outcome = TurnOutcome::default();
@@ -5192,6 +5095,7 @@ impl LiveCli {
                 output: None,
                 ui: None,
                 is_rendered: true,
+                shown: &[],
             },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5242,13 +5146,17 @@ impl LiveCli {
             return;
         };
         let active = self.lifecycle.session_handle().id;
+        // Evaluated on the input thread when Tab is pressed, so it must stay
+        // cheap: ids only, never the full listing, which parses every
+        // transcript and classifies the workspace with git and tmux.
         let sessions: commands::ValueList = Arc::new(move || {
             let mut ids = vec![active.clone()];
             ids.extend(
-                list_managed_sessions()
+                engine_host::session::current_session_store()
+                    .ok()
+                    .and_then(|store| store.recent_session_ids(21).ok())
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|session| session.id)
                     .filter(|id| *id != active)
                     .take(20),
             );
@@ -5332,6 +5240,7 @@ impl LiveCli {
     fn run_turn_iocraft(
         &mut self,
         input: &str,
+        shown: &[engine_events::InputView],
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
@@ -5359,6 +5268,7 @@ impl LiveCli {
                 output: Some(output),
                 ui: Some(ui),
                 is_rendered: true,
+                shown,
             },
             &mut permission_prompter,
             &mut question_prompter,
@@ -5423,6 +5333,7 @@ impl LiveCli {
                 output: None,
                 ui: None,
                 is_rendered: false,
+                shown: &[],
             },
             permission_prompter,
             &mut question_prompter,

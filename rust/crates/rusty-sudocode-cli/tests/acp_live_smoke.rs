@@ -2,8 +2,10 @@
 //!
 //! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
 //! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
-//! is absent or empty the tests silently pass (return early). On CI they run
-//! only on main merges / `workflow_dispatch` where the GitHub secret is available.
+//! is absent or empty the tests return early. Invoke the shared `acp` scenario
+//! in `.github/scripts/live_model_acceptance.py` explicitly with local credentials,
+//! or through the authorized on-demand/release workflow. Ordinary PR, queue and
+//! main-push checks do not run paid provider tests.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!
@@ -24,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -768,6 +770,122 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
 // Entry points
 // ---------------------------------------------------------------------------
 
+async fn prompt_with_host_context(
+    client: &mut AcpTestClient,
+    session: &str,
+    prompt: &str,
+    snapshot: Option<&str>,
+) -> (String, usize) {
+    let id = client.next_id;
+    client.next_id += 1;
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+            "params": {"sessionId": session, "prompt": [{"type": "text", "text": prompt}]},
+        }))
+        .await;
+    let mut text = String::new();
+    let mut requests = 0;
+    loop {
+        let message = client.recv().await;
+        if message["method"] == "_sudocode/session/host_context" {
+            assert_eq!(message["params"]["sessionId"], session);
+            let snapshot = snapshot.expect("management commands must not refresh host context");
+            requests += 1;
+            client
+                .send_raw(&json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "result": {"appendSystemPrompt": snapshot},
+                }))
+                .await;
+        } else if message.get("id").and_then(Value::as_u64) == Some(id) {
+            assert!(message.get("error").is_none(), "{message}");
+            fail_clearly_if_the_credential_was_rejected(&text);
+            return (text.trim().to_string(), requests);
+        } else {
+            assert_ne!(
+                message["method"], "session/request_permission",
+                "read-only context lookup must not need a tool"
+            );
+            let update = &message["params"]["update"];
+            if update["sessionUpdate"] == "agent_message_chunk" {
+                text.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_host_context_survives_revision_compaction_and_resume() {
+    let Some(token) = proxy_token() else {
+        eprintln!("SKIP live host context: PROXY_AUTH_TOKEN is not configured");
+        return;
+    };
+    let workspace = TestWorkspace::new("live-host-context");
+    workspace.create();
+    workspace.write_sudocode_json();
+    let mut client = spawn_stdio_client(&workspace, &token);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        scenario_initialize(&mut client).await;
+        let (_, response) = client
+            .send_request("session/new", json!({
+                "cwd": workspace.root.to_string_lossy(), "mcpServers": [],
+                "_meta": {"sudocode": {"hostContext": {"version": 1}, "appendSystemPrompt": "STALE_HOST_SEED"}},
+            }))
+            .await;
+        assert!(response.get("error").is_none(), "{response}");
+        let session = response["result"]["sessionId"].as_str().unwrap().to_string();
+        let nonce = format!("{}-{}", std::process::id(), TEMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let snapshots: Vec<_> = ['A', 'B', 'C'].iter().map(|revision| format!(
+            "Authorized project: host-context-live\nModel revision: {revision}\nObject: SalesOrder\ncurrent_marker: CONTEXT_{revision}_{nonce}"
+        )).collect();
+        let prompt = "Read the current host-provided model context and reply with exactly its current_marker value. No tools, explanation or formatting.";
+        for (index, revision) in ['A', 'B', 'B'].iter().enumerate() {
+            let mut input = prompt.to_string();
+            if index < 2 {
+                // A balanced history makes the unchanged 20% recent-token
+                // floor compatible with the existing 50% compaction target.
+                input.push_str("\n\nHistorical fixture background; the host snapshot remains current:\n");
+                for note in 0..if index == 0 { 160 } else { 80 } {
+                    use std::fmt::Write as _;
+                    writeln!(input, "Historical review note {note:03}: source records remain read-only; check stable SalesOrder and Customer identities, declared date fields, row grain, and unresolved business meanings.").unwrap();
+                }
+            }
+            let (answer, requests) = prompt_with_host_context(&mut client, &session, &input, Some(&snapshots[usize::from(*revision == 'B')])).await;
+            assert_eq!(requests, 1);
+            assert_eq!(answer, format!("CONTEXT_{revision}_{nonce}"));
+        }
+        let path = find_jsonl_file(&workspace.root.join(".scode/sessions")).expect("persisted live session");
+        let before = runtime::Session::load_from_path(&path).unwrap();
+        let (_, requests) = prompt_with_host_context(&mut client, &session, "/compact", None).await;
+        assert_eq!(requests, 0);
+        let compacted = runtime::Session::load_from_path(&path).unwrap();
+        assert!(compacted.compaction.as_ref().is_some_and(|report| report.removed_message_count > 0));
+        assert!(compacted.messages().len() < before.messages().len());
+        assert_eq!(compacted.messages().iter().rev().find_map(runtime::ConversationMessage::host_context_text), Some(snapshots[1].as_str()));
+        let (answer, requests) = prompt_with_host_context(&mut client, &session, prompt, Some(&snapshots[1])).await;
+        assert_eq!(requests, 1);
+        assert_eq!(answer, format!("CONTEXT_B_{nonce}"));
+        let (_, loaded) = client.send_request("session/load", json!({
+            "sessionId": session, "cwd": workspace.root.to_string_lossy(), "mcpServers": [],
+            "_meta": {"sudocode": {"hostContext": {"version": 1}, "appendSystemPrompt": "STALE_RESUMED_HOST_SEED"}},
+        })).await;
+        assert!(loaded.get("error").is_none(), "{loaded}");
+        let (answer, requests) = prompt_with_host_context(&mut client, &session, prompt, Some(&snapshots[2])).await;
+        assert_eq!(requests, 1);
+        assert_eq!(answer, format!("CONTEXT_C_{nonce}"));
+    }).catch_unwind().await;
+    client.shutdown().await;
+    workspace.cleanup();
+    assert!(
+        !workspace.root.exists(),
+        "remove private live credentials and history"
+    );
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::test]
 async fn live_anthropic_smoke_stdio() {
     let Some(token) = proxy_token() else {
@@ -785,6 +903,27 @@ async fn live_anthropic_smoke_stdio() {
 }
 
 /// A real model must read the summary, send it back, and preserve its record.
+/// A steering message with a summary, from `from` to `to`.
+fn summary_message(
+    from: &str,
+    to: &str,
+    body: &str,
+    summary: &str,
+) -> runtime::agent_mailbox::MailboxEnvelope {
+    runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: from.into(),
+        to: to.into(),
+        body: body.into(),
+        summary: Some(summary.into()),
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    }
+}
+
 #[tokio::test]
 async fn live_peer_summary_reaches_model_client_and_saved_session() {
     const SUMMARY: &str = "ACP-SUMMARY-REAL-104729";
@@ -825,18 +964,8 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         PEER.into(),
     );
     peer.ensure_presence().unwrap();
-    peer.send(runtime::agent_mailbox::MailboxEnvelope {
-        delivery: runtime::turn_input::InputDelivery::Steer,
-        from: PEER.into(),
-        to: agent.into(),
-        body: BODY.into(),
-        summary: Some(SUMMARY.into()),
-        timestamp: 0,
-        color: None,
-        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
-        request_id: None,
-    })
-    .unwrap();
+    peer.send(summary_message(PEER, agent, BODY, SUMMARY))
+        .unwrap();
     timeout(RECV_TIMEOUT, async {
         let mut saw_summary = false;
         let mut answer = String::new();

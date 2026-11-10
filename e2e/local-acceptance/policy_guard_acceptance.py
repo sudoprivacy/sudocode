@@ -37,6 +37,7 @@ def main():
     if output == SOURCE or SOURCE in output.parents:
         raise RuntimeError("Keep guard fixtures outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
+    prepared_home = Path.home()
     parent = load("policy_guard_parent", SOURCE / "e2e/local-acceptance/run.py")
     os.environ.clear()
     os.environ.update(parent.FIXTURE_ENV)
@@ -54,10 +55,10 @@ def main():
         if path.is_file() and "__pycache__" not in path.parts
     }
     # Windows git archive can apply core.autocrlf to the Docker input snapshot.
-    # Reconstruct only exact pinned policy bytes for this private Git fixture;
-    # arbitrary changed content must still fail the production SHA256 check.
+    # Read every pinned input from the same source, including files outside the
+    # policy directories. Arbitrary changes still fail the production SHA256 check.
     for path, expected in pins.items():
-        canonical = contents[path].replace(b"\r\n", b"\n")
+        canonical = (SOURCE / path).read_bytes().replace(b"\r\n", b"\n")
         if hashlib.sha256(canonical).hexdigest() != expected:
             raise RuntimeError(f"Guard fixture source differs from its protected byte pin: {path}")
         contents[path] = canonical
@@ -128,7 +129,36 @@ def main():
         negative = json.loads((output / "old-path-negative.command.json").read_text())
         assert negative["exit_code"] == 2, negative
     entry = profiles.stage_profile_executor(candidate, protected, "guard-contract", output / "native-guard-policy")
-    executable = profiles.nextest_binary(output)
+    # A fresh private HOME must retain the already-prepared tool offline.
+    proxy_names = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"]
+    original_proxy = {name: os.environ.get(name) for name in proxy_names}
+    os.environ.update(HTTPS_PROXY="http://127.0.0.1:1", https_proxy="http://127.0.0.1:1", NO_PROXY="", no_proxy="")
+    try:
+        executable = profiles.nextest_binary(output)
+    finally:
+        for name, value in original_proxy.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    original = prepared_home / executable.relative_to(Path.home())
+    assert original != executable and original.read_bytes() == executable.read_bytes()
+    # Deliberately mutate only the private executable; its parent cache must
+    # remain intact and the normal pinned verifier must reject the mutation.
+    intact = executable.read_bytes()
+    executable.write_bytes(intact + b"private cache corruption control")
+    try:
+        assert original.read_bytes() == intact
+        try:
+            profiles.nextest_binary(output)
+        except RuntimeError as error:
+            assert "Cached nextest executable differs" in str(error), error
+        else:
+            raise AssertionError("A modified private nextest executable passed verification")
+    finally:
+        executable.write_bytes(intact)
+    assert profiles.nextest_binary(output) == executable
+    print("PASS: isolated HOME retains verified nextest offline; private corruption is refused and parent bytes remain intact", flush=True)
     result = authority.run_command([
         sys.executable, str(entry), "--repository", str(candidate), "--output", str(output / "positive"),
         "--executable", str(executable), "--source-receipt", str(output / "nextest-source.json"),

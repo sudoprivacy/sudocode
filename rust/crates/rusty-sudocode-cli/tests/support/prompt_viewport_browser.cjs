@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const http = require('node:http');
 const { performance } = require('node:perf_hooks');
 const { createHash } = require('node:crypto');
@@ -34,6 +35,12 @@ const report = { status: 'running', enabled: config.enabled, samples: [], frame_
   resource_scope: 'Dedicated browser process tree, including renderer/GPU; summed RSS can count shared pages more than once. Peak sums per-process high-water RSS where available, otherwise phase samples. Observer Node process excluded. Memory accounting requires Linux/macOS.' };
 let child, browser, page, exited = false;
 const wire = [];
+async function assertNativeHistory() {
+  const committed = await page.evaluate(() => window.fixture.lines().join('\n'));
+  const expected = Array.from({ length: 90 }, (_, row) => `ViewportRow${String(row).padStart(3, '0')}`);
+  assert.deepEqual(committed.match(/ViewportRow\d{3}/g), expected,
+    'every answer paragraph remains in native history exactly once and in order');
+}
 websocket.on('connection', socket => {
   const terminalModules = process.env.SCODE_TERMINAL_MODULES || path.join(shared, 'node_modules');
   child = launch(config, { cols: config.cols, rows: config.rows }, name => require(path.join(terminalModules, name)));
@@ -62,31 +69,67 @@ websocket.on('connection', socket => {
       return sample;
     }
     page = await browser.newPage({ viewport: { width: 1300, height: 1000 } });
-    await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify({ cols: config.cols, rows: config.rows }))}`);
+    const terminalOptions = { cols: config.cols, rows: config.rows,
+      reflowCursorLine: config.backend !== 'system',
+      windowsPty: process.platform === 'win32'
+        ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined };
+    await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify(terminalOptions))}`);
     await page.waitForFunction(() => window.fixture?.viewport().includes('❯'));
     const initial = await resources('initial');
+    const initialHistory = await page.evaluate(() => window.fixture.terminal.buffer.active.baseY);
     await page.locator('.xterm-helper-textarea').focus();
     await page.keyboard.insertText(config.prompt);
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => window.fixture.viewport().includes('ViewportRow089'));
+    const appendedHistory = await page.evaluate(() => window.fixture.terminal.buffer.active.baseY);
+    report.native_history = { initial: initialHistory, after_stream: appendedHistory };
+    assert(appendedHistory > initialHistory + 90, 'committed output must grow native terminal history');
+    assert.equal(await page.evaluate(() => window.fixture.terminal.modes.mouseTrackingMode), 'none',
+      'the terminal owns both wheel and scrollbar navigation');
+    report.checks.push('stream appends native history without application mouse capture');
     await page.keyboard.insertText('draft界');
     await page.waitForFunction(() => window.fixture.viewport().includes('draft界'));
     const rect = await page.locator('.xterm-screen').boundingBox();
     await page.mouse.move(rect.x + 300, rect.y + 120);
     await page.mouse.wheel(0, -350);
-    await page.waitForFunction(enabled => {
-      if (!enabled) { const buffer = window.fixture.terminal.buffer.active; return buffer.viewportY < buffer.baseY; }
-      return !window.fixture.viewport().includes('ViewportRow089') && window.fixture.viewport().includes('ViewportRow');
-    }, config.enabled);
+    await page.waitForFunction(() => {
+      const buffer = window.fixture.terminal.buffer.active;
+      return buffer.viewportY < buffer.baseY;
+    });
+    // Use the actual scrollbar thumb, not scrollLines/scrollToLine. The old
+    // experiment gave wheel events and the native scrollbar separate histories.
+    const wheelTop = await page.evaluate(() => window.fixture.terminal.buffer.active.viewportY);
+    report.scrolling = { wheel_top: wheelTop };
+    const slider = await page.evaluate(() => {
+      for (const element of document.querySelectorAll('.xterm-slider')) {
+        const bounds = element.getBoundingClientRect();
+        if (bounds.width > 0 && bounds.height > bounds.width)
+          return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+      }
+      throw new Error('Native vertical scrollbar thumb is missing');
+    });
+    await page.mouse.move(slider.x, slider.y);
+    await page.mouse.down();
+    await page.mouse.move(slider.x, rect.y + rect.height - 2, { steps: 12 });
+    await page.mouse.up();
+    await page.waitForFunction(() => {
+      const buffer = window.fixture.terminal.buffer.active;
+      return buffer.viewportY === buffer.baseY;
+    });
+    report.scrolling.after_drag = await page.evaluate(() => window.fixture.terminal.buffer.active.viewportY);
+    assert(report.scrolling.after_drag > wheelTop);
+    await page.mouse.move(rect.x + 300, rect.y + 120);
+    await page.mouse.wheel(0, -350);
+    await page.waitForFunction(() => {
+      const buffer = window.fixture.terminal.buffer.active;
+      return buffer.viewportY < buffer.baseY;
+    });
+    report.checks.push('real scrollbar drag and wheel navigate the same native buffer');
     const visible = await page.evaluate(() => {
       const terminal = window.fixture.terminal, buffer = terminal.buffer.active;
       return Array.from({ length: terminal.rows }, (_, index) => buffer.getLine(buffer.viewportY + index).translateToString(true));
     });
-    if (config.enabled) {
-      assert(visible[0].includes('PROSE_CONTROL'), 'context belongs to the answer being read');
-      assert(visible.slice(-6).some(row => row.includes('draft界')), 'composer remains fixed');
-      report.checks.push('real wheel navigation; pinned prompt and draft');
-    } else report.checks.push('real native terminal history scrolling');
+    assert(visible.some(row => row.includes('ViewportRow')), 'history is visible at the native reading position');
     await page.screenshot({ path: path.join(config.logRoot, 'reading.png') });
 
     const label = visible.slice(1).map(row => row.match(/ViewportRow\d+/)?.[0]).find(Boolean);
@@ -111,12 +154,21 @@ websocket.on('connection', socket => {
     assert.equal(await page.evaluate(() => window.fixture.terminal.getSelection()), label);
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     await page.waitForFunction(() => window.fixture.viewport().includes('Σ'));
+    await assertNativeHistory();
     assert.equal(await page.evaluate(() => window.fixture.terminal.getSelection()), label, 'new output preserves selection');
     report.checks.push('native drag copies exact visible text and survives output');
     await resources('after-selection');
 
+    await page.evaluate(() => window.fixture.terminal.scrollToBottom());
+    await page.waitForFunction(() => {
+      const terminal = window.fixture.terminal, buffer = terminal.buffer.active;
+      return buffer.viewportY === buffer.baseY
+        && Array.from({ length: terminal.rows }, (_, row) => buffer.getLine(buffer.viewportY + row).translateToString(true))
+          .some(line => line.includes('draft界'));
+    });
     await page.evaluate(() => window.fixture.resize(64, 36));
     await page.waitForFunction(() => window.fixture.terminal.cols === 64 && window.fixture.viewport().includes('draft界'));
+    await assertNativeHistory();
     await page.screenshot({ path: path.join(config.logRoot, 'resized.png') });
     await page.locator('.xterm-helper-textarea').focus();
     await page.keyboard.press('Control+u');
@@ -151,6 +203,7 @@ websocket.on('connection', socket => {
     }
     report.metrics.input_history_frame_p95_ms = [...report.frame_samples].sort((a, b) => a - b)[Math.ceil(report.frame_samples.length * .95) - 1];
     await page.screenshot({ path: path.join(config.logRoot, 'typed.png') });
+    await assertNativeHistory();
     const after = await resources('after-typing');
     report.metrics.terminal_cpu_ms = after.cpu_ms - initial.cpu_ms;
     if (after.rss_mib !== null) {

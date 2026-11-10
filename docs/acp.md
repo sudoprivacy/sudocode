@@ -159,6 +159,11 @@ Every request includes `sessionId` and an `action`:
 `steer` allows delivery at the next model boundary within the active turn.
 `queue` waits for the current turn to end. These actions do not interrupt a
 running tool to inject text. Idle input starts a new turn automatically.
+Background and sub-agent notifications on this path follow the `steer` rule:
+one that arrives while a turn is running is delivered at that turn's next
+model boundary, and otherwise it is queued and starts the next turn, as in
+the CLI. Journaled completions (`taskCompletions`, `subagentCompletions`,
+below) still deliver only after the parent turn commits.
 Cancellation through `session/cancel` always remains available and pauses
 unapplied input; an explicit human steer or flush resumes delivery. Delivery
 does not add a mandatory instruction to abandon the model's existing work.
@@ -255,7 +260,10 @@ python crates/rusty-sudocode-cli/tests/live/tool_pause.py --evidence /tmp/pause-
 `_scode/ask_user_question` keeps `description` as a string and supplies optional
 `descriptionFormat` (`"plain"` or `"markdown"`) when a description is present.
 Clients can render model questions and plan reviews as Markdown while keeping
-configuration and permission text literal.
+configuration and permission text literal. The engine resolves question defaults
+before sending this request; clients consume each field's `allowCustomInput`.
+The model input contract and terminal behavior are described in
+[interactive question behavior](usage.md#interactive-repl).
 
 Plan approval runs through this same question exchange even when the engine
 has no terminal. Selecting “Clear context & execute” continues inside the
@@ -471,9 +479,16 @@ returns `{"appendSystemPrompt":"exact current context"}`. The controller owns
 source selection and authorization; the model cannot select a provider or grant
 access through this request. This interface performs no model summarization.
 
-The engine replaces only the caller's appended prompt and preserves the existing
-session, history, model, memory mode and execution policy. Byte-identical content
-does not rebuild the runtime. A failed, disconnected, malformed, empty or timed
+The response field retains its v1 name for compatibility. With this capability,
+the initial caller append on `session/new` or `session/load` is superseded before
+model work. The resolved snapshot is then a native harness record at the current
+conversation tail. It does not replace the fixed provider system prompt or
+rewrite earlier messages, so a changed revision preserves the reusable request
+prefix. Ordinary caller appends without this capability keep their existing
+semantics. The session, model, memory mode and execution policy are preserved.
+Byte-identical snapshots do not append duplicates or rebuild the runtime. The
+latest exact snapshot survives compaction without pinning the old prefix or
+relying on an LLM summary to preserve it. A failed, disconnected, malformed, empty or timed
 out response fails the turn before model work; it never falls back to a stale
 append. The provider has a 30-second response budget and cancellation releases
 its pending request. Slash and shell management commands do not call the provider.
@@ -494,12 +509,27 @@ Context stays fixed during a turn, including in-turn steering. The following
 turn resolves anew. The provider mode is transport state, so controllers must
 negotiate it again when restoring a session.
 
+Provider cache checkpoint metadata can move as the conversation grows. The
+process regression compares the unchanged system prompt, message roles and all
+content fields, excluding only content-block `cache_control` markers. That
+establishes preserved model input, not a live cache hit; provider usage and the
+native cache ledger remain the evidence for actual reuse and cost.
+
+The live `acp_live_smoke` case
+`live_host_context_survives_revision_compaction_and_resume` exercises the actual
+CLI and provider with isolated project facts: revision A, revision B, unchanged
+B, explicit model compaction, B after compaction, and revision C after resume.
+It checks exact model answers and the persisted snapshot, and removes its
+temporary credentials and history. This is engine acceptance; the controller
+must separately verify authorization and bindings against a real project.
+
 The shared native release profile also drives the actual CLI with a pinned Sudograph
 compiler installed in a dedicated Python environment. Two turns around a model
 edit must receive the exact compiled context for their respective revisions;
 the graph must expose the same new revision. Captured provider requests must
-retain user history without copying context into user messages, and a synthetic
-host denial must prevent another model request. The loopback provider returns
+retain the exact current snapshot at the conversation tail and preserve both
+the system and earlier history prefixes. A synthetic host denial must prevent
+another model request. The loopback provider returns
 fixed responses: this checks the compiler/engine contract, not model reasoning,
 production host authorization or Sudowork's UI. Evidence retains the executable
 checksum, compiler identity, revisions, request bodies and ACP diagnostics.
@@ -850,7 +880,15 @@ the `session/load` request.
 is keyed by its workspace and the persisted `workspace_root` is validated on
 load, so loading a session id from another directory is rejected. Continuing
 a conversation in a new directory is a fork, not a load — see `forkFrom`
-below. `session/load` does not currently replay the history to the client as
+below.
+
+`sessionId` must be the exact id a `session/new` returned. CLI aliases such as
+`latest` and file paths are not ids and fail with `invalid_params` (-32602).
+A well-formed id that this workspace never persisted fails with
+`resource_not_found` (-32002) and `data: {"sessionId": <requested id>}`; any
+other load failure (an unreadable transcript, a workspace mismatch, a
+transcript carrying a different id) is an internal error. No failure creates a
+session. `session/load` does not currently replay the history to the client as
 `session/update` notifications; the client is expected to keep its own copy
 of the conversation.
 

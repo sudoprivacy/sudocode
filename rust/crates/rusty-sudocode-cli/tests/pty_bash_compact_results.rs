@@ -128,12 +128,9 @@ fn shell_roundtrip(env: &TestEnv, prompt: &str, answer_marker: &str) -> BTreeMap
     resumed.expect("❯").expect("resumed prompt");
     let budget = std::time::Duration::from_secs(15);
     common::expect_input_line_cleared(&resumed, budget, "resume ready");
-    let turn_marker = common::turn_status_marker(&resumed);
     let request_count = env.captured_message_count();
-    resumed.send(&format!("{prompt}\r")).unwrap();
+    common::run_turn(&mut resumed, prompt, budget, "resumed shell results");
     resumed.expect(answer_marker).expect("resume completes");
-    common::expect_turn_complete_after(&resumed, &turn_marker, budget, "resumed turn");
-    common::expect_input_line_cleared(&resumed, budget, "ready to exit");
     assert!(
         env.captured_message_count() > request_count,
         "resume must actually call the provider"

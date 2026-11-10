@@ -829,6 +829,7 @@ mod tests {
             }),
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }];
 
         let tracker = UsageTracker::from_session(&session);
@@ -871,6 +872,7 @@ mod tests {
             }),
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }];
 
         let tracker = UsageTracker::from_session(&session);
@@ -904,6 +906,7 @@ mod tests {
             }),
             model: None,
             duration_ms: Some(ms),
+            inputs: Vec::new(),
         };
         session.messages = vec![turn(1000), turn(2500)];
 

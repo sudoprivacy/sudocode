@@ -371,6 +371,7 @@ fn assert_cohost_context_questions(
     );
     let (mode, _) = until(mailbox, |message| message["id"] == "context-mode");
     assert!(mode.get("error").is_none(), "{mode}");
+    let mut previous_request = None;
     for (index, context) in ["COHOST_CONTEXT_REVISION_A", "COHOST_CONTEXT_REVISION_B"]
         .into_iter()
         .enumerate()
@@ -378,7 +379,7 @@ fn assert_cohost_context_questions(
         let turn = format!("context-question-{index}");
         let answer = format!("COHOST_CONTEXT_ANSWER_{index}");
         let calls = json!([{"id":turn,"name":"AskUserQuestion",
-            "input":{"question":format!("Question after cohost context refresh {index}")}}]);
+            "input":{"questions":[{"id":"q1","prompt":format!("Question after cohost context refresh {index}")}]}}]);
         let before = rt.block_on(service.captured_requests()).len();
         send(
             mailbox,
@@ -423,9 +424,8 @@ fn assert_cohost_context_questions(
             .find(|request| !request.path.contains("count_tokens"))
             .unwrap();
         let body: Value = serde_json::from_str(&last.raw_body).unwrap();
-        assert!(body["system"].to_string().contains(context));
+        assert_cohost_context_prefix(&body, context, &mut previous_request);
         assert!(body["messages"].to_string().contains(&answer));
-        assert!(!body["messages"].to_string().contains(context));
         if index == 1 {
             assert!(!body["system"]
                 .to_string()
@@ -437,6 +437,30 @@ fn assert_cohost_context_questions(
         assert_runtime_state(kernel, &started["session_id"], "ready", None);
         assert_status(mailbox, sid, "idle", None);
     }
+}
+
+fn assert_cohost_context_prefix(
+    body: &Value,
+    context: &str,
+    previous: &mut Option<(Value, Vec<Value>)>,
+) {
+    assert!(!body["system"].to_string().contains(context));
+    assert!(body["messages"].to_string().contains(context));
+    let mut messages = body["messages"].as_array().unwrap().clone();
+    for message in &mut messages {
+        if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks {
+                if let Some(object) = block.as_object_mut() {
+                    object.remove("cache_control");
+                }
+            }
+        }
+    }
+    if let Some((system, prefix)) = previous {
+        assert_eq!(&body["system"], system);
+        assert!(messages.starts_with(prefix));
+    }
+    *previous = Some((body["system"].clone(), messages));
 }
 
 fn assert_cohost_permission_turns(
@@ -677,7 +701,7 @@ fn assert_parallel_question_progress(
     fs.write("parallel-read.txt", b"MAILBOX_PARALLEL_READ_RESULT")
         .unwrap();
     let calls = json!([
-        {"id":"question", "name":"AskUserQuestion", "input":{"question":"MAILBOX_PARALLEL_QUESTION"}},
+        {"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"MAILBOX_PARALLEL_QUESTION"}]}},
         {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
     ]);
     send(
@@ -916,6 +940,7 @@ fn start_failed_peer_delivery(kernel: &Arc<Kernel>) -> FailedPeer {
     );
     failed_peer
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            send_id: None,
             delivery: runtime::turn_input::InputDelivery::Steer,
             from: "failed-peer".into(),
             to: "failed-worker".into(),

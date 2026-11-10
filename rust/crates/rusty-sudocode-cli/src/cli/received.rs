@@ -38,6 +38,7 @@ fn envelope_header(line: &str) -> Option<EnvelopeHeader> {
         "shutdown-request" => ("shutdown-request", "shutdown request"),
         "shutdown-response" => ("shutdown-response", "shutdown response"),
         "plan-approval-response" => ("plan-approval-response", "plan approval response"),
+        "scheduled-message" => ("scheduled-message", "scheduled"),
         _ => return None,
     };
     let (sender, mut rest) = attributes.strip_prefix("from=\"")?.split_once('"')?;
@@ -172,6 +173,7 @@ impl ReceivedMessage<'_> {
                 .chain(std::iter::once(body.trim_end_matches('\n'))),
             width,
             theme().color(TextRole::Secondary),
+            left_frame::Tail::Closed,
         );
         if renderer.color_support() == ColorSupport::NoColor {
             StyledText::from_ansi(&output).text
@@ -182,11 +184,30 @@ impl ReceivedMessage<'_> {
 }
 
 /// Render a whole persisted or live prompt, preserving mixed-input order.
+/// How a committed input is drawn in scrollback: when it is committed live,
+/// and again when a restored session replays its saved echo.
+pub(crate) fn echo(
+    input: &runtime::turn_input::InputEcho,
+    width: usize,
+    renderer: &TerminalRenderer,
+) -> String {
+    use runtime::turn_input::InputSource;
+    match input.source {
+        InputSource::Human => {
+            super::format::format_input_echo(&input.display, &input.pasted, width).0
+        }
+        InputSource::Peer | InputSource::Scheduled => {
+            render_prompt(&input.display, width, renderer)
+        }
+        InputSource::Subagent | InputSource::Background => input.display.clone(),
+    }
+}
+
 pub(crate) fn render_prompt(text: &str, width: usize, renderer: &TerminalRenderer) -> String {
     let mut output = String::new();
     for part in prompt_parts(text) {
         let formatted_text = match part {
-            PromptPart::Human(text) => super::format::format_input_echo(text, width).0,
+            PromptPart::Human(text) => super::format::format_input_echo(text, &[], width).0,
             PromptPart::Peer(message) => message.render(width, renderer),
         };
         crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &formatted_text);

@@ -62,6 +62,9 @@ use crate::subagent_completions::{
 pub enum AcpError {
     InvalidParams(String),
     Internal(String),
+    /// `session/load` named a well-formed session id that this workspace never
+    /// persisted. Carries the requested id; nothing was loaded or created.
+    SessionNotFound(String),
     /// A prompt-turn failure that arrived already classified by the runtime
     /// (via [`runtime::RuntimeError`]'s typed bits). Carrying the classification
     /// here — instead of flattening to a bare `Internal(String)` and later
@@ -94,6 +97,11 @@ impl AcpError {
         Self::Internal(message.into())
     }
 
+    #[must_use]
+    pub fn session_not_found(session_id: impl Into<String>) -> Self {
+        Self::SessionNotFound(session_id.into())
+    }
+
     /// Build a turn error from a runtime error, capturing its typed
     /// classification so the ACP surface never has to re-derive behavior by
     /// string-matching the message.
@@ -121,6 +129,7 @@ impl AcpError {
                 message
             }
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
+            Self::SessionNotFound(session_id) => return format!("session not found: {session_id}"),
         };
 
         if raw_message.contains(runtime::COMPACTION_FAILED) {
@@ -192,6 +201,7 @@ impl std::fmt::Display for AcpError {
             Self::InvalidParams(message) | Self::Internal(message) | Self::Turn { message, .. } => {
                 f.write_str(message)
             }
+            Self::SessionNotFound(session_id) => write!(f, "session not found: {session_id}"),
         }
     }
 }
@@ -763,7 +773,11 @@ fn prompt_engine_command(
             },
         }
     } else {
-        engine_core::EngineCommand::Prompt { blocks, context }
+        engine_core::EngineCommand::Prompt {
+            blocks,
+            context,
+            shown: Vec::new(),
+        }
     }
 }
 
@@ -862,6 +876,10 @@ async fn ensure_a2a_receiver(
     let Some(mailbox) = mailbox else {
         return;
     };
+    if !tools::cron_tools_disabled() {
+        let firing = Arc::clone(&mailbox);
+        runtime::cron_scheduler::start_once(|| runtime::cron_scheduler::Firing::new(firing));
+    }
     let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
     else {
@@ -1137,6 +1155,7 @@ fn peer_input_action(
             text: text.to_owned(),
             display: text.to_owned(),
             source: engine_core::engine_events::InputSource::Peer,
+            pasted: Vec::new(),
             attachments: Vec::new(),
         },
         delivery: message.delivery,
@@ -3631,6 +3650,9 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
+                // A client that manages cron gets change notifications from
+                // its first cron request on; one watcher per connection.
+                let cron_watching = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
                     Dispatch::Request(message, responder)
                         if message.method() == RUNTIME_STATUS_METHOD =>
@@ -3662,6 +3684,21 @@ pub(crate) async fn run_acp_on_transport(
                             responder.respond_with_result(result)?;
                             Ok(())
                         })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::cron_control::matches(message.method()) =>
+                    {
+                        if !cron_watching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let watcher = cx.clone();
+                            cx.spawn(async move {
+                                crate::cron_control::watch(watcher).await;
+                                Ok(())
+                            })?;
+                        }
+                        let (method, params) = message.into_parts();
+                        responder
+                            .respond_with_result(crate::cron_control::call(&method, params))?;
                         Ok(Handled::Yes)
                     }
                     Dispatch::Request(message, responder)
@@ -3727,6 +3764,9 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
     match e {
         AcpError::InvalidParams(msg) => {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
+        }
+        AcpError::SessionNotFound(session_id) => {
+            Error::resource_not_found(None).data(json!({ "sessionId": session_id }))
         }
         AcpError::Internal(message) | AcpError::Turn { message, .. } => {
             let mut error =

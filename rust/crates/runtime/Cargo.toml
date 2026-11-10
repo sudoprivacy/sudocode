@@ -77,8 +77,12 @@ tempfile = "3"
 
 [dev-dependencies]
 backends = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+backends = { workspace = true, features = ["driver-cas-local"] }
+nexus-raft = { workspace = true }
+tempfile = "3"
 # Exercise the shipped VFS host and its error envelopes over real mTLS gRPC.
 transport = { workspace = true }
 nexus-rebac = { workspace = true }
@@ -96,3 +100,23 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "acceptance_runtime_01"
+path = "tests/acceptance_groups/acceptance_runtime_01.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_02"
+path = "tests/acceptance_groups/acceptance_runtime_02.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_03"
+path = "tests/acceptance_groups/acceptance_runtime_03.rs"
+test = false
+
+[[test]]
+name = "acceptance_runtime_04"
+path = "tests/acceptance_groups/acceptance_runtime_04.rs"
+test = false

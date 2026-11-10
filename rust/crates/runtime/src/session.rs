@@ -17,6 +17,8 @@ pub mod history;
 
 const SESSION_VERSION: u32 = 1;
 const UNANSWERED_TURN_TEXT: &str = "No response requested.";
+const HOST_CONTEXT_PREFIX: &str = "<host_context_snapshot>\n";
+const HOST_CONTEXT_SUFFIX: &str = "\n</host_context_snapshot>";
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
 /// append-log (nexus `DT_STREAM`). `0` = keep-forever: cold segments spill out
 /// of the hot tier but are never dropped, so the whole transcript stays
@@ -95,6 +97,10 @@ pub struct ConversationMessage {
     /// session can report cumulative wall time — the true cost when the turn
     /// ran on local compute rather than a token-billed API.
     pub duration_ms: Option<u64>,
+    /// How the inputs this user message holds were drawn live, for replay.
+    /// Empty for every other message, and for prompts saved before this was
+    /// recorded; those replay from their text.
+    pub inputs: Vec<crate::turn_input::InputEcho>,
 }
 
 /// Metadata describing the latest compaction that summarized a session.
@@ -1581,6 +1587,15 @@ impl Session {
 
     /// Push a user message containing multiple content blocks (e.g. text + images).
     pub fn push_user_blocks(&mut self, blocks: Vec<ContentBlock>) -> Result<(), SessionError> {
+        self.push_prompt(blocks, Vec::new())
+    }
+
+    /// Push a prompt together with how its inputs were drawn live.
+    pub fn push_prompt(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        inputs: Vec<crate::turn_input::InputEcho>,
+    ) -> Result<(), SessionError> {
         self.push_message(ConversationMessage {
             history: None,
             role: MessageRole::User,
@@ -1588,6 +1603,7 @@ impl Session {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs,
         })
     }
 
@@ -2483,6 +2499,37 @@ fn durable_bytes_revision(bytes: Option<&[u8]>) -> String {
 }
 
 impl ConversationMessage {
+    /// Record trusted host context at the current conversation boundary.
+    /// Native System records are projected into provider history, never into
+    /// the fixed provider system prompt or a fabricated user input event.
+    #[must_use]
+    pub fn host_context_snapshot(text: &str) -> Self {
+        Self {
+            history: None,
+            role: MessageRole::System,
+            blocks: vec![ContentBlock::Text {
+                text: format!("{HOST_CONTEXT_PREFIX}{text}{HOST_CONTEXT_SUFFIX}"),
+            }],
+            usage: None,
+            model: None,
+            duration_ms: None,
+            inputs: Vec::new(),
+        }
+    }
+
+    /// Only a harness-owned native record can supply or deduplicate context.
+    #[must_use]
+    pub fn host_context_text(&self) -> Option<&str> {
+        if self.role != MessageRole::System {
+            return None;
+        }
+        let [ContentBlock::Text { text }] = self.blocks.as_slice() else {
+            return None;
+        };
+        text.strip_prefix(HOST_CONTEXT_PREFIX)?
+            .strip_suffix(HOST_CONTEXT_SUFFIX)
+    }
+
     #[must_use]
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
@@ -2492,6 +2539,7 @@ impl ConversationMessage {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }
     }
 
@@ -2504,6 +2552,7 @@ impl ConversationMessage {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }
     }
 
@@ -2533,6 +2582,7 @@ impl ConversationMessage {
             usage,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }
     }
 
@@ -2555,6 +2605,7 @@ impl ConversationMessage {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         }
     }
 
@@ -2590,6 +2641,19 @@ impl ConversationMessage {
             object.insert(
                 "duration_ms".to_string(),
                 JsonValue::Number(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
+            );
+        }
+        // Omitted when empty, so a message without it keeps the exact bytes
+        // (and so the identity) it had before this key existed.
+        if !self.inputs.is_empty() {
+            object.insert(
+                "inputs".to_string(),
+                JsonValue::Array(
+                    self.inputs
+                        .iter()
+                        .map(crate::turn_input::InputEcho::to_json)
+                        .collect(),
+                ),
             );
         }
         JsonValue::Object(object)
@@ -2630,6 +2694,16 @@ impl ConversationMessage {
             .get("duration_ms")
             .and_then(JsonValue::as_i64)
             .and_then(|value| u64::try_from(value).ok());
+        let inputs = object
+            .get("inputs")
+            .and_then(JsonValue::as_array)
+            .and_then(|inputs| {
+                inputs
+                    .iter()
+                    .map(crate::turn_input::InputEcho::from_json)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .unwrap_or_default();
         Ok(Self {
             history: object
                 .get("history")
@@ -2641,6 +2715,7 @@ impl ConversationMessage {
             usage,
             model,
             duration_ms,
+            inputs,
         })
     }
 }

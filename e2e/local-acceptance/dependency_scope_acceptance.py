@@ -13,7 +13,7 @@ import sys
 
 
 SOURCE = Path(__file__).resolve().parents[2]
-PRODUCT = {"native-release", "native-services", "native-cohost"}
+PRODUCT = {"native-context", "native-services", "native-cohost"}
 
 
 def workflow_scope(output, environment):
@@ -44,7 +44,12 @@ def workflow_scope(output, environment):
     assert "      fail-fast: true" in lint
     gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
     assert "    if: always() && github.event_name == 'merge_group'" in gate
-    assert "    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]" in gate
+    assert "    needs: [one-nexus-vfs-pin, a2a-live, cohost-live, clippy-workspace]" in gate
+    for job, flag in [("a2a-live", "a2a"), ("cohost-live", "cohost")]:
+        block = re.search(rf"^  {job}:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
+        assert "    needs: one-nexus-vfs-pin\n" in block
+        assert f"    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.{flag}_required == 'true'" in block
+    assert "          COHOST_RESULT: ${{ needs.cohost-live.result }}" in gate
     branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
     assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
         "- 'gaebal/**'", "- 'omx-issue-*'"}, branches
@@ -65,7 +70,8 @@ def workflow_scope(output, environment):
         return lines[start:end]
 
     condition = "        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'"
-    for name in ["Co-host duet against a daemon built from this checkout", "Checkout the VFS contract used by the co-host",
+    for name in ["Co-host duet against a daemon built from this checkout",
+                 "Conditional owner content survives a co-host process restart", "Checkout the VFS contract used by the co-host",
                  "Search authorization and restart under the confined co-host owner", "The driver-ai co-host still resolves"]:
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
@@ -92,6 +98,7 @@ def workflow_scope(output, environment):
         return "set -eu\n" + "\n".join(body) + "\n"
 
     scripts = {"explain": script("Explain selected daemon acceptance"),
+               "cohost-explain": script("Explain selected co-host acceptance"),
                "required": script("Require native daemon acceptance and zero workspace warnings")}
     for name, source in scripts.items():
         (output / f"{name}.sh").write_text(source, encoding="utf-8")
@@ -114,10 +121,28 @@ def workflow_scope(output, environment):
         ("required", "true", "true", "true", "failure", False),
     ]
     cases = [(name, {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
-                     "DAEMON_REQUIRED": daemon, "A2A_RESULT": actual}, succeeds)
+                     "DAEMON_REQUIRED": daemon,
+                     "A2A_RESULT": actual if a2a == "true" else "skipped",
+                     "COHOST_RESULT": actual if cohost == "true" else "skipped"}, succeeds)
              for name, a2a, cohost, daemon, actual, succeeds in cases]
+    cases.extend(("cohost-explain", {"COHOST_REQUIRED": value}, succeeds)
+                 for value, succeeds in [("true", True), ("false", False), ("", False)])
+    cases.extend(("required", {"A2A_REQUIRED": a2a, "COHOST_REQUIRED": cohost,
+                              "DAEMON_REQUIRED": "true", "A2A_RESULT": cli_result,
+                              "COHOST_RESULT": cohost_result}, False)
+                 for a2a, cohost, cli_result, cohost_result in [
+                     ("true", "true", "success", "failure"),
+                     ("true", "true", "cancelled", "success"),
+                     ("true", "false", "success", "success"),
+                     ("false", "true", "success", "success"),
+                     ("true", "true", "skipped", "success"),
+                     ("true", "true", "success", "cancelled"),
+                     ("true", "true", "success", ""),
+                     ("true", "true", "", "success"),
+                 ])
     cases.extend(("required", {"A2A_REQUIRED": "false", "COHOST_REQUIRED": "false",
-                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped", **values}, succeeds)
+                              "DAEMON_REQUIRED": "false", "A2A_RESULT": "skipped",
+                              "COHOST_RESULT": "skipped", **values}, succeeds)
                  for values, succeeds in [
                      ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "success"}, True),
                      ({"CLIPPY_REQUIRED": "true", "CLIPPY_RESULT": "failure"}, False),
@@ -141,6 +166,7 @@ def workflow_scope(output, environment):
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
     return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
             "CLI_and_cohost_steps_bound_to_independent_selectors": True,
+            "CLI_and_cohost_jobs_have_no_mutual_dependency": True,
             "three_platform_lint_required_once_on_queue": True,
             "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
@@ -274,7 +300,7 @@ def run(output):
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
-    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None):
+    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None, live_required=True):
         cohost_required = daemon if cohost_required is None else cohost_required
         head = command("git", "rev-parse", "HEAD")
         keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
@@ -298,9 +324,9 @@ def run(output):
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted
                 assert result["clippy_required"] == "true", result
-                assert result["live_required"] == "true", result
+                assert result["live_required"] == str(live_required).lower(), result
                 assert result["benchmark_required"] == str(benchmark).lower(), result
-                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}; native lint/provider coverage retained", flush=True)
+                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}, lint=true, live={live_required}", flush=True)
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -310,6 +336,16 @@ def run(output):
 
     expect("dev-only manifest/lock skips unchanged normal products", base, [])
     ci_scope(base, False)
+    queue_base = command("git", "rev-parse", "HEAD")
+    queue_branch = command("git", "branch", "--show-current")
+    command("git", "switch", "--detach", queue_base)
+    for path in [".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"]:
+        original = (repository / path).read_text() if (repository / path).exists() else ""
+        write(path, original + "\n# Changed queue execution input.\n")
+        commit("Queue execution input requires the actual daemon and native lint")
+        ci_scope(queue_base, True, benchmark=True, live_required=False)
+        command("git", "switch", "--detach", queue_base)
+    command("git", "switch", queue_branch)
     assert product() == original_binary
     cargo("test", "--locked", "--offline", "-p", "rusty-sudocode-cli", "--test", "development")
     assert product() == original_binary
@@ -448,7 +484,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n')
     commit("CLI source keeps daemon journeys without rebuilding the independent co-host")
     expect("CLI source retains normal CLI checks and skips the unchanged co-host", base,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(base, True, cohost_required=False)
     assert cohost() == original_cohost
     refused_log = output / "independent-cli-refusal.log"
@@ -464,7 +500,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/lib.rs", 'pub fn shared() {}\n')
     library_head = commit("Automatic CLI library target retains co-host scope")
     expect("a new CLI library target retains conservative co-host scope", base,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(base, True)
     command("git", "rm", "rust/crates/rusty-sudocode-cli/src/lib.rs")
     binary_head = commit("Removing a prior CLI library also retains co-host scope")
@@ -478,7 +514,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// consumer boundary\n')
     commit("CLI source with a declared consumer keeps co-host acceptance")
     expect("a declared CLI consumer retains scope for later CLI source", importer,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(importer, True)
     command("git", "switch", "--detach", binary_head)
     write("rust/Cargo.toml", workspace.replace('["crates/*"]',
@@ -487,7 +523,7 @@ def run(output):
     write("rust/crates/rusty-sudocode-cli/src/main.rs", 'compile_error!("unused-CLI-control");\n// workspace boundary\n')
     commit("CLI source with an unfamiliar workspace layout keeps co-host acceptance")
     expect("an unfamiliar workspace layout retains scope for later CLI source", layout,
-           {"native-release", "native-services"})
+           {"native-context", "native-services"})
     ci_scope(layout, True)
     command("git", "switch", "--detach", binary_head)
     write("rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n')
@@ -513,16 +549,16 @@ def run(output):
         ("normal lock package changed", "rust/Cargo.lock", positive_lock.replace('name = "runtime"\nversion = "0.1.0"', 'name = "runtime"\nversion = "0.2.0"'), PRODUCT),
         ("ambiguous additional lock version", "rust/Cargo.lock", positive_lock + '\n[[package]]\nname="runtime"\nversion="0.2.0"\n', PRODUCT),
         ("lock format changed", "rust/Cargo.lock", positive_lock.replace('version = 4', 'version = 3'), PRODUCT),
-        ("ordinary runtime source keeps services without the separate release build", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-release"}),
+        ("ordinary runtime source keeps services without the context-specific journey", "rust/crates/runtime/src/lib.rs", 'pub fn value() -> u8 { 43 }\n', PRODUCT - {"native-context"}),
         ("CLI build script keeps conservative co-host scope", "rust/crates/rusty-sudocode-cli/build.rs",
-         'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-release", "native-services"}),
-        ("release assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-release"}),
+         'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n', {"native-context", "native-services"}),
+        ("source stream assertion stays required", "rust/crates/rusty-sudocode-cli/tests/pty_model_stream_close.rs", '// actual changed release fixture\n', {"native-context"}),
         ("service assertion stays required", "e2e/shared-services/scope.py", '# actual changed service fixture\n', {"native-services"}),
         ("target-specific development alias", "rust/crates/rusty-sudocode-cli/Cargo.toml",
          application + '[target.\'cfg(windows)\'.dev-dependencies]\nalias={package="scope-helper",path="../helper"}\n', []),
         ("standalone benchmark driver metadata", "rust/crates/scode-benchmark-drivers/Cargo.toml",
          # This test package is outside the policy's explicit co-host inputs.
-         '[package]\nname="scode-benchmark-drivers"\nversion="0.1.0"\nedition="2021"\n', {"native-release", "native-services"}),
+         '[package]\nname="scode-benchmark-drivers"\nversion="0.1.0"\nedition="2021"\n', {"native-context", "native-services"}),
     ]
     for index, (label, path, text, expected) in enumerate(variants):
         command("git", "switch", "--detach", changed)
@@ -531,7 +567,7 @@ def run(output):
             assert text != positive_lock, label
         commit("Scope boundary " + str(index))
         expect(label, base, expected)
-        if label in {"ordinary runtime source keeps services without the separate release build", "CLI build script keeps conservative co-host scope",
+        if label in {"ordinary runtime source keeps services without the context-specific journey", "CLI build script keeps conservative co-host scope",
                      "normal dependency features", "build dependency", "normal lock package changed"}:
             ci_scope(base, True)
         elif label == "standalone benchmark driver metadata":
@@ -539,7 +575,7 @@ def run(output):
     command("git", "switch", "--detach", changed)
     command("git", "mv", "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/renamed.rs")
     commit("Keep both sides of a renamed source")
-    expect("renamed ordinary source keeps services without the separate release build", base, PRODUCT - {"native-release"})
+    expect("renamed ordinary source keeps services without the context-specific journey", base, PRODUCT - {"native-context"})
     command("git", "switch", "--detach", changed)
     assert not command("git", "status", "--porcelain")
     # An earlier broader receipt/checkpoint must retain actual completed work
@@ -552,7 +588,7 @@ def run(output):
         "native-workspace": {"include": ["rust/**"]},
         **{name: {"include": ["rust/Cargo.lock", "rust/crates/*/Cargo.toml",
                               "rust/crates/rusty-sudocode-cli/tests/**"]}
-           for name in ["native-release", "native-services", "native-cohost"]},
+           for name in ["native-context", "native-services", "native-cohost"]},
     }}
     write("spec/local_acceptance.json", json.dumps(policy))
     write("spec/local_acceptance_signers.json", json.dumps({"signers": {"fixture": {
@@ -667,6 +703,7 @@ def run(output):
               "newly_required_profile_refused": True,
               "required_normal_failure_still_fails": True,
               "actual_pr_push_queue_selectors_keep_lint_and_provider_scope": True,
+              "queue_entry_changes_require_real_daemon_and_lint_without_paid_calls": True,
               "actual_cli_package_is_binary_only_and_has_no_workspace_dependents": True,
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,

@@ -121,13 +121,15 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
-fn expect_frame_caps(sess: &PtySession, color: &str) {
+/// `tail` is how the frame ends: `╎` while a call is in flight, `╰─` once
+/// it is finished.
+fn expect_frame_caps(sess: &PtySession, color: &str, tail: &str) {
     // Bold corners shift inside their cells in Menlo even though plain text
     // and column positions match. This contract also covers live overlays.
     if let Some(root) = std::env::var_os("SCODE_FRAME_SNAPSHOT_DIR") {
         common::expect_screen(
             sess,
-            |screen| screen.contains("╭─") && screen.contains("╰─"),
+            |screen| screen.contains("╭─") && screen.contains(tail),
             common::DEFAULT_TIMEOUT,
             "complete frame before raster capture",
         );
@@ -152,9 +154,43 @@ fn expect_frame_caps(sess: &PtySession, color: &str) {
         )
         .unwrap();
     }
-    for cap in ["╭─", "╰─"] {
+    for cap in ["╭─", tail] {
         expect_style(sess, cap, (color, false, false));
     }
+}
+
+/// A running card breathes: its frame alternates between the brand amber and
+/// one quieter shade, about once a second, changing colour but never weight.
+/// On a no-color terminal it stays steady.
+fn expect_frame_pulse(sess: &PtySession, border: &str, no_color: bool) {
+    let expected = terminal_palette::expected_color(border);
+    let mut seen: Vec<String> = Vec::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if let Some((color, bold, dim)) = attributes(sess, "╭─") {
+            assert!(!bold && !dim, "the pulse changes colour, never weight");
+            if seen.last() != Some(&color) {
+                seen.push(color);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let distinct: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
+    if no_color {
+        assert_eq!(distinct, [expected].into(), "no-color frames stay steady");
+        return;
+    }
+    assert!(
+        distinct.len() == 2 && distinct.contains(&expected) && !distinct.contains("Default"),
+        "the frame alternates between amber and one quieter shade: {seen:?}"
+    );
+    // A half period is 480 ms, so 3 s holds about six changes. Many more would
+    // be a flicker driven by redraws rather than the clock.
+    let changes = seen.len() - 1;
+    assert!(
+        (3..=10).contains(&changes),
+        "about one breath per second: {changes} changes in 3 s ({seen:?})"
+    );
 }
 
 fn settle_chrome(sess: &PtySession) {
@@ -200,6 +236,20 @@ fn exit(sess: &mut PtySession) {
     expect_style(sess, "❯ /exit", ("Default", false, false));
     sess.send("\r").expect("submit exit");
     assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
+}
+
+fn question_prompt(env: &TestEnv, id: &str, input: &serde_json::Value) -> String {
+    if env.is_mock() {
+        return env.tool_batch_prompt(&serde_json::json!([{
+            "id": id, "name": "AskUserQuestion", "input": input,
+        }]));
+    }
+    let path = env.workspace_root().join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec(input).unwrap()).unwrap();
+    format!(
+        "Use read_file to read {} then call AskUserQuestion once with exactly that JSON object. Preserve every value. Answer briefly after I choose.",
+        path.display()
+    )
 }
 
 #[test]
@@ -248,7 +298,8 @@ fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
 #[test]
 fn question_title_resets_restore_terminal_foreground_not_parent_color() {
     for background in ["15;0", "0;15"] {
-        let env = TestEnv::new("chrome-initial-style-reset");
+        // This renderer contract requires exact SGR bytes.
+        let env = TestEnv::new_mock("chrome-initial-style-reset");
         let mut sess = env.spawn_with_env(
             &["--permission-mode", "workspace-write"],
             &[
@@ -260,23 +311,16 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             ],
         );
         // The shared input-line observer samples one physical row. Keep this
-        // JSON fixture on one row, then inspect the actual question at an
+        // fixture command on one row, then inspect the actual question at an
         // ordinary width; wrapping is not the style-reset contract.
         sess.resize(40, 600).unwrap();
         settle_chrome(&sess);
         let input = serde_json::json!({
             "title": "InheritedTitle \u{1b}[31mRedTitle\u{1b}[39mDefaultTitle \u{1b}[1mBoldTitle\u{1b}[0mPlainTitle",
-            "question": "Choose style answer",
-            "options": ["Accept style"],
+            "questions": [{"id":"style", "prompt":"Choose style answer",
+                "options":[{"label":"Accept style", "value":"Accept style"}]}],
         });
-        let calls = serde_json::json!([{
-            "id": "style_question", "name": "AskUserQuestion", "input": input,
-        }]);
-        let prompt = if env.is_mock() {
-            format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-        } else {
-            format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-        };
+        let prompt = question_prompt(&env, "style_question", &input);
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
         common::expect_input_line(
             &sess,
@@ -347,14 +391,7 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
             sess.resize(40, 600).unwrap();
             settle_chrome(&sess);
             let input = surface_question_input(option_count);
-            let calls = serde_json::json!([{
-                "id": "surface_question", "name": "AskUserQuestion", "input": input,
-            }]);
-            let prompt = if env.is_mock() {
-                format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
-            } else {
-                format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
-            };
+            let prompt = question_prompt(&env, "surface_question", &input);
             sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
             common::expect_input_line(
                 &sess,
@@ -542,7 +579,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
-    expect_frame_caps(&sess, green);
+    expect_frame_caps(&sess, green, "╰─");
     expect_style(&sess, "│", (green, false, false));
     exit(&mut sess);
 }
@@ -601,14 +638,15 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     } else {
         DARK_SECONDARY
     };
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
+    expect_frame_pulse(&sess, border, no_color);
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
     sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
-    expect_frame_caps(&sess, border);
+    expect_frame_caps(&sess, border, "╎");
     sess.send("\x1b[A").expect("recall queued message");
     common::expect_input_line(
         &sess,
@@ -818,26 +856,20 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
-                let visible = sess.render(|screen| {
-                    screen
-                        .raw()
-                        .rows(0, screen.raw().size().1)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
                 if rows == 8 {
                     if statuses.len() > 1 {
-                        assert!(
-                            !visible.contains("Task 0"),
-                            "folded completed item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Working 1"),
-                            "folded active item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Task 2"),
-                            "folded pending item: {visible}"
+                        // The waits above also pass on the unfolded frame, and
+                        // a resize reaches the app later than chrome looks
+                        // settled (through ConPTY, often). Wait for the fold.
+                        common::expect_screen(
+                            &sess,
+                            |screen| {
+                                !["Task 0", "Working 1", "Task 2"]
+                                    .iter()
+                                    .any(|item| screen.contains(item))
+                            },
+                            common::DEFAULT_TIMEOUT,
+                            "every item folds away at eight rows",
                         );
                     }
                 } else {
@@ -963,7 +995,7 @@ fn surface_question_input(option_count: usize) -> serde_json::Value {
     options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
     serde_json::json!({
         "title": "SurfaceQuestionTitle",
-        "question": "Choose a readable surface",
-        "options": options,
+        "questions": [{"id":"surface", "prompt":"Choose a readable surface",
+            "options": options.into_iter().map(|label| serde_json::json!({"label":label, "value":label})).collect::<Vec<_>>()}],
     })
 }

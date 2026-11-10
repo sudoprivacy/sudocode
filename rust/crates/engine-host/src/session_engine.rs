@@ -1049,6 +1049,7 @@ impl SessionEngine {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             };
             session
                 .runtime
@@ -1100,17 +1101,37 @@ impl engine_core::EngineDelegate for SessionEngine {
             return Err(runtime::RuntimeError::new("host context must be non-empty"));
         }
         let mut session = self.lock_session();
-        if session.prompt_overrides.append_system_prompt.as_ref() == Some(&text) {
+        Self::ensure_fresh_session_source(&mut session)?;
+        // Host-context v1 supersedes the initial append supplied on new/load.
+        // Clear that legacy seed before model work, then keep this system
+        // prefix fixed. Ordinary sessions without a provider never enter here.
+        if let Some(previous) = session.prompt_overrides.append_system_prompt.take() {
+            let mut snapshot = session.runtime.session().clone();
+            // With no explicit override, the builder normally reuses its
+            // persisted prompt. This deliberate removal must also invalidate
+            // that assembled seed; subsequent context updates reuse it again.
+            snapshot.clear_prompt_snapshot();
+            let handle = session.handle.clone();
+            if let Err(error) = self.rebuild_locked(&mut session, snapshot, handle) {
+                session.prompt_overrides.append_system_prompt = Some(previous);
+                return Err(runtime::RuntimeError::new(error));
+            }
+        }
+        let current = session
+            .runtime
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(runtime::ConversationMessage::host_context_text);
+        if current == Some(text.as_str()) {
             return Ok(());
         }
-        let previous = session.prompt_overrides.append_system_prompt.replace(text);
-        let snapshot = session.runtime.session().clone();
-        let handle = session.handle.clone();
-        if let Err(error) = self.rebuild_locked(&mut session, snapshot, handle) {
-            session.prompt_overrides.append_system_prompt = previous;
-            return Err(runtime::RuntimeError::new(error));
-        }
-        Ok(())
+        session
+            .runtime
+            .session_mut()
+            .push_message(runtime::ConversationMessage::host_context_snapshot(&text))
+            .map_err(|error| runtime::RuntimeError::new(error.to_string()))
     }
 
     fn prepare_prompt(

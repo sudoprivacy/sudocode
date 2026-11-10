@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use backends::storage::local_connector::LocalConnectorBackend;
 use engine_host::managed_agent::prepare_managed_agent;
+use engine_host::managed_context::ManagedRuntimeContext;
 use engine_host::SessionLifecycle;
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind, RepoMount};
 use kernel::kernel::Kernel;
@@ -31,11 +32,12 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     std::fs::write(skill.join("SKILL.md"), "---\nname: shared-workspace\ndescription: Check the shared project\n---\nRun sh scripts/run.sh from this skill directory.\n").unwrap();
     std::fs::write(skill.join("scripts/run.sh"), "printf skill-script-ok").unwrap();
     let first = descriptor("first", "/projects/first");
+    let first_context = ManagedRuntimeContext::cohost(&kernel, &first, false).unwrap();
     let prepared = prepare_managed_agent(
-        &kernel,
-        &first,
-        &seed_managed_session(&kernel, &first),
-        false,
+        &first_context,
+        seed_managed_session(&kernel, &first)
+            .resume_session_id
+            .as_deref(),
     )
     .unwrap();
     let original_id = prepared.durable_session_id().to_string();
@@ -62,10 +64,10 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     drop(engine);
     let second_descriptor = descriptor("second", "/projects/second");
     let second = prepare_managed_agent(
-        &kernel,
-        &second_descriptor,
-        &seed_managed_session(&kernel, &second_descriptor),
-        false,
+        &ManagedRuntimeContext::cohost(&kernel, &second_descriptor, false).unwrap(),
+        seed_managed_session(&kernel, &second_descriptor)
+            .resume_session_id
+            .as_deref(),
     )
     .unwrap();
     assert_ne!(second.cwd(), cwd);
@@ -82,16 +84,25 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
         second_fs.read(&format!("{memory}/MEMORY.md")).unwrap(),
         b"same-agent-memory"
     );
-    let restored = prepare_managed_agent(
-        &kernel,
-        &first,
-        &managed_agent::SpawnOptions {
-            resume_session_id: Some(original_id.clone()),
-            ..Default::default()
-        },
-        false,
-    )
-    .unwrap();
+    // Another host still holding this session's writer lease refuses the
+    // resume with the message hosts match on, and the release admits it.
+    let lease_path = format!(
+        "{}/{original_id}",
+        fs.managed_root(ManagedRoot::Sessions).unwrap()
+    );
+    let held = kernel
+        .sys_lock(&lease_path, "", 1, 60, "another-host")
+        .unwrap()
+        .expect("the session is not leased between hosts");
+    let refused = prepare_managed_agent(&first_context, Some(&original_id))
+        .err()
+        .expect("a leased session must not be resumed");
+    assert_eq!(
+        refused.to_string(),
+        "co-host: session is still running; stop it before resuming"
+    );
+    kernel.sys_unlock(&lease_path, &held, false).unwrap();
+    let restored = prepare_managed_agent(&first_context, Some(&original_id)).unwrap();
     assert_eq!(restored.durable_session_id(), original_id);
     assert_eq!(restored.cwd(), cwd);
     let restored = restored
@@ -152,12 +163,9 @@ fn assert_shared_workspace_tools(
         .unwrap();
     let execute_skill = "sh .nexus/sudocode/skills/shared-workspace/scripts/run.sh";
     let scope = WorkspaceRootScope::enter(cwd);
-    let result = runtime::execute_bash(serde_json::from_value(serde_json::json!({
-        "command": format!("cat from-file-tool.txt; printf shell-bytes > from-shell.txt; {execute_skill}"),
-        "dangerouslyDisableSandbox": true,
-        "timeout": 10000,
-    })).unwrap()).unwrap();
-    assert_eq!(result.exit_code, Some(0), "{}", result.stderr);
+    let result = execute_workspace_command(&format!(
+        "cat from-file-tool.txt; printf shell-bytes > from-shell.txt; {execute_skill}"
+    ));
     assert!(result.stdout.contains("file-tool-bytes"));
     assert!(result.stdout.contains("skill-script-ok"));
     assert_eq!(fs.read("from-shell.txt").unwrap(), b"shell-bytes");
@@ -206,6 +214,28 @@ fn assert_recovered_effect(restored: &engine_host::SessionEngine) {
     );
 }
 
+fn execute_workspace_command(command: &str) -> runtime::BashCommandOutput {
+    // Filesystem and recovery semantics use the runtime's bounded subprocess
+    // budget. Shell startup latency is not this functional journey's contract.
+    let started = std::time::Instant::now();
+    let result = runtime::execute_bash(
+        serde_json::from_value(serde_json::json!({
+            "command": command,
+            "dangerouslyDisableSandbox": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "workspace command {command:?}, elapsed {:?}, runtime budget {} ms: {result:?}",
+        started.elapsed(),
+        runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    );
+    result
+}
+
 fn write_hosted_config(config: &std::path::Path) {
     std::fs::write(
         config.join("sudocode.json"),
@@ -232,15 +262,6 @@ fn persist_inflight_workspace_effect(engine: &engine_host::SessionEngine) {
             ]))
             .unwrap();
     });
-    let effect = runtime::execute_bash(
-        serde_json::from_value(serde_json::json!({
-            "command": "printf effect >> side-effect.txt",
-            "dangerouslyDisableSandbox": true,
-            "timeout": 10000,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(effect.exit_code, Some(0));
+    execute_workspace_command("printf effect >> side-effect.txt");
     engine.persist().unwrap();
 }

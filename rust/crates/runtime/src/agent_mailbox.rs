@@ -57,7 +57,9 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
          the agent that messaged you, never a word copied from the message text — \
          and `message` set to your reply. A send \
          that does not return success did NOT leave this machine — say so rather \
-         than reporting the message as delivered.\n\n\
+         than reporting the message as delivered — unless it says delivery is \
+         unconfirmed or unknown: then it may have arrived, so check the \
+         conversation before resending.\n\n\
          Messages reach you at least once, which means the same message can arrive \
          more than once: delivery tracks one position for a whole batch and re-reads \
          a batch it could not finish. A repeat delivery is identical to the copy you \
@@ -151,6 +153,14 @@ pub struct MailboxEnvelope {
     /// Correlator for shutdown/plan-approval request/response pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Identity of one logical send, set by [`crate::mailbox::Mailbox::send`]
+    /// when absent. A retransmission of the same envelope keeps it; a new send
+    /// of the same words gets a new one. Unlike `timestamp` (whole seconds)
+    /// and `request_id` (question/reply correlation), it tells two sends of
+    /// identical bytes apart, which is what lets a sender whose append
+    /// returned an error find out whether THIS send committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_id: Option<String>,
 }
 
 #[expect(
@@ -181,6 +191,7 @@ impl MailboxEnvelope {
             kinds::SHUTDOWN_REQUEST => "shutdown-request",
             kinds::SHUTDOWN_RESPONSE => "shutdown-response",
             kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
+            kinds::SCHEDULED => "scheduled-message",
             _ => "mailbox-message",
         };
         let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&self.from));
@@ -250,7 +261,8 @@ fn xml_attr_escape(s: &str) -> String {
 /// organisation — so a body spelling one of these either impersonates the
 /// harness or closes the frame built around it.
 const HARNESS_OWNED_TAGS: &str = "system-reminder|task-notification|mailbox-message|\
-                                  shutdown-request|shutdown-response|plan-approval-response|channel";
+                                  shutdown-request|shutdown-response|plan-approval-response|\
+                                  scheduled-message|channel";
 
 /// Render an envelope `body` for a prompt with the harness's own markup inert.
 ///
@@ -303,6 +315,10 @@ pub mod kinds {
     /// drains these between turns and prepends them to the next
     /// user prompt so the model sees them mid-conversation.
     pub const TASK_NOTIFICATION: &str = "task_notification";
+    /// A scheduled job's message, sent by the cron scheduler. It enters the
+    /// receiver's message queue like a peer message, steered or queued per the
+    /// envelope's `delivery`, and is the one kind an agent can send itself.
+    pub const SCHEDULED: &str = "scheduled";
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -395,6 +411,10 @@ mod prompt_tests {
         assert!(
             c.contains("did NOT leave this machine"),
             "must warn that a non-success send did not deliver: {c}"
+        );
+        assert!(
+            c.contains("unconfirmed or unknown") && c.contains("before resending"),
+            "an uncertain send must not be resent blindly: {c}"
         );
     }
 

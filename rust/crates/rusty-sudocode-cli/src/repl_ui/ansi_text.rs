@@ -154,6 +154,7 @@ mod tests {
                     }],
                     40,
                     width,
+                    false,
                 );
                 let canvas = element! { AnsiText(content: overlay) }.render(Some(width));
                 let mut wire = Vec::new();
@@ -184,7 +185,7 @@ mod tests {
             status: runtime::TodoStatus::Completed,
             active_form: "Finishing parser".into(),
         }];
-        let panel = super::super::render_todo_panel(&todos, 40);
+        let panel = crate::cli::format::todo::panel(&todos, 40);
         let canvas =
             element! { AnsiText(content: format!("{panel}\nPlainSample")) }.render(Some(100));
         let mut wire = Vec::new();

@@ -494,6 +494,11 @@ fn configure_mcp(env: &TestEnv, http: bool) -> Option<Server> {
     let root = env.workspace_root();
     let script = root.join("concurrent_mcp.py");
     std::fs::write(&script, include_str!("fixtures/concurrent_mcp.py")).unwrap();
+    std::fs::write(
+        root.join("loopback_http.py"),
+        include_str!("fixtures/loopback_http.py"),
+    )
+    .unwrap();
     let mut server = http.then(|| {
         Server(
             std::process::Command::new(common::resolve_python())
@@ -973,7 +978,7 @@ if command in ('cat one.txt','cat two.txt'):
 fn question_wait_keeps_sibling_output_visible_and_queues_second_question() {
     let env = TestEnv::new("parallel-questions");
     fifo(&env, "read.fifo");
-    let question = |id: &str, prompt: &str| json!({"id":id, "name":"AskUserQuestion", "input":{"question":prompt}});
+    let question = |id: &str, prompt: &str| json!({"id":id, "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":prompt}]}});
     let mut sess = start(
         &env,
         &[
@@ -1127,7 +1132,7 @@ if p.get('command')=='cat protected.txt':
     let mut sess = start(
         &env,
         &[
-            json!({"id":"question", "name":"AskUserQuestion", "input":{"question":"QUEUE_FIRST_QUESTION"}}),
+            json!({"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"QUEUE_FIRST_QUESTION"}]}}),
             bash("protected", "cat protected.txt"),
             bash("free", "cat free.txt"),
         ],
@@ -1194,7 +1199,7 @@ fn cancelling_a_question_preserves_sibling_result_and_releases_input() {
     let mut sess = start(
         &env,
         &[
-            json!({"id":"question", "name":"AskUserQuestion", "input":{"question":"CANCEL_THIS_QUESTION"}}),
+            json!({"id":"question", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"CANCEL_THIS_QUESTION"}]}}),
             bash("read", "cat read.txt"),
         ],
         "10",
@@ -1217,7 +1222,7 @@ fn cancelling_a_question_preserves_sibling_result_and_releases_input() {
         &env,
         &mut sess,
         &[
-            json!({"id":"fresh", "name":"AskUserQuestion", "input":{"question":"NEW_TURN_QUESTION"}}),
+            json!({"id":"fresh", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"NEW_TURN_QUESTION"}]}}),
         ],
     );
     common::expect_screen(

@@ -63,6 +63,7 @@ vte = "0.15"
 workspace = true
 
 [dev-dependencies]
+scode-test-support.workspace = true
 flate2 = "1"
 futures-util = "0.3"
 mock-anthropic-service = { path = "../mock-anthropic-service" }

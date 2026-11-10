@@ -487,128 +487,6 @@ impl ToolExecutor for CliToolExecutor {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliInput {
-    question: Option<String>,
-    options: Option<Vec<String>>,
-    title: Option<String>,
-    description: Option<String>,
-    #[serde(default)]
-    questions: Vec<AskUserQuestionCliField>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliField {
-    id: String,
-    // Accept `question` as an alias for `prompt`: the natural caller mistake
-    // (mirroring the tool's legacy top-level `question` field) otherwise fails
-    // the whole call with a cryptic "missing field `prompt`".
-    #[serde(alias = "question")]
-    prompt: String,
-    kind: Option<String>,
-    required: Option<bool>,
-    allow_custom_input: Option<bool>,
-    custom_input_hint: Option<String>,
-    #[serde(default)]
-    options: Vec<AskUserQuestionCliOption>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionCliOption {
-    label: String,
-    value: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    recommended: Option<bool>,
-}
-
-impl AskUserQuestionCliInput {
-    fn into_request(self) -> Result<QuestionPromptRequest, ToolError> {
-        let fields = if self.questions.is_empty() {
-            let prompt = self
-                .question
-                .map(|question| question.trim().to_string())
-                .filter(|question| !question.is_empty())
-                .ok_or_else(|| ToolError::new("question or questions is required"))?;
-            let options = self
-                .options
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|option| !option.trim().is_empty())
-                .map(|option| QuestionOption {
-                    label: option.clone(),
-                    value: option,
-                    description: None,
-                    recommended: false,
-                })
-                .collect::<Vec<_>>();
-            let kind = if options.is_empty() {
-                QuestionKind::Text
-            } else {
-                QuestionKind::SingleSelect
-            };
-            vec![QuestionField {
-                id: "q1".to_string(),
-                prompt,
-                kind,
-                required: true,
-                allow_custom_input: options.is_empty(),
-                custom_input_hint: None,
-                options,
-            }]
-        } else {
-            self.questions
-                .into_iter()
-                .map(|field| {
-                    let options = field
-                        .options
-                        .into_iter()
-                        .map(|option| QuestionOption {
-                            label: option.label,
-                            value: option.value,
-                            description: option.description,
-                            recommended: option.recommended.unwrap_or(false),
-                        })
-                        .collect::<Vec<_>>();
-                    let kind = field
-                        .kind
-                        .as_deref()
-                        .and_then(|kind| kind.parse::<QuestionKind>().ok())
-                        .unwrap_or({
-                            if options.is_empty() {
-                                QuestionKind::Text
-                            } else {
-                                QuestionKind::SingleSelect
-                            }
-                        });
-                    QuestionField {
-                        id: field.id,
-                        prompt: field.prompt,
-                        kind,
-                        required: field.required.unwrap_or(true),
-                        allow_custom_input: field.allow_custom_input.unwrap_or(false),
-                        custom_input_hint: field.custom_input_hint,
-                        options,
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-
-        Ok(QuestionPromptRequest {
-            presentation: runtime::QuestionPresentation::Question,
-            title: self.title,
-            description: self
-                .description
-                .map(|text| runtime::PromptText::Markdown(text.into())),
-            fields,
-        })
-    }
-}
-
 impl CliToolExecutor {
     fn begin_question(
         &self,
@@ -629,40 +507,13 @@ impl CliToolExecutor {
         &self,
         value: serde_json::Value,
     ) -> Result<String, ToolError> {
-        let input: AskUserQuestionCliInput = serde_json::from_value(value)
-            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-
-        let request = input.into_request()?;
+        let request = tools::parse_question_request(value).map_err(ToolError::new)?;
 
         let answers = self
             .begin_question(&request)?
             .await
             .map_err(ToolError::new)?;
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "answered",
-            "title": request.title,
-            "description": request.description.as_ref().map(runtime::PromptText::as_str),
-            "questions": request.fields.iter().map(|field| serde_json::json!({
-              "id": field.id,
-              "prompt": field.prompt,
-              "kind": field.kind.as_str(),
-              "required": field.required,
-              "allowCustomInput": field.allow_custom_input,
-              "customInputHint": field.custom_input_hint,
-              "options": field.options.iter().map(|option| serde_json::json!({
-                "label": option.label,
-                "value": option.value,
-                "description": option.description,
-                "recommended": option.recommended,
-              })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-            "answers": answers.iter().map(|answer| serde_json::json!({
-              "id": answer.id,
-              "value": answer.value,
-              "label": answer.label,
-            })).collect::<Vec<_>>(),
-        }))
-        .map_err(|error| ToolError::new(error.to_string()))
+        tools::question_result(&request, &answers).map_err(ToolError::new)
     }
 
     /// Persist the complete document first, then approve the exact stored

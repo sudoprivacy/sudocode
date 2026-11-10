@@ -77,13 +77,21 @@ fn close_on_exec_pipe() -> io::Result<(std::os::fd::OwnedFd, std::fs::File)> {
 
 /// A FIFO reader that drains readiness until the syscall reports `WouldBlock`.
 ///
-/// Darwin can announce buffered FIFO data without a sticky closed event.
-/// `ChildStdout`'s short-read optimization clears that readiness before the
-/// following read can observe EOF. A short read is not proof of `WouldBlock`.
+/// Darwin announces FIFO data through readiness but never the FIFO's end:
+/// once the last writer closes, kqueue (edge- or level-triggered, or freshly
+/// registered) and `poll()` all stay silent while `read()` returns 0. A
+/// reader that drained the data before the shell exited would otherwise wait
+/// out the command's whole timeout. So while it waits it also reads again
+/// every [`EOF_RECHECK`].
 #[cfg(target_os = "macos")]
 pub(super) struct FifoReader {
     io: tokio::io::unix::AsyncFd<std::fs::File>,
+    recheck: std::pin::Pin<Box<tokio::time::Sleep>>,
 }
+
+/// How long a drained FIFO waits before reading again to look for its end.
+#[cfg(target_os = "macos")]
+const EOF_RECHECK: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[cfg(target_os = "macos")]
 impl FifoReader {
@@ -93,6 +101,7 @@ impl FifoReader {
                 descriptor.into(),
                 tokio::io::Interest::READABLE,
             )?,
+            recheck: Box::pin(tokio::time::sleep(EOF_RECHECK)),
         })
     }
 
@@ -113,21 +122,37 @@ impl tokio::io::AsyncRead for FifoReader {
         context: &mut std::task::Context<'_>,
         buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        use std::task::{ready, Poll};
+        use std::future::Future;
+        use std::task::Poll;
 
+        let this = self.get_mut();
         if buffer.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
         // Read buffered bytes and EOF directly, including after a short read.
-        match Self::read_into(self.io.get_ref(), buffer) {
+        match Self::read_into(this.io.get_ref(), buffer) {
             Ok(()) => return Poll::Ready(Ok(())),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Poll::Ready(Err(error)),
         }
         loop {
-            let mut guard = ready!(self.io.poll_read_ready(context))?;
-            if let Ok(result) = guard.try_io(|io| Self::read_into(io.get_ref(), buffer)) {
-                return Poll::Ready(result);
+            if let Poll::Ready(guard) = this.io.poll_read_ready(context) {
+                if let Ok(result) = guard?.try_io(|io| Self::read_into(io.get_ref(), buffer)) {
+                    return Poll::Ready(result);
+                }
+                continue;
+            }
+            // Readiness will never report the end; look for it ourselves.
+            if this.recheck.as_mut().poll(context).is_pending() {
+                return Poll::Pending;
+            }
+            this.recheck
+                .as_mut()
+                .reset(tokio::time::Instant::now() + EOF_RECHECK);
+            match Self::read_into(this.io.get_ref(), buffer) {
+                Ok(()) => return Poll::Ready(Ok(())),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Poll::Ready(Err(error)),
             }
         }
     }

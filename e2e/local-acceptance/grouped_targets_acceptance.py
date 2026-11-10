@@ -6,8 +6,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
+from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -137,7 +139,8 @@ pub fn record(name: &str) {
     write(package + "tests/acceptance_reserved/main.rs",
           '#[test] fn directory_target() { group_helper::record("directory"); }\n')
     write("rust/crates/helper/tests/independent.rs", '#[test] fn independent_package() { group_helper::record("other-package"); }\n')
-    for relative in [".github/scripts/local_acceptance.py", "spec/local_acceptance.json"]:
+    for relative in [".github/scripts/local_acceptance.py", ".github/scripts/ci_input_scope.py",
+                     "spec/local_acceptance.json"]:
         write(relative, (SOURCE / relative).read_text(encoding="utf-8"))
     git("init", "--initial-branch=main")
     git("config", "user.name", "Grouped targets acceptance")
@@ -255,12 +258,13 @@ pub fn record(name: &str) {
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
     try:
-        dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
-        legacy = profiles.workspace_nextest_options(output, False)
+        with patch.dict(os.environ, {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]}):
+            dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
+        legacy = profiles.workspace_nextest_options(output, False, False)
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
         environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
-        limited = profiles.workspace_nextest_options(output, True)
+        limited = profiles.workspace_nextest_options(output, True, False)
         command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
     finally:
         if explicit_workers is None:
@@ -271,7 +275,11 @@ pub fn record(name: &str) {
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
-    expected_workers = 8 if (os.cpu_count() or 0) >= 8 else 4
+    cpus = os.cpu_count() or 0
+    hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
+                        and profiles.supports_hosted_eight_workers(root))
+    hosted_minimum = 3 if platform.system() == "Darwin" else 4
+    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= hosted_minimum) else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
     for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
@@ -279,6 +287,38 @@ pub fn record(name: &str) {
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())
         assert lower <= maximum <= upper, (label, maximum)
+        assert len(list(observed.iterdir())) == 7
+        assert not list((output / label / "active").iterdir()), label
+        observed_workers[label] = maximum
+    # Control reported host inputs, then execute the real native cases with
+    # those selected options after restoring the caller's compiler environment.
+    for label, hosted, cpus, system, source_ready, limit, expected_count, minimum in [
+        ("hosted-four-core-pool", "true", 4, "Windows", True, None, 8, 5),
+        ("hosted-unqualified-source", "true", 4, "Windows", False, None, 4, 1),
+        ("local-four-core-pool", "false", 4, "Windows", True, None, 4, 1),
+        ("hosted-small-pool", "true", 3, "Linux", True, None, 4, 1),
+        ("hosted-unknown-pool", "true", None, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-pool", "true", 4, "Windows", True, "2", 2, 1),
+        ("hosted-three-core-macos", "true", 3, "Darwin", True, None, 8, 5),
+        ("hosted-unqualified-macos", "true", 3, "Darwin", False, None, 4, 1),
+        ("local-three-core-macos", "false", 3, "Darwin", True, None, 4, 1),
+        ("hosted-small-macos", "true", 2, "Darwin", True, None, 4, 1),
+        ("hosted-explicit-small-macos", "true", 3, "Darwin", True, "2", 2, 1),
+    ]:
+        with patch.object(os, "cpu_count", return_value=cpus), \
+                patch.object(platform, "system", return_value=system), \
+                patch.dict(os.environ, {"GITHUB_ACTIONS": hosted}):
+            os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
+            if limit is not None:
+                os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = limit
+            controlled = profiles.workspace_nextest_options(
+                output, True, hosted_source_ready=source_ready)
+        assert controlled[controlled.index("--test-threads") + 1] == str(expected_count)
+        environment["SCODE_GROUP_POOL_DIR"] = str(output / label)
+        command(str(executable), "nextest", "run", *controlled, "--workspace", "--locked", *integration_arguments)
+        observed = output / label / "observed"
+        maximum = max(int(path.read_text()) for path in observed.iterdir())
+        assert minimum <= maximum <= expected_count, (label, maximum)
         assert len(list(observed.iterdir())) == 7
         assert not list((output / label / "active").iterdir()), label
         observed_workers[label] = maximum
@@ -336,17 +376,141 @@ pub fn record(name: &str) {
                        "--policy-ref", base, "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
         planned = json.loads(next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ACCEPTANCE_PLAN=")))
         checks = set(planned["local_checks"])
-        costly = {"native-release", "native-services", "native-cohost"}
+        costly = {"native-context", "native-services", "native-cohost"}
         assert (checks & costly == set()) if expected else (costly - {"native-cohost"}) <= checks, (label, text)
+        # These manifest/group changes retain functional checks; optimized
+        # artifact acceptance belongs to release and its own harness inputs.
+        assert "native-release" not in checks, (label, text)
         # Manifests and test-group wrappers are not browser terminal inputs.
         assert "browser" not in checks, (label, text)
         assert "rendering" not in checks, (label, text)
         assert "native-workspace" in checks
         if expected:
             assert "native-examples" in checks, text
+        if not scope_cases:
+            # Exercise the public planner in a deep output directory without
+            # another Cargo build or checkout. All inputs remain Git objects.
+            deep = output / "deep-plan"
+            while len(str(deep.resolve())) < 221:
+                deep /= "committed-source"
+            command("git", "clone", "--no-checkout", "--shared",
+                    "--separate-git-dir", str(output / "deep-plan-git"), str(root), str(deep), cwd=output)
+            deep_text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"),
+                                "plan", "--base", base, "--policy-ref", base,
+                                "--host", "windows", "--architecture", "AMD64", cwd=deep).read_text(encoding="utf-8")
+            deep_plan = json.loads(next(line.split("=", 1)[1] for line in deep_text.splitlines()
+                                        if line.startswith("ACCEPTANCE_PLAN=")))
+            assert deep_plan == planned, (str(deep), deep_text, text)
         scope_cases.append({"case": label, "head": head, "opt_in_only": expected, "checks": sorted(checks)})
 
     scope("New disabled grouping target keeps native cases but skips unchanged products and benchmarks", True)
+    queue_scope_cases = []
+
+    def queue_scope(label, diff_base, daemon, ignored):
+        head = git("rev-parse", "HEAD")
+        keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
+        previous = {key: environment.get(key) for key in keys}
+        try:
+            for event, payload in [
+                ("pull_request", {"pull_request": {"base": {"sha": diff_base}, "head": {"sha": head}}}),
+                ("push", {"before": diff_base, "after": head}),
+                ("merge_group", {"merge_group": {"base_sha": diff_base, "head_sha": head}}),
+            ]:
+                event_file = output / "queue-event.json"
+                event_file.write_text(json.dumps(payload), encoding="utf-8")
+                outputs = output / "queue-output.txt"
+                outputs.write_text("", encoding="utf-8")
+                environment.update(GITHUB_EVENT_NAME=event, GITHUB_EVENT_PATH=str(event_file),
+                                   GITHUB_OUTPUT=str(outputs))
+                log = command(sys.executable, str(root / ".github/scripts/ci_input_scope.py"), cwd=root)
+                actual = json.loads(log.read_text(encoding="utf-8"))
+                for key in ["daemon_required", "a2a_required", "cohost_required"]:
+                    assert actual[key] == str(daemon).lower(), (label, event, actual)
+                assert actual["clippy_required"] == actual["live_required"] == "true", actual
+                assert actual["daemon_disabled_test_sources_ignored"] == sorted(ignored), actual
+                emitted = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+                assert all(emitted[key] == value for key, value in actual.items() if key.endswith("_required")), actual
+                queue_scope_cases.append({"case": label, "event": event, "base": diff_base,
+                                          "head": head, "actual": actual})
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    environment.pop(key, None)
+                else:
+                    environment[key] = value
+
+    # The real queue previously treated every non-CLI wrapper as a daemon
+    # input even though the public author planner excluded its declaration.
+    # Exercise the actual selector and Cargo product using a non-CLI crate.
+    queue_base = git("rev-parse", "HEAD")
+    helper_manifest_path = "rust/crates/helper/Cargo.toml"
+    helper_manifest = (root / helper_manifest_path).read_text()
+    helper_wrapper = "rust/crates/helper/tests/acceptance_groups/acceptance_helper.rs"
+    helper_declaration = ('\n[[test]]\nname="acceptance_helper"\n'
+                          'path="tests/acceptance_groups/acceptance_helper.rs"\ntest=false\n')
+    helper_canonical = profiles.test_group_source(["independent"])
+    write(helper_manifest_path, helper_manifest + helper_declaration)
+    write(helper_wrapper, helper_canonical)
+    queue_head = commit("Add a disabled non-CLI integration group")
+    queue_scope("new disabled non-CLI group", queue_base, False, [helper_wrapper])
+    digest, log = product()
+    assert digest == original_binary, "Non-CLI grouping changed the normal native product"
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+    assert all(row["fresh"] for row in rows if row.get("reason") == "compiler-artifact"), log
+    helper_arguments, helper_plan = profiles.grouped_workspace_test_targets(root, metadata())
+    assert normalize(inventory(helper_arguments), helper_plan) == grown
+    previous_pids = environment["SCODE_GROUP_PID_DIR"]
+    environment["SCODE_GROUP_PID_DIR"] = str(output / "non-cli-group-pids")
+    command(str(executable), "nextest", "run", *options, "--locked", "-p", "group-helper",
+            "--test", "acceptance_helper")
+    assert {path.name for path in (output / "non-cli-group-pids").iterdir()} == {"other-package"}
+    environment["SCODE_GROUP_PID_DIR"] = previous_pids
+    for index, (label, path, contents, diff_base, ignored) in enumerate([
+        ("enabled non-CLI group", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('test=false', 'test=true'), queue_base, []),
+        ("default-enabled non-CLI group", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('test=false\n', ''), queue_base, []),
+        ("unknown target settings", helper_manifest_path,
+         helper_manifest + helper_declaration + 'harness=false\n', queue_base, []),
+        ("existing disabled group source edit", helper_wrapper,
+         helper_canonical + '// Existing source changed.\n', queue_head, []),
+        ("original non-CLI integration source edit", "rust/crates/helper/tests/independent.rs",
+         (root / 'rust/crates/helper/tests/independent.rs').read_text() + '// Original source changed.\n',
+         queue_base, [helper_wrapper]),
+        ("normal library source edit", "rust/crates/helper/src/lib.rs",
+         (root / 'rust/crates/helper/src/lib.rs').read_text() + '// Normal source changed.\n',
+         queue_base, [helper_wrapper]),
+        ("build script edit", "rust/crates/helper/build.rs", 'fn main() {}\n', queue_base, [helper_wrapper]),
+        ("mixed manifest feature edit", helper_manifest_path,
+         helper_manifest + '\n[features]\nfuture=[]\n' + helper_declaration, queue_base, []),
+        ("target source escapes group directory", helper_manifest_path,
+         helper_manifest + helper_declaration.replace('tests/acceptance_groups/acceptance_helper.rs',
+                                                     'tests/independent.rs'), queue_base, []),
+    ]):
+        git("switch", "--detach", queue_head)
+        write(path, contents)
+        commit("Retain daemon checks for " + label)
+        queue_scope(label, diff_base, True, ignored)
+    git("switch", "--detach", queue_head)
+    git("rm", helper_wrapper)
+    commit("Missing non-CLI grouping source")
+    queue_scope("missing non-CLI grouping source", queue_base, True, [])
+    git("switch", "--detach", queue_head)
+    blob = git("rev-parse", "HEAD:" + helper_wrapper)
+    git("update-index", "--cacheinfo", "120000," + blob + "," + helper_wrapper)
+    git("commit", "-m", "Refuse indirect grouping source")
+    # Materialize the committed mode too; changing only the index otherwise
+    # leaves a modified regular file that Git correctly refuses to replace.
+    git("checkout-index", "--force", "--", helper_wrapper)
+    git("diff", "--exit-code")
+    queue_scope("committed symlink grouping source", queue_base, True, [])
+    git("switch", "--detach", queue_head)
+    git("rm", helper_wrapper)
+    (root / helper_wrapper).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", "rust/crates/helper/tests/independent.rs", helper_wrapper)
+    commit("Moving an original integration source retains daemon checks")
+    queue_scope("original source renamed into group", queue_base, True, [helper_wrapper])
+    git("switch", "main")
     # Reproduce complementary CI's raw newer-main base with actual diverging
     # commits. The PR changes one original integration target; main-only files
     # must not turn it into a full-workspace run.
@@ -363,6 +527,18 @@ pub fn record(name: &str) {
     selected = profiles.changed_cli_test_targets(root, newer_main)
     assert selected == ["kept_driver"], f"Newer-main-only changes widened isolated native scope: {selected}"
     assert profiles.changed_cli_test_targets(root, git("merge-base", newer_main, "HEAD")) == selected
+
+    def example_scope(expected):
+        text = command(sys.executable, str(root / ".github/scripts/local_acceptance.py"), "plan",
+                       "--base", newer_main, "--policy-ref", base,
+                       "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
+        plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                               if line.startswith("ACCEPTANCE_PLAN=")))
+        assert ("native-examples" in plan["local_checks"]) == expected, text
+        assert "native-workspace" in plan["local_checks"], text
+        return plan
+
+    isolated_plan = example_scope(False)
     previous_pids = environment["SCODE_GROUP_PID_DIR"]
     environment["SCODE_GROUP_PID_DIR"] = str(output / "isolated-target-pids")
     selected_args = [argument for name in selected for argument in ["--test", name]]
@@ -370,7 +546,8 @@ pub fn record(name: &str) {
     assert {path.name for path in (output / "isolated-target-pids").iterdir()} == {"driver"}
     environment["SCODE_GROUP_PID_DIR"] = previous_pids
     behind_main = {"newer_main": newer_main, "head": isolated_head, "selected": selected,
-                   "actual_native_targets": ["driver"], "conservative_cases": []}
+                   "actual_native_targets": ["driver"], "isolated_plan": isolated_plan,
+                   "conservative_cases": []}
     for index, (label, path) in enumerate([
         ("shared test helper", package + "tests/common/mod.rs"),
         ("production source", package + "src/main.rs"),
@@ -381,6 +558,7 @@ pub fn record(name: &str) {
         write(path, (file.read_text() if file.exists() else "") + "// Changed actual branch input.\n")
         head = commit("Keep full scope for " + label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
         if index == 0:
             environment["SCODE_GROUP_PID_DIR"] = str(output / "mixed-target-pids")
@@ -395,11 +573,13 @@ pub fn record(name: &str) {
             git("mv", package + "tests/kept_driver.rs", package + "src/moved.rs")
         head = commit(label)
         assert profiles.changed_cli_test_targets(root, newer_main) is None, label
+        example_scope(True)
         behind_main["conservative_cases"].append({"case": label, "head": head})
     git("switch", "isolated-native-test")
     write(package + "src/main_only.rs", "// Production input changed only on newer main.\n")
     head = commit("Keep actual branch source changes even when main has identical bytes")
     assert profiles.changed_cli_test_targets(root, newer_main) is None
+    example_scope(True)
     behind_main["conservative_cases"].append({"case": "coincident main and PR source bytes", "head": head})
     git("switch", "-c", "grouping-controls", grouped_scope_head)
     for label, replacement, workspace_text, remove in [
@@ -434,6 +614,7 @@ pub fn record(name: &str) {
               "original_named_driver_and_developer_target_passed": True,
               "invalid_group_refusals": refusals, "scope_cases": scope_cases, "ungrouped_plan": ungrouped_plan,
               "behind_main": behind_main,
+              "queue_scope_cases": queue_scope_cases,
               "commands": commands,
               "scope": "Real Git commits/public planner, Cargo metadata/builds, original and grouped nextest inventories, actual per-case native child processes and independent process-state assertions. Tiny infrastructure fixtures, no product PTY/provider coverage credit."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

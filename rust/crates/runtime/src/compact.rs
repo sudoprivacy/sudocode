@@ -443,6 +443,7 @@ impl PreparedCompaction {
             let framing =
                 frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
             estimate_message_tokens(&ConversationMessage::user_text(framing))
+                + removed_host_context(source, boundary).map_or(0, estimate_message_tokens)
                 + source.messages[boundary..]
                     .iter()
                     .map(estimate_message_tokens)
@@ -633,17 +634,7 @@ impl PreparedCompaction {
             self.keep_from < self.source.messages.len(),
         );
         let mut session = self.source.clone();
-        session.messages = vec![ConversationMessage {
-            history: None,
-            role: MessageRole::System,
-            blocks: vec![ContentBlock::Text { text: continuation }],
-            usage: None,
-            model: None,
-            duration_ms: None,
-        }];
-        session
-            .messages
-            .extend_from_slice(&self.source.messages[self.keep_from..]);
+        session.messages = compacted_messages(&self.source, self.keep_from, continuation);
         session.record_compaction_with_usage(
             summary.clone(),
             self.keep_from,
@@ -664,6 +655,43 @@ impl PreparedCompaction {
             agent_description,
         })
     }
+}
+
+/// Preserve the latest exact snapshot when compaction removes its original
+/// record. Keeping the whole old prefix would prevent useful compaction.
+fn removed_host_context(source: &Session, keep_from: usize) -> Option<&ConversationMessage> {
+    source
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.host_context_text().is_some())
+        .filter(|(index, _)| *index < keep_from)
+        .map(|(_, message)| message)
+}
+
+fn compacted_messages(
+    source: &Session,
+    keep_from: usize,
+    continuation: String,
+) -> Vec<ConversationMessage> {
+    let mut messages = vec![ConversationMessage {
+        history: None,
+        role: MessageRole::System,
+        blocks: vec![ContentBlock::Text { text: continuation }],
+        usage: None,
+        model: None,
+        duration_ms: None,
+        inputs: Vec::new(),
+    }];
+    if let Some(context) = removed_host_context(source, keep_from) {
+        // This is a new compacted history, so its writer assigns a new identity.
+        let mut context = context.clone();
+        context.history = None;
+        messages.push(context);
+    }
+    messages.extend_from_slice(&source.messages[keep_from..]);
+    messages
 }
 
 fn frozen_continuation(summary: &str, todo: Option<&str>, recent: bool) -> String {
@@ -824,6 +852,55 @@ fn format_todo_continuity_block(todos: &[crate::todo_store::Todo]) -> Option<Str
          (with any updates), since TodoWrite replaces the list wholesale.\n",
     );
     for todo in todos {
+        let _ = std::fmt::Write::write_fmt(
+            &mut block,
+            format_args!("- [{}] {}\n", todo.status, todo.content),
+        );
+    }
+    block.push_str("</system-reminder>");
+    Some(block)
+}
+
+/// Text every todo-continuity block carries. A message holding it showed the
+/// model the whole list, which is what the periodic reminder looks for.
+pub(crate) const TODO_CONTINUITY_MARKER: &str = "Your todo list survived the compaction";
+
+/// How the periodic todo reminder opens. Matched as a prefix, so only a block
+/// that IS the reminder counts as the list having been shown, not a message
+/// that quotes it.
+pub(crate) const TODO_TURN_REMINDER_PREFIX: &str =
+    "<system-reminder>\nYour todo list still has open items";
+
+/// Pure formatter for the reminder `ConversationRuntime::inject_todo_context`
+/// prepends once the list has been out of view for `quiet_turns` turns.
+///
+/// `None` when nothing is pending or in progress, so a finished list never
+/// nags. Open items come first because they are what the model has to act on;
+/// completed ones follow because `TodoWrite` replaces the list wholesale, and a
+/// rewrite made without them would drop them from what the user sees. Counts
+/// use the status words the list lines use. The text depends only on its
+/// arguments, so the same list always yields the same bytes.
+pub(crate) fn format_todo_turn_reminder(
+    todos: &[crate::todo_store::Todo],
+    quiet_turns: usize,
+) -> Option<String> {
+    use crate::todo_store::TodoStatus;
+    let count = |status| todos.iter().filter(|todo| todo.status == status).count();
+    let in_progress = count(TodoStatus::InProgress);
+    let pending = count(TodoStatus::Pending);
+    if in_progress + pending == 0 {
+        return None;
+    }
+    let mut block = format!(
+        "{TODO_TURN_REMINDER_PREFIX} ({in_progress} in progress, {pending} pending, {} completed) \
+         and has not been shown in the last {quiet_turns} turns. The user may be looking at this \
+         list, so keep it current: mark finished items completed and remove items that no longer \
+         apply. The next TodoWrite must send the full list.\n",
+        count(TodoStatus::Completed)
+    );
+    let is_open = |todo: &&crate::todo_store::Todo| todo.status != TodoStatus::Completed;
+    let completed = todos.iter().filter(|todo| !is_open(todo));
+    for todo in todos.iter().filter(is_open).chain(completed) {
         let _ = std::fmt::Write::write_fmt(
             &mut block,
             format_args!("- [{}] {}\n", todo.status, todo.content),
@@ -996,6 +1073,7 @@ fn build_compaction_messages(
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             })
         })
         .collect();
@@ -1142,15 +1220,7 @@ async fn compact_session_inner<C: ApiClient>(
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
@@ -1310,15 +1380,7 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
@@ -1406,15 +1468,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         Some(&session.fs_handle()),
     );
 
-    let mut compacted_messages = vec![ConversationMessage {
-        history: None,
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text: continuation }],
-        usage: None,
-        model: None,
-        duration_ms: None,
-    }];
-    compacted_messages.extend(preserved);
+    let compacted_messages = compacted_messages(session, keep_from, continuation);
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
@@ -1782,7 +1836,8 @@ pub(crate) fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSe
 mod tests {
     use super::{
         compact_session_sync, format_compact_summary, format_todo_continuity_block,
-        get_compact_continuation_message, should_compact, CompactionConfig,
+        format_todo_turn_reminder, get_compact_continuation_message, should_compact,
+        CompactionConfig, TODO_CONTINUITY_MARKER, TODO_TURN_REMINDER_PREFIX,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
     use crate::todo_store::{Todo, TodoStatus};
@@ -1822,6 +1877,69 @@ mod tests {
         assert!(block.contains("- [pending] Ship it"), "{block}");
         // Names the whole-list-replace contract so the next TodoWrite is faithful.
         assert!(block.contains("TodoWrite"), "{block}");
+        // The periodic reminder finds this block by its marker.
+        assert!(block.contains(TODO_CONTINUITY_MARKER), "{block}");
+    }
+
+    fn todo(content: &str, status: TodoStatus) -> Todo {
+        Todo {
+            content: content.to_string(),
+            status,
+            active_form: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn todo_turn_reminder_is_none_when_nothing_is_open() {
+        assert!(format_todo_turn_reminder(&[], 10).is_none());
+        let done = [todo("Write parser", TodoStatus::Completed)];
+        assert!(format_todo_turn_reminder(&done, 10).is_none());
+        // Work in progress is open too.
+        let running = [todo("Run tests", TodoStatus::InProgress)];
+        assert!(format_todo_turn_reminder(&running, 10).is_some());
+    }
+
+    #[test]
+    fn todo_turn_reminder_lists_open_items_first_and_keeps_completed_ones() {
+        let todos = [
+            todo("Write parser", TodoStatus::Completed),
+            todo("Run tests", TodoStatus::InProgress),
+            todo("Review docs", TodoStatus::Completed),
+            todo("Ship it", TodoStatus::Pending),
+        ];
+        let block = format_todo_turn_reminder(&todos, 10).expect("open items yield a reminder");
+        // Hidden from users by the `<system-reminder>` prefix, and found again
+        // in history by this exact opening.
+        assert!(block.starts_with(TODO_TURN_REMINDER_PREFIX), "{block}");
+        assert!(block.ends_with("</system-reminder>"), "{block}");
+        assert!(
+            block.contains("(1 in progress, 1 pending, 2 completed)"),
+            "{block}"
+        );
+        assert!(block.contains("last 10 turns"), "{block}");
+        assert!(
+            block.contains("TodoWrite must send the full list"),
+            "{block}"
+        );
+        let items: Vec<&str> = block
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                "- [in_progress] Run tests",
+                "- [pending] Ship it",
+                "- [completed] Write parser",
+                "- [completed] Review docs",
+            ],
+            "open items keep their order and come first: {block}"
+        );
+        // Same list, same bytes: the reminder never varies for one state.
+        assert_eq!(
+            format_todo_turn_reminder(&todos, 10).as_deref(),
+            Some(block.as_str())
+        );
     }
 
     #[test]
@@ -1879,6 +1997,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
 
@@ -2261,6 +2380,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
             ConversationMessage::user_text("tiny"),
             ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -2377,6 +2497,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
 

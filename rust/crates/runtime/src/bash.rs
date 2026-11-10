@@ -1110,6 +1110,25 @@ impl BackgroundShell {
             match result {
                 Ok(Some(status)) => {
                     self.child = None;
+                    // The journal can publish completion synchronously. Make
+                    // the observed exit visible before waking its consumers;
+                    // this monitor still owns persistence retries afterward.
+                    self.tasks.update(&self.id, |task| {
+                        task.status = if cancelling && !kill_confirmed {
+                            BackgroundTaskStatus::ExecutionUnconfirmed
+                        } else if cancelling {
+                            BackgroundTaskStatus::Cancelled
+                        } else if status.success() {
+                            BackgroundTaskStatus::Completed
+                        } else {
+                            BackgroundTaskStatus::Failed
+                        };
+                        task.exit_code = status.code();
+                        task.activity = describe_exit_status(status)
+                            .as_ref()
+                            .map(ShellStatus::wire)
+                            .unwrap_or_default();
+                    });
                     if let Some(journal) = &self.journal {
                         #[cfg(unix)]
                         let signal = {
@@ -1136,23 +1155,6 @@ impl BackgroundShell {
                         };
                         self.persist_terminal(journal, &snapshot, cancelling && !kill_confirmed);
                     }
-                    self.tasks.update(&self.id, |task| {
-                        task.status = if cancelling && !kill_confirmed {
-                            BackgroundTaskStatus::ExecutionUnconfirmed
-                        } else if cancelling {
-                            BackgroundTaskStatus::Cancelled
-                        } else if status.success() {
-                            BackgroundTaskStatus::Completed
-                        } else {
-                            BackgroundTaskStatus::Failed
-                        };
-                        task.exit_code = status.code();
-                        task.activity = describe_exit_status(status)
-                            .as_ref()
-                            .map(ShellStatus::wire)
-                            .unwrap_or_default();
-                    });
-                    self.child = None;
                     return;
                 }
                 Err(error) => {

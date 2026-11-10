@@ -1,3 +1,8 @@
+mod ask_user_question;
+pub use ask_user_question::{
+    parse_request as parse_question_request, serialize_result as question_result,
+};
+
 /// Test-only seams exposed for integration tests.
 ///
 /// These wrappers cross the crate boundary so `tools/tests/*.rs`
@@ -260,7 +265,6 @@ pub mod testing {
 }
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -276,9 +280,8 @@ use api::{
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
     agent_mailbox::{kinds as mailbox_kinds, MailboxEnvelope},
-    check_freshness,
-    cron_registry::CronRegistry,
-    current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
+    check_freshness, current_workspace_root, dedupe_superseded_commit_events, edit_file,
+    glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     plan_store::compose_task_framing,
     read_file,
@@ -295,23 +298,6 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-fn global_cron_registry() -> &'static CronRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
-    // Persistent store shared with the `scode cron` CLI and the scheduler,
-    // so a cron the agent creates survives restart and actually fires —
-    // rather than living only for this process. `SUDOCODE_CRON_STORE`
-    // overrides the path (tests point it at a temp file; it is cron-only,
-    // so isolating cron never perturbs other config-home consumers).
-    REGISTRY.get_or_init(|| {
-        let path = std::env::var_os("SUDOCODE_CRON_STORE").map_or_else(
-            || runtime::default_config_home().join("crons.json"),
-            std::path::PathBuf::from,
-        );
-        CronRegistry::open(path)
-    })
-}
 
 /// The persisted todo list for this session. Used to seed a REPL's context panel
 /// at startup, before any turn has produced a `TodoWrite` result to read.
@@ -1444,52 +1430,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user structured questions and wait for their response. Use this tool whenever you need user preferences, configuration values, first-run setup answers, or any other structured input. Prefer title/description/questions[] for multi-step forms; simple legacy question/options is still accepted. Do not ask numbered setup questions directly in plain assistant text when this tool is available.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "description": { "type": "string" },
-                    "question": { "type": "string" },
-                    "options": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "questions": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "prompt": { "type": "string" },
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["single_select", "multi_select", "text", "boolean"]
-                                },
-                                "required": { "type": "boolean" },
-                                "allowCustomInput": { "type": "boolean" },
-                                "customInputHint": { "type": "string" },
-                                "options": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "label": { "type": "string" },
-                                            "value": { "type": "string" },
-                                            "description": { "type": "string" },
-                                            "recommended": { "type": "boolean" }
-                                        },
-                                        "required": ["label", "value"],
-                                        "additionalProperties": false
-                                    }
-                                }
-                            },
-                            "required": ["id", "prompt"],
-                            "additionalProperties": false
-                        }
-                    }
-                }
-            }),
+            description: "Ask the user structured questions and wait for their response. Use this tool whenever you need user preferences, configuration values, first-run setup answers, or any other structured input. Use questions[] with id and prompt for every question. Custom answers are allowed by default; set allowCustomInput to false for a closed choice. Do not ask numbered setup questions directly in plain assistant text when this tool is available.",
+            input_schema: ask_user_question::input_schema(),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
@@ -1650,13 +1592,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CronCreate",
-            description: "Create a scheduled recurring task.",
+            description: "Schedule a recurring message (5-field cron) to an agent, by default this one.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "schedule": { "type": "string" },
                     "prompt": { "type": "string" },
-                    "description": { "type": "string" }
+                    "description": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "delivery": { "type": "string", "enum": ["queue", "steer"] }
                 },
                 "required": ["schedule", "prompt"],
                 "additionalProperties": false
@@ -1974,9 +1918,7 @@ fn execute_tool_with_enforcer(
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
         "PowerShell" => call.run_powershell(),
-        "AskUserQuestion" => {
-            from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
-        }
+        "AskUserQuestion" => ask_user_question::run(input),
         "set_tip" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             let tip: runtime::tips::Tip = from_value(input)?;
@@ -2035,107 +1977,6 @@ fn maybe_enforce_permission_check_with_mode(
     } else {
         Ok(())
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> {
-    use std::io;
-
-    let stdout = io::stdout();
-    let stdin = io::stdin();
-    let mut out = stdout.lock();
-    let mut reader = stdin.lock();
-
-    run_ask_user_question_v2(input, &mut out, &mut reader)
-}
-
-fn prompt_user_for_answer(
-    out: &mut impl Write,
-    reader: &mut impl BufRead,
-    question: &str,
-    options: Option<&Vec<String>>,
-) -> Result<String, String> {
-    writeln!(out, "\n[Question] {question}").map_err(|e| e.to_string())?;
-
-    if let Some(options) = options {
-        for (i, option) in options.iter().enumerate() {
-            writeln!(out, "  {}. {}", i + 1, option).map_err(|e| e.to_string())?;
-        }
-        write!(out, "Enter choice (1-{}): ", options.len()).map_err(|e| e.to_string())?;
-    } else {
-        write!(out, "Your answer: ").map_err(|e| e.to_string())?;
-    }
-    out.flush().map_err(|e| e.to_string())?;
-
-    let mut response = String::new();
-    reader.read_line(&mut response).map_err(|e| e.to_string())?;
-    let response = response.trim().to_string();
-
-    if let Some(options) = options {
-        if let Ok(idx) = response.parse::<usize>() {
-            if idx >= 1 && idx <= options.len() {
-                return Ok(options[idx - 1].clone());
-            }
-        }
-    }
-
-    Ok(response)
-}
-
-fn run_ask_user_question_v2(
-    input: AskUserQuestionInput,
-    out: &mut impl Write,
-    reader: &mut impl BufRead,
-) -> Result<String, String> {
-    let NormalizedQuestions {
-        title,
-        description,
-        questions,
-    } = normalize_ask_user_question_input(input)?;
-
-    if let Some(title) = &title {
-        writeln!(out, "\n[Question Set] {title}").map_err(|e| e.to_string())?;
-    }
-    if let Some(description) = &description {
-        writeln!(out, "{description}").map_err(|e| e.to_string())?;
-    }
-
-    let mut answers = Vec::with_capacity(questions.len());
-    for (index, item) in questions.iter().enumerate() {
-        let prompt = format!("{}. {}", index + 1, item.prompt);
-        let option_labels = if item.options.is_empty() {
-            None
-        } else {
-            Some(
-                item.options
-                    .iter()
-                    .map(|option| option.label.clone())
-                    .collect::<Vec<_>>(),
-            )
-        };
-
-        let answer = prompt_user_for_answer(out, reader, &prompt, option_labels.as_ref())?;
-        let matched_option = item
-            .options
-            .iter()
-            .find(|option| option.label == answer || option.value == answer);
-
-        answers.push(AskUserQuestionAnswer {
-            id: item.id.clone(),
-            value: matched_option.map_or_else(|| answer.clone(), |option| option.value.clone()),
-            label: matched_option
-                .map(|option| option.label.clone())
-                .or_else(|| (!answer.is_empty()).then_some(answer)),
-        });
-    }
-
-    to_pretty_json(AskUserQuestionResult {
-        status: "answered".to_string(),
-        title,
-        description,
-        questions,
-        answers,
-    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2836,39 +2677,34 @@ fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
-    // Validate up front so the agent gets an actionable error instead of a
-    // cron that silently never fires. The tool schedules standard 5-field
-    // cron expressions.
-    runtime::cron_schedule::validate(
-        runtime::cron_registry::CronKind::Cron,
-        &input.schedule,
-        None,
-    )?;
-    let reg = global_cron_registry();
-    let entry = reg.create(&input.schedule, &input.prompt, input.description.as_deref());
-    // Seed the first fire time so the scheduler/tick considers it.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let next = runtime::cron_schedule::first_run_at(&entry, now);
-    if next.is_some() {
-        let _ = reg.set_next_run(&entry.cron_id, next);
-    }
-    to_pretty_json(json!({
-        "cron_id": entry.cron_id,
-        "schedule": entry.schedule,
-        "prompt": entry.prompt,
-        "description": entry.description,
-        "enabled": entry.enabled,
-        "created_at": entry.created_at,
-        "next_run_at": next
-    }))
+    // A job the agent schedules comes back to the agent that asked for it,
+    // through its own inbox and message queue.
+    let agent = input
+        .agent
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| runtime::mailbox::sending_mailbox().self_id().to_string());
+    let target = if agent.is_empty() {
+        runtime::cron_registry::CronTarget::NewSession
+    } else {
+        runtime::cron_registry::CronTarget::Agent { name: agent }
+    };
+    let entry = runtime::cron_service::create(runtime::cron_registry::CronCreateParams {
+        schedule: input.schedule,
+        kind: runtime::cron_registry::CronKind::Cron,
+        prompt: input.prompt,
+        description: input.description,
+        target,
+        delivery: input.delivery,
+        created_by: runtime::cron_registry::CronCreator::Agent,
+        ..Default::default()
+    })?;
+    to_pretty_json(serde_json::to_value(entry).map_err(|e| e.to_string())?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
-    match global_cron_registry().delete(&input.cron_id) {
+    match runtime::cron_service::remove(&input.cron_id) {
         Ok(entry) => to_pretty_json(json!({
             "cron_id": entry.cron_id,
             "schedule": entry.schedule,
@@ -2880,25 +2716,10 @@ fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
 }
 
 fn run_cron_list(_input: Value) -> Result<String, String> {
-    let entries: Vec<_> = global_cron_registry()
-        .list(false)
-        .into_iter()
-        .map(|e| {
-            json!({
-                "cron_id": e.cron_id,
-                "schedule": e.schedule,
-                "prompt": e.prompt,
-                "description": e.description,
-                "enabled": e.enabled,
-                "run_count": e.run_count,
-                "last_run_at": e.last_run_at,
-                "created_at": e.created_at
-            })
-        })
-        .collect();
+    let entries = runtime::cron_service::list();
     to_pretty_json(json!({
+        "count": entries.len(),
         "crons": entries,
-        "count": entries.len()
     }))
 }
 
@@ -3085,6 +2906,7 @@ fn write_envelope(
 ) -> Result<PathBuf, String> {
     let recipient_sanitized = sanitize_recipient(recipient);
     let envelope = MailboxEnvelope {
+        send_id: None,
         delivery: input.delivery,
         from: resolve_sender(input, mailbox),
         to: recipient.to_string(),
@@ -3344,11 +3166,30 @@ fn run_monitor(
         tasks,
     )
     .map_err(|error| format!("failed to start monitor: {error}"))?;
-    Ok(format!(
-        "Monitor started (task {id}, output {output_path}). You will be notified \
+    Ok(monitor_started(&id, &output_path))
+}
+
+/// How a successful `Monitor` result begins, spelled once for the tool that
+/// writes it and [`monitor_task_from_tool_result`] that reads it back.
+const MONITOR_STARTED: &str = "Monitor started (task ";
+
+/// The result of a started `Monitor`: the task it launched, then what the
+/// model should do while it waits.
+fn monitor_started(id: &str, output_path: &str) -> String {
+    format!(
+        "{MONITOR_STARTED}{id}, output {output_path}). You will be notified \
          when it finishes or fires. Keep working — do not poll or sleep. An event \
          may arrive while you are waiting for the user; it is not their reply."
-    ))
+    )
+}
+
+/// The background task a successful `Monitor` result names, if it is one.
+#[must_use]
+pub fn monitor_task_from_tool_result(output: &str) -> Option<&str> {
+    output
+        .strip_prefix(MONITOR_STARTED)?
+        .split_once(", output ")
+        .map(|(task, _)| task)
 }
 
 fn classify_bash_permission(command: &str) -> PermissionMode {
@@ -4199,129 +4040,6 @@ struct PowerShellInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionInput {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    question: Option<String>,
-    #[serde(default)]
-    options: Option<Vec<String>>,
-    #[serde(default)]
-    questions: Vec<AskUserQuestionItem>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionItem {
-    id: String,
-    // Accept `question` as an alias so an item written with the legacy
-    // top-level field name (the natural mistake, since the tool also takes a
-    // top-level `question`) deserializes instead of failing the whole call
-    // with a cryptic "missing field `prompt`".
-    #[serde(alias = "question")]
-    prompt: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    required: Option<bool>,
-    #[serde(default)]
-    allow_custom_input: Option<bool>,
-    #[serde(default)]
-    custom_input_hint: Option<String>,
-    #[serde(default)]
-    options: Vec<AskUserQuestionOption>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct AskUserQuestionOption {
-    label: String,
-    value: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    recommended: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionAnswer {
-    id: String,
-    value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AskUserQuestionResult {
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    questions: Vec<AskUserQuestionItem>,
-    answers: Vec<AskUserQuestionAnswer>,
-}
-
-struct NormalizedQuestions {
-    title: Option<String>,
-    description: Option<String>,
-    questions: Vec<AskUserQuestionItem>,
-}
-
-fn normalize_ask_user_question_input(
-    input: AskUserQuestionInput,
-) -> Result<NormalizedQuestions, String> {
-    if !input.questions.is_empty() {
-        return Ok(NormalizedQuestions {
-            title: input.title,
-            description: input.description,
-            questions: input.questions,
-        });
-    }
-
-    let question = input
-        .question
-        .map(|question| question.trim().to_string())
-        .filter(|question| !question.is_empty())
-        .ok_or_else(|| "question or questions is required".to_string())?;
-
-    let options = input
-        .options
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|option| !option.trim().is_empty())
-        .map(|option| AskUserQuestionOption {
-            label: option.clone(),
-            value: option,
-            description: None,
-            recommended: None,
-        })
-        .collect::<Vec<_>>();
-
-    Ok(NormalizedQuestions {
-        title: input.title,
-        description: input.description,
-        questions: vec![AskUserQuestionItem {
-            id: "q1".to_string(),
-            prompt: question,
-            kind: Some(if options.is_empty() {
-                "text".to_string()
-            } else {
-                "single_select".to_string()
-            }),
-            required: Some(true),
-            allow_custom_input: Some(options.is_empty()),
-            custom_input_hint: None,
-            options,
-        }],
-    })
-}
-
-#[derive(Debug, Deserialize)]
 struct TodoWriteInput {
     todos: Vec<TodoInput>,
 }
@@ -4378,6 +4096,10 @@ struct CronCreateInput {
     prompt: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    delivery: Option<runtime::turn_input::InputDelivery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7323,7 +7045,7 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
     }
 
     let mut disabled = Vec::new();
-    for entry in global_cron_registry().list(true) {
+    for entry in runtime::cron_service::registry().list(true) {
         let haystack = format!(
             "{} {}",
             entry.prompt,
@@ -7331,7 +7053,9 @@ fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<S
         )
         .to_ascii_lowercase();
         if tokens.iter().any(|token| haystack.contains(token))
-            && global_cron_registry().disable(&entry.cron_id).is_ok()
+            && runtime::cron_service::registry()
+                .disable(&entry.cron_id)
+                .is_ok()
         {
             disabled.push(entry.cron_id);
         }
@@ -8847,6 +8571,7 @@ fn build_forked_messages(
         usage: None,
         model: None,
         duration_ms: None,
+        inputs: Vec::new(),
     };
 
     vec![full_assistant, user_message]
@@ -9387,6 +9112,23 @@ fn run_in_process_group(
     // pipes open, hanging the drain forever.
     let mut child = runtime::shell_process_group(process.group()).spawn()?;
 
+    // Drain both pipes while the process runs. Waiting for exit first deadlocks
+    // as soon as a tool fills either OS pipe (for example a model context JSON).
+    let stdout_handle = child.inner().stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.inner().stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            buf
+        })
+    });
+
     let started = Instant::now();
     let outcome = loop {
         if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
@@ -9403,7 +9145,12 @@ fn run_in_process_group(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    let drained = drain_group_child(child, drain_budget_for(timeout_ms));
+    let drained = drain_group_child(
+        child,
+        stdout_handle,
+        stderr_handle,
+        drain_budget_for(timeout_ms),
+    );
     Ok(ShellRunResult {
         outcome,
         stdout: drained.stdout,
@@ -9446,28 +9193,15 @@ struct DrainedShellOutput {
 /// The reader threads run on a detached worker so a stuck pipe (e.g. a descendant we did
 /// not manage to kill that still holds the write end) cannot pin the calling thread
 /// past `budget`. If the watchdog fires, callers get empty stdio rather than a hang.
-fn drain_group_child(child: command_group::GroupChild, budget: Duration) -> DrainedShellOutput {
+fn drain_group_child(
+    child: command_group::GroupChild,
+    stdout_handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr_handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    budget: Duration,
+) -> DrainedShellOutput {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut child = child;
-        let stdout_pipe = child.inner().stdout.take();
-        let stderr_pipe = child.inner().stderr.take();
-
-        let stdout_handle = stdout_pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        let stderr_handle = stderr_pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-
         // Reap the leader; the polling loop already decided the outcome.
         let _ = child.wait();
 
@@ -9633,6 +9367,19 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_monitor_result_names_the_task_it_started() {
+        let output = super::monitor_started("shell-7f3a", "/tmp/out.log");
+        assert_eq!(
+            super::monitor_task_from_tool_result(&output),
+            Some("shell-7f3a")
+        );
+        assert_eq!(
+            super::monitor_task_from_tool_result("failed to start monitor"),
+            None
+        );
+    }
     /// A sub-agent never resumes a session, so the retired `fresh` field is not
     /// in the schema. A caller that still sends it must not break: `AgentInput`
     /// ignores unknown fields, so the input still deserializes.
@@ -9862,11 +9609,10 @@ mod tests {
         await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
         classify_lane_failure, convert_messages, derive_agent_state,
         execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
+        extract_recovery_outcome, final_assistant_text, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
         normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, search_tool_specs, AgentInput, AgentJob,
-        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        push_output_block, search_tool_specs, AgentInput, AgentJob, GlobalToolRegistry,
         LaneEventName, LaneFailureClass, SearchableToolSpec, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
@@ -9881,10 +9627,59 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        env_lock()
+    /// Serialise a test that changes the process environment, and point the
+    /// home directory at an empty scratch one while it holds the lock.
+    /// Without that, a test that builds an agent's prompt or a session loads
+    /// the developer's own settings, and a key those still carry fails it on
+    /// that machine only. A test that needs a fixture home sets its own.
+    fn env_guard() -> EnvGuard {
+        let lock = env_lock()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = ENV_GUARD_KEYS.map(|key| (key, std::env::var_os(key)));
+        let home = scratch_home();
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+        std::env::remove_var(runtime::config::GLOBAL_CONFIG_DIR_ENV);
+        EnvGuard { saved, _lock: lock }
+    }
+
+    const ENV_GUARD_KEYS: [&str; 4] = [
+        "HOME",
+        "USERPROFILE",
+        "SUDO_CODE_CONFIG_HOME",
+        runtime::config::GLOBAL_CONFIG_DIR_ENV,
+    ];
+
+    /// One per test process, so a test that runs without the lock and reads
+    /// the home while another holds it never sees a directory that is gone.
+    fn scratch_home() -> &'static Path {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let home =
+                std::env::temp_dir().join(format!("sudocode-tools-home-{}", std::process::id()));
+            fs::create_dir_all(&home).expect("scratch home");
+            home
+        })
+    }
+
+    /// Restores the environment before releasing the lock: `drop` runs before
+    /// the fields are dropped.
+    struct EnvGuard {
+        saved: [(&'static str, Option<std::ffi::OsString>); 4],
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -10073,10 +9868,42 @@ mod tests {
     /// ticks scode's crons.json) sets `SUDOCODE_DISABLE_CRON_TOOLS` so the agent
     /// cannot "schedule" a task that would persist but never fire — an orphan.
     #[test]
+    fn cron_create_delivers_back_to_this_agent_by_default() {
+        let _guard = env_guard();
+        let dir = std::env::temp_dir().join(format!("cron-tool-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
+        let created: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "*/5 * * * *", "prompt": "check the queue"}),
+            )
+            .expect("create"),
+        )
+        .unwrap();
+        let steer: serde_json::Value = serde_json::from_str(
+            &execute_tool(
+                "CronCreate",
+                &json!({"schedule": "0 * * * *", "prompt": "x", "agent": "worker", "delivery": "steer"}),
+            )
+            .expect("create with options"),
+        )
+        .unwrap();
+        std::env::remove_var("SUDOCODE_CRON_STORE");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let me = runtime::mailbox::sending_mailbox().self_id().to_string();
+        assert_eq!(created["target"], json!({"type": "agent", "name": me}));
+        assert_eq!(created["delivery"], "queue");
+        assert_eq!(created["created_by"], "agent");
+        assert!(created["next_run_at"].is_u64(), "armed: {created}");
+        assert_eq!(steer["target"], json!({"type": "agent", "name": "worker"}));
+        assert_eq!(steer["delivery"], "steer");
+    }
+
+    #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
         let default_names: Vec<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
         assert!(
@@ -10554,9 +10381,7 @@ mod tests {
         // sets SUDOCODE_WEB_SEARCH_BASE_URL. Without the lock, parallel test
         // runners can interleave the set/remove calls and cause assertion
         // failures on the wrong port.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -10603,9 +10428,7 @@ mod tests {
 
     #[test]
     fn web_search_handles_generic_links_and_invalid_base_url() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /fallback?q=generic+links "));
             HttpResponse::html(
@@ -10658,9 +10481,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_returns_results_with_snippets() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|_request_line: &str| {
             HttpResponse::json(
                 200,
@@ -10725,9 +10546,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_missing_api_key_returns_error() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
 
         std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "tavily");
         std::env::set_var("SUDOCODE_TAVILY_API_KEY", "<PLACEHOLDER>");
@@ -10863,9 +10682,7 @@ mod tests {
 
     #[test]
     fn todo_write_replaces_the_whole_list() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("todos-write.json");
         std::env::set_var("SUDOCODE_TODO_STORE", &path);
 
@@ -11529,6 +11346,7 @@ mod tests {
             usage: None,
             model: None,
             duration_ms: None,
+            inputs: Vec::new(),
         });
         let converted = convert_messages(&messages);
         assert_eq!(converted.len(), 2);
@@ -11585,6 +11403,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
             ConversationMessage {
                 history: None,
@@ -11598,6 +11417,7 @@ mod tests {
                 usage: None,
                 model: None,
                 duration_ms: None,
+                inputs: Vec::new(),
             },
         ];
         let discovered = extract_discovered_tool_names(&messages);
@@ -11626,9 +11446,7 @@ mod tests {
         // on a missing definition — a race that shows up on one runner and not
         // another. The mutating test already takes this lock; a reader that
         // depends on what it changes has to take it too.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = GlobalToolRegistry::builtin();
 
         // Nothing searched for yet: core on, the rest deferred.
@@ -11673,9 +11491,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_persists_handoff_metadata() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-store");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
@@ -11764,9 +11580,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn agent_fake_runner_can_persist_completion_and_failure() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-runner");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         // Cron is now persistent; point its dedicated store env at this temp
@@ -12173,7 +11987,7 @@ mod tests {
             "deadbee"
         );
 
-        let cron = global_cron_registry().create(
+        let cron = runtime::cron_service::registry().create(
             "*/10 * * * *",
             "roadmap-nudge-10min for ROADMAP #66",
             Some("ROADMAP #66 reminder"),
@@ -12212,7 +12026,7 @@ mod tests {
             reminder_manifest_json["laneEvents"][1]["data"]["disabledCronIds"][0],
             cron.cron_id
         );
-        let disabled_entry = global_cron_registry()
+        let disabled_entry = runtime::cron_service::registry()
             .get(&cron.cron_id)
             .expect("cron should still exist");
         assert!(!disabled_entry.enabled);
@@ -12494,9 +12308,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn subagent_runtime_executes_tool_loop_with_isolated_session() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("subagent-input.txt");
         std::fs::write(&path, "hello from child").expect("write input file");
 
@@ -13421,9 +13233,7 @@ mod tests {
 
     #[test]
     fn bash_workspace_tests_are_blocked_when_branch_is_behind_main() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-test-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13473,9 +13283,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bash_targeted_tests_skip_branch_preflight() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("targeted-test-no-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13507,9 +13315,7 @@ mod tests {
 
     #[test]
     fn file_tools_cover_read_write_and_edit_behaviors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("fs-suite");
         fs::create_dir_all(&root).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13618,9 +13424,7 @@ mod tests {
 
     #[test]
     fn glob_and_grep_tools_cover_success_and_errors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("search-suite");
         fs::create_dir_all(root.join("nested")).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13720,66 +13524,24 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_v2_returns_structured_answers() {
+    fn ask_user_question_returns_structured_answers() {
         use std::io::Cursor;
 
-        let input = AskUserQuestionInput {
-            question: None,
-            options: None,
-            title: Some("Initial setup".to_string()),
-            description: Some("Please answer the following.".to_string()),
-            questions: vec![
-                AskUserQuestionItem {
-                    id: "save_scope".to_string(),
-                    prompt: "Where to save preferences?".to_string(),
-                    kind: Some("single_select".to_string()),
-                    required: Some(true),
-                    allow_custom_input: Some(false),
-                    custom_input_hint: None,
-                    options: vec![
-                        AskUserQuestionOption {
-                            label: "Project".to_string(),
-                            value: "project".to_string(),
-                            description: None,
-                            recommended: Some(true),
-                        },
-                        AskUserQuestionOption {
-                            label: "User".to_string(),
-                            value: "user".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                    ],
-                },
-                AskUserQuestionItem {
-                    id: "default_language".to_string(),
-                    prompt: "Default language?".to_string(),
-                    kind: Some("single_select".to_string()),
-                    required: Some(true),
-                    allow_custom_input: Some(false),
-                    custom_input_hint: None,
-                    options: vec![
-                        AskUserQuestionOption {
-                            label: "zh-CN".to_string(),
-                            value: "zh-CN".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                        AskUserQuestionOption {
-                            label: "en-US".to_string(),
-                            value: "en-US".to_string(),
-                            description: None,
-                            recommended: None,
-                        },
-                    ],
-                },
-            ],
-        };
+        let request = super::parse_question_request(json!({
+            "title": "Initial setup", "description": "Please answer the following.",
+            "questions": [
+                {"id":"save_scope", "prompt":"Where to save preferences?", "allowCustomInput":false,
+                 "options":[{"label":"Project", "value":"project", "recommended":true}, {"label":"User", "value":"user"}]},
+                {"id":"default_language", "prompt":"Default language?", "allowCustomInput":false,
+                 "options":[{"label":"zh-CN", "value":"zh-CN"}, {"label":"en-US", "value":"en-US"}]}
+            ]
+        })).expect("valid question request");
 
         let mut output = Vec::new();
         let mut input_reader = Cursor::new(b"1\n2\n".to_vec());
-        let result = run_ask_user_question_v2(input, &mut output, &mut input_reader)
-            .expect("AskUserQuestion v2 should succeed");
+        let result =
+            super::ask_user_question::run_with_io(&request, &mut output, &mut input_reader)
+                .expect("AskUserQuestion should succeed");
         let json: serde_json::Value = serde_json::from_str(&result).expect("json");
 
         assert_eq!(json["status"], "answered");
@@ -13795,29 +13557,15 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_v2_requires_non_empty_questions() {
-        use std::io::Cursor;
-
-        let input = AskUserQuestionInput {
-            question: None,
-            options: None,
-            title: None,
-            description: None,
-            questions: vec![],
-        };
-
-        let mut output = Vec::new();
-        let mut input_reader = Cursor::new(Vec::<u8>::new());
-        let error = run_ask_user_question_v2(input, &mut output, &mut input_reader)
+    fn ask_user_question_requires_non_empty_questions() {
+        let error = super::parse_question_request(json!({"questions": []}))
             .expect_err("empty questions should fail");
-        assert!(error.contains("question or questions is required"));
+        assert!(error.contains("questions must contain at least one question"));
     }
 
     #[test]
     fn config_reads_and_writes_supported_values() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "sudocode-config-{}",
             std::time::SystemTime::now()
@@ -13944,9 +13692,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn powershell_runs_via_stub_shell() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "sudocode-pwsh-bin-{}",
             std::time::SystemTime::now()
@@ -14185,9 +13931,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn powershell_errors_when_shell_is_missing() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_path = std::env::var("PATH").unwrap_or_default();
         let empty_dir = std::env::temp_dir().join(format!(
             "sudocode-empty-bin-{}",
@@ -14266,9 +14010,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn given_read_only_enforcer_when_read_file_then_not_permission_denied() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("perm-read");
         fs::create_dir_all(&root).expect("create root");
         let file = root.join("readable.txt");
@@ -14295,9 +14037,7 @@ printf 'pwsh:%s' "$1"
     #[cfg(unix)]
     #[test]
     fn given_no_enforcer_when_bash_then_executes_normally() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = super::GlobalToolRegistry::builtin();
         let result = registry
             .execute("bash", &json!({ "command": "printf 'ok'" }))

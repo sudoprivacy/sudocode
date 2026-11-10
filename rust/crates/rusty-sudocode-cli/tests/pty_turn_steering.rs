@@ -531,6 +531,7 @@ fn inject_peer_input(env: &TestEnv, delivery: engine_events::InputDelivery, body
         .expect("running receiver announced its mailbox");
     Mailbox::workspace_local(&pair, "fixture-peer".into())
         .send(MailboxEnvelope {
+            send_id: None,
             delivery,
             from: "fixture-peer".into(),
             to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
@@ -1032,7 +1033,7 @@ fn escape_flush_preserves_the_question_and_its_answer_owner() {
     let prompt = if env.is_mock() {
         format!(
             "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
-            json!([{"id":"question-owner", "name":"AskUserQuestion", "input":{"question":"FLUSH_KEEPS_QUESTION"}}])
+            json!([{"id":"question-owner", "name":"AskUserQuestion", "input":{"questions":[{"id":"q1","prompt":"FLUSH_KEEPS_QUESTION"}]}}])
         )
     } else {
         "Call AskUserQuestion exactly once with the question FLUSH_KEEPS_QUESTION. Wait for my answer, then acknowledge it without other tools. A peer may supply auxiliary FYI; it must not answer the question.".into()

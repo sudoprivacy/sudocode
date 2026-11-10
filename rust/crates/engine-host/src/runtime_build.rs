@@ -120,38 +120,41 @@ impl HostContext {
         })
     }
 
-    /// The co-host's shape: an agent inside `nexusd-cluster`, on the daemon's
-    /// kernel.
+    /// A managed agent's shape: bound by its host registry, on the one backend
+    /// its [`ManagedRuntimeContext`](crate::managed_context::ManagedRuntimeContext)
+    /// resolved (the daemon's kernel when co-hosted).
     ///
     /// Deliberately adjacent to [`Self::for_cli_session`]: the difference between
-    /// the two hosts is the difference between these two functions, and a reader
-    /// who has to open two files to find it will not find it. Everything either
-    /// host supplies is a VALUE here — no engine behaviour branches on which one
-    /// is running.
+    /// the hosts is the difference between these functions, and a reader who has
+    /// to open two files to find it will not find it. Everything either host
+    /// supplies is a VALUE here — no engine behaviour branches on which one is
+    /// running.
     ///
-    /// * `fs` — the daemon's kernel, so the agent's writes pass the hooks, the
-    ///   audit trail and the permission checks that co-hosting exists for.
-    /// * `config_root` — the daemon's own directory. A daemon reads its
+    /// * `fs` — the context's backend, so the agent's writes pass the daemon's
+    ///   hooks, audit trail and permission checks, and the model is reached only
+    ///   through its mount (`require_model_mount`).
+    /// * `config_root` — the host process's own directory. A daemon reads its
     ///   configuration before it can serve the VFS that configuration describes.
-    /// * `agent_name` / `mailbox` — from the descriptor, which is the SSOT for
-    ///   who this agent is. Deriving either here would let `send` address one
-    ///   identity while the agent receives on another.
-    /// * `shell_root` — the kernel-resolved local project when available;
-    ///   otherwise a per-agent host directory for VFS-only workspaces.
-    pub fn for_cohost_agent(
-        fs: Arc<dyn runtime::FsBackend>,
-        agent_name: &str,
-        mailbox: Arc<runtime::mailbox::Mailbox>,
-        shell_root: Option<PathBuf>,
-    ) -> io::Result<Self> {
-        let shell_root = shell_root.unwrap_or_else(|| cohost_shell_root(agent_name));
+    /// * `agent_name` / `mailbox` — from the registry binding, which is the SSOT
+    ///   for who this agent is. Deriving either here would let `send` address
+    ///   one identity while the agent receives on another. The mailbox uses the
+    ///   SAME backend as the file tools: an absolute A2A path bypasses the
+    ///   workspace root, so sender and receiver are two views of one object.
+    /// * `shell_root` — the native directory backing the workspace when there
+    ///   is one; otherwise a per-agent host directory for VFS-only workspaces.
+    pub fn for_managed(ctx: &crate::managed_context::ManagedRuntimeContext) -> io::Result<Self> {
+        let name = &ctx.desc.name;
+        let shell_root = ctx
+            .shell_root
+            .clone()
+            .unwrap_or_else(|| cohost_shell_root(name));
         std::fs::create_dir_all(&shell_root)?;
         Ok(Self {
-            fs,
+            fs: Arc::clone(&ctx.fs),
             shell_root,
             config_root: std::env::current_dir()?,
-            agent_name: Some(agent_name.to_string()),
-            mailbox: Some(mailbox),
+            agent_name: Some(name.clone()),
+            mailbox: Some(ctx.mailbox()),
             require_model_mount: true,
         })
     }
@@ -236,7 +239,7 @@ fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
 /// The agent name a session under `root` answers to: what the configuration
 /// there says, else what [`runtime::mailbox::local_agent_name`] derives from
 /// the directory itself.
-fn agent_name_under(root: &Path) -> String {
+pub fn agent_name_under(root: &Path) -> String {
     let loader = ConfigLoader::default_for(root);
     let configured = loader.load().ok().and_then(|rc| {
         rc.get("agentName")

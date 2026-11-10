@@ -536,16 +536,16 @@ fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
 /// A co-hosted agent's shell runs in a directory of its OWN.
 ///
 /// The scope is thread-local on the loop thread, so no test thread can read it —
-/// but the agent can be asked. It runs `pwd` and reports the answer, and the
+/// but the agent can be asked. It runs the platform's working-directory command
+/// (PowerShell on Windows, `pwd` on Unix) and reports the answer, and the
 /// answer has to be its own directory rather than the daemon's, which is what
 /// `current_workspace_root()` falls through to when no scope is entered. That
 /// default was shared by every co-hosted agent on the daemon and pointed at the
 /// daemon's own git repository, so `git status` — and the git-context hook, and
 /// the stale-branch check — answered about the daemon.
 ///
-/// Matched loosely on purpose: `sh -lc pwd` prints an MSYS path on Windows
-/// (`/c/Users/...`) and a canonicalised one on macOS, and the claim here is about
-/// WHICH directory, not how the platform spells it.
+/// Separators are normalized because the claim is about WHICH directory, not
+/// how the platform spells it. Native Windows does not require a Unix shell.
 #[test]
 fn a_cohosted_agents_shell_runs_in_its_own_directory() {
     let agent_id = "scode-mock-shell";

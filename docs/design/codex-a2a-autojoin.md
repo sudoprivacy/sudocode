@@ -1,10 +1,10 @@
 # Native Codex attachment through the shared ACP bridge
 
-This is the candidate implementation contract. Rollout ownership and final
-acceptance remain in the [integration handoff, draft #1101](https://github.com/sudoprivacy/sudocode/pull/1101).
-In particular, this candidate's loaded-runtime lifetime must be reconciled with
-that handoff's frontend-retirement requirement before installation. It does not
-claim that retained inventory proves frontend presence.
+This is the shared implementation contract. The
+[source investigation and remaining handoff](codex-network-autojoin.md#reviewed-implementation-and-remaining-handoff)
+distinguishes implemented components from composed-artifact and deployment
+acceptance. Ownership below follows loaded native roots; retained inventory does
+not establish frontend presence. This contract does not qualify an installation.
 
 The intended user workflow is one machine setup followed by ordinary new or
 resumed Codex sessions in any trusted workspace. No model prompt is needed to
@@ -32,12 +32,13 @@ Inventory is read through the existing native proxy. A qualifying thread has
 Subagents, guardian reviews and feature workers are excluded. `source=cli` is
 not a root discriminator: actual CLI roots can report `source=vscode`.
 
-The configured native endpoint must already be discoverable through the native
-proxy. The private fixture explicitly starts its own server; that does not
-prove normal embedded CLI startup is discoverable. Qualification of the native
-daemon-management entry and actual production launch modes remains a rollout
-gate. The config initializer only prepares a global MCP command, not a complete
-installer or a native daemon migration.
+The selected native endpoint must be discoverable through the shared native
+proxy. An explicitly started private server does not qualify other launch modes.
+The config initializer prepares commands without installing them; the separate
+prepared-machine installer performs native preparation and registration readback.
+The [SDK instructions](../../sdk/typescript/README.md#one-installation-command-for-a-prepared-machine)
+own those steps and the cold-start/installation fixture variants. Qualify the
+actual native package, launch mode and composed artifact before a live migration.
 
 Tools select the binding using native host `_meta.threadId`, never a sender or
 thread argument supplied to the tool. Each invocation refreshes native inventory

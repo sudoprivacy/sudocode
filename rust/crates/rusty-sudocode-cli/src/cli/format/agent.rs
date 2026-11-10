@@ -9,17 +9,9 @@ use serde_json::Value;
 use std::fmt::Write as _;
 
 use super::{
-    identity_annotation, tool_label, truncate_output_for_display, value_card, ToolCardContent,
-    TOOL_OUTPUT_DISPLAY_MAX_CHARS, TOOL_OUTPUT_DISPLAY_MAX_LINES,
+    identity_annotation, text, tool_label, truncate_output_for_display, value_card,
+    ToolCardContent, TOOL_OUTPUT_DISPLAY_MAX_CHARS, TOOL_OUTPUT_DISPLAY_MAX_LINES,
 };
-
-#[inline]
-fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-}
 
 /// What one sub-agent or background-task result says about itself.
 struct AgentState<'a> {

@@ -141,11 +141,20 @@ jobs:
     with:
       failed-job: Real daemon acceptance
 
+  stop-after-cohost-failure:
+    if: always() && github.event_name == 'merge_group' && needs.cohost-live.result == 'failure'
+    needs: cohost-live
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Co-host daemon acceptance
+
   integrated-acceptance:
     # A required job must fail when a dependency fails or is unexpectedly
     # skipped; GitHub treats a skipped required job as successful.
     if: always() && github.event_name == 'merge_group'
-    needs: [one-nexus-vfs-pin, a2a-live, clippy-workspace]
+    needs: [one-nexus-vfs-pin, a2a-live, cohost-live, clippy-workspace]
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
     defaults:
@@ -160,6 +169,7 @@ jobs:
           COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
           CLIPPY_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.clippy_required }}
           A2A_RESULT: ${{ needs.a2a-live.result }}
+          COHOST_RESULT: ${{ needs.cohost-live.result }}
           CLIPPY_RESULT: ${{ needs.clippy-workspace.result }}
         run: |
           set -eu
@@ -190,13 +200,14 @@ jobs:
               exit 1
             fi
           }
-          require_result daemon "$DAEMON_REQUIRED" "$A2A_RESULT"
+          require_result CLI-A2A "$A2A_REQUIRED" "$A2A_RESULT"
+          require_result cohost "$COHOST_REQUIRED" "$COHOST_RESULT"
           require_result clippy "$CLIPPY_REQUIRED" "$CLIPPY_RESULT"
 
   a2a-live:
     # The real daemon and cross-node journeys gate the integrated queue commit
     # once, rather than repeating on the PR and on push/main too.
-    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.daemon_required == 'true'
+    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
     needs: one-nexus-vfs-pin
     name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
@@ -235,6 +246,11 @@ jobs:
           shared-key: ci-dependencies
           env-vars: ImageOS
           save-if: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the shared CLI and mailbox process supervisor
+        run: python3 -m pip install psutil==7.2.2
       # The one thing unit tests structurally cannot reach: an envelope moving
       # through a real gRPC server and a real DT_STREAM, and a blocking tail
       # woken by a real write. `ensure_inbox` shipped broken for exactly that
@@ -307,6 +323,37 @@ jobs:
         if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-auth-on.sh
 
+
+  cohost-live:
+    # Independent fresh-node journeys overlap CLI A2A; every original cohost,
+    # restart, search and feature assertion remains required when selected.
+    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+    needs: one-nexus-vfs-pin
+    name: nexus co-host journeys (real daemon)
+    runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain selected co-host acceptance
+        env:
+          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+        run: |
+          set -eu
+          test "$COHOST_REQUIRED" = true
+          echo 'DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
       # Everything above is an agent that TALKS TO a daemon. This one runs
       # INSIDE one: `nexusd-cohost` is built from this checkout, so the agent
       # under test is the code in this diff — which is the whole reason the crate
@@ -322,6 +369,23 @@ jobs:
         env:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
+
+      # The same managed agent hosted OUT of the daemon: the public
+      # nexusd-cluster and an owner credential, with every session effect over
+      # that one authenticated connection. This is the co-host's replacement.
+      - name: Managed scode against the public nexusd-cluster
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        run: e2e/nexus-a2a/run-managed-subprocess.sh
+
+      - name: Conditional owner content survives a co-host process restart
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        working-directory: rust
+        env:
+          NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+        run: >-
+          cargo --config "$NEXUS_A2A_COHOST_CARGO_CONFIG"
+          test --locked -p nexusd-cohost --features daemon,driver-ai
+          --test conditional_content -- --nocapture
 
       - name: Checkout the VFS contract used by the co-host
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
@@ -464,12 +528,14 @@ jobs:
       # daemon matching the pin, and a pin between releases has no daemon to match
       # (it fails loud saying so). The tag recorded in the lock must be the tag the
       # manifest asked for.
-      - name: The rev is named once, and the lock agrees
+      - name: Exercise exact published pin tags and refusal paths
+        run: python3 .github/scripts/nexus_pin_workflow_e2e.py --workflow .github/workflows/rust-ci.yml --output "${{ runner.temp }}/nexus-pin-policy"
+      - name: Canonical Nexus contract and daemon resolve one published pin
         id: pin
         run: |
           set -euo pipefail
           MANIFEST_TAGS=$(grep 'nexus-vfs' rust/Cargo.toml \
-            | grep -oE 'tag = "[^"]+"' | grep -oE 'v[0-9][0-9.]*' | sort -u)
+            | grep -oE 'tag = "v[0-9][^"]*"' | cut -d '"' -f 2 | sort -u)
           LOCK_PAIRS=$(grep -oE 'nexus-vfs\?tag=[^#]+#[a-f0-9]{40}' rust/Cargo.lock \
             | sed 's/.*tag=//' | sort -u)
           LOCK_TAGS=$(echo "$LOCK_PAIRS" | sed 's/#.*//' | sort -u)
@@ -502,25 +568,6 @@ jobs:
           echo "one nexus-vfs pin: $MANIFEST_TAGS ($LOCK_COMMITS)"
           echo "commit=$LOCK_COMMITS" >> "$GITHUB_OUTPUT"
 
-      - name: Vendored VFS contract must match the pinned daemon
-        shell: bash
-        env:
-          NEXUS_PROTO_COMMIT: ${{ steps.pin.outputs.commit }}
-        # The wire contract follows the same commit as the Rust client and
-        # daemon. A mutable Node-client latest can describe another release.
-        run: |
-          set -euo pipefail
-          [[ "$NEXUS_PROTO_COMMIT" =~ ^[a-f0-9]{40}$ ]]
-          url="https://raw.githubusercontent.com/nexi-lab/nexus-vfs/$NEXUS_PROTO_COMMIT/proto/nexus/grpc/vfs/vfs.proto"
-          upstream="$RUNNER_TEMP/pinned-vfs.proto"
-          vendored='rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto'
-          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 "$url" -o "$upstream"
-          if ! diff -u --strip-trailing-cr "$upstream" "$vendored"; then
-            echo "::error::$vendored differs from pinned nexus-vfs $NEXUS_PROTO_COMMIT"
-            exit 1
-          fi
-          echo "vendored vfs.proto matches pinned nexus-vfs $NEXUS_PROTO_COMMIT"
-
       - name: Select expensive checks from changed inputs
         id: scope
         run: |
@@ -528,7 +575,7 @@ jobs:
           echo "::notice::Native acceptance retains per-host lint. Queue Clippy checks all features on three platforms. Ordinary/shared inputs retain all-targets; isolated CLI test edits select changed originals and their groups. Missing history or dirty inputs retain full lint. Feature-only errors may first appear there. Main reuses completed queue preflight."
 
       - name: Install focused executor observer dependencies
-        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true')
+        if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true' || steps.scope.outputs.release_artifact_required == 'true')
         run: python3 -m pip install psutil
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
@@ -541,6 +588,9 @@ jobs:
           if [[ '${{ steps.scope.outputs.container_required }}' == 'true' ]]; then
             python3 e2e/local-acceptance/container_inputs_acceptance.py --output "$RUNNER_TEMP/container-inputs"
           fi
+      - name: Exercise native artifact gates and publication refusal paths
+        if: github.event_name == 'pull_request' && steps.scope.outputs.release_artifact_required == 'true'
+        run: python3 e2e/local-acceptance/release_artifact_acceptance.py --output "$RUNNER_TEMP/release-artifact-gates"
       - name: Verify lint stops on the first error and covers a clean workspace
         id: clippy_executor
         if: github.event_name == 'pull_request' && steps.scope.outputs.clippy_executor_required == 'true'

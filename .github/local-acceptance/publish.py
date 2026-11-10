@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import urllib.request
@@ -21,8 +22,26 @@ def applicable_run(run):
 
 
 def main():
-    source = gate.github_event()["workflow_run"]
+    trigger = gate.github_event()
     repository = os.environ["GITHUB_REPOSITORY"]
+    if "workflow_run" in trigger:
+        source = trigger["workflow_run"]
+    else:
+        inputs = trigger.get("inputs", {})
+        number, requested_head = str(inputs.get("pr", "")), inputs.get("head", "")
+        if not number.isdecimal() or not re.fullmatch(r"[a-f0-9]{40}", requested_head):
+            raise RuntimeError("Finalization requires a PR number and its exact frozen head")
+        pull = gate.api(f"repos/{repository}/pulls/{number}")
+        if pull["head"]["sha"] != requested_head or pull["state"] != "open" or pull["draft"]:
+            raise RuntimeError("Finalization requires the current open ready PR head")
+        candidates = gate.pages(f"repos/{repository}/actions/workflows/local-acceptance.yml/runs?head_sha={requested_head}&event=pull_request", "workflow_runs")
+        candidates = [item for item in candidates if item["head_sha"] == requested_head and applicable_run(item)]
+        source = max(candidates, key=lambda item: item["id"]) if candidates else None
+        if not source or source["status"] != "completed":
+            print("LOCAL_ACCEPTANCE_FINALIZATION: current source CI has not completed; its normal publisher "
+                  "will independently verify the newly published author signature on completion. "
+                  "No native job was restarted and no acceptance success was published.")
+            return
     run = gate.api(f"repos/{repository}/actions/runs/{source['id']}")
     if run["path"].split("@")[0] != ".github/workflows/local-acceptance.yml" or run["status"] != "completed":
         raise RuntimeError("Unexpected workflow identity or incomplete run")
@@ -56,6 +75,7 @@ def main():
     else:
         raise RuntimeError("Unexpected workflow event")
     success = False
+    pending = False
     error = "Source acceptance failed; inspect the acceptance workflow's jobs and responsibility plan"
     description = "Carried signed source acceptance; deployment is separate"
     try:
@@ -81,11 +101,18 @@ def main():
         if run["event"] == "pull_request":
             description = description.replace("source only, deployment separate", "source only")
             description += f". When ready: gh pr merge {event['pull_request']['number']} --auto"
-        success = True
+        pending = not selection.get("author_complete", True)
+        if pending:
+            description = "Native CI passed; full author signature still required. Finish the original local check; native jobs are retained."
+            print("LOCAL_ACCEPTANCE_PENDING_AUTHOR: all required native CI jobs passed, but a scheduling plan "
+                  "does not prove completed author checks. Complete/publish the original exact-head local "
+                  "acceptance, then dispatch local-acceptance-publish.yml on main with pr/head. "
+                  "Do not rerun native jobs or weaken the required Local acceptance status.")
+        success = not pending
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as problem:
         error = str(problem)
-    body = {"state": "success" if success else "failure", "context": "Local acceptance",
-            "description": (description if success else error)[:140],
+    body = {"state": "success" if success else "pending" if pending else "failure", "context": "Local acceptance",
+            "description": (description if success or pending else error)[:140],
             "target_url": f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}
     request = urllib.request.Request(f"https://api.github.com/repos/{repository}/statuses/{head}",
                                      data=json.dumps(body).encode(), method="POST",
@@ -94,7 +121,7 @@ def main():
     with urllib.request.urlopen(request, timeout=60) as response:
         result = json.load(response)
     print(f"Published {result['state']} for {head}")
-    if not success:
+    if not success and not pending:
         raise RuntimeError(error)
 
 

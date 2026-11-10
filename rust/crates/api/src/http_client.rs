@@ -227,6 +227,17 @@ pub fn build_http_client_with_opts(
         .pool_idle_timeout(timeout.pool_idle_timeout)
         .tcp_keepalive(timeout.tcp_keepalive);
 
+    // `*` matches every host, IP literals included. hyper-util's matcher
+    // checks a literal IP only against IP entries, so `NO_PROXY=*` would still
+    // proxy `https://127.0.0.1:…`; with `*`, nothing is proxied.
+    if config
+        .no_proxy
+        .as_deref()
+        .is_some_and(|list| list.split(',').any(|entry| entry.trim() == "*"))
+    {
+        return Ok(builder.build()?);
+    }
+
     let no_proxy = config
         .no_proxy
         .as_deref()

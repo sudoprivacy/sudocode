@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 
@@ -73,6 +74,19 @@ def color_environment(output):
 
 def service_graph(profiles, root, output, target, execute, driver):
     """Exercise Cargo freshness and native dispatch; RPC coverage stays in the real journeys."""
+    client = output / "rpc-client"
+    (client / "src").mkdir(parents=True)
+    (client / "Cargo.toml").write_text(
+        '[package]\nname="rpc-client-fixture"\nversion="0.0.1"\nedition="2021"\n[workspace]\n',
+        encoding="utf-8")
+    (client / "src/main.rs").write_text('''fn main() {
+    assert_eq!(std::env::args().nth(1).as_deref(), Some("--version"));
+    println!("rpc-client-fixture 0.0.1");
+}
+''', encoding="utf-8")
+    execute(["cargo", "build", "--offline", "--manifest-path", str(client / "Cargo.toml"),
+             "--target-dir", str(client / "target")], root, output / "rpc-client-build.log")
+    rpc = client / "target/debug" / ("rpc-client-fixture.exe" if os.name == "nt" else "rpc-client-fixture")
     scripts = root / "e2e/shared-services"
     scripts.mkdir(parents=True)
     process = '''import argparse, json, subprocess
@@ -91,15 +105,18 @@ a.artifacts.mkdir(parents=True)
         (scripts / name).write_text(process, encoding="utf-8")
     bash = root / "e2e/nexus-a2a"
     bash.mkdir(parents=True)
-    # This fixture tests native artifact selection, not gRPC. The real profile
-    # separately runs both unchanged private-Node journeys before publication.
-    (bash / "lib.sh").write_text('grpcurl_bin() { printf fixture-unused-rpc; }\n'
+    # A real native version probe is required even at this controlled RPC
+    # boundary. Actual gRPC remains covered by both original service journeys.
+    (bash / "lib.sh").write_text('grpcurl_bin() { printf "%s" ' + shlex.quote(rpc.as_posix()) + '; }\n'
                                 'native_path() { printf "%s" "$1"; }\n', encoding="utf-8")
     binary = target / "debug" / ("scode.exe" if os.name == "nt" else "scode")
     before = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     records = profiles.run("native-services", root, output / "services", "fixture-base", execute)
-    assert len(records) == 3, "Cargo verification and both service processes remain required"
-    assert "Compiling " not in (output / "services/000.log").read_text(encoding="utf-8")
+    assert len(records) == 4, "Native client probe, Cargo verification and both service processes remain required"
+    tool = json.loads((output / "services/service-tool/000.log").read_text(encoding="utf-8"))
+    assert tool["executable"] == str(rpc.resolve()) and tool["version"] == "rpc-client-fixture 0.0.1", tool
+    assert tool["sha256"] == hashlib.sha256(rpc.read_bytes()).hexdigest(), tool
+    assert "Compiling " not in (output / "services/001.log").read_text(encoding="utf-8")
     assert before == [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     for name in ["services", "existing-box"]:
         assert json.loads((output / "services" / name / "native-child.json").read_text())["actual"] == (
@@ -110,8 +127,8 @@ a.artifacts.mkdir(parents=True)
         standalone = profiles.run("native-services", root, output / "standalone", "fixture-base", execute)
     finally:
         os.environ["CARGO_TARGET_DIR"] = previous
-    assert len(standalone) == 3
-    assert "Compiling " in (output / "standalone/000.log").read_text(encoding="utf-8")
+    assert len(standalone) == 4
+    assert "Compiling " in (output / "standalone/001.log").read_text(encoding="utf-8")
     source = root / "rust/src/main.rs"
     original = source.read_bytes()
     try:
@@ -120,10 +137,10 @@ a.artifacts.mkdir(parents=True)
             profiles.run("native-services", root, output / "stale", "fixture-base", execute)
             raise AssertionError("A stale existing binary hid invalid current source")
         except RuntimeError:
-            failure = json.loads((output / "stale/000.command.json").read_text(encoding="utf-8"))
+            failure = json.loads((output / "stale/001.command.json").read_text(encoding="utf-8"))
             assert failure["exit_code"] == 101, failure
-            assert "changed candidate must rebuild before services" in (output / "stale/000.log").read_text(encoding="utf-8")
-            assert not (output / "stale/001.log").exists(), "Services ran before current-source compilation succeeded"
+            assert "changed candidate must rebuild before services" in (output / "stale/001.log").read_text(encoding="utf-8")
+            assert not (output / "stale/002.log").exists(), "Services ran before current-source compilation succeeded"
     finally:
         source.write_bytes(original)
     return {"warm_commands": records, "standalone_commands": standalone,
@@ -269,14 +286,14 @@ def compiler_contract(profiles, root, output, execute):
     scripts = root / "e2e/compiler-context"
     scripts.mkdir(parents=True)
     driver = scripts / "run.py"
-    driver.write_text('''import argparse, hashlib, json, subprocess
+    driver.write_text('''import argparse, hashlib, json, os, subprocess
 from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--engine', type=Path, required=True)
 p.add_argument('--directory', type=Path, required=True)
 a = p.parse_args()
 actual = subprocess.check_output([str(a.engine)], text=True).strip()
-assert actual == 'debug=false,flavor=normal', actual
+assert actual == os.environ.get('EXPECTED_COMPILER_FLAVOR', 'debug=false,flavor=normal'), actual
 a.directory.mkdir(parents=True)
 (a.directory / 'native-child.json').write_text(json.dumps({
     'actual': actual, 'engine_sha256': hashlib.sha256(a.engine.read_bytes()).hexdigest()}))
@@ -287,6 +304,15 @@ a.directory.mkdir(parents=True)
     evidence = json.loads((output / "compiler/compiler-context/native-child.json").read_text(encoding="utf-8"))
     assert evidence["engine_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
     assert "e2e/compiler-context/run.py" in records[-1]["command"]
+    def dev_execute(args, cwd, log, env=None):
+        return execute(args, cwd, log, {**(env or {}), "EXPECTED_COMPILER_FLAVOR": "debug=true,flavor=dev"})
+
+    source_records = profiles.run("native-context", root, output / "source-compiler", "fixture-base", dev_execute)
+    assert len(source_records) == 2 and not any("--release" in row["command"] for row in source_records)
+    source_engine = Path(source_records[-1]["command"][source_records[-1]["command"].index("--engine") + 1])
+    assert source_engine.parent.name == "debug"
+    source_evidence = json.loads((output / "source-compiler/compiler-context/native-child.json").read_text(encoding="utf-8"))
+    assert source_evidence["engine_sha256"] == hashlib.sha256(source_engine.read_bytes()).hexdigest()
     driver.write_text(driver.read_text(encoding="utf-8") + "\nraise SystemExit(17)\n", encoding="utf-8")
     try:
         profiles.run("native-release", root, output / "compiler-failure", "fixture-base", execute)
@@ -295,6 +321,12 @@ a.directory.mkdir(parents=True)
         failed = json.loads((output / "compiler-failure/003.command.json").read_text(encoding="utf-8"))
         assert failed["exit_code"] == 17, failed
         assert not (output / "compiler-failure/004.log").exists()
+    try:
+        profiles.run("native-context", root, output / "source-compiler-failure", "fixture-base", dev_execute)
+        raise AssertionError("Failed source compiler context was accepted")
+    except RuntimeError:
+        source_failed = json.loads((output / "source-compiler-failure/001.command.json").read_text(encoding="utf-8"))
+        assert source_failed["exit_code"] == 17
     execute(["git", "add", "e2e/compiler-context/run.py"], root, output / "compiler-history-add.log")
     execute(["git", "-c", "user.name=Acceptance fixture", "-c", "user.email=acceptance@example.invalid",
              "-c", "commit.gpgsign=false", "commit", "-m", "Introduce required compiler journey"],
@@ -325,6 +357,7 @@ a.directory.mkdir(parents=True)
     finally:
         os.environ["CARGO_TARGET_DIR"] = previous_target
     return {"commands": records, "failed_compiler_exit": failed["exit_code"],
+            "source_dev_context_commands": source_records, "source_failed_compiler_exit": source_failed["exit_code"],
             "introduced_driver_removal_refused": True,
             "shallow_history_absence_not_treated_as_proof": True,
             "scope": "Native executor/CLI artifact boundary only; not product compiler coverage"}

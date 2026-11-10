@@ -421,17 +421,40 @@ impl SessionStore {
         })
     }
 
-    fn collect_sessions_from_dir(
+    /// Session ids, most recently written first, at most `limit`.
+    ///
+    /// For completion: it reads directory names and modification times only.
+    /// It never parses a transcript (listing loads every one), spawns nothing,
+    /// and runs no cleanup, so it stays cheap while the user presses Tab.
+    pub fn recent_session_ids(&self, limit: usize) -> Result<Vec<String>, SessionControlError> {
+        let mut entries = self.session_entries(&self.sessions_root)?;
+        entries.retain(|(path, _)| {
+            !matches!(
+                crate::subagent_completion::deleted_storage(self.fs.as_ref(), path),
+                Ok(true)
+            )
+        });
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        Ok(entries
+            .into_iter()
+            .filter_map(|(path, _)| session_id_from_path(&path))
+            .take(limit)
+            .collect())
+    }
+
+    /// The transcripts in `directory`, in either layout, with their
+    /// modification time. The one place that knows what a stored session is.
+    fn session_entries(
         &self,
         directory: &Path,
-        sessions: &mut Vec<ManagedSessionSummary>,
-    ) -> Result<(), SessionControlError> {
+    ) -> Result<Vec<(PathBuf, u128)>, SessionControlError> {
         let dir_str = directory.to_string_lossy();
         let entries = match self.fs.readdir(&dir_str) {
             Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(err) => return Err(err.into()),
         };
+        let mut sessions = Vec::new();
         for entry in entries {
             let entry_path = directory.join(&entry.name);
             // Current layout: a per-session directory holding transcript.jsonl.
@@ -452,6 +475,25 @@ impl SessionStore {
             } else {
                 continue;
             };
+            let modified = self
+                .fs
+                .stat(&path.to_string_lossy())
+                .ok()
+                .and_then(|m| m.modified)
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
+            sessions.push((path, modified));
+        }
+        Ok(sessions)
+    }
+
+    fn collect_sessions_from_dir(
+        &self,
+        directory: &Path,
+        sessions: &mut Vec<ManagedSessionSummary>,
+    ) -> Result<(), SessionControlError> {
+        for (path, modified_epoch_millis) in self.session_entries(directory)? {
             // An unreadable binding belongs to this entry's existing load-error
             // path, so one damaged Session cannot prevent listing healthy ones.
             if matches!(
@@ -463,14 +505,6 @@ impl SessionStore {
                 }
                 continue;
             }
-            let modified_epoch_millis = self
-                .fs
-                .stat(&path.to_string_lossy())
-                .ok()
-                .and_then(|m| m.modified)
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or_default();
             let summary = match Session::load_from_path_with(&*self.fs, &path) {
                 Ok(session) => {
                     if self.validate_loaded_session(&path, &session).is_err() {

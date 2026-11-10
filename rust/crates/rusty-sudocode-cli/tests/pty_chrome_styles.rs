@@ -856,26 +856,20 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
-                let visible = sess.render(|screen| {
-                    screen
-                        .raw()
-                        .rows(0, screen.raw().size().1)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
                 if rows == 8 {
                     if statuses.len() > 1 {
-                        assert!(
-                            !visible.contains("Task 0"),
-                            "folded completed item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Working 1"),
-                            "folded active item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Task 2"),
-                            "folded pending item: {visible}"
+                        // The waits above also pass on the unfolded frame, and
+                        // a resize reaches the app later than chrome looks
+                        // settled (through ConPTY, often). Wait for the fold.
+                        common::expect_screen(
+                            &sess,
+                            |screen| {
+                                !["Task 0", "Working 1", "Task 2"]
+                                    .iter()
+                                    .any(|item| screen.contains(item))
+                            },
+                            common::DEFAULT_TIMEOUT,
+                            "every item folds away at eight rows",
                         );
                     }
                 } else {

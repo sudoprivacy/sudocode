@@ -1168,13 +1168,14 @@ from redirected requests, including release-asset storage. Public downloads
 without a token remain supported. Tool tags, asset selection, hashes, versions,
 caches and request timeouts retain their existing checks.
 
-The preparation entry consumes both `GH_TOKEN` and `GITHUB_TOKEN` before any
-subprocess. The candidate step receives neither variable, and the native command
+The trusted preparation step receives the read-only API credential. Tool
+subprocesses and the candidate step receive neither `GH_TOKEN` nor `GITHUB_TOKEN`.
+The native command
 executor also strips both after SDK discovery and explicit environment overrides,
 including mixed-case keys that Windows treats as the same variable names.
 The native contract guard exercises real private HTTPS requests, redirect refusals,
-cold pinned tool preparation, candidate subprocess isolation and refusal of a
-case-sensitive cleanup that leaks explicit lowercase overrides. These controls
+candidate subprocess isolation and refusal of a case-sensitive cleanup that leaks
+explicit lowercase or mixed-case overrides. These controls
 establish credential transport behavior; they do not measure live GitHub quota.
 
 #### Acceptance contract changes

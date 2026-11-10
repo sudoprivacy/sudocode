@@ -178,7 +178,9 @@ def main():
     ignored_product_inputs = []
     ignored_cohost_cli_sources = []
     ignored_disabled_test_sources = []
-    queue_inputs = {".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"}
+    # The workflow changes real compiler/daemon commands; this selector does
+    # not. Its own edits retain preflight and the complete contract guard.
+    queue_inputs = {".github/workflows/rust-ci.yml"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
@@ -225,8 +227,7 @@ def main():
                             if "native-workspace" in selected(policy, [path])]
             # Test modules remain part of all-feature linting even
             # when they do not rebuild or exercise the daemon binary.
-            # Exercise a changed queue entry on the real workspace/platforms,
-            # in addition to its small compiler controls in PR preflight.
+            # Workflow edits still exercise the real workspace/platforms.
             clippy = bool(native_specs) or any(
                 path.startswith("rust/") or path in queue_inputs | {".github/scripts/ci_clippy.py"}
                 for path in relevant)
@@ -304,7 +305,9 @@ def main():
             stream.write(f"{key}={value}\n")
     print(json.dumps({**result, "changed_paths": paths, "normal_product_ignored": ignored_product_inputs,
                       "daemon_disabled_test_sources_ignored": ignored_disabled_test_sources,
-                      "cohost_cli_source_ignored": ignored_cohost_cli_sources, "nextest_dependency_scope": nextest_scope}))
+                      "cohost_cli_source_ignored": ignored_cohost_cli_sources, "nextest_dependency_scope": nextest_scope,
+                      "selector_only_product_checks_skipped": ".github/scripts/ci_input_scope.py" in paths
+                          and not daemon and not clippy}))
 
 
 if __name__ == "__main__":

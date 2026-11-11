@@ -43,6 +43,10 @@ fi
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-xnode.XXXXXX")"
 FOUNDER_PID=
 JOINER_PID=
+show_node_log() {
+  # Startup logs contain an enrollment token, including on readiness failures.
+  tail -"$2" "$1" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
+}
 cleanup() {
   local status=$?
   [ -n "$JOINER_PID" ] && kill "$JOINER_PID" 2>/dev/null || true
@@ -50,8 +54,7 @@ cleanup() {
   if [ "$status" -ne 0 ]; then
     for node in founder joiner; do
       echo "== $node log after cross-node failure ==" >&2
-      # Startup logs contain a join token. Never expose it in CI output.
-      tail -100 "$DATA_DIR/$node.log" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
+      show_node_log "$DATA_DIR/$node.log" 100
     done
   fi
   if [ "${NEXUS_A2A_KEEP_WORK:-0}" = 1 ]; then
@@ -101,7 +104,7 @@ AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
 AUTHON_PORT="$FOUNDER_PORT"
 AUTHON_ZONE="$ZONE"
 AUTHON_DATA_DIR="$DATA_DIR/a"
-PROBE_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
+PROBE_BUNDLE="$(authon_mint "live-probe")" || { show_node_log "$DATA_DIR/founder.log" 40; exit 1; }
 RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
 SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
 RUNTIME_BUNDLE="$(authon_mint "runtime-directory-probe")" || exit 1
@@ -120,7 +123,7 @@ for i in $(seq 1 30); do
   [ -n "$TOKEN" ] && break
   sleep 1
 done
-[ -n "$TOKEN" ] || { echo "!! founder never printed a join token" >&2; tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
+[ -n "$TOKEN" ] || { echo "!! founder never printed a join token" >&2; show_node_log "$DATA_DIR/founder.log" 40; exit 1; }
 echo "   got a token"
 
 # The joiner auto-enrolls at boot: --token presents it to the founder's

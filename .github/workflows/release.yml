@@ -48,6 +48,10 @@ jobs:
         working-directory: /
         run: |
           set -euo pipefail
+          # Keep Ubuntu signature verification while avoiding the hosted image's
+          # unavailable archive DNS names. No package or compiler is substituted.
+          test -f /etc/apt/apt-mirrors.txt
+          printf '%s\n' 'https://mirrors.edge.kernel.org/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y \
             binutils \

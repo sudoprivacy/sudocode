@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -130,8 +131,62 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
   finally { await client.close(); }
 }
 
+/** Claude Code wake: the bridge spools peers and the asyncRewake hook waiter hands them over with exit 2. */
+async function checkWake(): Promise<void> {
+  const config = path.join(directory, 'wake.json');
+  const log = path.join(directory, 'wake-fixture.jsonl');
+  const auditLog = path.join(directory, 'wake-audit.jsonl');
+  const spool = path.join(directory, 'wake-spool.jsonl');
+  fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, 'channel-allowlist'],
+    workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
+    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log },
+    claudeChannel: { peerPolicy: 'allowlist', peers: ['fixture-peer'], wakeSpool: spool },
+  }), { mode: 0o600 });
+  const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
+  const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--config', config],
+    env: { ...process.env, NODE_PATH: '' } as Record<string, string>, stderr: 'pipe' });
+  const client = new Client({ name: 'wake-smoke', version: '1' });
+  let notifications = 0;
+  client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'), params: z.any() }),
+    () => { notifications += 1; });
+  const wake = () => new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
+    child.on('exit', code => resolve({ code, stderr }));
+  });
+  try {
+    await client.connect(transport);
+    const deadline = Date.now() + 5000;
+    while (!(fs.existsSync(spool) && fs.readFileSync(spool, 'utf8').trim()) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const spooled = fs.readFileSync(spool, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(spooled.map(entry => entry.from), ['fixture-peer'], 'the allowlist still gates spooled peers');
+    assert.equal(notifications, 0, 'a wake spool replaces channel notifications');
+    if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
+    const first = await wake();
+    assert.equal(first.code, 2, 'pending peers wake Claude');
+    assert.match(first.stderr, /^<channel source="nexus_scode" from="fixture-peer" verified="false" kind="message" summary="greeting">\n<mailbox-message from="/);
+    // Delivered entries are not repeated; a second waiter holds the slot until the next peer.
+    const armed = wake();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const duplicate = await wake();
+    assert.equal(duplicate.code, 0, 'one waiter per spool');
+    fs.appendFileSync(spool, JSON.stringify({ at: new Date().toISOString(), from: 'fixture-peer', verified: true,
+      text: '<mailbox-message from="fixture-peer">later</mailbox-message>' }) + '\n');
+    const later = await armed;
+    assert.equal(later.code, 2);
+    assert.doesNotMatch(later.stderr, /greeting/, 'the cursor skips delivered peers');
+    assert.match(later.stderr, /verified="true">\n<mailbox-message from="fixture-peer">later/);
+    assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
+    assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message' && row.delivery === 'wake').length, 1);
+  } finally { await client.close(); }
+}
+
 async function main(): Promise<void> {
   for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
+  await checkWake();
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.

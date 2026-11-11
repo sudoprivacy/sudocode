@@ -8,6 +8,7 @@ import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBin
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
+import { waitForClaudeWake } from './claudeWake';
 
 interface Manifest {
   sourceCommit: string;
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
     'enroll-codex': {type:'boolean'},
+    'claude-wake': {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
@@ -65,6 +67,7 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --claude-wake --config FILE  (Claude Code asyncRewake hook: wait for spooled peers, exit 2 to wake)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
@@ -104,6 +107,12 @@ async function main(): Promise<void> {
   if(values['enroll-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
     await runCodexEnrollment(values.config);return;
+  }
+  if(values['claude-wake']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude-wake'].includes(key)))throw new Error('--claude-wake takes only --config');
+    const spool=JSON.parse(fs.readFileSync(values.config,'utf8'))?.claudeChannel?.wakeSpool;
+    if(typeof spool!=='string')throw new Error('--claude-wake requires claudeChannel.wakeSpool in --config');
+    process.exitCode=await waitForClaudeWake(spool);return;
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace

@@ -51,6 +51,23 @@ MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
 channels are in research preview. A scode without client-owned peer input is
 refused at startup instead of answering peers alongside Claude.
 
+Channel events reach only a session started with that flag on an installation
+where channels are available. To wake any Claude Code session instead, add an
+absolute private `"wakeSpool"` to `claudeChannel`: the bridge appends each
+admitted peer there, and a background command hook hands it to Claude. Register
+the hook for `SessionStart` and `Stop` with `asyncRewake`, so it is re-armed at
+the end of every turn:
+
+```json
+{ "type": "command", "asyncRewake": true,
+  "command": "node /abs/server.cjs --claude-wake --config /abs/private/claude.json" }
+```
+
+The waiter exits 2 with the pending `<channel …>` frames on stderr, which wakes
+the session; one waiter runs per spool, a cursor keeps delivered peers from
+repeating, and a peer that arrives while none is armed waits for the next. This
+is Claude Code's counterpart of the `turn/start` a Codex attachment uses.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user

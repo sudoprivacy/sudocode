@@ -159,6 +159,71 @@ fn live_and_resumed_prompts_share_the_editor_surface() {
     }
 }
 
+/// A committed paste stands apart from what was typed. The shaded surface sets
+/// the prompt's foreground explicitly and faint over it barely shows, so there
+/// a paste takes a muted foreground; without the surface it stays faint.
+#[test]
+fn a_committed_paste_stands_apart_from_typed_text() {
+    for (enabled, light) in [(true, false), (true, true), (false, false)] {
+        let env = TestEnv::new_mock("prompt-paste-mark");
+        let mut session = start(&env, enabled, light);
+        common::expect_input_line_cleared(&session, env.timeout(), "editor ready");
+        let typed = env.prompt("TypedPart", "single_turn_text");
+        session.send(&format!("{typed} ")).unwrap();
+        // Only a paste that collapses to a placeholder is recorded as pasted.
+        session
+            .send("\x1b[200~PastedPart one\nPastedLine two\nPastedLine three\x1b[201~")
+            .unwrap();
+        common::expect_screen(
+            &session,
+            |s| s.contains("[Pasted text #"),
+            env.timeout(),
+            "paste collapsed in the editor",
+        );
+        let marker = common::turn_status_marker(&session);
+        session.send("\r").unwrap();
+        common::expect_turn_complete_after(&session, &marker, env.timeout(), "answer completes");
+        let typed = cell_style(&session, "TypedPart");
+        for needle in ["PastedPart", "PastedLine two"] {
+            let pasted = cell_style(&session, needle);
+            assert_eq!(pasted.1, typed.1, "{needle} keeps the prompt background");
+            if enabled {
+                assert_ne!(pasted.0, typed.0, "{needle} takes a muted foreground");
+                assert!(!pasted.2, "{needle} is not faint on top of it");
+            } else {
+                assert!(
+                    pasted.2 && !typed.2,
+                    "{needle} is faint without the surface"
+                );
+            }
+        }
+        finish(&mut session, &env);
+    }
+}
+
+/// Foreground, background and faint of the first cell of the last `needle`.
+fn cell_style(session: &PtySession, needle: &str) -> (String, String, bool) {
+    session.render(|screen| {
+        let raw = screen.raw();
+        let rows: Vec<String> = raw.rows(0, raw.size().1).collect();
+        let (row, line) = rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle}: {}", screen.contents()));
+        let col = line[..line.find(needle).unwrap()].chars().count();
+        let cell = raw
+            .cell(row.try_into().unwrap(), col.try_into().unwrap())
+            .unwrap();
+        (
+            format!("{:?}", cell.fgcolor()),
+            format!("{:?}", cell.bgcolor()),
+            cell.dim(),
+        )
+    })
+}
+
 fn prompt_surface(session: &PtySession, text: &str, light: bool) -> (String, String) {
     session.render(|screen| {
         let raw = screen.raw();

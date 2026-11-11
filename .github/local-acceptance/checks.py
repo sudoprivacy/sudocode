@@ -1050,7 +1050,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/nexus-a2a/lib.sh": "becaa87de0aeadc466de2626dad554ca3df9cd9b10b2ce6612214b7c4b373c70",
+        "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
@@ -1059,7 +1059,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
         "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
-        ".github/scripts/ci_input_scope.py": "a1dbd43f587caf2ff52b7b61ec08ed8f1e8f3ede853712ce17d956021a0fad7f",
+        ".github/scripts/ci_input_scope.py": "67a5f1727e8556f108fe5ebb424ace762bccc78d37e76215ebc9143da03d73be",
         ".github/workflows/rust-ci.yml": "be3949990d6174a23cecf47836fc040febdb54d34a367ebd65d9e4f86bba9eb8",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
@@ -1079,7 +1079,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "50c467e75589a15153ef782ac75c47e32fa3d70620bd1be8c6456d1be5fd58d6",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "ebe15c35ce4015f29b2699f6fe9dc8149fa51aaf390076c33fe4625715205864",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",

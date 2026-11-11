@@ -55,6 +55,83 @@ def verify_command_completion(output, source):
     return observations
 
 
+def verify_unreviewed_resource_context(output, source):
+    """Retain actual runtime counterexamples to equal-but-unknown source layouts."""
+    import importlib.util
+
+    output.mkdir(parents=True, exist_ok=False)
+    repository = output / "repository"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=repository, stderr=subprocess.PIPE).decode().strip()
+
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Resource observer fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "core.autocrlf", "false")
+    script = repository / ".github/scripts/local_acceptance.py"
+    script.parent.mkdir(parents=True)
+    profiles = repository / ".github/local-acceptance"
+    profiles.mkdir()
+    (profiles / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (profiles / "checks.py").write_text('def run(name, root, output, base, execute):\n'
+                                       '    return execute(["private-fixture"], root, output)\n', encoding="utf-8")
+    modules = []
+    mutant = source.replace("if layout != reviewed:", "if False:")
+    assert mutant != source
+    for label, text in [("current", source), ("old-behavior", mutant)]:
+        path = output / (label + ".py")
+        path.write_text(text, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("resource_observer_" + label, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.ROOT = repository
+        modules.append(module)
+    wait = """                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass"""
+    assert source.count(wait) == 1
+    effect = ('os.environ["SCODE_SYNTHETIC_WAIT_OBSERVER"] = '
+              '"changed" if "TimeoutExpired" in run_command.__code__.co_names else "baseline"')
+    callback = '\ndef eager_completion_observer():\n    ' + effect + '\neager_completion_observer()\n'
+    pairs = [
+        ("eager-module", source.replace('\ndef read_note(', callback + '\ndef read_note(', 1)),
+        ("command-consumer", source.replace('def sha(data):\n', 'def sha(data):\n    ' + effect + '\n', 1)),
+    ]
+    driver = '''import importlib.util,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("observed",sys.argv[1])
+helper=importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+helper.ROOT=Path.cwd()
+helper.run_command([sys.executable,"-c","print('first real command')"],Path.cwd(),Path(sys.argv[2]+".first"))
+helper.run_command([sys.executable,"-c","import os; print(os.environ['SCODE_SYNTHETIC_WAIT_OBSERVER'])"],Path.cwd(),Path(sys.argv[2]))
+'''
+    records = []
+    for label, updated in pairs:
+        refs, values = {}, {}
+        for phase, text in [("before", updated.replace(wait, "                time.sleep(0.15)", 1)), ("after", updated)]:
+            script.write_text(text, encoding="utf-8", newline="\n")
+            git("add", ".")
+            git("-c", "commit.gpgsign=false", "commit", "-m", label + " " + phase)
+            refs[phase] = git("rev-parse", "HEAD")
+            path = output / (label + "-" + phase + ".py")
+            path.write_text(text, encoding="utf-8")
+            log = output / (label + "-" + phase + ".log")
+            result = subprocess.run([sys.executable, "-c", driver, str(path), str(log)], cwd=repository, capture_output=True)
+            log.with_suffix(".stdout").write_bytes(result.stdout)
+            log.with_suffix(".stderr").write_bytes(result.stderr)
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            values[phase] = log.read_text(encoding="utf-8").strip()
+        assert values == {"before": "baseline", "after": "changed"}
+        assert not modules[0].resource_equivalent_profiles(refs["before"], refs["after"], ["native-workspace"])
+        assert modules[1].resource_equivalent_profiles(refs["before"], refs["after"], ["native-workspace"]) == {"native-workspace"}
+        records.append({"case": label, "refs": refs, "actual_child_environment": values,
+                        "current_refused": True, "old_behavior_exposes_unsafe_reuse": True})
+    return records
+
+
 def verify_resource_scheduling(output, source, command):
     output.mkdir(parents=True, exist_ok=False)
     work = output / "author"
@@ -179,6 +256,7 @@ Path(out).parent.joinpath('full-note.json').write_text(json.dumps({'version':1,'
     trusted = output / "trusted-verifier.py"
     trusted.write_text(adaptive, encoding="utf-8")
     completion_observations = verify_command_completion(output / "command-completion", adaptive)
+    observer_controls = verify_unreviewed_resource_context(output / "observer-controls", adaptive)
     plan_read = '''import runpy,sys
 from pathlib import Path
 h=runpy.run_path(sys.argv[1]); h['read_execution_plan'].__globals__['ROOT']=Path.cwd()
@@ -262,6 +340,7 @@ h['read_execution_plan'](sys.argv[2],sys.argv[3],sys.argv[3],signers_ref=sys.arg
               "current_policy": current, "original_real_commands": 2, "migration_real_commands": 0,
               "mutation_refusals": records, "original_notes_signatures_logs_and_first_clock_preserved": True,
               "completion_only_plan_and_full_preserved": True, "completion_observations": completion_observations,
+              "unreviewed_context_controls": observer_controls,
               "scope": "Private Git/SSH/CLI plan/full/resume controls. No product or missing-platform acceptance."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result), flush=True)

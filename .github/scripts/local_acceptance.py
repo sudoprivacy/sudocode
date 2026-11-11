@@ -139,6 +139,16 @@ def commands_hash(ref):
                           **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
+def referenced_globals(table):
+    """Use Python's scope rules, including nested/comprehension scopes."""
+    result, pending = set(), [table]
+    while pending:
+        current = pending.pop()
+        result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
+        pending.extend(current.get_children())
+    return result
+
+
 def profile_ast_value(value):
     """Serialize semantic AST fields independently of Python's dump formatting."""
     if isinstance(value, ast.AST):
@@ -330,6 +340,8 @@ def committed_test_groups(head):
 
 def resource_executor_identity(ref):
     """Normalize only known compiler budgets and command-completion waits."""
+    import symtable
+
     path = ".github/scripts/local_acceptance.py"
     row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
@@ -453,6 +465,28 @@ except subprocess.TimeoutExpired:
         loops[0].body[-1] = sleep
     elif profile_ast_value(wait) != profile_ast_value(sleep):
         raise ValueError("Unknown command-completion wait or effects")
+    # Equal unknown callbacks can observe a changed executor without changing
+    # their own source. Bind reviewed eager context AND command consumers after
+    # normalizing the two supported resource differences; never import it.
+    symbols = symtable.symtable(source, path, "exec")
+    definitions = {node.name: node for node in functions}
+    consumers, pending = {}, ["run_command", "selected", "opt_in_test_target_changes", "production_build_paths"]
+    while pending:
+        name = pending.pop()
+        if name in consumers:
+            continue
+        consumers[name] = profile_ast_value(function if name == "run_command" else definitions[name])
+        used = referenced_globals(symbols.lookup(name).get_namespace())
+        pending.extend(used & definitions.keys() - consumers.keys())
+    layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
+    reviewed = "18bd11d3296b29a9c0087de0e1f7e01c361761bade18e9b2bb3776b629532658"
+    if layout != reviewed:
+        print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
+            "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
+            "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command. Unknown layouts grant no reuse or waiver.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed eager context or command consumer layout; full current checks remain required")
     return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
                                                 "executor": profile_ast_value(function), "executor_text": text}).decode()
 

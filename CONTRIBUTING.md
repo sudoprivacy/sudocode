@@ -1330,6 +1330,11 @@ the same compiler-priority scan interval; tests stay Normal. Original signed fin
 match their original source. All remaining selected commands, assertions, test
 pools, retries, deadlines, environment, Docker images, workflow and current
 host responsibilities stay bound. Unknown changes refuse reuse. The required
+proof also binds reviewed module initialization and the actual command/selector
+consumer functions after resource normalization. Equal unknown callbacks or
+helper bodies can observe a changed executor and therefore refuse automatically.
+`LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED` reports both layouts and the supported
+original-author route; it does not request a personal review or waiver. The required
 interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
 `LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE`; a refusal prints
 `LOCAL_ACCEPTANCE_PLAN_RECOVERY`, including that blindly renewing the same-head
@@ -1338,7 +1343,9 @@ preserved. This proof executes no product tests and cannot complete missing
 profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
 original execution, plan/full verification, resume without repeated commands,
 and eighteen independent refusals. Real short-lived children retain exact output,
-normal priority and failure propagation under both wait forms. These controls add
+normal priority and failure propagation under both wait forms. Two real
+Git/native paired observer controls require changed child environments to refuse
+reuse, while the prior proof mutant exposes the unsafe acceptance. They add
 no product journey coverage. Measured individual command costs do not establish
 a whole-lifecycle speedup.
 

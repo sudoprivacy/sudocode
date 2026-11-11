@@ -139,6 +139,16 @@ def commands_hash(ref):
                           **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
+def referenced_globals(table):
+    """Use Python's scope rules, including nested/comprehension scopes."""
+    result, pending = set(), [table]
+    while pending:
+        current = pending.pop()
+        result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
+        pending.extend(current.get_children())
+    return result
+
+
 def profile_ast_value(value):
     """Serialize semantic AST fields independently of Python's dump formatting."""
     if isinstance(value, ast.AST):
@@ -329,7 +339,9 @@ def committed_test_groups(head):
 
 
 def resource_executor_identity(ref):
-    """Recognize only the serial/adaptive compiler budget; retain all other code."""
+    """Normalize only known compiler budgets and command-completion waits."""
+    import symtable
+
     path = ".github/scripts/local_acceptance.py"
     row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
@@ -337,7 +349,7 @@ def resource_executor_identity(ref):
     source = tracked(ref, path).decode("utf-8")
     tree = ast.parse(source)
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    reserved = {"os", "psutil", "max", "min", "str", "int", "RuntimeError"}
+    reserved = {"os", "psutil", "time", "subprocess", "max", "min", "str", "int", "RuntimeError"}
     if any(node.name in reserved for node in functions):
         raise ValueError("Compiler budget helper is shadowed by a module function")
     if len({node.name for node in functions}) != len(functions):
@@ -363,7 +375,8 @@ def resource_executor_identity(ref):
             for alias in statement.names:
                 binding = alias.asname or alias.name.split(".")[0]
                 if alias.name == "*" or (binding in reserved and not (
-                        isinstance(statement, ast.Import) and alias.name == "os" and alias.asname is None)):
+                        isinstance(statement, ast.Import) and alias.name in {"os", "time", "subprocess"}
+                        and alias.asname is None)):
                     raise ValueError("Compiler budget namespace has an unknown import")
     imports = [node for node in contexts if isinstance(node, ast.Import)
                and any(alias.name == "os" and alias.asname is None for alias in node.names)]
@@ -430,8 +443,83 @@ if cap is not None:
     if text.count(budget_comment) > 1:
         raise ValueError("Duplicate compiler budget explanation")
     text = text.replace(budget_comment, "", 1)
-    return budget_form, canonical({"mode": row[0], "context": profile_ast_value(contexts),
-                                   "executor": profile_ast_value(function), "executor_text": text}).decode()
+    poll = ast.parse("process.poll() is None", mode="eval").body
+    loops = [node for node in ast.walk(function)
+             if isinstance(node, ast.While) and profile_ast_value(node.test) == profile_ast_value(poll)]
+    if len(loops) != 1 or len(loops[0].body) != 2:
+        raise ValueError("Unknown command-completion supervision loop")
+    sleep = ast.parse("time.sleep(0.15)").body[0]
+    notify = ast.parse("""try:
+    process.wait(timeout=0.15)
+except subprocess.TimeoutExpired:
+    pass
+""").body[0]
+    wait = loops[0].body[-1]
+    wait_form = "sleep"
+    if profile_ast_value(wait) == profile_ast_value(notify):
+        wait_form = "completion"
+        original = "\n".join(source.splitlines()[wait.lineno - 1:wait.end_lineno])
+        if text.count(original) != 1:
+            raise ValueError("Unknown command-completion wait source")
+        text = text.replace(original, "                time.sleep(0.15)", 1)
+        loops[0].body[-1] = sleep
+    elif profile_ast_value(wait) != profile_ast_value(sleep):
+        raise ValueError("Unknown command-completion wait or effects")
+    # Equal unknown callbacks can observe a changed executor without changing
+    # their own source. Bind reviewed eager context AND command consumers after
+    # normalizing the two supported resource differences; never import it.
+    symbols = symtable.symtable(source, path, "exec")
+    definitions = {node.name: node for node in functions}
+    consumers, pending = {}, ["run_command", "selected", "opt_in_test_target_changes", "production_build_paths"]
+    while pending:
+        name = pending.pop()
+        if name in consumers:
+            continue
+        consumers[name] = profile_ast_value(function if name == "run_command" else definitions[name])
+        used = referenced_globals(symbols.lookup(name).get_namespace())
+        pending.extend(used & definitions.keys() - consumers.keys())
+    layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
+    reviewed = "18bd11d3296b29a9c0087de0e1f7e01c361761bade18e9b2bb3776b629532658"
+    if layout != reviewed:
+        print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
+            "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
+            "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command. Unknown layouts grant no reuse or waiver.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed eager context or command consumer layout; full current checks remain required")
+    # Callers such as main/perform_check can observe the executor too. Keep
+    # complete reviewed program layouts, not only the command's callees. Erase
+    # only this literal allowlist from its own checksum to avoid a hash cycle.
+    program = copy.deepcopy(tree)
+    for index, node in enumerate(program.body):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_command":
+            program.body[index] = function
+        if isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+            declarations = [item for item in node.body if isinstance(item, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                                    for target in item.targets)]
+            if len(declarations) > 1:
+                raise ValueError("Duplicate reviewed source declaration")
+            for declaration in declarations:
+                values = ast.literal_eval(declaration.value)
+                if not isinstance(values, set) or not values or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in values):
+                    raise ValueError("Unknown reviewed source declaration")
+                declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
+    source_layout = sha(canonical(profile_ast_value(program)))
+    reviewed_sources = {
+        "5994969a04ea543c7a96e0e3c0d69be4ffeac9d759452b5d2b14a9b2f6654047",
+        "d428d86b5fc3ffaa3bbb5606e3853420c0f81cafe58c91cd5ed865a3c3dba74e",
+        "5e07512c7277de8ebc37142a1055a6c59001aa2ef821e5d68379ba148356378f",
+    }
+    if source_layout not in reviewed_sources:
+        print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
+            "ref": ref, "observed_source_layout": source_layout, "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command; unreviewed callers grant no reuse.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed complete executor program; full current checks remain required")
+    return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                                                "executor": profile_ast_value(function), "executor_text": text}).decode()
 
 
 def resource_equivalent_profiles(before, after, names):
@@ -540,7 +628,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
         if resources:
             print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
                 "original_policy": previous, "current_policy": value("rev-parse", policy_ref),
-                "profiles": sorted(resources), "proof": "only_known_compiler_budget_forms",
+                "profiles": sorted(resources), "proof": "only_known_compiler_budget_or_completion_wait_forms",
                 "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
             }).decode(), flush=True)
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
@@ -1227,7 +1315,10 @@ def run_command(command, cwd, log, env=None):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                time.sleep(0.15)
+                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass
         except BaseException:
             # Interrupting owned validation must not orphan compiler children.
             for child in psutil.Process(process.pid).children(recursive=True)[::-1]:

@@ -15,7 +15,9 @@ import subprocess
 import symtable
 import tempfile
 
-from local_acceptance import POLICY, SIGNERS, opt_in_test_target_changes, production_build_paths, selected
+from local_acceptance import (
+    POLICY, SIGNERS, opt_in_test_target_changes, production_build_paths, referenced_globals, selected,
+)
 
 
 def git(*args):
@@ -23,19 +25,8 @@ def git(*args):
 
 
 
-def referenced_globals(table):
-    """Use Python's scope rules, including nested/comprehension scopes."""
-    result, pending = set(), [table]
-    while pending:
-        current = pending.pop()
-        result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
-        pending.extend(current.get_children())
-    return result
-
-
-
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
-REVIEWED_VERIFIER_LAYOUT = "7aa45a70af2c3fc23e807a7b0b3ca98770387d8e296923eac773d41cb7cc42b6"
+REVIEWED_VERIFIER_LAYOUT = "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766"
 
 
 def verifier_layout_digest(source, mode, consumers):

@@ -1320,13 +1320,24 @@ required profiles or revoked signers still reject the old plan. Real Git/SSH/HTT
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
 
-Compiler-budget evolution can preserve an older signed execution plan and its
+Compiler-budget or command-completion waiting changes can preserve an older signed execution plan and its
 completed native profiles. The verifier derives this proof from both committed
 sources: only the known serial/adaptive compiler-budget calculations and matching
-native forwarding forms may differ. Original signed fingerprints must first
+native forwarding forms, or the exact 150 ms sleep/completion-notification forms,
+may differ. The command supervisor waits for actual process exit instead of
+sleeping the full interval after a short command finishes. Running commands keep
+the same compiler-priority scan interval; tests stay Normal. Original signed fingerprints must first
 match their original source. All remaining selected commands, assertions, test
 pools, retries, deadlines, environment, Docker images, workflow and current
 host responsibilities stay bound. Unknown changes refuse reuse. The required
+proof also binds reviewed module initialization and the actual command/selector
+consumer functions after resource normalization. Equal unknown callbacks or
+helper bodies can observe a changed executor and therefore refuse automatically.
+Complete normalized helper-program layouts also bind outer callers, including
+`main` and the check producer; only the literal reviewed-source set is removed
+from its own checksum. Unknown callers keep all current checks.
+`LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED` reports both layouts and the supported
+original-author route; it does not request a personal review or waiver. The required
 interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
 `LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE`; a refusal prints
 `LOCAL_ACCEPTANCE_PLAN_RECOVERY`, including that blindly renewing the same-head
@@ -1334,7 +1345,15 @@ plan is unsupported. Old plans, signatures, logs and the first timing record are
 preserved. This proof executes no product tests and cannot complete missing
 profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
 original execution, plan/full verification, resume without repeated commands,
-and fourteen independent refusals; they add no product journey coverage.
+and eighteen independent refusals. Real short-lived children retain exact output,
+normal priority and failure propagation under both wait forms. Three real
+Git/native paired observer controls require changed child environments to refuse
+reuse at module initialization, a command consumer and an outer producer, while
+the prior proof mutant exposes the unsafe acceptance. All fixture Git/runtime
+and proof children use the existing isolated command environment, including
+when outer hooks export Git repository/index selectors. They add
+no product journey coverage. Measured individual command costs do not establish
+a whole-lifecycle speedup.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

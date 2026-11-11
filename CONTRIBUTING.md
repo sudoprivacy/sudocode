@@ -333,11 +333,12 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json`, its active profile and the queue position. Each fresh profile
-rejoins the FIFO after the previous profile completes, so existing waiters run
-before this invocation's next profile. A running profile keeps the lease through
-its execution and checkpoint. Waiters start in arrival order when that profile
-releases the host, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Adjacent fresh
+workspace and compile-only examples share one reservation, with a separate
+checkpoint for each. Other fresh profiles rejoin the FIFO, so existing waiters
+run before this invocation's next reservation. A running reservation keeps the
+lease through its execution and checkpoints. Waiters start in arrival order
+when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
@@ -355,7 +356,8 @@ The native author guard and complementary native jobs run the same real-process
 inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
-profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
+profiles and count their common wait once. The signed receipt format is unchanged.
 
 A fresh `guard-contract` also validates its protected input pins, selection
 digest, release recipe and native fixture inventory before joining the host queue. The required
@@ -776,21 +778,28 @@ for a committed source without group files or declarations. The verifier reads
 Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
 members and grouped sources require fresh validation. This conditional pair
 cannot authorize the new grouped execution from an old original-target pass.
-Complete `native-workspace` execution includes the normal
-`cargo build --workspace --locked --features engine-acp/mailbox --examples`
-before later native work. It compiles and links examples without running their
-entry points. Explicit nextest target selection otherwise omits this original
-default Cargo/nextest compile-only coverage. When workspace and example host
-targets match, the public plan omits the duplicate `native-examples` profile:
-the same command belongs to the workspace's signed receipt and needs no second
-FIFO acquisition. Different host targets, nonordinary inputs confined to CLI
-test paths, and standalone callers retain the original example profile.
-`EXAMPLE_BUILD_SCOPE` explains both decisions.
-The changed workspace recipe requires fresh qualification; an older workspace
-receipt cannot supply the new example command. Real native controls check
-normal linking, no implicit example execution, distinct-host retention and a
-link-only failure before long native work. These checks add no product PTY
-coverage or measured population saving.
+Grouped or unknown sources also select `native-examples`: a separate normal
+`cargo build --workspace --locked --features engine-acp/mailbox --examples` on
+the author and complementary hosts. It compiles and links examples without
+running their entry points. Explicit nextest target selection otherwise omits
+this original default Cargo/nextest compile-only coverage. Known ungrouped
+sources retain their existing selection without adding a duplicate example
+build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
+native guard proves normal linking, no implicit example execution and refusal
+of a deliberately broken example. These checks add no product PTY coverage.
+On the author's machine, a fresh `native-workspace` and its immediately
+following fresh `native-examples` share one existing FIFO reservation. Their
+order, commands, separate signed results and original command fingerprints
+remain unchanged. Workspace success is checkpointed before examples begin;
+an example failure preserves it for verified resume. All other fresh profiles
+rejoin the FIFO, and reused profiles need no reservation. The mandatory
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups;
+acquisition timing lists both profiles and counts their common wait once.
+This removes an additional queue admission, not the example build. Hosted
+complementary profiles and all native cases remain unchanged. Real private
+Git/SSH/process controls verify the shared acquisition, the existing waiter's
+subsequent turn, failure propagation and full/partial reuse without replaying
+completed work. Population time savings remain unmeasured.
 Changes confined to ordinary individual CLI test files can omit the separate
 example build on both the author and complementary hosts. README and Markdown
 files under `docs/` may accompany them. The selector reads committed Git blobs;

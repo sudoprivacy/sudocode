@@ -226,6 +226,23 @@ checks. This deliberately removes general product smoke coverage from
 selector-only queue revisions; it does not shorten any selected case or add
 feature coverage. Savings depend on the changed inputs and queue load.</p>
 
+<p><strong>Author-scheduling changes (2026-11-11).</strong>
+Daemon journeys may be omitted when committed runner modes, required policy
+and every non-guard reachable execution fingerprint remain identical. Only
+the author lease/check bodies and a plain two-argument reservation helper may
+differ; imports, globals and other function declarations/bodies stay bound.
+Companion inputs are limited to dispatcher changes with the same non-guard
+fingerprints, the host-lease enforcement fixture and documentation. Changed
+executors, product/workflow inputs, dynamic
+namespace observers, unknown declarations or fingerprints retain the original
+scope. Mandatory CI JSON reports <code>acceptance_scheduling_scope</code> with
+the proof or fallback reason. Real Git PR/push/queue controls, preflight and the
+complete native/Docker contract guard remain required. This reduces general
+product smoke coverage on proven author-scheduling-only revisions; selected
+journeys retain every case, assertion and deadline, with no new feature coverage.
+The observed 856 allocated job-seconds on PR #1380's queue describe one prior
+execution, not measured future or population savings.</p>
+
 <p><strong>Bind transitive shared tool inputs (2026-11-11).</strong>
 The daemon/A2A selector binds the functions reached by the shared nextest
 helpers, including GitHub API authorization and asset download. Unrelated

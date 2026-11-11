@@ -4,6 +4,7 @@
 import ast
 import builtins
 import fnmatch
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,91 @@ from local_acceptance import POLICY, SIGNERS, opt_in_test_target_changes, produc
 
 def git(*args):
     return subprocess.check_output(["git", *args]).decode().strip()
+
+
+def scheduling_only_inputs(paths, base, head, details):
+    """Keep unchanged queue executors out of author-scheduling-only acceptance."""
+    runner = ".github/scripts/local_acceptance.py"
+    allowed = {runner, ".github/local-acceptance/checks.py",
+               "e2e/local-acceptance/host_lease_acceptance.py"}
+    if runner not in paths or not set(paths) <= allowed:
+        details.update(decision="not_applicable")
+        return False
+    functions = {"host_acceptance_lease", "perform_check"}
+
+    def identity(ref):
+        row = git("ls-tree", ref, "--", runner)
+        mode, kind, _object = row.split("\t", 1)[0].split()
+        if mode not in {"100644", "100755"} or kind != "blob":
+            raise ValueError("Scheduling proof requires a regular committed executor")
+        tree = ast.parse(git("show", f"{ref}:{runner}"))
+        projected, seen = [], set()
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "profile_reservations":
+                args = node.args
+                if (node.name in seen or node.decorator_list or node.returns
+                        or getattr(node, "type_params", []) or args.posonlyargs or args.kwonlyargs
+                        or args.vararg or args.kwarg or args.defaults or args.kw_defaults
+                        or [argument.arg for argument in args.args] != ["ordered", "pending"]
+                        or any(argument.annotation for argument in args.args)):
+                    raise ValueError("Unknown reservation declaration or import-time execution")
+                seen.add(node.name)
+                continue
+            if isinstance(node, ast.FunctionDef) and node.name in functions:
+                if node.name in seen:
+                    raise ValueError("Scheduling function has multiple definitions")
+                seen.add(node.name)
+                node.body = [ast.Pass()]
+            projected.append(node)
+        if not functions <= seen:
+            raise ValueError("Missing author scheduling functions")
+        tree.body = projected
+        refresh = ast.dump(ast.parse(
+            "exec(compile(current_runner, namespace['__file__'], 'exec'), namespace)").body[0].value,
+            include_attributes=False)
+        for top in tree.body:
+            for node in ast.walk(top):
+                if ((isinstance(node, ast.Name) and node.id == "profile_reservations")
+                        or (isinstance(node, ast.Constant) and node.value == "profile_reservations")
+                        or (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id in {"globals", "locals", "vars", "eval"})):
+                    raise ValueError("Code outside scheduling can observe the reservation function")
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "exec":
+                    # Preserve the existing managed start-pr refresh, whose
+                    # complete body still compares equal in this projection.
+                    if (not isinstance(top, ast.FunctionDef) or top.name != "start_pr"
+                            or ast.dump(node, include_attributes=False) != refresh):
+                        raise ValueError("Unknown dynamic executor namespace")
+        return mode, ast.dump(tree, include_attributes=False)
+
+    try:
+        if identity(base) != identity(head):
+            raise ValueError("Code outside author scheduling or its declaration changed")
+        # Load our own unchanged fingerprint implementation in a private module:
+        # the candidate commit objects belong to the caller's Git directory.
+        source = Path(__file__).with_name("local_acceptance.py")
+        spec = importlib.util.spec_from_file_location("scheduling_execution_identity", source)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        helper.ROOT = Path.cwd()
+        before_policy = json.loads(git("show", f"{base}:{POLICY}"))
+        after_policy = json.loads(git("show", f"{head}:{POLICY}"))
+        if before_policy != after_policy:
+            raise ValueError("Required acceptance policy changed")
+        names = [name for name in after_policy["checks"] if name != "guard-contract"]
+        before = helper.reachable_profile_commands_hashes(base, names)
+        after = helper.reachable_profile_commands_hashes(head, names)
+        changed = [name for name in names if before[name] != after[name]]
+        if changed:
+            raise ValueError(f"Product or metadata execution changed: {changed}")
+        details.update(decision="unchanged_queue_executors", profiles=names,
+                       author_scheduling_functions=sorted(functions | {"profile_reservations"}),
+                       contract_guard_required=True)
+        return True
+    except (ValueError, SyntaxError, TypeError, KeyError, AttributeError,
+            StopIteration, subprocess.CalledProcessError) as error:
+        details.update(decision="unknown_or_changed", reason=str(error), full_daemon_scope_retained=True)
+        return False
 
 
 def mailbox_executor_changed(base, head, details=None):
@@ -175,6 +261,7 @@ def independent_cli_sources(*refs):
 
 def main():
     nextest_scope = {}
+    scheduling_scope = {}
     ignored_product_inputs = []
     ignored_cohost_cli_sources = []
     ignored_disabled_test_sources = []
@@ -241,9 +328,11 @@ def main():
             # named daemon journeys. Reuse the same committed proof as its
             # manifest; existing/ordinary test sources keep their full scope.
             ignored_disabled_test_sources = sorted(set(normal_inputs) & opt_in_sources)
+            scheduling_only = scheduling_only_inputs(relevant, base, head, scheduling_scope)
             daemon_paths = [path for path in normal_inputs
                             if not path.startswith("rust/crates/rusty-sudocode-cli/tests/")
                             and path not in opt_in_sources
+                            and not (scheduling_only and path == ".github/scripts/local_acceptance.py")
                             and (path in native_specs
                                  or any(fnmatch.fnmatchcase(path, rule) for rule in daemon_inputs))]
             executor_path = ".github/local-acceptance/checks.py"
@@ -306,6 +395,7 @@ def main():
     print(json.dumps({**result, "changed_paths": paths, "normal_product_ignored": ignored_product_inputs,
                       "daemon_disabled_test_sources_ignored": ignored_disabled_test_sources,
                       "cohost_cli_source_ignored": ignored_cohost_cli_sources, "nextest_dependency_scope": nextest_scope,
+                      "acceptance_scheduling_scope": scheduling_scope,
                       "selector_only_product_checks_skipped": ".github/scripts/ci_input_scope.py" in paths
                           and not daemon and not clippy}))
 

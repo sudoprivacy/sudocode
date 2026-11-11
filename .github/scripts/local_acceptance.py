@@ -508,6 +508,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "89efe09a8254059f7bf10fda7d53d2accc6658abc1316a656c1c59b22855d32b",
         "5994969a04ea543c7a96e0e3c0d69be4ffeac9d759452b5d2b14a9b2f6654047",
         "d428d86b5fc3ffaa3bbb5606e3853420c0f81cafe58c91cd5ed865a3c3dba74e",
         "5e07512c7277de8ebc37142a1055a6c59001aa2ef821e5d68379ba148356378f",
@@ -588,6 +589,26 @@ def execute(command, cwd, log, env=None):
         return False
 
 
+def approved_equivalent_profiles(before, current, policy_ref, names, head):
+    """Share protected exact recipe approvals between scheduling and completion."""
+    policy = load_policy(policy_ref)
+    equivalents = policy.get("equivalent_profile_commands", {})
+    ungrouped = policy.get("equivalent_profile_commands_without_test_groups", {})
+    accepted = {}
+    for name in names:
+        approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
+        predecessors = approved.get(current[name], []) if isinstance(approved, dict) else []
+        if isinstance(predecessors, list) and before[name] in predecessors:
+            accepted[name] = "declared"
+            continue
+        conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
+        predecessors = conditional.get(current[name], []) if isinstance(conditional, dict) else []
+        if (isinstance(predecessors, list) and before[name] in predecessors
+                and not committed_test_groups(head)):
+            accepted[name] = "without_test_groups"
+    return accepted
+
+
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
     try:
@@ -631,19 +652,13 @@ def compatible_profile_commands(receipt, policy_ref, required):
                 "profiles": sorted(resources), "proof": "only_known_compiler_budget_or_completion_wait_forms",
                 "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
             }).decode(), flush=True)
-        equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
-        ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
+        approved = approved_equivalent_profiles(original_reachable, expected, policy_ref, differences, receipt["head"])
         for name in required:
             if original_reachable[name] == expected[name] or name in resources:
                 continue
-            approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
-            predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
-            if not isinstance(predecessors, list) or original_reachable[name] not in predecessors:
-                conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
-                predecessors = conditional.get(expected[name], []) if isinstance(conditional, dict) else []
-                if (not isinstance(predecessors, list) or original_reachable[name] not in predecessors
-                        or committed_test_groups(receipt["head"])):
-                    return False
+            if name not in approved:
+                return False
+            if approved[name] == "without_test_groups":
                 print(f"Preserving exact-head {name} evidence for a committed source without test groups; "
                       "the exact protected recipe pair applies only to unchanged original target selection. "
                       "Grouped or unknown sources still need fresh validation.", flush=True)
@@ -1413,12 +1428,13 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         current = reachable_profile_commands_hashes(protected, names)
         changed = [name for name in names if before[name] != current[name]]
         resources = resource_equivalent_profiles(planned_policy, protected, changed)
+        approved = approved_equivalent_profiles(before, current, protected, changed, head)
         dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
-        if set(changed) - resources or not dispatcher_matches:
+        if set(changed) - resources - approved.keys() or not dispatcher_matches:
             print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
                 "version": 1, "run_on": "original author native host", "head": head,
                 "original_policy": planned_policy, "current_policy": protected,
-                "changed_profiles": sorted(set(changed) - resources),
+                "changed_profiles": sorted(set(changed) - resources - approved.keys()),
                 "native_dispatcher_changed": not dispatcher_matches,
                 "same_head_start_pr_renewal_supported": False,
                 "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
@@ -1426,6 +1442,14 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
             }).decode(), file=sys.stderr, flush=True)
             raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
                                "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        if approved:
+            print("LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(approved),
+                "conditional_profiles": sorted(name for name, kind in approved.items() if kind == "without_test_groups"),
+                "original_plan_and_signatures_unchanged": True, "checks_executed_by_this_proof": False,
+                "full_acceptance_still_required": True,
+            }).decode(), flush=True)
         if resources or tracked(planned_policy, ".github/local-acceptance/cross_platform.py") != tracked(protected, ".github/local-acceptance/cross_platform.py"):
             print("LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE=" + canonical({
                 "head": head, "original_policy": planned_policy, "current_policy": protected,
@@ -2164,9 +2188,22 @@ def profile_reservations(ordered, pending):
     return reservations
 
 
-def perform_check(args, attempt):
+def materialize_profile_module(policy_ref, output):
+    """Load protected profile code and its pinned companion from Git objects."""
     import importlib.util
 
+    profiles = output / "protected_profiles.py"
+    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
+    companion = ".github/local-acceptance/compiler_cache.py"
+    if git("ls-tree", "--name-only", policy_ref, "--", companion).stdout.strip():
+        (output / "compiler_cache.py").write_bytes(tracked(policy_ref, companion))
+    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def perform_check(args, attempt):
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
@@ -2201,11 +2238,7 @@ def perform_check(args, attempt):
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
-    profiles = output / "protected_profiles.py"
-    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
-    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = materialize_profile_module(policy_ref, output)
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)

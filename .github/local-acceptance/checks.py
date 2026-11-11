@@ -457,7 +457,7 @@ def compiler_cache_profiles():
 def prepare_compiler_cache(output):
     """Bind the separate cache implementation before loading or executing it."""
     contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
-    if hashlib.sha256(contents).hexdigest() != "37ad51519f7a3142300ec558598f7058adb2193924a21e8b535dc3623b2ad22f":
+    if hashlib.sha256(contents).hexdigest() != "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7":
         raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
                            f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
                            "prepare_compiler_cache, then rerun the original supported contract-update command. "
@@ -861,7 +861,7 @@ def native_compiler_run(name, root, output, base, execute):
     module, tool = prepare_compiler_cache(output / "compiler-cache")
     if tool is None:
         return run(name, root, output, base, command)
-    print("COMPILER_CACHE: pinned local objects, 2 GiB maximum; independent Cargo outputs and original "
+    print("COMPILER_CACHE: pinned local objects, 2 GiB maximum; unchanged Cargo output layout and original "
           "source/features/environment keys. Explicit user wrappers/configuration remain authoritative; "
           "busy storage adds no wait. This is not a source-freshness attestation.", flush=True)
     with module.session(tool, output / "compiler-cache", execute) as active:
@@ -1117,8 +1117,8 @@ def native_guard_files():
     return {
         **preflight_guard_files(),
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "de4eed8534d1b16cde811403b13a5cc1021ffd2708db5f1adbf72164e428e6b6",
-        ".github/local-acceptance/compiler_cache.py": "37ad51519f7a3142300ec558598f7058adb2193924a21e8b535dc3623b2ad22f",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "2e6155f813f2807f2f6e2ab7cc8a88dcc92587c271dd8284339168ff9b279b15",
+        ".github/local-acceptance/compiler_cache.py": "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
@@ -1140,7 +1140,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "963a3818c30413ded67c12437c6de990f5041a62bf7d1b690d69f55d77d62dda",
+        ".github/scripts/local_acceptance.py": "0c83a0040c05ed4836b8af84b799c3fd9c712f9ab98bce67f7b9aef8fda571d5",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1157,7 +1157,7 @@ def native_guard_files():
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "171729bd1351c3d03f89678f29d87eadc3e45305da9e7c5c655ca880977f6d24",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
-        "e2e/local-acceptance/parallel_acceptance.py": "0e062dfe86745b94c2cbb69870098a61a6ce3200cfb8649de2c7979ca9a42977",
+        "e2e/local-acceptance/parallel_acceptance.py": "5cb522ab539da4437b075555d711c26a572017dbad5ea8f255e4014dbb5a07a5",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
@@ -1222,7 +1222,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '31063076ed660b45c9b39adba2bd2e1b89504d656bf8c073ff8a002422bb9323', 'native-context': '299f5f3a70a2bb5da1877aea3ddcfec0a1a697fc1a2988428bedeb638460bc3f'}
+    expected = {'native-release': 'd19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9', 'native-context': '921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

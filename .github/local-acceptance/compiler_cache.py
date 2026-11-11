@@ -216,6 +216,17 @@ class Session:
     def current_server(self):
         import psutil
 
+        if self.server is not None:
+            try:
+                process = psutil.Process(self.server["pid"])
+                if process.create_time() == self.server["birth"]:
+                    process = self.assert_owner()
+                    priority = psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10
+                    if process.nice() != priority:
+                        process.nice(priority)
+                    return process
+            except psutil.NoSuchProcess:
+                pass
         matching = self.owned_servers()
         if not matching:
             return None

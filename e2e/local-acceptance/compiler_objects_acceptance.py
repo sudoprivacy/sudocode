@@ -209,16 +209,35 @@ fn nested_cargo_and_explicit_target() {
             '[features]\nmailbox=[]\n', encoding="utf-8")
         (rust / "examples/cache.rs").write_text('fn main(){println!("REAL_DISPATCHER_EXAMPLE");}\n', encoding="utf-8")
         command("dispatcher-lock", ["cargo", "generate-lockfile", "--offline"], rust)
-        checks.prepare_native_checks(["native-examples"], project, output / "dispatcher", helper.run_command)
-        original = checks.run("native-examples", project, output / "dispatcher/native-examples", "HEAD", helper.run_command)
+        for relative in (".github/local-acceptance/checks.py", ".github/local-acceptance/compiler_cache.py"):
+            destination = project / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SOURCE / relative, destination)
+        command("dispatcher-repository", ["git", "init", "--initial-branch=main"], project)
+        command("dispatcher-index", ["git", "add", "."], project)
+        command("dispatcher-policy", ["git", "-c", "user.name=Compiler fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                                      "commit", "-m", "Freeze private dispatcher policy"], project)
+        # Materialization must use the protected Git blob, not an unrelated
+        # candidate companion with the same filename in the working checkout.
+        (project / ".github/local-acceptance/compiler_cache.py").write_text(
+            'raise AssertionError("candidate companion executed")\n', encoding="utf-8")
+        snapshot = output / "dispatcher"
+        snapshot.mkdir()
+        helper.ROOT = project
+        try:
+            staged = helper.materialize_profile_module("HEAD", snapshot)
+        finally:
+            helper.ROOT = SOURCE
+        staged.prepare_native_checks(["native-examples"], project, snapshot, helper.run_command)
+        original = staged.run("native-examples", project, snapshot / "native-examples", "HEAD", helper.run_command)
         assert len(original) == 1 and original[0]["compiler_cache"]["stats"]["max_cache_size"] == 2 * 1024**3
         example = rust / "target/debug/examples" / ("cache.exe" if os.name == "nt" else "cache")
         assert command("dispatcher-example", [str(example)], rust).strip() == "REAL_DISPATCHER_EXAMPLE"
         os.environ["RUSTC_WRAPPER"] = ""
         try:
-            checks.prepare_native_checks(["native-examples"], project, output / "caller-dispatcher", helper.run_command)
-            assert checks.run.prepared_compiler_cache[1] is None
-            caller = checks.run("native-examples", project, output / "caller-dispatcher/native-examples", "HEAD", helper.run_command)
+            staged.prepare_native_checks(["native-examples"], project, output / "caller-dispatcher", helper.run_command)
+            assert staged.run.prepared_compiler_cache[1] is None
+            caller = staged.run("native-examples", project, output / "caller-dispatcher/native-examples", "HEAD", helper.run_command)
             assert len(caller) == 1 and "compiler_cache" not in caller[0]
             assert caller[0]["command"] == original[0]["command"]
         finally:

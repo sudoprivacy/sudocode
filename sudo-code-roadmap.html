@@ -462,7 +462,7 @@ executor checks, with no product journey credit. Lint now denies warnings before
 long builds/tests. Full workspace changes lint all targets with the native mailbox
 feature graph; targeted changes lint their targets. The queue additionally checks
 all features.</p>
-<p><strong>Reuse native compiler objects with independent Cargo outputs
+<p><strong>Reuse native compiler objects with the original Cargo output layout
 (2026-11-12).</strong> Native Rust profiles use checksum-pinned sccache 0.19.0
 with a local 2 GiB cap. Each profile starts and stops its own finite server;
 compiler workers remain BelowNormal/nice and actual tests stay Normal.
@@ -480,6 +480,18 @@ workspace on author and complementary hosts. Cache hits supply compiler
 objects, never previous test results or a generic source-freshness witness.
 These checks add no product journey credit. Hosted object persistence and
 whole-PR latency savings remain unmeasured.</p>
+<p>Protected modules and their companion bytes load from the same frozen Git
+policy, including when the managed runner stages <code>protected_profiles.py</code>.
+An altered candidate companion cannot replace those bytes. Scheduling plans and
+completed receipts now share protected exact recipe approvals and their existing
+conditional source rules. The accepted profile set is printed at the mandatory
+interface. Original signatures, source/tree/base, selected checks, author/native
+responsibility, workflow and dispatcher checks remain. Plans record no completed
+test. Actual Git/SSH/HTTP/finalizer controls preserve the original notes, logs and
+native process counts while rejecting undeclared, malformed and cross-profile
+approvals. Only source-verified prior native recipes receive cache-migration
+approvals; the changed guard and the cache implementation's workspace checks
+still run. These are executor checks without product coverage credit.</p>
 <p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
 scenarios remain. Short retains five A/A and seven alternating A/B pairs,
 preserving the full check that caught a real RSS regression. Long, cap, markdown,
@@ -1781,6 +1793,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>No; compiler/executor checks do not add product journeys.</td>
       <td><code>compiler_objects_acceptance.py</code> inside
       <code>native_cache_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Execution-plan recipe compatibility</td>
+      <td>Real Git commits, SSH-signed original plans/receipts, HTTP metadata and
+      the actual finalizer cover both author/CI completion orders. Protected
+      exact recipe approvals preserve original signatures, logs and process
+      counts. Undeclared/malformed/wrong-profile pairs and changed workflow,
+      dispatcher, required checks, executor/image or signer remain refused.</td>
+      <td>No; scheduling and proof reuse add no product journeys.</td>
+      <td><code>parallel_acceptance.py</code> /
+      <code>profile_compat_acceptance.py</code></td>
     </tr>
     <tr>
       <td>SSE archive compressor reuse</td>

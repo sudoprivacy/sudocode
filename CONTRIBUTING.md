@@ -1430,6 +1430,20 @@ runs inside the existing native-cache guard. Cache code changes additionally
 select the actual native workspace on author and complementary hosts. These
 checks add no product coverage credit. Hosted object persistence and whole-PR
 savings are not established by the private fixture's cache-hit counts.
+Protected profile modules and their compiler-cache companion are materialized
+from the same frozen Git policy. A candidate's working-tree companion is never
+an execution source. The original cache tests also exercise this managed loader.
+Scheduling plans and completed receipts share the existing exact recipe approval
+lookup in protected policy, including the source-without-test-groups condition.
+Original signatures, source/tree/base, author/platform responsibility, required
+checks, native workflow and dispatcher checks remain mandatory. This preserves
+an authentic plan when only an explicitly approved equivalent recipe advances;
+it records no completed check. `LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE`
+reports the exact accepted profile set. Actual Git/SSH/HTTP/finalizer controls
+retain original notes, logs and process counts; undeclared, malformed and
+cross-profile approvals still refuse. Cache migration approves only the prior
+native recipes whose unchanged core commands were source-verified. The changed
+guard remains fresh and cache implementation changes select the real workspace.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

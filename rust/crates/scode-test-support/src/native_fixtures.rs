@@ -11,8 +11,9 @@ pub fn verify_owned_runtime_process(
     fixture_root: &Path,
 ) -> Result<(), String> {
     let transport_pid = terminal.process_id().ok_or("PTY has no process")?;
-    #[cfg(windows)]
-    {
+    // Both paths use portable Rust APIs. Compile and lint both on every host;
+    // only the native Windows host executes the PowerShell control process.
+    if cfg!(windows) {
         let reported = runtime_pid.to_string();
         let transport = transport_pid.to_string();
         windows_control(
@@ -28,19 +29,12 @@ pub fn verify_owned_runtime_process(
                 executable.as_os_str(),
             ],
         )?;
-        Ok(())
+    } else if transport_pid != runtime_pid {
+        return Err(format!(
+            "runtime {runtime_pid} is not owned PTY {transport_pid}"
+        ));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (executable, fixture_root);
-        if transport_pid == runtime_pid {
-            Ok(())
-        } else {
-            Err(format!(
-                "runtime {runtime_pid} is not owned PTY {transport_pid}"
-            ))
-        }
-    }
+    Ok(())
 }
 
 /// Make an index unreadable while its native processes and locks remain live.
@@ -76,7 +70,7 @@ impl DirectoryReadFault {
             fixture_root: fixture_root.to_path_buf(),
             #[cfg(windows)]
             original_acl: native_acl_snapshot(
-                windows_control(
+                &windows_control(
                     fixture_root,
                     &[
                         "-Operation".as_ref(),
@@ -100,7 +94,7 @@ impl DirectoryReadFault {
             // Retain the restoration guard even if applying the ACL fails.
             fault.is_active = true;
             let denied = native_acl_snapshot(
-                windows_control(
+                &windows_control(
                     fixture_root,
                     &[
                         "-Operation".as_ref(),
@@ -135,7 +129,7 @@ impl DirectoryReadFault {
             let descriptor = self.original_acl["descriptor"]
                 .as_str()
                 .ok_or("missing original native ACL descriptor")?;
-            let restored = native_acl_snapshot(windows_control(
+            let restored = native_acl_snapshot(&windows_control(
                 &self.fixture_root,
                 &[
                     "-Operation".as_ref(),
@@ -171,9 +165,8 @@ impl Drop for DirectoryReadFault {
     }
 }
 
-#[cfg(windows)]
-fn native_acl_snapshot(raw: String) -> Result<serde_json::Value, String> {
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+fn native_acl_snapshot(raw: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
     let policy = &value["policy"];
     let is_null_dacl = policy.get("dacl_revision") == Some(&serde_json::Value::Null)
         && policy.get("aces") == Some(&serde_json::Value::Null);
@@ -193,7 +186,6 @@ fn native_acl_snapshot(raw: String) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
-#[cfg(windows)]
 fn windows_control(root: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
     use std::io::Write;
     let script = root.join("scode-native-runtime-controls.ps1");

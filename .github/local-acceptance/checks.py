@@ -1223,7 +1223,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'a6c7369764fc812f4ce51ac64264635276b1eb3189a2c7eb26de21645f9a1add', 'native-context': 'e1e2a39e36343b609de69175105428136f33d793ac4eac320e17665fce5d2b51'}
+    expected = {'native-release': 'd19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9', 'native-context': '921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1241,7 +1241,12 @@ def container_image_tag(repository, digest):
     return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
-def guard_tool_source(root, policy_ref, compiler=False):
+def guard_tool_source(root, policy_ref):
+    """Preserve the existing nextest image seed and its public interface."""
+    return guard_tool_variant_source(root, policy_ref, False)
+
+
+def guard_tool_variant_source(root, policy_ref, compiler):
     """Provision the frozen tool function without duplicating its URL/checksums."""
     import ast
 
@@ -1367,7 +1372,7 @@ def guard_image_context(root, policy_ref, context):
         path.write_bytes(contents)
         inputs_hash.update(relative.encode() + b"\0" + contents + b"\0")
     for filename, compiler in [("nextest_seed.py", False), ("compiler_seed.py", True)]:
-        seed = guard_tool_source(root, policy_ref, compiler=compiler)
+        seed = guard_tool_variant_source(root, policy_ref, compiler)
         (context / filename).write_bytes(seed)
         inputs_hash.update(filename.encode() + b"\0" + seed + b"\0")
     return inputs_hash.hexdigest()

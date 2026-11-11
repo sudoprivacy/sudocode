@@ -428,22 +428,37 @@ pub(crate) fn format_input_echo(
     };
     let mut rendered = String::new();
     let mut offset = lead;
+    let surface =
+        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport)
+            .then(|| theme().prompt_style());
+    // A shaded surface sets the prompt's foreground explicitly, and faint text
+    // over it barely differs from what was typed. There a paste takes the
+    // muted foreground instead, as other low-emphasis text does.
+    let (paste_on, paste_off) = match surface.filter(|style| style.background_color.is_some()) {
+        Some(style) => (
+            theme().fg_seq(TextRole::Secondary),
+            style
+                .foreground_color
+                .map_or_else(|| "\x1b[39m".to_string(), ansi_fg),
+        ),
+        None => (DIM.to_string(), "\x1b[22m".to_string()),
+    };
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
         // box uses. Live commits and replay share this presentation; the
         // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
-        let body = format!("{prefix}{}", dim_pasted(line, offset, pasted));
+        let body = format!(
+            "{prefix}{}",
+            mark_pasted(line, offset, pasted, &paste_on, &paste_off)
+        );
         offset += line.len() + 1;
         if idx > 0 {
             rendered.push('\n');
         }
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            let styled = crate::render::theme()
-                .prompt_style()
-                .apply(body)
-                .to_string();
+        if let Some(style) = surface {
+            let styled = style.apply(body).to_string();
             rendered.push_str(
                 &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
             );
@@ -454,10 +469,16 @@ pub(crate) fn format_input_echo(
     (rendered, raw_lines.len())
 }
 
-/// `line` (starting at byte `offset` of its prompt) with the pasted parts dim.
-/// Ends the dim with "normal intensity" rather than a reset, which would also
-/// drop the prompt's background.
-fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> String {
+/// `line` (starting at byte `offset` of its prompt) with each pasted part
+/// between `on` and `off`. `off` restores the line's own style rather than
+/// resetting, which would also drop the prompt's background.
+fn mark_pasted(
+    line: &str,
+    offset: usize,
+    pasted: &[std::ops::Range<usize>],
+    on: &str,
+    off: &str,
+) -> String {
     let end = offset + line.len();
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
@@ -472,9 +493,9 @@ fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> S
             continue;
         }
         out.push_str(&line[at..start]);
-        out.push_str(crate::render::DIM);
+        out.push_str(on);
         out.push_str(&line[start..stop]);
-        out.push_str("\x1b[22m");
+        out.push_str(off);
         at = stop;
     }
     out.push_str(&line[at..]);

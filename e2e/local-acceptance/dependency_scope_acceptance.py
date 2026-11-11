@@ -468,8 +468,8 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     mutant_dir = output / "old-behavior-mutant"
     mutant_dir.mkdir()
     selector_source = (SOURCE / ".github/scripts/ci_input_scope.py").read_text(encoding="utf-8")
-    assert selector_source.count("if current[3] != REVIEWED_VERIFIER_LAYOUT:") == 1
-    mutant = selector_source.replace("if current[3] != REVIEWED_VERIFIER_LAYOUT:", "if False:", 1)
+    assert selector_source.count("if current[3] not in REVIEWED_VERIFIER_LAYOUTS:") == 1
+    mutant = selector_source.replace("if current[3] not in REVIEWED_VERIFIER_LAYOUTS:", "if False:", 1)
     (mutant_dir / "ci_input_scope.py").write_text(mutant, encoding="utf-8")
     (mutant_dir / "local_acceptance.py").write_text(sources[runner], encoding="utf-8")
     for label, observer in observers.items():

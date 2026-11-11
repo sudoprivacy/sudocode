@@ -757,8 +757,36 @@ fn local_directory_retires_crashed_process_ownership_and_preserves_its_peer() {
     let mut observer = Host::new(&env);
     let row = discovered_instance(&mut observer, &first.session);
     let instance = row["runtime"]["instance"].clone();
-    let pid = first.terminal.process_id().expect("owned CLI process");
-    assert_eq!(row["runtime"]["update"]["identity"]["os_pid"], pid);
+    let pid = u32::try_from(
+        row["runtime"]["update"]["identity"]["os_pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .expect("runtime reports a native PID");
+    let other = discovered_instance(&mut first, &observer.session);
+    let other_pid = u32::try_from(
+        other["runtime"]["update"]["identity"]["os_pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .expect("observer reports a native PID");
+    assert!(
+        common::verify_owned_runtime_process(
+            &first.terminal,
+            other_pid,
+            &common::scode_bin(),
+            env.workspace_root(),
+        )
+        .is_err(),
+        "another owned fixture is not this PTY's runtime"
+    );
+    common::verify_owned_runtime_process(
+        &first.terminal,
+        pid,
+        &common::scode_bin(),
+        env.workspace_root(),
+    )
+    .expect("reported engine belongs to this PTY, independently of its launch wrapper");
     #[cfg(windows)]
     let status = std::process::Command::new("taskkill.exe")
         .args(["/F", "/PID", &pid.to_string()])
@@ -878,16 +906,16 @@ fn local_directory_missing_live_routing_is_unknown_and_recovers() {
         before["runtime"]["instance"]
     );
 
-    let hidden = root.with_extension("held-aside");
-    fs::rename(&root, &hidden).unwrap();
-    let missing_root = observer.discovered();
-    fs::rename(&hidden, &root).unwrap();
+    let inaccessible_root = {
+        let _fault = common::DirectoryReadFault::new(&root, env.workspace_root());
+        observer.discovered()
+    };
     assert!(
-        !missing_root["runtime_discovery"]["unavailable"]
+        !inaccessible_root["runtime_discovery"]["unavailable"]
             .as_array()
             .unwrap()
             .is_empty(),
-        "missing runtime index was reported as complete: {missing_root}"
+        "unreadable runtime index was reported as complete: {inaccessible_root}"
     );
     assert_eq!(
         discovered_instance(&mut observer, &first.session)["runtime"]["instance"],

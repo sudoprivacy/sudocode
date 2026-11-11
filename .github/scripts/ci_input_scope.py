@@ -26,7 +26,7 @@ def git(*args):
 
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
-REVIEWED_VERIFIER_LAYOUT = "0000f0266034e3465f1098c0065582c365923dbef5fd2f87bcb6f2b8e8fc951e"
+REVIEWED_VERIFIER_LAYOUT = "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766"
 
 
 def verifier_layout_digest(source, mode, consumers):

@@ -203,10 +203,10 @@ def profile_commands_hashes(ref, names):
     return result
 
 
-def reachable_profile_commands_hashes(ref, names):
+def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha(executor_source(ref).encode())
+    executor = sha((executor_source(ref) if executor_identity is None else executor_identity).encode())
     image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
     result = {}
     # Reflection can find a function without a static Name reference. Retain
@@ -328,6 +328,149 @@ def committed_test_groups(head):
         return True
 
 
+def resource_executor_identity(ref):
+    """Recognize only the serial/adaptive compiler budget; retain all other code."""
+    path = ".github/scripts/local_acceptance.py"
+    row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+    if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+        raise ValueError("Compiler resource identity requires a regular committed executor")
+    tree = ast.parse(tracked(ref, path).decode("utf-8"))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    reserved = {"os", "psutil", "max", "min", "str", "int", "RuntimeError"}
+    if any(node.name in reserved for node in functions):
+        raise ValueError("Compiler budget helper is shadowed by a module function")
+    if len({node.name for node in functions}) != len(functions):
+        raise ValueError("Duplicate executor function binding")
+    # New declarations must have no unknown import-time effects. The existing
+    # stdlib contextmanager wraps a function without running its body.
+    decorator = profile_ast_value(ast.parse("contextlib.contextmanager", mode="eval").body)
+    for function in functions:
+        if (any(profile_ast_value(node) != decorator for node in function.decorator_list)
+                or function.returns or getattr(function, "type_params", [])
+                or any(arg.annotation for arg in [*function.args.posonlyargs, *function.args.args,
+                    *function.args.kwonlyargs, *[arg for arg in [function.args.vararg, function.args.kwarg] if arg]])):
+            raise ValueError("Unknown executor import-time declaration")
+        for default in [*function.args.defaults, *function.args.kw_defaults]:
+            if default is not None and not isinstance(default, ast.Name):
+                ast.literal_eval(default)
+    contexts = [node for node in tree.body if not isinstance(node, ast.FunctionDef)]
+    for statement in contexts:
+        if any(isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store)
+               for node in ast.walk(statement)):
+            raise ValueError("Compiler budget namespace has a module assignment")
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(statement, ast.Import) and alias.name == "os" and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown import")
+    imports = [node for node in contexts if isinstance(node, ast.Import)
+               and any(alias.name == "os" and alias.asname is None for alias in node.names)]
+    if len(imports) != 1 or any(isinstance(node, ast.Name) and node.id == "os" and isinstance(node.ctx, ast.Store)
+                                for statement in contexts for node in ast.walk(statement)):
+        raise ValueError("Unknown operating-system import binding")
+    function = copy.deepcopy(next(node for node in functions if node.name == "run_command"))
+    for node in ast.walk(function):
+        if ((isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store))
+                or (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in reserved)
+                or (isinstance(node, (ast.Global, ast.Nonlocal)) and set(node.names) & reserved)):
+            raise ValueError("Compiler budget namespace has a local assignment")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(node, ast.Import) and alias.name == "psutil" and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown local import")
+    updates = [node for node in function.body
+               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and profile_ast_value(node.value.func) == profile_ast_value(ast.parse("environment.update", mode="eval").body)
+               and len(node.value.args) == 1 and isinstance(node.value.args[0], ast.Dict)
+               and any(isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS" for key in node.value.args[0].keys)]
+    if len(updates) != 1:
+        raise ValueError("Unknown compiler environment declaration")
+    statement = updates[0]
+    settings = statement.value.args[0]
+    index = next(index for index, key in enumerate(settings.keys)
+                 if isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS")
+    selected = settings.values[index]
+    if profile_ast_value(selected) == profile_ast_value(ast.parse("str(jobs)", mode="eval").body):
+        budget = ast.parse('''
+jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+if cap is not None:
+    if not cap.isdigit() or int(cap) < 1:
+        raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+    jobs = min(jobs, int(cap))
+''').body
+        at = function.body.index(statement)
+        if at < 3 or profile_ast_value(function.body[at - 3:at]) != profile_ast_value(budget):
+            raise ValueError("Unknown compiler budget calculation or effects")
+        del function.body[at - 3:at]
+        settings.values[index] = ast.Constant(value="1")
+    elif not isinstance(selected, ast.Constant) or selected.value != "1":
+        raise ValueError("Unknown serial compiler budget")
+    if any(isinstance(node, ast.Name) and node.id in {"jobs", "cap"} for node in ast.walk(function)):
+        raise ValueError("Compiler budget is observed outside its environment field")
+    return canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                      "executor": profile_ast_value(function)}).decode()
+
+
+def resource_equivalent_profiles(before, after, names):
+    """Prove resource-only differences, without accepting a supplied hash pair."""
+    allowed = {"preflight", "native-workspace", "native-examples", "native-release",
+               "native-context", "native-services", "native-cohost"}
+    names = [name for name in names if name in allowed]
+    if not names:
+        return set()
+    try:
+        before = value("rev-parse", f"{before}^{{commit}}")
+        after = value("rev-parse", f"{after}^{{commit}}")
+        previous = reachable_profile_commands_hashes(before, names, executor_identity=resource_executor_identity(before))
+        current = reachable_profile_commands_hashes(after, names, executor_identity=resource_executor_identity(after))
+        return {name for name in names if previous[name] == current[name]}
+    except (ValueError, TypeError, KeyError, StopIteration, SyntaxError, RuntimeError, subprocess.CalledProcessError):
+        return set()
+
+
+def compatible_native_dispatcher(before, after):
+    """Retain exact dispatcher identity, allowing only its two known budget forms."""
+    path = ".github/local-acceptance/cross_platform.py"
+
+    def source(ref):
+        row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+        if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+            raise ValueError("Native dispatcher must be a regular committed file")
+        return row[0], tracked(ref, path)
+
+    try:
+        old, current = source(before), source(after)
+        if old == current:
+            return True
+        if old[0] != current[0]:
+            return False
+        forms = [ast.parse(text).body[0] for text in ['''
+def execute(command, cwd, log, env=None):
+    jobs = (os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
+    return helper.run_command(command, cwd, log, {**(env or {}), "CARGO_BUILD_JOBS": str(jobs)})
+''', '''
+def execute(command, cwd, log, env=None):
+    hosted = {"CARGO_BUILD_JOBS": str(os.cpu_count() or 1)} if os.environ.get("GITHUB_ACTIONS") == "true" else {}
+    return helper.run_command(command, cwd, log, {**(env or {}), **hosted})
+''']]
+
+        def identity(contents):
+            tree = ast.parse(contents.decode("utf-8"))
+            functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "execute"]
+            if len(functions) != 1 or profile_ast_value(functions[0]) not in [profile_ast_value(form) for form in forms]:
+                raise ValueError("Unknown native dispatch or environment effects")
+            functions[0].body = ast.parse("return helper.run_command(command, cwd, log, env or {})").body
+            return profile_ast_value(tree)
+
+        return identity(old[1]) == identity(current[1])
+    except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
+        return False
+
+
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
     try:
@@ -363,10 +506,18 @@ def compatible_profile_commands(receipt, policy_ref, required):
                 return False
         expected = (original_reachable if previous == policy_ref
                     else reachable_profile_commands_hashes(policy_ref, required))
+        differences = [name for name in required if original_reachable[name] != expected[name]]
+        resources = resource_equivalent_profiles(previous, policy_ref, differences)
+        if resources:
+            print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
+                "original_policy": previous, "current_policy": value("rev-parse", policy_ref),
+                "profiles": sorted(resources), "proof": "only_known_compiler_budget_forms",
+                "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
+            }).decode(), flush=True)
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
         ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
         for name in required:
-            if original_reachable[name] == expected[name]:
+            if original_reachable[name] == expected[name] or name in resources:
                 continue
             approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
             predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
@@ -1138,14 +1289,32 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if not names or receipt.get("plan") != plan:
         raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
     if contract_hash(planned_policy) != contract_hash(protected):
-        dispatcher = ".github/local-acceptance/cross_platform.py"
-        if (tracked(planned_policy, dispatcher) != tracked(protected, dispatcher)
-                or reachable_profile_commands_hashes(planned_policy, names)
-                   != reachable_profile_commands_hashes(protected, names)):
+        before = reachable_profile_commands_hashes(planned_policy, names)
+        current = reachable_profile_commands_hashes(protected, names)
+        changed = [name for name in names if before[name] != current[name]]
+        resources = resource_equivalent_profiles(planned_policy, protected, changed)
+        dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
+        if set(changed) - resources or not dispatcher_matches:
+            print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
+                "version": 1, "run_on": "original author native host", "head": head,
+                "original_policy": planned_policy, "current_policy": protected,
+                "changed_profiles": sorted(set(changed) - resources),
+                "native_dispatcher_changed": not dispatcher_matches,
+                "same_head_start_pr_renewal_supported": False,
+                "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
+                        "use the supported fresh-source plan route when required. Do not overwrite or re-sign the old plan.",
+            }).decode(), file=sys.stderr, flush=True)
             raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
                                "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        if resources or tracked(planned_policy, ".github/local-acceptance/cross_platform.py") != tracked(protected, ".github/local-acceptance/cross_platform.py"):
+            print("LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(resources), "dispatcher": "unchanged_or_known_compiler_budget_forms",
+                "original_plan_and_signatures_unchanged": True, "full_acceptance_still_required": True,
+            }).decode(), flush=True)
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
-              "author/native responsibility, selected commands and native workflow/dispatcher verified unchanged.", flush=True)
+              "author/native responsibility, selected command effects and native workflow verified; "
+              "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
     return receipt
 
 

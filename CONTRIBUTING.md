@@ -1291,6 +1291,22 @@ required profiles or revoked signers still reject the old plan. Real Git/SSH/HTT
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
 
+Compiler-budget evolution can preserve an older signed execution plan and its
+completed native profiles. The verifier derives this proof from both committed
+sources: only the known serial/adaptive compiler-budget calculations and matching
+native forwarding forms may differ. Original signed fingerprints must first
+match their original source. All remaining selected commands, assertions, test
+pools, retries, deadlines, environment, Docker images, workflow and current
+host responsibilities stay bound. Unknown changes refuse reuse. The required
+interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
+`LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE`; a refusal prints
+`LOCAL_ACCEPTANCE_PLAN_RECOVERY`, including that blindly renewing the same-head
+plan is unsupported. Old plans, signatures, logs and the first timing record are
+preserved. This proof executes no product tests and cannot complete missing
+profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
+original execution, plan/full verification, resume without repeated commands,
+and twelve independent refusals; they add no product journey coverage.
+
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and
 editing diagnostics, not only removing checks or lowering thresholds. The purpose

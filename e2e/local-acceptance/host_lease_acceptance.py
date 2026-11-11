@@ -578,11 +578,18 @@ def verify_native_inventory_before_queue(fixture, authority, run, environment):
                       if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
                       and node.left.id == "actual_scope")
     controlled = controlled.replace(scope_node.comparators[0].value, digest)
-    spec = importlib.util.spec_from_file_location("inventory_fixture_executor",
-                                                 repository / ".github/scripts/local_acceptance.py")
-    executor = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(executor)
-    executor.ROOT = repository
+    # The real hook-environment control deliberately binds its parent's Git.
+    # Resolve fixture recipes in a real child with the same isolated Git
+    # environment as every other private repository command.
+    recipe_reader = '''import importlib.util,json,sys
+from pathlib import Path
+repository = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("inventory_fixture_executor", repository / ".github/scripts/local_acceptance.py")
+executor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(executor)
+executor.ROOT = repository
+print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", ["native-release", "native-context"])))
+'''
 
     def inventory_policy(label, inventory):
         (repository / ".github/local-acceptance/native_guard.py").write_text(inventory, encoding="utf-8")
@@ -602,7 +609,8 @@ def verify_native_inventory_before_queue(fixture, authority, run, environment):
                         and target.id == "expected" for target in node.targets)
                         and isinstance(node.value, ast.Dict)
                         and "native-release" in [getattr(key, "value", None) for key in node.value.keys])
-        recipes = executor.reachable_profile_commands_hashes("HEAD", ["native-release", "native-context"])
+        recipes = json.loads(subprocess.check_output([sys.executable, "-c", recipe_reader, str(repository)],
+                                                      cwd=repository, env=environment))
         for key, old in zip(expected.keys, expected.values):
             candidate = candidate.replace(old.value, recipes[key.value])
         path.write_text(candidate, encoding="utf-8")

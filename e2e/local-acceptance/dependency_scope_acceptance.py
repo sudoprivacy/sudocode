@@ -16,17 +16,32 @@ SOURCE = Path(__file__).resolve().parents[2]
 PRODUCT = {"native-context", "native-services", "native-cohost"}
 
 
+def git_for_windows_bash(path=None):
+    """Git for Windows' own Bash, located from the git on PATH and never WSL's.
+
+    A git hook runs with Git's mingw64/libexec/git-core first on PATH, three
+    levels below the bin/bash.exe of the same installation, so look in every
+    ancestor of the resolved git rather than its parent and grandparent only.
+    """
+    git = shutil.which("git", path=path)
+    if not git:
+        return None
+    for directory in Path(git).resolve().parents:
+        for candidate in (directory / "bash.exe", directory / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def workflow_scope(output, environment):
     """Execute the actual workflow guards and bind their conditional steps."""
     output.mkdir()
-    bash = shutil.which("bash", path=environment.get("PATH"))
     if os.name == "nt":
         # CreateProcess can resolve a bare bash against the parent's PATH,
         # selecting WSL even when the explicit child environment lists Git first.
-        git = shutil.which("git", path=environment.get("PATH"))
-        candidates = [Path(git).resolve().parent / "bash.exe",
-                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
-        bash = next((str(path) for path in candidates if path.is_file()), None)
+        bash = git_for_windows_bash(environment.get("PATH"))
+    else:
+        bash = shutil.which("bash", path=environment.get("PATH"))
     if not bash:
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
@@ -300,7 +315,8 @@ def run(output):
         (output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
         print("PASS: " + label, flush=True)
 
-    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None, live_required=True):
+    def ci_scope(diff_base, daemon, benchmark=False, cohost_required=None, live_required=True,
+                 clippy_required=True):
         cohost_required = daemon if cohost_required is None else cohost_required
         head = command("git", "rev-parse", "HEAD")
         keys = ["GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_OUTPUT"]
@@ -323,10 +339,13 @@ def run(output):
                 assert result["cohost_required"] == str(cohost_required).lower(), result
                 emitted = dict(line.split("=", 1) for line in result_path.read_text().splitlines())
                 assert emitted["cohost_required"] == result["cohost_required"], emitted
-                assert result["clippy_required"] == "true", result
+                if clippy_required:
+                    assert result["clippy_required"] == "true", result
+                else:
+                    assert result["clippy_required"] == "false", result
                 assert result["live_required"] == str(live_required).lower(), result
                 assert result["benchmark_required"] == str(benchmark).lower(), result
-                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}, lint=true, live={live_required}", flush=True)
+                print(f"PASS: actual {event} selector daemon={daemon}, cohost={cohost_required}, lint={clippy_required}, live={live_required}", flush=True)
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -339,11 +358,13 @@ def run(output):
     queue_base = command("git", "rev-parse", "HEAD")
     queue_branch = command("git", "branch", "--show-current")
     command("git", "switch", "--detach", queue_base)
-    for path in [".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py"]:
+    for path, product_required in [(".github/workflows/rust-ci.yml", True),
+                                   (".github/scripts/ci_input_scope.py", False)]:
         original = (repository / path).read_text() if (repository / path).exists() else ""
         write(path, original + "\n# Changed queue execution input.\n")
-        commit("Queue execution input requires the actual daemon and native lint")
-        ci_scope(queue_base, True, benchmark=True, live_required=False)
+        commit("Update queue workflow or selection script")
+        ci_scope(queue_base, product_required, benchmark=True, live_required=False,
+                 clippy_required=product_required)
         command("git", "switch", "--detach", queue_base)
     command("git", "switch", queue_branch)
     assert product() == original_binary
@@ -703,7 +724,8 @@ def run(output):
               "newly_required_profile_refused": True,
               "required_normal_failure_still_fails": True,
               "actual_pr_push_queue_selectors_keep_lint_and_provider_scope": True,
-              "queue_entry_changes_require_real_daemon_and_lint_without_paid_calls": True,
+              "workflow_changes_require_real_daemon_and_lint_without_paid_calls": True,
+              "selector_only_changes_retain_executor_controls_without_product_jobs": True,
               "actual_cli_package_is_binary_only_and_has_no_workspace_dependents": True,
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,

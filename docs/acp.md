@@ -159,6 +159,11 @@ Every request includes `sessionId` and an `action`:
 `steer` allows delivery at the next model boundary within the active turn.
 `queue` waits for the current turn to end. These actions do not interrupt a
 running tool to inject text. Idle input starts a new turn automatically.
+Background and sub-agent notifications on this path follow the `steer` rule:
+one that arrives while a turn is running is delivered at that turn's next
+model boundary, and otherwise it is queued and starts the next turn, as in
+the CLI. Journaled completions (`taskCompletions`, `subagentCompletions`,
+below) still deliver only after the parent turn commits.
 Cancellation through `session/cancel` always remains available and pauses
 unapplied input; an explicit human steer or flush resumes delivery. Delivery
 does not add a mandatory instruction to abandon the model's existing work.
@@ -892,7 +897,15 @@ the `session/load` request.
 is keyed by its workspace and the persisted `workspace_root` is validated on
 load, so loading a session id from another directory is rejected. Continuing
 a conversation in a new directory is a fork, not a load — see `forkFrom`
-below. `session/load` does not currently replay the history to the client as
+below.
+
+`sessionId` must be the exact id a `session/new` returned. CLI aliases such as
+`latest` and file paths are not ids and fail with `invalid_params` (-32602).
+A well-formed id that this workspace never persisted fails with
+`resource_not_found` (-32002) and `data: {"sessionId": <requested id>}`; any
+other load failure (an unreadable transcript, a workspace mismatch, a
+transcript carrying a different id) is an internal error. No failure creates a
+session. `session/load` does not currently replay the history to the client as
 `session/update` notifications; the client is expected to keep its own copy
 of the conversation.
 

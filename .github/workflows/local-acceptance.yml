@@ -102,6 +102,23 @@ jobs:
           save-if: false
       - name: Install acceptance observer dependencies
         run: python -m pip install psutil jsonschema
+      - name: Verify real native host-lease inheritance before compilation
+        if: matrix.family == 'native'
+        shell: python
+        env:
+          INHERITED_LEASE_OUTPUT: ${{ runner.temp }}/local-acceptance/inherited-lease
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable,
+                          '../.trusted-acceptance/e2e/local-acceptance/inherited_lease_acceptance.py',
+                          '--output', os.environ['INHERITED_LEASE_OUTPUT']], check=True)
+      - name: Prepare pinned tools through the authenticated GitHub API
+        if: matrix.family == 'native'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
+        run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
       - name: Run the same native commands on the missing platform
         env:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}

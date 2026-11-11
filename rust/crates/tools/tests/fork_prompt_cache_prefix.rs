@@ -65,6 +65,7 @@ fn parent_assistant_with_two_tool_uses() -> ConversationMessage {
         usage: None,
         model: Some("claude-opus-4-8".to_string()),
         duration_ms: None,
+        inputs: Vec::new(),
     }
 }
 
@@ -189,6 +190,7 @@ fn fork_with_zero_parent_tool_uses_still_produces_shared_prefix_shape() {
         usage: None,
         model: Some("claude-opus-4-8".to_string()),
         duration_ms: None,
+        inputs: Vec::new(),
     };
 
     let a = build_forked_messages_for_test("directive-a", &parent_no_tools);

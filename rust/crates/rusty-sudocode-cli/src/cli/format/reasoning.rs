@@ -1,8 +1,8 @@
 //! Reasoning: prose the model wrote for itself, shown dim and never parsed as
-//! Markdown. Live streaming and replay both render through here; the margin
-//! owner (`ResponseGlyphState`) gives each block its ✻ lead.
+//! Markdown. The renderer draws it for live turns and transcript replay alike;
+//! the margin owner (`ResponseGlyphState`) gives each block its ✻ lead.
 
-use crate::render::{styled_text::StyledText, theme, ResponseGlyphState, TextRole};
+use crate::render::{styled_text::StyledText, theme, TextRole};
 
 /// Reasoning text in its theme role.
 pub(crate) fn styled(text: &str) -> StyledText {
@@ -18,16 +18,4 @@ pub(crate) fn line(line: &str) -> StyledText {
     } else {
         styled(line)
     }
-}
-
-/// A whole reasoning block as replay shows it: laid out with the same ✻ lead
-/// and hanging indent the live stream gets.
-pub(crate) fn block(text: &str, width: usize) -> String {
-    let mut margin = ResponseGlyphState::new(width);
-    margin.begin_reasoning();
-    let mut output = String::new();
-    margin
-        .apply_styled(&styled(text))
-        .write_ansi_lines(&mut output);
-    output
 }

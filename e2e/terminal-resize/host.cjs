@@ -121,4 +121,10 @@ function launch(config, initial, load = name => require(name)) {
   return child;
 }
 
-module.exports = { createHost, launch };
+/// How many rows of `text` read exactly `content`, past the "• " lead the
+/// first row of an answer carries, live and after a restart alike.
+function countRows(text, content) {
+  return text.split('\n').filter(row => row.trim().replace(/^• /, '') === content).length;
+}
+
+module.exports = { createHost, launch, countRows };

@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { createHost } = require('../../../../../e2e/terminal-resize/host.cjs');
+const { createHost, countRows } = require('../../../../../e2e/terminal-resize/host.cjs');
 const config = JSON.parse(process.argv[2]);
 const windows = process.platform === 'win32';
 const boundary = 'SCODE_RESTART_READY';
@@ -17,7 +17,7 @@ const count = marker => snapshot().split(marker).length - 1;
 function history(copies, label) {
   const text = snapshot();
   for (let i = 0; i < 70; i++)
-    assert.equal(text.split('\n').filter(row => row.trim() === `Earlier history line ${i}`).length,
+    assert.equal(countRows(text, `Earlier history line ${i}`),
       copies, `${label}: history ${i} was lost or duplicated\n${text}`);
   assert.equal(count('ResizeHistorySentinel'), copies, label);
 }

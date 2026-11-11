@@ -25,6 +25,17 @@ def main():
     if output == SOURCE or SOURCE in output.parents or output == repository or repository in output.parents:
         raise RuntimeError("Keep native guard outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
+    spec = importlib.util.spec_from_file_location("native_guard_profiles", SOURCE / ".github/local-acceptance/checks.py")
+    profiles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiles)
+    print("GUARD_NATIVE_TOOL_PREFLIGHT: prepare and verify the platform-pinned protoc before "
+          "the native matrix; isolated fixtures copy only that tool cache, never home or lease claims.", flush=True)
+    protoc = profiles.cohost_protoc()
+    if protoc is not None:
+        (output / "protoc-source.json").write_text(json.dumps({
+            "version": "3.20.2", "executable": str(protoc),
+            "executable_sha256": hashlib.sha256(protoc.read_bytes()).hexdigest(),
+        }, indent=2) + "\n")
     spec = importlib.util.spec_from_file_location("native_executor", SOURCE / ".github/scripts/local_acceptance.py")
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
@@ -44,9 +55,17 @@ def main():
         fixtures.append({"command": list(map(str, command)), "log": str(log)})
 
     fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/inherited_lease_acceptance.py"),
+        "--output", str(output / "inherited-lease"),
+    ], SOURCE, output / "inherited-lease.log")
+    fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/contract_reads_acceptance.py"),
         "--output", str(output / "contract-reads"),
     ], SOURCE, output / "contract-reads.log")
+    fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/github_asset_credentials.py"),
+        "--output", str(output / "github-asset-credentials"),
+    ], SOURCE, output / "github-asset-credentials.log")
     fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
         "--output", str(output / "parallel-acceptance"),
@@ -104,7 +123,7 @@ def main():
     ], SOURCE, output / "native-lint.log")
     protocol = [row for row in fixtures if Path(row["command"][1]).name == "parallel_acceptance.py"]
     native = [row for row in fixtures if row not in protocol]
-    assert len(protocol) == 1 and len(native) == 12
+    assert len(protocol) == 1 and len(native) == 14
     configuration = output / "native-parallel.json"
     configuration.write_text(json.dumps({
         "version": 1, "kind": "native-policy", "root": str(SOURCE), "branches": [

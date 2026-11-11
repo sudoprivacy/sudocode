@@ -10,6 +10,7 @@ import { registerCommandShutdown } from './lifecycle';
 import { connectCodexCallback, type CodexCallback, type CodexCallbackConfig } from './codexCallback';
 import { CodexCleanupUnknownError } from './codexConnection';
 import { acquireReceiverOwner, validateReceiverOwner, ReceiverOwnerCleanupUnknownError, type ReceiverOwnerIdentity, type ReceiverOwnerLease } from './receiverOwner';
+import { appendClaudeWake } from './claudeWake';
 
 export interface ScodeMcpConfig extends ScodeAcpConfig {
   version: 1;
@@ -27,6 +28,10 @@ export interface ClaudeChannelConfig {
   /** `node-namespace` accepts any sender the verified Node stamped; `allowlist` only `peers`. */
   peerPolicy: 'allowlist' | 'node-namespace';
   peers?: string[];
+  /** Absolute private spool. When set, peers are delivered through it to the
+   * `--claude-wake` hook waiter, which wakes an idle session, instead of as
+   * channel notifications. */
+  wakeSpool?: string;
 }
 
 /** Delivered to the MCP client as context when the channel connects. */
@@ -46,8 +51,9 @@ function readConfig(file: string): ScodeMcpConfig {
   if (channel && (!['allowlist', 'node-namespace'].includes(channel.peerPolicy)
       || (channel.peerPolicy === 'allowlist' && (!Array.isArray(channel.peers) || !channel.peers.length
         || channel.peers.some(peer => typeof peer !== 'string' || !peer)))
+      || (channel.wakeSpool !== undefined && (typeof channel.wakeSpool !== 'string' || !path.isAbsolute(channel.wakeSpool)))
       || config.codexCallback)) {
-    throw new Error('claudeChannel requires peerPolicy node-namespace, or allowlist with peers, and no codexCallback');
+    throw new Error('claudeChannel requires peerPolicy node-namespace, or allowlist with peers, an absolute wakeSpool if any, and no codexCallback');
   }
   return config;
 }
@@ -89,7 +95,13 @@ export async function runScodeMcp(file: string, lifecycle: {
     if (!transportReady || (channel.peerPolicy === 'node-namespace' && !verified)) {
       if (early.length < 64) early.push(message); return;
     }
-    audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified: senderVerified });
+    audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified: senderVerified,
+      delivery: channel.wakeSpool ? 'wake' : 'channel' });
+    if (channel.wakeSpool) {
+      appendClaudeWake(channel.wakeSpool, { at: new Date().toISOString(), from, verified: senderVerified,
+        ...(kind ? { kind } : {}), ...(summary ? { summary } : {}), text: message.text });
+      return;
+    }
     void server.server.notification({ method: 'notifications/claude/channel', params: {
       content: message.text,
       meta: { from, verified: String(senderVerified), ...(kind ? { kind } : {}), ...(summary ? { summary } : {}) },

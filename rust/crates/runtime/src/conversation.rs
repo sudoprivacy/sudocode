@@ -99,6 +99,33 @@ const DATE_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>Today's date is ";
 /// also counts as a valid date announcement when scanning the session.
 const DATE_ROLLOVER_REMINDER_MARKER: &str = "The local calendar date has changed";
 
+/// The date a runtime date reminder announced, when `block` is one: a text
+/// block that starts with the first-turn announcement or the rollover
+/// reminder, naming a `YYYY-MM-DD` date. Every wording earlier builds wrote
+/// starts the same way, and every rollover names today as
+/// "; today is now {date}. ".
+fn announced_date(block: &ContentBlock) -> Option<&str> {
+    let ContentBlock::Text { text } = block else {
+        return None;
+    };
+    let date = if let Some(rest) = text.strip_prefix(DATE_CONTEXT_REMINDER_PREFIX) {
+        rest.split_once('.')?.0
+    } else {
+        text.strip_prefix("<system-reminder>")?
+            .strip_prefix(DATE_ROLLOVER_REMINDER_MARKER)?
+            .split_once("; today is now ")?
+            .1
+            .split_once(". ")?
+            .0
+    };
+    let is_date = date.len() == 10
+        && date.bytes().enumerate().all(|(at, byte)| match at {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        });
+    is_date.then_some(date)
+}
+
 /// Prefix of the user-side model announcement injected on the first turn.
 /// The active model deliberately lives in a content block instead of the
 /// system prompt so the system blocks stay byte-stable across a `/model`
@@ -109,6 +136,38 @@ const MODEL_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>You are running as
 /// Marker present in the model-change reminder text; a change reminder also
 /// counts as a valid model announcement when scanning the session.
 const MODEL_CHANGE_REMINDER_MARKER: &str = "The active model has changed";
+
+/// Turns the model may finish without seeing its todo list before
+/// [`ConversationRuntime::inject_todo_context`] shows it again. A list the user
+/// keeps on screen while the model has long scrolled past it is how the two
+/// stop agreeing on what is still open.
+const TODO_REMINDER_QUIET_TURNS: usize = 10;
+/// Canonical name of the tool whose call and result show the model its list.
+const TODO_WRITE_TOOL: &str = "TodoWrite";
+
+/// `true` when this block put the whole todo list in front of the model: a
+/// `TodoWrite` call or result, a compaction's continuity block, or a reminder
+/// [`ConversationRuntime::inject_todo_context`] prepended earlier.
+///
+/// The reminder is matched by its exact opening, not by its text appearing
+/// anywhere: a message that only quotes it must not count as the list being
+/// shown. Nobody else can write that opening, because peer messages arrive with
+/// `<system-reminder>` escaped (`agent_mailbox::HARNESS_OWNED_TAGS`). The
+/// continuity block sits inside a longer compaction message, so it is found
+/// by its marker.
+fn shows_todo_list(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::ToolUse { name, .. }
+        | ContentBlock::ToolResult {
+            tool_name: name, ..
+        } => crate::tool_names::canonicalize_tool_name(name) == TODO_WRITE_TOOL,
+        ContentBlock::Text { text } => {
+            text.starts_with(crate::compact::TODO_TURN_REMINDER_PREFIX)
+                || text.contains(crate::compact::TODO_CONTINUITY_MARKER)
+        }
+        _ => false,
+    }
+}
 
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +502,10 @@ pub trait ApiClient: Send {
 /// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
 /// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
+    /// How the turn's initial prompt was drawn, saved with it for replay.
+    fn prompt_echoes(&self) -> Vec<crate::turn_input::InputEcho> {
+        Vec::new()
+    }
     /// The initial user blocks, including attachments, reached durable history.
     fn on_prompt_committed(&mut self) {}
     fn on_input_committed(&mut self, _input: &crate::turn_input::InputView) {}
@@ -1251,6 +1314,15 @@ pub struct ConversationRuntime<C, T> {
     /// Override for "today" used in tests. Always `None` outside tests.
     #[cfg(test)]
     today_override: Option<String>,
+    /// Todo list used in tests instead of the persisted store. Always `None`
+    /// outside tests.
+    #[cfg(test)]
+    todos_override: Option<Vec<crate::todo_store::Todo>>,
+    /// Where the todo store was last read and had nothing open: the session's
+    /// compaction count and the history length then.
+    /// [`Self::todo_list_out_of_view`] scans only what came after it, so the
+    /// store is not read again for another quiet stretch.
+    todo_checked_at: Option<(u32, usize)>,
     max_iterations: usize,
     max_steps: Option<u32>,
     usage_tracker: UsageTracker,
@@ -1338,6 +1410,9 @@ where
             prompt_known_model: None,
             #[cfg(test)]
             today_override: None,
+            #[cfg(test)]
+            todos_override: None,
+            todo_checked_at: None,
             max_iterations: usize::MAX,
             max_steps: feature_config.max_steps(),
             usage_tracker,
@@ -1399,10 +1474,11 @@ where
 
     /// Records the date (`YYYY-MM-DD`) the session should treat as "today".
     /// The runtime announces it to the model via a `<system-reminder>`
-    /// content block on the first user turn, and each later turn compares it
-    /// against the local date, emitting a rollover reminder when the date
-    /// has changed — the system prompt itself never carries the date, so its
-    /// prompt-cache prefix stays warm across days.
+    /// content block on the first user turn, and each later turn compares the
+    /// date the transcript last announced (this one, until it announced any)
+    /// against the local date, emitting a rollover reminder when it differs.
+    /// The system prompt itself never carries the date, so its prompt-cache
+    /// prefix stays warm across days.
     #[must_use]
     pub fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
         self.prompt_known_date = Some(date.into());
@@ -1503,9 +1579,11 @@ where
     ///   or after compaction dropped the message that carried it), a
     ///   `<system-reminder>` content block stating today's date is PREPENDED to
     ///   the user's content.
-    /// - When the local date no longer matches the session's known date, a
-    ///   rollover reminder is prepended and the known date advanced so the
-    ///   reminder fires only once per rollover.
+    /// - When the local date no longer matches the date the session last
+    ///   announced (or, before it announced any, the date the runtime was
+    ///   stamped with), a rollover reminder is prepended and the known date
+    ///   advanced, so the reminder fires once per rollover, including when a
+    ///   process resumes the session on a later day.
     ///
     /// Both shapes live in user-side content blocks, leaving the system
     /// prompt byte-stable across days so its prompt-cache prefix stays warm.
@@ -1525,10 +1603,19 @@ where
     /// (`engine-core::session`, its only caller) is computed from the blocks
     /// handed to the turn, upstream of every injector here.
     fn inject_date_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-        let Some(known) = self.prompt_known_date.clone() else {
+        let Some(stamped) = self.prompt_known_date.clone() else {
             return blocks;
         };
         let today = self.current_local_date();
+        // A runtime is stamped with the day it is built, and a process that
+        // resumes a session builds a new one: stamped today, over a transcript
+        // that last told the model an earlier day. The transcript records what
+        // the model was told, so it decides; the stamp stands in only while
+        // the session has announced no date.
+        let announced = self.session_date_context().map(str::to_string);
+        let known = announced.clone().unwrap_or(stamped);
+        // Carried into a rebuilt runtime; keep it what the model was told.
+        self.prompt_known_date = Some(known.clone());
         if today != known {
             let reminder = ContentBlock::Text {
                 text: format!(
@@ -1543,7 +1630,7 @@ where
             combined.extend(blocks);
             return combined;
         }
-        if self.session_has_date_context() {
+        if announced.is_some() {
             return blocks;
         }
         let mut combined = Vec::with_capacity(blocks.len() + 1);
@@ -1554,21 +1641,20 @@ where
         combined
     }
 
-    /// `true` when some message already announced the current date to the
-    /// model — either the first-turn announcement or a rollover reminder.
-    /// Scanning the session (rather than tracking a flag) self-heals after
-    /// compaction removes the message that carried the announcement.
-    fn session_has_date_context(&self) -> bool {
-        self.session.messages.iter().any(|message| {
-            message.blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Text { text }
-                        if text.contains(DATE_CONTEXT_REMINDER_PREFIX)
-                            || text.contains(DATE_ROLLOVER_REMINDER_MARKER)
-                )
-            })
-        })
+    /// The date the model was last told: the one in the latest first-turn
+    /// announcement or rollover reminder in the session. Reading it off the
+    /// session rather than keeping it holds across resume and rebuilds, and a
+    /// compaction that drops every announcement makes it `None` again.
+    ///
+    /// Within a message the runtime's own reminders come first, so a block
+    /// pasted later in the same message does not override them.
+    fn session_date_context(&self) -> Option<&str> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == MessageRole::User)
+            .find_map(|message| message.blocks.iter().find_map(announced_date))
     }
 
     /// Keep the assistant informed of which model it is WITHOUT ever putting
@@ -1612,6 +1698,101 @@ where
         combined.push(ContentBlock::Text { text });
         combined.extend(blocks);
         combined
+    }
+
+    /// Keep the model's open todos in front of it WITHOUT touching the cached
+    /// prefix. The list lives in the persisted store, which the user sees the
+    /// whole time; the model only sees it where a `TodoWrite` call or result,
+    /// a compaction's continuity block or an earlier reminder sits in history.
+    /// Once the model finishes [`TODO_REMINDER_QUIET_TURNS`] turns with none of
+    /// those, the list is prepended to this turn's input, which is the one
+    /// place it can go without rewriting anything a prompt cache already holds:
+    /// the system prompt and every earlier message stay byte-identical.
+    fn inject_todo_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+        if !self.todo_list_out_of_view() {
+            return blocks;
+        }
+        let Some(text) = crate::compact::format_todo_turn_reminder(
+            &self.current_todos(),
+            TODO_REMINDER_QUIET_TURNS,
+        ) else {
+            // Nothing is open. Without this mark every later turn would read
+            // the store again, which for a co-hosted agent is a remote read.
+            self.todo_checked_at = Some((self.compaction_count(), self.session.messages.len()));
+            return blocks;
+        };
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
+        combined.push(ContentBlock::Text { text });
+        combined.extend(blocks);
+        combined
+    }
+
+    /// `true` when the model finished the last [`TODO_REMINDER_QUIET_TURNS`]
+    /// turns without anything in history showing it the todo list.
+    ///
+    /// A turn runs up to a model reply that calls no tool, and everything
+    /// between two such replies is one turn; a turn with the list anywhere in
+    /// it saw the list. Turns are told apart by the model's replies, not by
+    /// user-role messages, because the harness writes in that role too
+    /// (bash-mode transcript lines, its own nudges) without asking for a turn.
+    ///
+    /// The scan starts no earlier than the last check that found nothing open,
+    /// and stops at the first sign the list was shown or after that many turns.
+    /// Reading it off the session rather than keeping a counter holds across
+    /// resume and compaction. The check's mark is a position in the history,
+    /// so it stops applying once a compaction rewrites that history.
+    fn todo_list_out_of_view(&self) -> bool {
+        let messages = &self.session.messages;
+        let from = self
+            .todo_checked_at
+            .filter(|&(compactions, at)| {
+                compactions == self.compaction_count() && at <= messages.len()
+            })
+            .map_or(0, |(_, at)| at);
+        let mut quiet_turns = 0;
+        // Walking backwards, a turn is open from its closing reply until the
+        // previous turn's closing reply shows it was complete.
+        let mut in_turn = false;
+        for message in messages[from..].iter().rev() {
+            if message.blocks.iter().any(shows_todo_list) {
+                return false;
+            }
+            let ends_turn = message.role == MessageRole::Assistant
+                && !message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+            if ends_turn {
+                if in_turn {
+                    quiet_turns += 1;
+                    if quiet_turns >= TODO_REMINDER_QUIET_TURNS {
+                        return true;
+                    }
+                }
+                in_turn = true;
+            }
+        }
+        // The oldest turn scanned runs back to where the scan started.
+        in_turn && quiet_turns + 1 >= TODO_REMINDER_QUIET_TURNS
+    }
+
+    /// How many times this session's history has been compacted.
+    fn compaction_count(&self) -> u32 {
+        self.session
+            .compaction
+            .as_ref()
+            .map_or(0, |compaction| compaction.count)
+    }
+
+    /// The persisted todo list, or the list a test supplies.
+    fn current_todos(&self) -> Vec<crate::todo_store::Todo> {
+        #[cfg(test)]
+        {
+            if let Some(ref todos) = self.todos_override {
+                return todos.clone();
+            }
+        }
+        crate::todo_store::TodoStore::open(&self.session.fs_handle()).list()
     }
 
     /// Fallback model label for clients that do not expose a wire model ID.
@@ -7071,6 +7252,382 @@ mod tests {
         ));
     }
 
+    fn todo(content: &str, status: crate::todo_store::TodoStatus) -> crate::todo_store::Todo {
+        crate::todo_store::Todo {
+            content: content.to_string(),
+            status,
+            active_form: content.to_string(),
+        }
+    }
+
+    fn todo_runtime(
+        captured: &Arc<std::sync::Mutex<Vec<ApiRequest>>>,
+        todos: Vec<crate::todo_store::Todo>,
+    ) -> ConversationRuntime<CapturingApi, StaticToolExecutor> {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        runtime.todos_override = Some(todos);
+        runtime
+    }
+
+    /// The turn input each request carried, by turn.
+    fn turn_inputs(requests: &[ApiRequest]) -> Vec<Vec<ContentBlock>> {
+        requests
+            .iter()
+            .map(|request| {
+                request
+                    .messages
+                    .iter()
+                    .rfind(|message| message.role == MessageRole::User)
+                    .expect("every request carries a user turn")
+                    .blocks
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn carries_todo_reminder(blocks: &[ContentBlock]) -> bool {
+        blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.starts_with(crate::compact::TODO_TURN_REMINDER_PREFIX))
+        })
+    }
+
+    /// Append `n` finished turns: the user's input and a reply that calls no
+    /// tool, which is where a turn ends.
+    fn push_turns(runtime: &mut ConversationRuntime<CapturingApi, StaticToolExecutor>, n: usize) {
+        use crate::session::ConversationMessage;
+        for i in 0..n {
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::user_text(format!("input {i}")));
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: format!("reply {i}"),
+                }]));
+        }
+    }
+
+    #[tokio::test]
+    async fn open_todos_are_prepended_after_quiet_turns_and_then_wait_again() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![
+                todo("Write parser", crate::todo_store::TodoStatus::Completed),
+                todo("Ship it", crate::todo_store::TodoStatus::Pending),
+            ],
+        );
+        for turn in 0..=2 * quiet + 2 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        let inputs = turn_inputs(&requests);
+        let reminder_turns: Vec<usize> = (0..inputs.len())
+            .filter(|&turn| carries_todo_reminder(&inputs[turn]))
+            .collect();
+        // Shown after `quiet` turns without it, and the reminder itself counts
+        // as showing it, so the next one waits another `quiet` turns.
+        assert_eq!(reminder_turns, [quiet, 2 * quiet + 1]);
+
+        let input = &inputs[quiet];
+        assert_eq!(
+            input.len(),
+            2,
+            "one reminder block plus the user's text: {input:?}"
+        );
+        let ContentBlock::Text { text: reminder } = &input[0] else {
+            panic!("the reminder must be the first block: {input:?}");
+        };
+        assert!(reminder.contains("- [pending] Ship it"), "{reminder}");
+        assert!(
+            reminder.contains("- [completed] Write parser"),
+            "{reminder}"
+        );
+        assert!(
+            matches!(&input[1], ContentBlock::Text { text } if *text == format!("turn {quiet}")),
+            "the user's own text must come LAST, so nothing the harness wrote \
+             trails it (sudocode#623): {input:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_reminder_leaves_system_prompt_and_history_byte_identical() {
+        // The reminder may only add to the newest message. A change to the
+        // system prompt or to any earlier message would cost the prompt cache
+        // everything after it.
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+        );
+        for turn in 0..=quiet + 1 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        assert!(carries_todo_reminder(&turn_inputs(&requests)[quiet]));
+        for turn in 1..requests.len() {
+            assert_eq!(
+                requests[turn].system_prompt, requests[0].system_prompt,
+                "turn {turn} changed the system prompt"
+            );
+            assert!(
+                requests[turn]
+                    .messages
+                    .starts_with(&requests[turn - 1].messages),
+                "turn {turn} rewrote history the previous request already sent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_todo_list_is_never_reminded() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo(
+                "Write parser",
+                crate::todo_store::TodoStatus::Completed,
+            )],
+        );
+        for turn in 0..=quiet + 1 {
+            runtime
+                .run_turn(format!("turn {turn}"), None, None)
+                .await
+                .expect("turn should succeed");
+        }
+
+        let requests = captured.lock().expect("captured mutex");
+        assert!(!turn_inputs(&requests)
+            .iter()
+            .any(|input| carries_todo_reminder(input)));
+    }
+
+    #[test]
+    fn todo_list_counts_as_shown_by_todo_write_continuity_block_or_reminder() {
+        use crate::session::ConversationMessage;
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(&captured, Vec::new());
+
+        push_turns(&mut runtime, quiet - 1);
+        assert!(!runtime.todo_list_out_of_view(), "fewer than {quiet} turns");
+        push_turns(&mut runtime, 1);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "{quiet} turns without the list"
+        );
+
+        let reminder = crate::compact::format_todo_turn_reminder(
+            &[todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+            quiet,
+        )
+        .expect("an open item yields a reminder");
+        let shown_by = [
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "toolu_1".to_string(),
+                name: "TodoWrite".to_string(),
+                input: "{}".to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage::tool_result("toolu_1", "TodoWrite", "{}", false),
+            ConversationMessage::user_text(format!(
+                "<system-reminder>\n{} above.\n</system-reminder>",
+                crate::compact::TODO_CONTINUITY_MARKER
+            )),
+            ConversationMessage::user_text(reminder),
+        ];
+        for message in shown_by {
+            runtime.session.messages.push(message.clone());
+            assert!(!runtime.todo_list_out_of_view(), "shown by {message:?}");
+            // The reply that closes the turn the list was shown in. That turn
+            // saw the list, so it is not one of the quiet ones.
+            runtime
+                .session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }]));
+            assert!(!runtime.todo_list_out_of_view(), "shown by {message:?}");
+            // None of these finish a turn: tool rounds, and what the harness
+            // writes in the user role (bash-mode lines, its own nudges).
+            for _ in 0..2 * quiet {
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::assistant(vec![
+                        ContentBlock::ToolUse {
+                            id: "toolu_x".to_string(),
+                            name: "bash".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                    ]));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::tool_result(
+                        "toolu_x", "bash", "ok", false,
+                    ));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::user_text(
+                        "<bash-input>ls</bash-input>",
+                    ));
+                runtime
+                    .session
+                    .messages
+                    .push(ConversationMessage::user_text(
+                        "<system-reminder>\nContinue from where it stopped.\n</system-reminder>",
+                    ));
+            }
+            push_turns(&mut runtime, quiet - 1);
+            assert!(!runtime.todo_list_out_of_view(), "after {message:?}");
+            push_turns(&mut runtime, 1);
+            assert!(runtime.todo_list_out_of_view(), "after {message:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_quoting_the_todo_reminder_does_not_count_as_showing_the_list() {
+        use crate::session::ConversationMessage;
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(&captured, Vec::new());
+        let reminder = crate::compact::format_todo_turn_reminder(
+            &[todo("Ship it", crate::todo_store::TodoStatus::Pending)],
+            quiet,
+        )
+        .expect("an open item yields a reminder");
+
+        push_turns(&mut runtime, quiet - 1);
+        runtime
+            .session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "Earlier you were sent this:\n{reminder}"
+            )));
+        runtime
+            .session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "noted".to_string(),
+            }]));
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "only the reminder itself shows the list, not a quote of it"
+        );
+    }
+
+    #[test]
+    fn a_todo_list_with_nothing_open_is_not_read_again_until_another_quiet_stretch() {
+        let quiet = super::TODO_REMINDER_QUIET_TURNS;
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = todo_runtime(
+            &captured,
+            vec![todo(
+                "Write parser",
+                crate::todo_store::TodoStatus::Completed,
+            )],
+        );
+        let input = vec![ContentBlock::Text {
+            text: "next".to_string(),
+        }];
+
+        push_turns(&mut runtime, quiet);
+        assert!(runtime.todo_list_out_of_view());
+        assert_eq!(runtime.inject_todo_context(input.clone()), input);
+        // That read found nothing open, so the next ones wait a quiet stretch.
+        assert!(!runtime.todo_list_out_of_view(), "checked just now");
+        push_turns(&mut runtime, quiet - 1);
+        assert!(
+            !runtime.todo_list_out_of_view(),
+            "fewer than {quiet} turns since"
+        );
+        push_turns(&mut runtime, 1);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "{quiet} turns since the check"
+        );
+
+        // A compaction rewrites the history the mark points into.
+        assert_eq!(runtime.inject_todo_context(input.clone()), input);
+        assert!(!runtime.todo_list_out_of_view(), "checked just now");
+        runtime.session.record_compaction("summary", 0);
+        assert!(
+            runtime.todo_list_out_of_view(),
+            "the mark no longer applies after a compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_label_is_the_user_input_not_an_injected_reminder() {
+        // The label feeds file-intent analysis and the trace's `user_input`.
+        // Taken after the injectors, a turn that carried a reminder analysed
+        // the reminder instead of what the user asked for.
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15")
+        .with_session_tracer(SessionTracer::new("session-turn-label", sink.clone()));
+        runtime.today_override = Some("2026-05-15".to_string());
+
+        runtime
+            .run_turn("create process_data.py", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        assert_eq!(
+            requests[0].messages[0].blocks.len(),
+            2,
+            "the turn must carry the date reminder for this test to mean anything"
+        );
+        let traced: Vec<String> = sink
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                TelemetryEvent::SessionTrace(trace) if trace.name == "turn_started" => trace
+                    .attributes
+                    .get("user_input")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(traced, ["create process_data.py"]);
+    }
+
     #[tokio::test]
     async fn date_change_reminder_fires_only_once_per_rollover() {
         let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
@@ -7116,6 +7673,206 @@ mod tests {
             &second_turn_user_blocks[0],
             ContentBlock::Text { text } if text == "second"
         ));
+    }
+
+    fn date_runtime(
+        session: Session,
+        captured: &Arc<std::sync::Mutex<Vec<ApiRequest>>>,
+        day: &str,
+    ) -> ConversationRuntime<CapturingApi, StaticToolExecutor> {
+        let mut runtime = ConversationRuntime::new(
+            session,
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date(day);
+        runtime.today_override = Some(day.to_string());
+        runtime
+    }
+
+    /// A process that resumes a session builds a new runtime stamped with
+    /// today. The transcript still says what the model was last told, so a
+    /// resume on a later day is a rollover like any other.
+    #[tokio::test]
+    async fn a_session_resumed_on_a_later_day_is_told_the_date_changed() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                ContentBlock::Text {
+                    text: "<system-reminder>Today's date is 2026-05-15.</system-reminder>"
+                        .to_string(),
+                },
+                ContentBlock::Text {
+                    text: "earlier work".to_string(),
+                },
+            ])
+            .expect("seed message");
+        let mut resumed = date_runtime(session, &captured, "2026-05-17");
+
+        resumed
+            .run_turn("first", None, None)
+            .await
+            .expect("first turn");
+        resumed
+            .run_turn("second", None, None)
+            .await
+            .expect("second turn");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        let first = &inputs[0];
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(
+            matches!(&first[0], ContentBlock::Text { text }
+                if text.contains("The previously announced date was 2026-05-15; today is now 2026-05-17")),
+            "the resumed turn must name the last announced day: {first:?}"
+        );
+        assert_eq!(inputs[1].len(), 1, "told once per rollover");
+    }
+
+    /// The latest announcement wins, whichever shape carried it: a resume on
+    /// the day the transcript last named says nothing, and a later one counts
+    /// from that day.
+    #[tokio::test]
+    async fn the_last_date_the_transcript_announced_is_the_known_date() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut original = date_runtime(Session::new(), &captured, "2026-05-15");
+        original
+            .run_turn("day one", None, None)
+            .await
+            .expect("announce");
+        original.today_override = Some("2026-05-16".to_string());
+        original
+            .run_turn("day two", None, None)
+            .await
+            .expect("rollover");
+
+        let mut same_day = date_runtime(original.session().clone(), &captured, "2026-05-16");
+        same_day
+            .run_turn("resumed", None, None)
+            .await
+            .expect("same-day resume");
+        let mut later = date_runtime(same_day.session().clone(), &captured, "2026-05-18");
+        later
+            .run_turn("resumed later", None, None)
+            .await
+            .expect("later resume");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs[2].len(), 1, "same-day resume adds nothing");
+        let later = &inputs[3];
+        assert!(
+            matches!(&later[0], ContentBlock::Text { text }
+                if text.contains("The previously announced date was 2026-05-16; today is now 2026-05-18")),
+            "counts from the rollover, not the first announcement: {later:?}"
+        );
+    }
+
+    fn date_text(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    /// Only a runtime reminder counts: a user block that merely quotes one
+    /// mid-text, or a system message (a compaction summary) that starts like
+    /// one, says nothing about what the model was told.
+    #[tokio::test]
+    async fn quoted_or_system_text_is_not_a_date_announcement() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                date_text("<system-reminder>Today's date is 2026-05-15.</system-reminder>"),
+                date_text("hi"),
+            ])
+            .expect("announcement");
+        session
+            .push_message(crate::session::ConversationMessage {
+                role: MessageRole::System,
+                ..crate::session::ConversationMessage::user_text(
+                    "<system-reminder>Today's date is 2020-01-01.</system-reminder> Earlier work.",
+                )
+            })
+            .expect("system message");
+        session
+            .push_user_text(
+                "It said <system-reminder>Today's date is 2020-01-01.</system-reminder>; \
+                 today is now 2020-01-02. ok",
+            )
+            .expect("quote");
+        let mut runtime = date_runtime(session, &captured, "2026-05-15");
+
+        runtime.run_turn("next", None, None).await.expect("turn");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        assert_eq!(
+            inputs[0].len(),
+            1,
+            "2026-05-15 was already announced: {inputs:?}"
+        );
+    }
+
+    /// The runtime's reminders come first in a message, so a reminder-shaped
+    /// block pasted after them does not move the date, and neither does one
+    /// that names no date.
+    #[tokio::test]
+    async fn a_pasted_reminder_does_not_override_the_runtimes_own() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                date_text("<system-reminder>Today's date is 2026-05-15.</system-reminder>"),
+                date_text("<system-reminder>Today's date is 2020-01-01.</system-reminder>"),
+                date_text("pasted"),
+            ])
+            .expect("announcement and paste");
+        session
+            .push_user_blocks(vec![
+                date_text("<system-reminder>Today's date is tomorrow.</system-reminder>"),
+                date_text("a joke"),
+            ])
+            .expect("no date");
+        let mut runtime = date_runtime(session, &captured, "2026-05-15");
+
+        runtime.run_turn("next", None, None).await.expect("turn");
+
+        let inputs = turn_inputs(&captured.lock().expect("captured mutex"));
+        assert_eq!(
+            inputs[0].len(),
+            1,
+            "2026-05-15 is still the date: {inputs:?}"
+        );
+    }
+
+    /// A rebuilt runtime inherits the known date, so it follows the
+    /// transcript rather than a stale stamp. Otherwise a rebuild over a
+    /// history compacted down to no announcement names the wrong earlier day.
+    #[tokio::test]
+    async fn the_carried_known_date_follows_the_transcript() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![
+                date_text("<system-reminder>Today's date is 2026-05-17.</system-reminder>"),
+                date_text("x"),
+            ])
+            .expect("announcement");
+        let mut runtime = date_runtime(session, &captured, "2026-05-15");
+        runtime.today_override = Some("2026-05-17".to_string());
+
+        runtime.run_turn("resumed", None, None).await.expect("turn");
+
+        assert_eq!(
+            turn_inputs(&captured.lock().expect("captured mutex"))[0].len(),
+            1
+        );
+        assert_eq!(runtime.prompt_known_date(), Some("2026-05-17"));
     }
 
     #[tokio::test]

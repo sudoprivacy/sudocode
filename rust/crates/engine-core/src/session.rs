@@ -628,17 +628,22 @@ struct TurnInput {
     management: Option<(String, engine_events::ManagementContext)>,
     image_policy: engine_events::ImageInputPolicy,
     input_views: Vec<engine_events::InputView>,
+    shown: Vec<engine_events::InputEcho>,
 }
 
 impl TurnInput {
     fn from_command(command: EngineCommand) -> (Self, Option<engine_events::PromptContext>) {
-        let (blocks, context, management) = match command {
-            EngineCommand::Prompt { blocks, context } => (blocks, context, None),
+        let (blocks, context, management, shown) = match command {
+            EngineCommand::Prompt {
+                blocks,
+                context,
+                shown,
+            } => (blocks, context, None, shown),
             EngineCommand::Management {
                 line,
                 context,
                 build,
-            } => (Vec::new(), context, Some((line, build))),
+            } => (Vec::new(), context, Some((line, build)), Vec::new()),
             _ => unreachable!(),
         };
         let image_policy = context
@@ -654,6 +659,7 @@ impl TurnInput {
                 input_views: context
                     .as_ref()
                     .map_or_else(Vec::new, |context| context.input_views.clone()),
+                shown,
             },
             context,
         )
@@ -702,6 +708,7 @@ fn spawn_turn_worker(
             .with_subagent_relay(subagents)
             .with_background_tasks(turn_tasks);
         observer.initial_inputs = std::mem::take(&mut input.input_views);
+        observer.shown = std::mem::take(&mut input.shown);
         let mut prompter = PrompterAdapter {
             tx: turn_tx,
             table: turn_table,
@@ -747,6 +754,7 @@ async fn run_one_turn(
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
+    evt_tx.inputs.attach_inbox(inbox.clone());
     if let Some(inbox) = &inbox {
         inbox.begin();
     }
@@ -1008,6 +1016,8 @@ struct ObserverAdapter {
     subagents: Option<SubagentRelay>,
     tasks: runtime::background_tasks::BackgroundTasks,
     initial_inputs: Vec<engine_events::InputView>,
+    /// Drawn by the host already: saved with the prompt, never announced.
+    shown: Vec<engine_events::InputEcho>,
 }
 
 impl ObserverAdapter {
@@ -1017,6 +1027,7 @@ impl ObserverAdapter {
             tx,
             subagents: None,
             initial_inputs: Vec::new(),
+            shown: Vec::new(),
         }
     }
 
@@ -1053,6 +1064,17 @@ impl SubagentRelay {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn prompt_echoes(&self) -> Vec<runtime::turn_input::InputEcho> {
+        self.shown
+            .iter()
+            .cloned()
+            .chain(
+                self.initial_inputs
+                    .iter()
+                    .map(engine_events::InputView::echo),
+            )
+            .collect()
+    }
     fn on_prompt_committed(&mut self) {
         for input in std::mem::take(&mut self.initial_inputs) {
             let _ = self.tx.send(EngineEvent::InputCommitted(input));

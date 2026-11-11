@@ -68,6 +68,9 @@ pub(crate) struct EngineEventRenderer {
     output_writer: Option<OutputSender>,
     /// Collect one event's history writes for a single history/preview handoff.
     preview_output: Option<String>,
+    /// Keep everything drawn, for [`replay`]: a saved transcript goes through
+    /// this same renderer instead of a second one.
+    capture: Option<String>,
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
@@ -110,6 +113,7 @@ impl EngineEventRenderer {
             spinner,
             output_writer,
             preview_output: is_preview_enabled.then(String::new),
+            capture: None,
             thinking_active: false,
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
@@ -129,7 +133,9 @@ impl EngineEventRenderer {
             return;
         }
         self.layout.observe(text);
-        if let Some(output) = self.preview_output.as_mut() {
+        if let Some(capture) = self.capture.as_mut() {
+            capture.push_str(text);
+        } else if let Some(output) = self.preview_output.as_mut() {
             output.push_str(text);
         } else if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
@@ -164,6 +170,47 @@ impl EngineEventRenderer {
             self.start_block(block);
             self.write_out(&format!("{text}\n"));
         }
+    }
+
+    /// A renderer that keeps what it draws, for [`replay`].
+    fn capturing() -> Self {
+        let mut renderer = Self::new(None, None);
+        renderer.capture = Some(String::new());
+        renderer
+    }
+
+    /// Live, a plan's review document is drawn when its dialog opens, before
+    /// the result card. Replay draws it at the same point, from the arguments
+    /// the call was made with.
+    fn plan_document(&mut self, id: &str, name: &str, result: &str) {
+        if crate::cli::format::ToolKind::from_name(name)
+            != Some(crate::cli::format::ToolKind::WritePlan)
+        {
+            return;
+        }
+        let input = self.tool_inputs.peek(id);
+        if let Some(document) = crate::cli::format::replay_plan_document(
+            &input,
+            result,
+            &self.renderer,
+            query_terminal_width(),
+        ) {
+            self.write_block(&document, OutputBlock::Notice);
+        }
+    }
+
+    /// A committed input, drawn the same way live and on replay.
+    fn commit_input(&mut self, input: &engine_events::InputEcho) {
+        let echo = crate::cli::received::echo(input, query_terminal_width(), &self.renderer);
+        self.write_block(&echo, OutputBlock::Notice);
+    }
+
+    /// A prompt saved before its echo was recorded: its text, with any peer
+    /// messages in it framed.
+    fn saved_prompt(&mut self, text: &str) {
+        let echo =
+            crate::cli::received::render_prompt(text, query_terminal_width(), &self.renderer);
+        self.write_block(&echo, OutputBlock::Notice);
     }
 
     fn finish_turn(&mut self) {
@@ -480,12 +527,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::InputCommitted(input) => {
                 self.finish_response();
-                let text = match input.source {
-                    engine_events::InputSource::Human => crate::cli::format::format_input_echo(&input.display, crate::render::query_terminal_width()).0,
-                    engine_events::InputSource::Peer => crate::cli::received::render_prompt(&input.display, crate::render::query_terminal_width(), &self.renderer),
-                    _ => input.display,
-                };
-                self.write_block(&text, OutputBlock::Notice);
+                self.commit_input(&input.echo());
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
@@ -702,6 +744,93 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
         event_name = event.as_str(),
         attr = attribution(plugin_source.as_deref())
     )
+}
+
+/// Scrollback for a saved transcript, drawn by the renderer a live turn uses:
+/// each message becomes the events that turn produced, and each user turn gets
+/// a fresh renderer, as it does live. Replay therefore cannot drift from what
+/// was shown before a restart.
+pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
+    use runtime::{ContentBlock, MessageRole};
+
+    let mut output = String::new();
+    let mut turn: Option<EngineEventRenderer> = None;
+    let finish = |turn: Option<EngineEventRenderer>, output: &mut String| {
+        if let Some(mut renderer) = turn {
+            renderer.finish_turn();
+            LayoutPolicy::append_block(output, &renderer.capture.take().unwrap_or_default());
+        }
+    };
+    for message in messages {
+        if message.is_unanswered_turn_boundary() {
+            continue;
+        }
+        match message.role {
+            MessageRole::User => {
+                let text = crate::cli::format::text_from_blocks(&message.blocks);
+                if message.inputs.is_empty() && text.is_empty() {
+                    continue;
+                }
+                finish(turn.take(), &mut output);
+                let mut renderer = EngineEventRenderer::capturing();
+                if message.inputs.is_empty() {
+                    renderer.saved_prompt(&text);
+                }
+                for input in &message.inputs {
+                    renderer.commit_input(input);
+                }
+                turn = Some(renderer);
+            }
+            MessageRole::Assistant => {
+                let renderer = turn.get_or_insert_with(EngineEventRenderer::capturing);
+                for block in &message.blocks {
+                    let event = match block {
+                        ContentBlock::Thinking { thinking, .. } => EngineEvent::ThinkingDelta {
+                            text: thinking.clone(),
+                        },
+                        ContentBlock::Text { text } => {
+                            EngineEvent::TextDelta { text: text.clone() }
+                        }
+                        ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => EngineEvent::ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        },
+                        _ => continue,
+                    };
+                    renderer.render_event(event);
+                }
+                renderer.render_event(EngineEvent::MessageComplete);
+            }
+            MessageRole::Tool => {
+                let renderer = turn.get_or_insert_with(EngineEventRenderer::capturing);
+                for block in &message.blocks {
+                    let ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output: result,
+                        is_error,
+                    } = block
+                    else {
+                        continue;
+                    };
+                    renderer.plan_document(tool_use_id, tool_name, result);
+                    renderer.render_event(EngineEvent::ToolResult {
+                        assistant_message_id: None,
+                        id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        output: result.clone(),
+                        is_error: *is_error,
+                    });
+                }
+            }
+            MessageRole::System => {}
+        }
+    }
+    finish(turn, &mut output);
+    output
 }
 
 #[cfg(test)]

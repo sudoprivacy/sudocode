@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 
@@ -73,6 +74,19 @@ def color_environment(output):
 
 def service_graph(profiles, root, output, target, execute, driver):
     """Exercise Cargo freshness and native dispatch; RPC coverage stays in the real journeys."""
+    client = output / "rpc-client"
+    (client / "src").mkdir(parents=True)
+    (client / "Cargo.toml").write_text(
+        '[package]\nname="rpc-client-fixture"\nversion="0.0.1"\nedition="2021"\n[workspace]\n',
+        encoding="utf-8")
+    (client / "src/main.rs").write_text('''fn main() {
+    assert_eq!(std::env::args().nth(1).as_deref(), Some("--version"));
+    println!("rpc-client-fixture 0.0.1");
+}
+''', encoding="utf-8")
+    execute(["cargo", "build", "--offline", "--manifest-path", str(client / "Cargo.toml"),
+             "--target-dir", str(client / "target")], root, output / "rpc-client-build.log")
+    rpc = client / "target/debug" / ("rpc-client-fixture.exe" if os.name == "nt" else "rpc-client-fixture")
     scripts = root / "e2e/shared-services"
     scripts.mkdir(parents=True)
     process = '''import argparse, json, subprocess
@@ -91,15 +105,18 @@ a.artifacts.mkdir(parents=True)
         (scripts / name).write_text(process, encoding="utf-8")
     bash = root / "e2e/nexus-a2a"
     bash.mkdir(parents=True)
-    # This fixture tests native artifact selection, not gRPC. The real profile
-    # separately runs both unchanged private-Node journeys before publication.
-    (bash / "lib.sh").write_text('grpcurl_bin() { printf fixture-unused-rpc; }\n'
+    # A real native version probe is required even at this controlled RPC
+    # boundary. Actual gRPC remains covered by both original service journeys.
+    (bash / "lib.sh").write_text('grpcurl_bin() { printf "%s" ' + shlex.quote(rpc.as_posix()) + '; }\n'
                                 'native_path() { printf "%s" "$1"; }\n', encoding="utf-8")
     binary = target / "debug" / ("scode.exe" if os.name == "nt" else "scode")
     before = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     records = profiles.run("native-services", root, output / "services", "fixture-base", execute)
-    assert len(records) == 3, "Cargo verification and both service processes remain required"
-    assert "Compiling " not in (output / "services/000.log").read_text(encoding="utf-8")
+    assert len(records) == 4, "Native client probe, Cargo verification and both service processes remain required"
+    tool = json.loads((output / "services/service-tool/000.log").read_text(encoding="utf-8"))
+    assert tool["executable"] == str(rpc.resolve()) and tool["version"] == "rpc-client-fixture 0.0.1", tool
+    assert tool["sha256"] == hashlib.sha256(rpc.read_bytes()).hexdigest(), tool
+    assert "Compiling " not in (output / "services/001.log").read_text(encoding="utf-8")
     assert before == [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     for name in ["services", "existing-box"]:
         assert json.loads((output / "services" / name / "native-child.json").read_text())["actual"] == (
@@ -110,8 +127,8 @@ a.artifacts.mkdir(parents=True)
         standalone = profiles.run("native-services", root, output / "standalone", "fixture-base", execute)
     finally:
         os.environ["CARGO_TARGET_DIR"] = previous
-    assert len(standalone) == 3
-    assert "Compiling " in (output / "standalone/000.log").read_text(encoding="utf-8")
+    assert len(standalone) == 4
+    assert "Compiling " in (output / "standalone/001.log").read_text(encoding="utf-8")
     source = root / "rust/src/main.rs"
     original = source.read_bytes()
     try:
@@ -120,10 +137,10 @@ a.artifacts.mkdir(parents=True)
             profiles.run("native-services", root, output / "stale", "fixture-base", execute)
             raise AssertionError("A stale existing binary hid invalid current source")
         except RuntimeError:
-            failure = json.loads((output / "stale/000.command.json").read_text(encoding="utf-8"))
+            failure = json.loads((output / "stale/001.command.json").read_text(encoding="utf-8"))
             assert failure["exit_code"] == 101, failure
-            assert "changed candidate must rebuild before services" in (output / "stale/000.log").read_text(encoding="utf-8")
-            assert not (output / "stale/001.log").exists(), "Services ran before current-source compilation succeeded"
+            assert "changed candidate must rebuild before services" in (output / "stale/001.log").read_text(encoding="utf-8")
+            assert not (output / "stale/002.log").exists(), "Services ran before current-source compilation succeeded"
     finally:
         source.write_bytes(original)
     return {"warm_commands": records, "standalone_commands": standalone,

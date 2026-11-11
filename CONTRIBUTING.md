@@ -221,6 +221,15 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Changes confined to `.github/scripts/ci_input_scope.py` do not rerun the
+unchanged daemon journeys or three-platform workspace Clippy. The selector
+does not build or launch the product. Its real Git PR/push/queue matrix,
+existing scoped executor controls and complete native/Docker contract guard
+remain mandatory. CI reports `selector_only_product_checks_skipped` when this
+reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
+or out of product source retain their original checks. This deliberately
+removes general product smoke coverage from selector-only queue revisions;
+no selected journey, assertion or deadline is shortened.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes
@@ -333,8 +342,17 @@ releases the host, including an abrupt exit; each holds a ticket under
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
 which turns timing budgets into failures that cost whole profile reruns.
-Processes started under the holder inherit `SUDOCODE_ACCEPTANCE_HOST_LEASE`, so
-fixture checks nested inside an acceptance run without waiting for their parent.
+Processes started under the holder inherit an acquisition-specific
+`SUDOCODE_ACCEPTANCE_HOST_LEASE` claim. Nested checks validate that claim against
+the existing OS-locked file, the owner's process creation time and actual
+ancestry before proceeding without waiting for their parent. Invented, copied,
+released and previous-acquisition claims fail before heavy execution. The record
+inside `host.lock` is authoritative; `host-lease.json` is a diagnostic snapshot.
+Standalone enforcement fixtures use private homes and real private locks, never
+a fabricated claim. Existing older runners can finish naturally; their legacy
+claims do not authorize execution under a newer validator.
+The native author guard and complementary native jobs run the same real-process
+inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
 profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
@@ -348,6 +366,16 @@ Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
 existing paths.
+
+Fresh Windows contract guards and native workspaces check their required
+Windows PowerShell and PowerShell 7 paths before joining the queue. Missing
+tools report how to fix this process's PATH and rerun the same command.
+The native lint and release compiler checks share the same path validator and
+check again at execution; readiness grants no completed-check credit.
+Real Git/SSH/native-process controls remove PowerShell 7 only from a private
+child's PATH while a private holder stays active. Guard and workspace source
+must refuse without a queue ticket, while metadata-only source still completes.
+This adds no product journey coverage and changes no test deadlines.
 
 When both a fresh contract guard and native workspace are required, the workspace's
 existing formatting, metadata and warning-denying lint commands run before the
@@ -377,6 +405,15 @@ The complementary native CI entrypoint uses the same ordering helper and prints
 Its first failed service profile stops the job before release execution; jobs
 selecting only release still run it. Real production-entrypoint child-process
 controls cover failure, complete success and release-only selection.
+
+When native services are selected, preparation resolves their existing grpcurl
+client and actually runs `--version` before native compilation. Windows selects
+Git for Windows Bash explicitly, so an earlier WSL launcher cannot take its place.
+Download and executable failures stop at `NATIVE_SERVICE_TOOL_PREFLIGHT`.
+The later service journey uses that exact resolved file and verifies its bytes
+again; both original service journeys still run. Real Bash/curl proxy-504,
+invalid-executable, offline-cache and unselected-profile controls protect this
+ordering. These are infrastructure checks and add no product journey credit.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
@@ -587,8 +624,27 @@ Hosted complementary builds use the available compiler CPUs. That hosted-only
 setting is applied after cache restore; local author builds keep one worker and
 all test commands, deadlines and compiler priorities stay unchanged.
 Full logs and partial failures remain under ~/.nexus/local-acceptance/results/.
-Deterministic workspace cases use the checksum-pinned nextest runner. Full
-grouped workspaces retain eight workers on hosts with at least eight logical
+Deterministic workspace cases use the checksum-pinned nextest runner. Workspace,
+resize and service dispatch verify its original pinned archive and
+executable before compilation. A missing download or corrupt cache fails before
+Cargo; cached verified tools remain usable offline. Real HTTP proxy 504 and
+corrupt-archive process controls protect this ordering. Missing nextest/protoc
+archives resolve their exact tag and filename through GitHub's public release
+metadata and asset API. The existing nextest archive/executable digests and
+protoc executable version still qualify the result. This avoids failing browser
+download redirects; the canonical artifact URL in the tool receipt stays stable.
+The Docker image provisions the same protected downloader. Tool preparation stays
+inside the invocation's total elapsed time; test selection and retries are unchanged.
+On Windows/macOS the native guard also prepares the original protoc 3.20.2
+before its matrix and checks the real executable's version. The isolated cohost
+canary copies only that tool cache into its private HOME and runs offline;
+it retains private Git/lease state and the original feature/stamp refusals.
+Real proxy 504 controls require protoc failure before cohost Cargo or any full
+native guard command. Tool preparation and failures remain in total timing.
+Tool controls keep their isolated HOME short on Windows and run from the real
+nested policy/evidence layout, preserving raw logs without exceeding native
+executable path limits.
+Full grouped workspaces retain eight workers on hosts with at least eight logical
 CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
@@ -924,6 +980,14 @@ archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
 repository disables automatic line-ending conversion without changing author settings.
 
+For shared nextest execution, the CI scope response includes
+`nextest_dependency_scope`: the decision and bound function names, or the reason
+an unknown dependency requires full A2A. It binds transitive module functions
+including the GitHub API/download helpers. Unrelated function bodies omit this
+journey; changed imported context, reachable code, unknown data, rebinding or
+reflection retain it. Real Git/CLI cases exercise actual Windows-helper,
+authorization and asset-identity changes alongside the existing scope matrix.
+
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
 summary job repeats those checks. Scheduling-only edits keep valid completed
@@ -1130,6 +1194,25 @@ cases remain, including standalone vendored Mermaid and benchmark type checks.
 Existing PRs do not need a cosmetic merge from main to acquire the hook files:
 the managed hook loads protected-main command definitions. Registering another
 public device key does not invalidate other devices' current receipts.
+
+#### Native tool API credentials
+
+Complementary native CI prepares selected pinned tools in a separate trusted
+step with the read-only GitHub token. Both release metadata and binary API
+requests authenticate only at `https://api.github.com`; credentials are omitted
+from redirected requests, including release-asset storage. Public downloads
+without a token remain supported. Tool tags, asset selection, hashes, versions,
+caches and request timeouts retain their existing checks.
+
+The trusted preparation step receives the read-only API credential. Tool
+subprocesses and the candidate step receive neither `GH_TOKEN` nor `GITHUB_TOKEN`.
+The native command
+executor also strips both after SDK discovery and explicit environment overrides,
+including mixed-case keys that Windows treats as the same variable names.
+The native contract guard exercises real private HTTPS requests, redirect refusals,
+candidate subprocess isolation and refusal of a case-sensitive cleanup that leaks
+explicit lowercase or mixed-case overrides. These controls
+establish credential transport behavior; they do not measure live GitHub quota.
 
 #### Acceptance contract changes
 
@@ -1531,6 +1614,17 @@ cargo test --workspace
 ./scripts/fmt.sh           # auto-format
 ./scripts/fmt.sh --check   # CI-equivalent check
 ```
+
+The managed native acceptance runner checks the same Cargo target roots and
+recursive local path dependencies with rustfmt batches bounded to 24,000 UTF-16
+command units. This avoids Windows' process argument limit as the workspace
+grows. Every edition, target kind, module traversal and package-local rustfmt
+configuration remains selected. Real Cargo/rustfmt controls compare formatting
+failures and exercise an oversized workspace, including failure in a later batch.
+Private enforcement homes copy the prepared nextest cache, which every reader
+still verifies against the pinned archive. The real old-checkout guard requires
+offline tool reuse and rejects a corrupted private executable while proving
+the enclosing tool cache retains its original bytes.
 
 The workspace enables `clippy::all` and `clippy::pedantic` at
 `warn` level. A few pedantic lints are allowed globally

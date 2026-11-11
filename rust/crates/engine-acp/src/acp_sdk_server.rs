@@ -62,6 +62,9 @@ use crate::subagent_completions::{
 pub enum AcpError {
     InvalidParams(String),
     Internal(String),
+    /// `session/load` named a well-formed session id that this workspace never
+    /// persisted. Carries the requested id; nothing was loaded or created.
+    SessionNotFound(String),
     /// A prompt-turn failure that arrived already classified by the runtime
     /// (via [`runtime::RuntimeError`]'s typed bits). Carrying the classification
     /// here — instead of flattening to a bare `Internal(String)` and later
@@ -94,6 +97,11 @@ impl AcpError {
         Self::Internal(message.into())
     }
 
+    #[must_use]
+    pub fn session_not_found(session_id: impl Into<String>) -> Self {
+        Self::SessionNotFound(session_id.into())
+    }
+
     /// Build a turn error from a runtime error, capturing its typed
     /// classification so the ACP surface never has to re-derive behavior by
     /// string-matching the message.
@@ -121,6 +129,7 @@ impl AcpError {
                 message
             }
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
+            Self::SessionNotFound(session_id) => return format!("session not found: {session_id}"),
         };
 
         if raw_message.contains(runtime::COMPACTION_FAILED) {
@@ -192,6 +201,7 @@ impl std::fmt::Display for AcpError {
             Self::InvalidParams(message) | Self::Internal(message) | Self::Turn { message, .. } => {
                 f.write_str(message)
             }
+            Self::SessionNotFound(session_id) => write!(f, "session not found: {session_id}"),
         }
     }
 }
@@ -764,7 +774,11 @@ fn prompt_engine_command(
             },
         }
     } else {
-        engine_core::EngineCommand::Prompt { blocks, context }
+        engine_core::EngineCommand::Prompt {
+            blocks,
+            context,
+            shown: Vec::new(),
+        }
     }
 }
 
@@ -1163,6 +1177,7 @@ fn peer_input_action(
             text: text.to_owned(),
             display: text.to_owned(),
             source: engine_core::engine_events::InputSource::Peer,
+            pasted: Vec::new(),
             attachments: Vec::new(),
         },
         delivery: message.delivery,
@@ -1686,6 +1701,10 @@ pub struct SessionRegistry {
     /// Own the worker until it has stopped; an abort signal alone does not
     /// release its remote receiver seat.
     peer_receivers: Mutex<HashMap<String, Arc<PeerReceiver>>>,
+    /// The first `close_all` outcome. Held for the whole teardown, so
+    /// concurrent callers serialize, and latched, so a later call over the
+    /// already-drained maps cannot report success after a failure.
+    close_outcome: Mutex<Option<Result<(), String>>>,
 }
 
 struct PeerReceiver {
@@ -1941,35 +1960,45 @@ impl SessionRegistry {
         }
     }
 
-    pub fn close_all(&self) {
+    /// Close every session and peer receiver and report whether all of them
+    /// confirmed: each engine reaped, bridge stopped and completion retired,
+    /// each receiver joined. Every one is driven even after a failure; the
+    /// result names the first. The first call's result is latched and
+    /// returned to every caller.
+    pub fn close_all(&self) -> Result<(), String> {
+        let mut outcome = self
+            .close_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(result) = outcome.as_ref() {
+            return result.clone();
+        }
+        let mut first: Option<String> = None;
         self.stop_peer_receivers();
-        let entries: Vec<_> = self
-            .lock_sessions()
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect();
-        for entry in entries {
+        let entries: Vec<_> = self.lock_sessions().drain().collect();
+        for (session_id, entry) in entries {
             let _ = entry.driver.send(engine_core::EngineCommand::Cancel);
             entry.abort.abort();
             drop(entry.engine);
             drop(entry.subagents);
-            if !entry.driver.shutdown() {
-                eprintln!("ACP session teardown timed out");
+            if let Err(stage) = entry.driver.shutdown() {
+                eprintln!("ACP session {session_id} teardown unconfirmed: {stage}");
+                first.get_or_insert_with(|| format!("session {session_id}: {stage}"));
             }
         }
-        let receivers: Vec<_> = self
-            .lock_peer_receivers()
-            .drain()
-            .map(|(_, receiver)| receiver)
-            .collect();
-        for receiver in receivers {
+        let receivers: Vec<_> = self.lock_peer_receivers().drain().collect();
+        for (agent, receiver) in receivers {
             if let Err(error) = receiver.stop_and_join() {
-                eprintln!("ACP peer receiver teardown failed: {error}");
+                eprintln!("ACP peer receiver {agent} teardown failed: {error}");
+                first.get_or_insert_with(|| format!("peer receiver {agent}: {error}"));
             }
         }
         if let Some(factory) = &self.hosted_factory {
             factory.close();
         }
+        let result = first.map_or(Ok(()), Err);
+        *outcome = Some(result.clone());
+        result
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
@@ -2991,8 +3020,10 @@ pub(crate) async fn run_acp_on_transport(
                                 let driver_stopped = driver.shutdown();
                                 let receiver_stopped =
                                     receiver.map_or(Ok(()), |receiver| receiver.stop_and_join());
-                                if !driver_stopped {
-                                    return Err(AcpError::internal("session teardown timed out"));
+                                if let Err(stage) = driver_stopped {
+                                    return Err(AcpError::internal(format!(
+                                        "session teardown timed out: {stage}"
+                                    )));
                                 }
                                 receiver_stopped.map_err(AcpError::internal)?;
                             }
@@ -3774,6 +3805,9 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
     match e {
         AcpError::InvalidParams(msg) => {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
+        }
+        AcpError::SessionNotFound(session_id) => {
+            Error::resource_not_found(None).data(json!({ "sessionId": session_id }))
         }
         AcpError::Internal(message) | AcpError::Turn { message, .. } => {
             let mut error =

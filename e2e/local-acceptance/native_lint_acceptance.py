@@ -47,7 +47,7 @@ def nextest_preflight(output, profiles):
     thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     thread.start()
     driver = output / "actual-native-dispatcher.py"
-    driver.write_text('''import importlib.util, json, subprocess, sys
+    driver.write_text('''import argparse, importlib.util, json, subprocess, sys
 from pathlib import Path
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -68,8 +68,13 @@ try:
         directory = output / "guard"
         policy = output / "guard-source"
         source = Path(profiles.__file__).resolve().parents[2]
-        for relative in [".github/local-acceptance/checks.py", ".github/local-acceptance/native_guard.py",
-                         ".github/scripts/local_acceptance.py"]:
+        guard = load("actual_native_inventory", source / ".github/local-acceptance/native_guard.py")
+        guard_args = argparse.Namespace(executable=sys.argv[6], source_receipt=sys.argv[7], options="[]")
+        fixtures, _, _ = guard.fixture_inventory(root, directory, guard_args)
+        members = [".github/local-acceptance/checks.py", ".github/local-acceptance/native_guard.py",
+                   ".github/scripts/local_acceptance.py"]
+        members.extend(Path(row["command"][1]).relative_to(source) for row in fixtures)
+        for relative in members:
             destination = policy / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((source / relative).read_bytes())

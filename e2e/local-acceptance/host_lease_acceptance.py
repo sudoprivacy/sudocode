@@ -2,6 +2,7 @@
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -259,6 +260,7 @@ def verify_host_lease(directory, source, command, environment):
     verify_lint_preparation_order(fixture, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated)
     verify_static_before_queue(fixture, source, run, isolated)
+    verify_native_inventory_before_queue(fixture, source, run, isolated)
 
 
 def clone_private_policy(fixture, authority, run, directory):
@@ -492,12 +494,189 @@ def verify_static_before_queue(fixture, authority, run, environment):
         checkpoint = sorted((directory / "Bad/checkpoints").iterdir())[-1]
         assert set(json.loads((checkpoint / "receipt.json").read_text())["checks"]) == {"preflight"}
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+
         (directory / "release-Holder").touch()
         assert holder.wait(timeout=30) == 0
         print("PASS: actual protected pin mismatch fails before a held host queue, without Docker/native entry; signed preflight progress remains incomplete")
     finally:
         # Terminate only this private refused contender before releasing its
         # holder, including when the unchanged-helper counterexample times out.
+        for process in processes[1:]:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+        (directory / "release-Holder").touch()
+        for process in processes[:1]:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=10)
+
+
+def verify_native_inventory_before_queue(fixture, authority, run, environment):
+    """Reject correctly pinned malformed inventories before the real private queue."""
+    directory = fixture / "inventory-before-queue"
+    directory.mkdir()
+    repository = clone_private_policy(fixture, authority, run, directory)
+    holder_policy = run("git", "rev-parse", "HEAD", cwd=repository)
+    home = directory / "home"
+    home.mkdir()
+    env = {key: value for key, value in environment.items() if key != LEASE_ENV}
+    env.update(HOME=str(home), USERPROFILE=str(home))
+    processes = []
+    works = {}
+
+    def prepare_source(label, policy):
+        work = directory / ("source-" + label)
+        run("git", "worktree", "add", "--detach", work, policy, cwd=repository)
+        (work / "input.txt").write_text(label)
+        run("git", "add", ".", cwd=work)
+        run("git", "commit", "-m", "Candidate " + label, cwd=work)
+        works[label] = work
+
+    def start(label, policy):
+        work = works[label]
+        with (directory / (label + ".log")).open("wb") as stream:
+            process = subprocess.Popen([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
+                "check", "--base", policy, "--policy-ref", policy, "--output", str(directory / label)],
+                cwd=work, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        processes.append(process)
+        return process
+
+    source = Path(__file__).resolve().parents[2]
+    policy = repository / "spec/local_acceptance.json"
+    rules = json.loads(policy.read_text())
+    rules["checks"] = {"preflight": {"include": ["*"]}, "guard-contract": {"include": ["input.txt"]}}
+    policy.write_text(json.dumps(rules))
+
+    # Stage actual production files and recipes, including the deliberately
+    # malformed inventory's own correct pin. Only this fixture's executable
+    # profile is replaced; the production validator and host queue are real.
+    spec = importlib.util.spec_from_file_location("inventory_fixture_profiles",
+                                                 source / ".github/local-acceptance/checks.py")
+    profiles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiles)
+    pins = profiles.native_guard_files()
+    for relative in pins:
+        destination = repository / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / relative, destination)
+    inventory_source = (source / ".github/local-acceptance/native_guard.py").read_text(encoding="utf-8")
+    controlled = (source / ".github/local-acceptance/checks.py").read_text(encoding="utf-8").replace(
+        'def run(name, root, output, base, execute):\n',
+        'def run(name, root, output, base, execute):\n'
+        '    if name == "preflight":\n'
+        '        return [execute([sys.executable,"-c","print(\'metadata passed\')"],root,output/"000.log")]\n'
+        '    if name == "guard-contract":\n'
+        '        return [execute([sys.executable,"-c","print(\'PRIVATE_GUARD_EXECUTED\')"],'
+        'root,output/"000.log")]\n')
+    selection = {key: rules[key] for key in ["version", "repository", "checks"]}
+    digest = hashlib.sha256(json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    scope_node = next(node for node in ast.walk(ast.parse(controlled))
+                      if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                      and node.left.id == "actual_scope")
+    controlled = controlled.replace(scope_node.comparators[0].value, digest)
+    # The real hook-environment control deliberately binds its parent's Git.
+    # Resolve fixture recipes in a real child with the same isolated Git
+    # environment as every other private repository command.
+    recipe_reader = '''import importlib.util,json,sys
+from pathlib import Path
+repository = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("inventory_fixture_executor", repository / ".github/scripts/local_acceptance.py")
+executor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(executor)
+executor.ROOT = repository
+print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", ["native-release", "native-context"])))
+'''
+
+    def inventory_policy(label, inventory):
+        (repository / ".github/local-acceptance/native_guard.py").write_text(inventory, encoding="utf-8")
+        run("git", "add", ".", cwd=repository)
+        candidate = controlled
+        for relative, expected in pins.items():
+            actual = hashlib.sha256(subprocess.check_output(["git", "show", ":" + relative],
+                                                         cwd=repository, env=environment)).hexdigest()
+            candidate = candidate.replace('"' + relative + '": "' + expected + '"',
+                                          '"' + relative + '": "' + actual + '"')
+        path = repository / ".github/local-acceptance/checks.py"
+        path.write_text(candidate, encoding="utf-8")
+        run("git", "add", ".", cwd=repository)
+        run("git", "commit", "-m", "Private pinned inventory " + label, cwd=repository)
+        expected = next(node.value for node in ast.walk(ast.parse(candidate))
+                        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                        and target.id == "expected" for target in node.targets)
+                        and isinstance(node.value, ast.Dict)
+                        and "native-release" in [getattr(key, "value", None) for key in node.value.keys])
+        recipes = json.loads(subprocess.check_output([sys.executable, "-c", recipe_reader, str(repository)],
+                                                      cwd=repository, env=environment))
+        for key, old in zip(expected.keys, expected.values):
+            candidate = candidate.replace(old.value, recipes[key.value])
+        path.write_text(candidate, encoding="utf-8")
+        run("git", "add", ".", cwd=repository)
+        run("git", "commit", "--allow-empty", "-m", "Bind private inventory recipes " + label, cwd=repository)
+        return run("git", "rev-parse", "HEAD", cwd=repository)
+
+    mutations = [
+        ("OldInventoryCount", inventory_source.replace("len(native) != 14", "len(native) != 13", 1),
+         "found 1 protocol and 14 native"),
+        ("DuplicateInventory", inventory_source.replace('SOURCE / "e2e/local-acceptance/native.py"',
+         'SOURCE / "e2e/local-acceptance/power_acceptance.py"', 1), "duplicate fixture scripts"),
+        ("MissingInventory", inventory_source.replace('SOURCE / "e2e/local-acceptance/native.py"',
+         'SOURCE / "e2e/local-acceptance/missing_inventory_fixture.py"', 1), "inventory fixture is missing"),
+    ]
+    policies = []
+    for label, inventory, diagnostic in mutations:
+        assert inventory != inventory_source
+        policy_ref = inventory_policy(label, inventory)
+        prepare_source(label, policy_ref)
+        policies.append((label, policy_ref, diagnostic))
+    valid_policy = inventory_policy("ValidInventory", inventory_source)
+    prepare_source("ValidInventory", valid_policy)
+    prepare_source("Holder", holder_policy)
+    try:
+        holder = start("Holder", holder_policy)
+        events = directory / "events.log"
+        deadline = time.monotonic() + 120
+        while not events.exists() or events.read_text().splitlines() != ["start:Holder"]:
+            assert holder.poll() is None, (directory / "Holder.log").read_text(encoding="utf-8")
+            assert time.monotonic() < deadline, "Private holder never entered its profile"
+            time.sleep(0.05)
+        for label, policy_ref, diagnostic in policies:
+            child = start(label, policy_ref)
+            assert child.wait(timeout=30) == 1
+            log = (directory / (label + ".log")).read_text(encoding="utf-8")
+            assert diagnostic in log, log
+            assert "Waiting for this host" not in log and "Acquired this host" not in log, log
+            assert "PRIVATE_GUARD_EXECUTED" not in log and "DOCKER_ENGINE_PROBE" not in log, log
+            attempt = json.loads((directory / label / "attempt.json").read_text())
+            assert attempt["outcome"] == "failure" and attempt["host_lease_wait_seconds"] == 0, attempt
+            assert attempt["host_lease_acquisitions"] == [], attempt
+            assert not (directory / label / "envelope.json").exists()
+            checkpoint = sorted((directory / label / "checkpoints").iterdir())[-1]
+            assert set(json.loads((checkpoint / "receipt.json").read_text())["checks"]) == {"preflight"}
+            assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+            assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+        valid = start("ValidInventory", valid_policy)
+        deadline = time.monotonic() + 30
+        while "Waiting for this host" not in (directory / "ValidInventory.log").read_text(encoding="utf-8"):
+            assert valid.poll() is None, (directory / "ValidInventory.log").read_text(encoding="utf-8")
+            assert time.monotonic() < deadline, "Valid inventory never joined the held private queue"
+            time.sleep(0.05)
+        assert "GUARD_NATIVE_INVENTORY=" in (directory / "ValidInventory.log").read_text(encoding="utf-8")
+        assert not (directory / "ValidInventory/envelope.json").exists()
+        assert list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+        assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+        (directory / "release-Holder").touch()
+        assert holder.wait(timeout=30) == 0
+        assert valid.wait(timeout=30) == 0
+        valid_receipt = json.loads((directory / "ValidInventory/receipt.json").read_text())
+        assert set(valid_receipt["checks"]) == {"preflight", "guard-contract"}
+        assert "PRIVATE_GUARD_EXECUTED" in (directory / "ValidInventory/guard-contract/000.log").read_text()
+        print("PASS: correctly pinned count/duplicate/missing inventory faults refuse before the held FIFO; "
+              "valid inventory still waits and executes its required private profile", flush=True)
+    finally:
         for process in processes[1:]:
             if process.poll() is None:
                 process.terminate()

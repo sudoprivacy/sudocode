@@ -120,49 +120,6 @@ pub(super) fn probe(
     )
 }
 
-/// The SID transaction excludes new context admission while every other owner
-/// lock is checked. A tombstone then fences every subsequent transcript write.
-pub(super) fn purge(
-    fs: &dyn FsBackend,
-    transcript: &Path,
-    deletion: &Deletion<'_>,
-    own_context: Option<&str>,
-) -> Result<(), String> {
-    let current = probe(fs, transcript, deletion.session_id, deletion.cwd)?;
-    if current["storageRef"] != deletion.storage_ref {
-        return Err("completion_storage_mismatch".into());
-    }
-    if current["deleted"] == true {
-        return Ok(());
-    }
-    let _responses = crate::response_archive::ResponseArchiveWriter::acquire(fs, transcript)?;
-    let directory = context_dir(transcript);
-    let mut owners = Vec::new();
-    if fs
-        .exists(&directory.to_string_lossy())
-        .map_err(|error| error.to_string())?
-    {
-        for entry in fs
-            .readdir(&directory.to_string_lossy())
-            .map_err(|error| error.to_string())?
-        {
-            if !is_context_entry(&entry) {
-                continue;
-            }
-            let path = directory.join(entry.name);
-            if own_context == Some(path.to_string_lossy().as_ref()) {
-                continue;
-            }
-            owners.push(
-                fs.try_lock(&path.with_extension("owner.lock").to_string_lossy(), 30_000)
-                    .map_err(|error| error.to_string())?
-                    .ok_or("session_writer_busy")?,
-            );
-        }
-    }
-    mark_deleted(fs, transcript, deletion)
-}
-
 /// The caller holds the native SID commit barrier. Record-history clients all
 /// check this binding inside that barrier before protocol writes and ACKs.
 pub(super) fn mark_deleted(

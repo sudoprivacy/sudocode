@@ -2,7 +2,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -63,10 +63,12 @@ impl ResponseRecordingConfig {
     }
 }
 
-/// Exclude response attachment deletion until every recorder has finalized.
-/// This lock never takes the transcript commit barrier.
+/// Exclude response deletion while actual attachment I/O is admitted.
+/// Idle recorders can retire independently of their HTTP body or OS process.
 pub(crate) struct ResponseArchiveWriter {
-    lock: Arc<dyn FsLock>,
+    fs: Arc<dyn FsBackend>,
+    transcript: PathBuf,
+    lock: RwLock<Option<Arc<dyn FsLock>>>,
     renewal: Mutex<()>,
 }
 
@@ -75,7 +77,7 @@ impl ResponseArchiveWriter {
         transcript.with_extension("responses.lock")
     }
 
-    pub(crate) fn acquire(fs: &dyn FsBackend, transcript: &Path) -> Result<Arc<Self>, String> {
+    fn acquire_lock(fs: &dyn FsBackend, transcript: &Path) -> Result<Arc<dyn FsLock>, String> {
         if !fs.fenced_locks() {
             return Err("completion_storage_exclusion_unavailable".into());
         }
@@ -96,23 +98,45 @@ impl ResponseArchiveWriter {
             std::thread::sleep(Duration::from_millis(5));
         };
         crate::subagent_completion::check_response_storage(fs, transcript)?;
-        Ok(Arc::new(Self {
-            lock,
-            renewal: Mutex::new(()),
-        }))
+        Ok(lock)
     }
 
-    fn check(&self) -> Result<(), String> {
-        // The backend lease excludes deletion for this Arc's whole lifetime.
-        // Serialize renewals, not independent files' compression or fsyncs.
+    fn acquire(fs: Arc<dyn FsBackend>, transcript: &Path) -> Result<Arc<Self>, String> {
+        let lock = Self::acquire_lock(fs.as_ref(), transcript)?;
+        let writer = Arc::new(Self {
+            fs,
+            transcript: transcript.to_path_buf(),
+            lock: RwLock::new(Some(lock)),
+            renewal: Mutex::new(()),
+        });
+        crate::session_cleanup::watch(Arc::clone(&writer.fs), transcript, &writer)?;
+        Ok(writer)
+    }
+
+    fn io(&self) -> Result<RwLockReadGuard<'_, Option<Arc<dyn FsLock>>>, String> {
+        let admission = self.lock.read().map_err(|_| "response writer poisoned")?;
+        let lock = admission.as_ref().ok_or("session_deleted")?;
+        crate::subagent_completion::check_response_storage(self.fs.as_ref(), &self.transcript)?;
+        // Serialize renewals. Independent response files retain concurrent I/O,
+        // but retirement must obtain the write side before closing the OS lock.
         let _guard = self
             .renewal
             .lock()
             .map_err(|_| "response writer poisoned")?;
-        if !self.lock.renew().map_err(|error| error.to_string())? {
+        if !lock.renew().map_err(|error| error.to_string())? {
             return Err("session_writer_lost".into());
         }
-        Ok(())
+        Ok(admission)
+    }
+}
+
+impl crate::session_cleanup::StorageHandles for ResponseArchiveWriter {
+    fn try_retire(&self) -> bool {
+        let Ok(mut admission) = self.lock.try_write() else {
+            return false;
+        };
+        drop(admission.take());
+        true
     }
 }
 
@@ -157,13 +181,13 @@ impl SessionResponseArchive {
             .lock()
             .map_err(|_| io::Error::other("response writer poisoned"))?;
         if let Some(writer) = current.upgrade() {
-            writer.check().map_err(io::Error::other)?;
+            drop(writer.io().map_err(io::Error::other)?);
             return Ok(writer);
         }
         if !self.fs.exists(&self.transcript.to_string_lossy())? {
             return Err(io::Error::other("session_deleted"));
         }
-        let writer = ResponseArchiveWriter::acquire(self.fs.as_ref(), &self.transcript)
+        let writer = ResponseArchiveWriter::acquire(Arc::clone(&self.fs), &self.transcript)
             .map_err(io::Error::other)?;
         *current = Arc::downgrade(&writer);
         Ok(writer)
@@ -201,8 +225,10 @@ impl SessionResponseArchive {
 impl ResponseArchive for SessionResponseArchive {
     fn begin(&self, metadata: ResponseCaptureMetadata) -> io::Result<Box<dyn ResponseRecorder>> {
         let writer = self.capture_writer()?;
+        // The initial budget scan, directory and empty body are real I/O too.
+        // Release before constructing the encoder, which admits its own writes.
+        let admission = writer.io().map_err(io::Error::other)?;
         self.initialize_budget()?;
-        writer.check().map_err(io::Error::other)?;
         self.fs.create_dir_all(&self.directory.to_string_lossy())?;
         {
             let mut used = self
@@ -246,10 +272,8 @@ impl ResponseArchive for SessionResponseArchive {
             error: None,
             finished: false,
         };
-        {
-            writer.check().map_err(io::Error::other)?;
-            recording.write_metadata("recording", false)?;
-        }
+        drop(admission);
+        recording.write_metadata("recording", false)?;
         // Keep the compressor's large buffer out of the initial metadata I/O.
         // Slow storage must not retain one for every pending capture.
         recording.encoder = Some(gzip::Encoder::new(output)?);
@@ -267,7 +291,7 @@ struct ArchiveWriter {
 
 impl Write for ArchiveWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.writer.check().map_err(io::Error::other)?;
+        let _admission = self.writer.io().map_err(io::Error::other)?;
         {
             let mut used = self
                 .used
@@ -315,6 +339,7 @@ impl fmt::Debug for SessionResponseRecorder {
 
 impl SessionResponseRecorder {
     fn write_metadata(&self, reason: &str, gzip_complete: bool) -> io::Result<()> {
+        let _admission = self.writer.io().map_err(io::Error::other)?;
         let value = json!({
             "version": 1, "session_id": self.session_id, "response": self.metadata, "end_reason": reason,
             "observed_bytes": self.observed, "saved_bytes": self.saved,
@@ -373,10 +398,7 @@ impl ResponseRecorder for SessionResponseRecorder {
                     false
                 }
             });
-        // Retain the attachment lease through this file's final atomic write.
-        if self.writer.check().is_ok() {
-            let _ = self.write_metadata(end.reason, complete);
-        }
+        let _ = self.write_metadata(end.reason, complete);
     }
 }
 

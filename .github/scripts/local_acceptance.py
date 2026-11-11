@@ -802,9 +802,12 @@ def report_plan(plan, current_environment=False):
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
-        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+        rule = "half the logical CPUs, at most one per 3 GiB of memory"
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": rule,
+                       "compiler_jobs_setting": "SCODE_ACCEPTANCE_BUILD_JOBS",
                        "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
-        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+        lines.append(f"Author-native Cargo compilation uses {rule} per command (SCODE_ACCEPTANCE_BUILD_JOBS "
+                     "lowers it) at BelowNormal priority. Native test processes use "
                      + ("the protected profile default." if cap is None else
                         f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
         try:
@@ -816,7 +819,7 @@ def report_plan(plan, current_environment=False):
                      else "unset SCODE_ACCEPTANCE_TEST_THREADS")
             lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
                          f"To use the protected test-pool default, run `{clear}` before retrying this command. "
-                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
+                         "Cargo compilation keeps its independent job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -999,7 +1002,18 @@ def run_command(command, cwd, log, env=None):
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
-    environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
+    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+    jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+    if cap is not None:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+        jobs = min(jobs, int(cap))
+    environment.update({"CARGO_BUILD_JOBS": str(jobs), "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
     # Neither ambient credentials, SDK discovery nor per-command overrides may
@@ -1718,13 +1732,14 @@ def verify_inherited_host_lease(claim, directory):
 
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
-    """Run one fresh profile at a time on this host, in arrival order.
+    """Run one fresh reservation at a time on this host, in arrival order.
 
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Each fresh profile rejoins the FIFO, so already waiting work
-    can run before this invocation's next profile. Processes
+    a memory kill. A complete workspace and its immediately following compile-only
+    examples can share one reservation. All other fresh work rejoins the FIFO,
+    so already waiting work runs before this invocation's next reservation. Processes
     started under the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
@@ -1757,7 +1772,8 @@ def host_acceptance_lease(attempt, head):
                     current = "an unrecorded process"
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
-                      "this invocation rejoins the FIFO between fresh profiles; each profile stays exclusive.", flush=True)
+                      "this invocation rejoins the FIFO between fresh reservations; "
+                      "only a workspace and its following compile-only examples may share one.", flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -1766,11 +1782,16 @@ def host_acceptance_lease(attempt, head):
         attempt.setdefault("host_lease_acquisitions", []).append({
             "profile": attempt.get("active_profile"), "wait_seconds": waited, "acquired_at": acquired,
         })
+        members = attempt.get("reservation_profiles", [])
+        if len(members) > 1:
+            attempt["host_lease_acquisitions"][-1]["profiles"] = list(members)
         import psutil
         record = {"version": 1, "active": True, "pid": os.getpid(),
                   "process_created_at": psutil.Process().create_time(),
                   "lease_id": secrets.token_hex(32), "head": head, "root": str(ROOT),
                   "acquired_at": acquired, "profile": attempt.get("active_profile")}
+        if len(members) > 1:
+            record["profiles"] = list(members)
         write_host_lease_record(descriptor, record)
         holder.write_bytes(canonical(record))
         print(f"Acquired this host's local acceptance lease after {waited:.3f}s; "
@@ -1837,6 +1858,21 @@ def scheduled_checks(needed):
         if position < service:
             ordered.insert(position, ordered.pop(service))
     return ordered
+
+
+def profile_reservations(ordered, pending):
+    """Share only adjacent fresh workspace/example work; keep order and logical receipts."""
+    ordered, pending = list(ordered), set(pending)
+    reservations, index = [], 0
+    while index < len(ordered):
+        pair = ordered[index:index + 2]
+        if pair == ["native-workspace", "native-examples"] and set(pair) <= pending:
+            reservations.append(pair)
+            index += 2
+        else:
+            reservations.append([ordered[index]])
+            index += 1
+    return reservations
 
 
 def perform_check(args, attempt):
@@ -1951,6 +1987,7 @@ def perform_check(args, attempt):
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
+    reservations = profile_reservations(serialized, pending)
     prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
     lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
                         and serialized.index("guard-contract") < serialized.index("native-workspace"))
@@ -1961,7 +1998,8 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "one_fresh_profile_then_fifo_requeue",
+        "reservation": "adjacent_fresh_workspace_and_compile_only_examples_share_one;_others_requeue",
+        "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:
         if "preflight" in needed:
@@ -1980,17 +2018,23 @@ def perform_check(args, attempt):
                 module.run.prepared_workspace = prepare_lint(ROOT, output, base, run_command)
             print("NATIVE_LINT_PREPARATION: lint passed; workspace acceptance remains incomplete. "
                   "Rejoining the existing host FIFO before the contract matrix.", flush=True)
-        for name in serialized:
-            fresh = name in pending
-            attempt["active_profile"] = name
+        for members in reservations:
+            fresh = members[0] in pending
+            attempt["active_profile"] = members[0]
+            attempt["reservation_profiles"] = members
             lease = host_acceptance_lease(attempt, head) if fresh else contextlib.nullcontext()
-            with lease:
-                if fresh and not prepared:
-                    prepare = getattr(module, "prepare_native_checks", None)
-                    if prepare:
-                        module.run.prepared_native = prepare(pending, ROOT, output, run_command)
-                    prepared = True
-                perform_profile(name)
+            try:
+                with lease:
+                    for name in members:
+                        attempt["active_profile"] = name
+                        if name in pending and not prepared:
+                            prepare = getattr(module, "prepare_native_checks", None)
+                            if prepare:
+                                module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                            prepared = True
+                        perform_profile(name)
+            finally:
+                attempt.pop("reservation_profiles", None)
         attempt.pop("active_profile", None)
         clean(head)
     except BaseException:

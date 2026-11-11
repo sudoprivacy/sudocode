@@ -84,6 +84,22 @@ pub fn load_session_reference(
     ))
 }
 
+/// Load exactly the session persisted under `id` in the current workspace: no
+/// alias or path is resolved, and the transcript must carry `id`. Protocol
+/// loads use this so a client cannot address a different session.
+pub fn load_session_exact(
+    id: &str,
+) -> Result<(SessionHandle, Session), runtime::session_control::SessionControlError> {
+    let loaded = SessionStore::from_cwd(runtime::current_workspace_root()?)?.load_exact(id)?;
+    Ok((
+        SessionHandle {
+            id: loaded.handle.id,
+            path: loaded.handle.path,
+        },
+        loaded.session,
+    ))
+}
+
 pub fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     current_session_store()?.delete_session(path)?;
     Ok(())

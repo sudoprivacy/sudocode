@@ -38,7 +38,9 @@ const CHOICE_PALETTES: [(&str, bool, &str, &str, &str, &str); 3] = [
     ("15;0", true, "Default", "Default", "Default", "Default"),
 ];
 
-fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String, bool, bool)> {
+type SurfaceAttributes = (String, String, bool, bool);
+
+fn surface_attributes_many(sess: &PtySession, needles: &[&str]) -> Option<Vec<SurfaceAttributes>> {
     sess.render(|screen| {
         // Search logical text across wrapping, but retain physical coordinates
         // for the cell assertion. rows() alone misses a needle split by a
@@ -63,17 +65,26 @@ fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String
                 text.push(' ');
             }
         }
-        let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
-        let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
-        let cell = screen.raw().cell(*row, *col)?;
-        Some((
-            format!("{:?}", cell.fgcolor()),
-            format!("{:?}", cell.bgcolor()),
-            cell.bold(),
-            cell.dim(),
-        ))
+        needles
+            .iter()
+            .map(|needle| {
+                let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
+                let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
+                let cell = screen.raw().cell(*row, *col)?;
+                Some((
+                    format!("{:?}", cell.fgcolor()),
+                    format!("{:?}", cell.bgcolor()),
+                    cell.bold(),
+                    cell.dim(),
+                ))
+            })
+            .collect()
     })
+}
+
+fn surface_attributes(sess: &PtySession, needle: &str) -> Option<SurfaceAttributes> {
+    surface_attributes_many(sess, &[needle])?.pop()
 }
 
 fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
@@ -115,6 +126,36 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
         assert!(
             Instant::now() < deadline,
             "{needle:?}: expected {expected:?}, got {actual:?}; screen:\n{}",
+            sess.render(|screen| screen.raw().contents())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn expect_resumed_metadata(sess: &PtySession, muted: &str) -> [String; 3] {
+    let expected_color = terminal_palette::expected_color(muted);
+    // Use the existing duration-label observer's deadline and polling interval.
+    // All dependent accents must come from its same complete terminal snapshot;
+    // separate render reads can interleave with a clear/paint after resize.
+    let deadline = Instant::now() + common::at_least(Duration::from_secs(30));
+    loop {
+        let actual = surface_attributes_many(
+            sess,
+            &["+1m14s Σ1m14s", "[claude", "ctx ", "chrome-style-branch"],
+        );
+        if let Some(styles) = actual
+            .as_ref()
+            .filter(|styles| styles[0].0 == expected_color && !styles[0].2 && !styles[0].3)
+        {
+            return [
+                styles[1].0.clone(),
+                styles[2].0.clone(),
+                styles[3].0.clone(),
+            ];
+        }
+        assert!(
+            Instant::now() < deadline,
+            "resumed duration and metadata accents did not share a complete frame: {actual:?}; screen:\n{}",
             sess.render(|screen| screen.raw().contents())
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -856,26 +897,20 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
-                let visible = sess.render(|screen| {
-                    screen
-                        .raw()
-                        .rows(0, screen.raw().size().1)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
                 if rows == 8 {
                     if statuses.len() > 1 {
-                        assert!(
-                            !visible.contains("Task 0"),
-                            "folded completed item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Working 1"),
-                            "folded active item: {visible}"
-                        );
-                        assert!(
-                            !visible.contains("Task 2"),
-                            "folded pending item: {visible}"
+                        // The waits above also pass on the unfolded frame, and
+                        // a resize reaches the app later than chrome looks
+                        // settled (through ConPTY, often). Wait for the fold.
+                        common::expect_screen(
+                            &sess,
+                            |screen| {
+                                !["Task 0", "Working 1", "Task 2"]
+                                    .iter()
+                                    .any(|item| screen.contains(item))
+                            },
+                            common::DEFAULT_TIMEOUT,
+                            "every item folds away at eight rows",
                         );
                     }
                 } else {
@@ -947,12 +982,9 @@ fn resumed_status_scopes_semantic_accents_and_cache_colors() {
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
-                for label in ["turn 1", "+1m14s Σ1m14s"] {
-                    expect_style(&sess, label, (muted, false, false));
-                }
-                let model_color = attributes(&sess, "[claude").unwrap().0;
-                let usage_color = attributes(&sess, "ctx ").unwrap().0;
-                let branch_color = attributes(&sess, "chrome-style-branch").unwrap().0;
+                expect_style(&sess, "turn 1", (muted, false, false));
+                let [model_color, usage_color, branch_color] =
+                    expect_resumed_metadata(&sess, muted);
                 for color in [&model_color, &usage_color, &branch_color] {
                     assert_ne!(
                         color, muted,

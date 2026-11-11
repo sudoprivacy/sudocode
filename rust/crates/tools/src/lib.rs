@@ -3166,11 +3166,30 @@ fn run_monitor(
         tasks,
     )
     .map_err(|error| format!("failed to start monitor: {error}"))?;
-    Ok(format!(
-        "Monitor started (task {id}, output {output_path}). You will be notified \
+    Ok(monitor_started(&id, &output_path))
+}
+
+/// How a successful `Monitor` result begins, spelled once for the tool that
+/// writes it and [`monitor_task_from_tool_result`] that reads it back.
+const MONITOR_STARTED: &str = "Monitor started (task ";
+
+/// The result of a started `Monitor`: the task it launched, then what the
+/// model should do while it waits.
+fn monitor_started(id: &str, output_path: &str) -> String {
+    format!(
+        "{MONITOR_STARTED}{id}, output {output_path}). You will be notified \
          when it finishes or fires. Keep working — do not poll or sleep. An event \
          may arrive while you are waiting for the user; it is not their reply."
-    ))
+    )
+}
+
+/// The background task a successful `Monitor` result names, if it is one.
+#[must_use]
+pub fn monitor_task_from_tool_result(output: &str) -> Option<&str> {
+    output
+        .strip_prefix(MONITOR_STARTED)?
+        .split_once(", output ")
+        .map(|(task, _)| task)
 }
 
 fn classify_bash_permission(command: &str) -> PermissionMode {
@@ -9348,6 +9367,19 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_monitor_result_names_the_task_it_started() {
+        let output = super::monitor_started("shell-7f3a", "/tmp/out.log");
+        assert_eq!(
+            super::monitor_task_from_tool_result(&output),
+            Some("shell-7f3a")
+        );
+        assert_eq!(
+            super::monitor_task_from_tool_result("failed to start monitor"),
+            None
+        );
+    }
     /// A sub-agent never resumes a session, so the retired `fresh` field is not
     /// in the schema. A caller that still sends it must not break: `AgentInput`
     /// ignores unknown fields, so the input still deserializes.

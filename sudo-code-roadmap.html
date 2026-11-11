@@ -215,6 +215,46 @@ verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
+<p><strong>Selection-script changes (2026-11-11).</strong>
+Edits confined to <code>.github/scripts/ci_input_scope.py</code> omit unchanged
+CLI/co-host daemon journeys and three-platform workspace Clippy. Real Git
+PR/push/queue selection, existing scoped executor controls and the complete
+native/Docker contract guard remain required. The mandatory CI JSON reports
+<code>selector_only_product_checks_skipped</code>. Workflow edits, mixed product
+or daemon-harness changes and moves across the product boundary retain their
+checks. This deliberately removes general product smoke coverage from
+selector-only queue revisions; it does not shorten any selected case or add
+feature coverage. Savings depend on the changed inputs and queue load.</p>
+
+<p><strong>Author-scheduling changes (2026-11-11).</strong>
+Daemon journeys may be omitted when committed runner modes, required policy
+and every non-guard reachable execution fingerprint remain identical. Only
+the author lease/check bodies and a plain two-argument reservation helper may
+differ; imports, globals and other function declarations/bodies stay bound.
+Companion inputs are limited to dispatcher changes with the same non-guard
+fingerprints, the host-lease enforcement fixture and documentation. Changed
+executors, product/workflow inputs, dynamic
+namespace observers, unknown declarations or fingerprints retain the original
+scope. Mandatory CI JSON reports <code>acceptance_scheduling_scope</code> with
+the proof or fallback reason. Real Git PR/push/queue controls, preflight and the
+complete native/Docker contract guard remain required. This reduces general
+product smoke coverage on proven author-scheduling-only revisions; selected
+journeys retain every case, assertion and deadline, with no new feature coverage.
+The observed 856 allocated job-seconds on PR #1380's queue describe one prior
+execution, not measured future or population savings.</p>
+
+<p><strong>Bind transitive shared tool inputs (2026-11-11).</strong>
+The daemon/A2A selector binds the functions reached by the shared nextest
+helpers, including GitHub API authorization and asset download. Unrelated
+function edits in the acceptance dispatcher omit the unchanged journey.
+Changed imported context or reachable functions retain it; unknown data,
+rebinding and runtime reflection require the full journey. The mandatory CI
+JSON includes the bound names or the conservative fallback reason. Real Git
+and CLI regressions cover the actual Windows helper, authorization and asset
+identity branches, with existing PR/push/queue and native selection checks
+retained. Product journeys, tool pins and assertions are unchanged. These
+infrastructure checks add no feature rows; elapsed savings remain unmeasured.</p>
+
 <p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
 run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
 locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs
@@ -833,6 +873,15 @@ all three callers and allocate no cancellation runner. A real GitHub fixture tes
 all three failure directions and a clean run; its controlled timings do not establish
 production lifecycle savings. Passing-run coverage, budgets and assertions stay
 unchanged.</p>
+<p><strong>Run each managed-process journey once (2026-11-11).</strong>
+CLI A2A's original <code>run.sh</code> already requires managed scode and remote-context
+acceptance. When both daemon jobs are selected, cohost omits its repeated invocation;
+cohost-only selection keeps the same script. Missing selection refuses before a
+daemon starts. Each selected job must still succeed. Real extracted workflow-shell
+checks protect dispatch and failure propagation, with missing-journey and duplicate
+controls. No original product case, assertion or deadline is removed. A previous
+queue's duplicate cohost step took 101 seconds; that observation is neither measured
+future savings nor a whole author-to-merge result.</p>
 <p><strong>Run independent daemon paths together (2026-11-08).</strong>
 CLI A2A and cohost each start and clean their own nodes, so their original
 journeys run on independent Ubuntu jobs after the same pin preflight. Every
@@ -1024,9 +1073,19 @@ product journey counts and acceptance budgets retain their current values.
 A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
 of command execution; this is a measured scheduling incident, not a forecast
 of whole-PR savings.</p>
-<p><strong>Rejoin the FIFO between fresh profiles (2026-11-06).</strong>
-Each running profile keeps the existing exclusive host lease through execution
-and its signed checkpoint. Its next fresh profile rejoins the queue after existing
+<p><strong>Prepare the service client before compilation (2026-11-10).</strong>
+Selected native service checks resolve the original grpcurl client and execute
+<code>--version</code> in the first preparation slot. Windows uses Git for Windows
+Bash explicitly. A download or executable failure stops before compilation;
+the actual service journey later uses the same file after verifying its hash.
+Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselected
+profile controls cover this ordering. Both original service journeys remain
+required; product coverage counts and budgets are unchanged. This adds
+infrastructure fault coverage and makes no whole-PR speedup claim.</p>
+<p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
+Each running reservation keeps the existing exclusive host lease through execution
+and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
+examples share one reservation; other fresh profiles rejoin the queue after existing
 waiters. Metadata and fully verified reused results retain their path without a
 host wait; native tool preparation still occurs once in the first fresh slot.
 Required output reports the reservation boundary and active holder profile.
@@ -1037,9 +1096,26 @@ with every required signed profile completed once. The same controls retain
 metadata success/failure, complete/partial resume, abandoned waiters, abrupt
 holder exit and service execution order. Product cases, measurement counts,
 budgets and checkpoint validation retain their current requirements.</p>
+<p><strong>Windows shell prerequisites before queueing (2026-11-10).</strong>
+Fresh Windows guards and native workspaces also check their required Windows
+PowerShell and PowerShell 7 paths before joining the queue. Native lint and
+release compiler checks share the same validator and recheck at execution.
+An actionable missing-tool error grants no completed-check credit. Real
+Git/SSH/native-process controls remove PowerShell 7 only from a private child's
+PATH: guard/workspace source refuses without a queue ticket while a private
+holder remains active; metadata-only source still completes. No product
+coverage, assertion or deadline is removed by this prerequisite check.</p>
 <p><strong>Reject invalid guard inputs before queueing (2026-11-06).</strong>
 Fresh contract guards reuse the existing static staging checks before entering
-the host queue: protected file pins, selection digest and release recipe.
+the host queue: protected file pins, selection digest, release recipe and native
+fixture inventory. The same inventory builder checks protocol/native counts,
+duplicate scripts/logs and missing scripts before admission and execution.
+<code>GUARD_NATIVE_INVENTORY</code> reports counts without preparing tools or
+executing tests. Real Git/SSH/native-process controls correctly pin malformed
+inventories: count, duplicate and missing-script errors refuse before a held
+private queue; a valid list still waits and executes its required profile.
+These infrastructure controls add no product journey coverage or measured
+population saving; passing-run cases, deadlines and full guard remain required.
 Required <code>GUARD_STATIC_PREFLIGHT</code> output explains the check and keeps
 full execution required. An actual malformed pin is refused while another
 private workflow holds the host, with zero host wait, no queue ticket and no
@@ -1282,6 +1358,19 @@ selection and avoid a duplicate build. The mandatory plan prints
 linking, no implicit execution and refusal of a broken example. Existing signed
 workspace execution stays reusable for the same head when its recipe is
 unchanged; the newly selected example check still requires actual execution.</p>
+<p><strong>Share one author reservation for workspace and examples.</strong>
+Adjacent fresh <code>native-workspace</code> and <code>native-examples</code>
+keep their original order, commands, separate signed results and execution
+fingerprints while sharing the existing host FIFO acquisition. Workspace
+success is checkpointed before examples start. An example failure preserves
+that result, and verified resume executes only unfinished profiles. Other
+fresh work still rejoins the FIFO; completed profiles need no reservation.
+Mandatory <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> output lists the groups,
+and acquisition records list both profiles with their common wait counted once.
+Real private Git/SSH/process controls require existing-waiter handoff after
+the pair, failure propagation and full/partial reuse. No example build, native
+case, complementary platform or deadline is removed. This avoids one author
+queue admission; population time savings remain unmeasured.</p>
 <p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
 changes contain only ordinary individual CLI test files, optionally accompanied
 by README or Markdown files under <code>docs/</code>, author and complementary
@@ -1631,6 +1720,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       sources use <code>native-examples</code>; original selection retains its
       existing behavior. Isolated individual CLI test changes omit the separate
       unchanged example build; shared/production/unknown inputs retain it.
+      Adjacent fresh author workspace/example profiles can share one FIFO
+      reservation while retaining both original signed results and commands.
       Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>

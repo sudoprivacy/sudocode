@@ -3393,13 +3393,13 @@ fn run_repl_iocraft_dispatch(
         input_history,
         Some(dequeue_hook),
         Arc::clone(&completions),
+        resume_status
+            .as_ref()
+            .map(|status| (status, cli.lifecycle.usage_snapshot().turns())),
     );
     cli.completions = Some(completions);
     cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
-    if let Some(status) = resume_status {
-        repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
-    }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
     repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
@@ -5146,13 +5146,17 @@ impl LiveCli {
             return;
         };
         let active = self.lifecycle.session_handle().id;
+        // Evaluated on the input thread when Tab is pressed, so it must stay
+        // cheap: ids only, never the full listing, which parses every
+        // transcript and classifies the workspace with git and tmux.
         let sessions: commands::ValueList = Arc::new(move || {
             let mut ids = vec![active.clone()];
             ids.extend(
-                list_managed_sessions()
+                engine_host::session::current_session_store()
+                    .ok()
+                    .and_then(|store| store.recent_session_ids(21).ok())
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|session| session.id)
                     .filter(|id| *id != active)
                     .take(20),
             );

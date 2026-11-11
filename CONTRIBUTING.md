@@ -221,6 +221,30 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Changes confined to `.github/scripts/ci_input_scope.py` do not rerun the
+unchanged daemon journeys or three-platform workspace Clippy. The selector
+does not build or launch the product. Its real Git PR/push/queue matrix,
+existing scoped executor controls and complete native/Docker contract guard
+remain mandatory. CI reports `selector_only_product_checks_skipped` when this
+reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
+or out of product source retain their original checks. This deliberately
+removes general product smoke coverage from selector-only queue revisions;
+no selected journey, assertion or deadline is shortened.
+Author-scheduling edits can also omit unchanged daemon journeys. This requires
+regular committed runner files with the same mode and identical module code
+outside `host_acceptance_lease` and `perform_check` bodies and the plain
+`profile_reservations(ordered, pending)` declaration. The required policy and
+every non-guard reachable execution fingerprint must still match. Companion
+edits are limited to dispatcher changes with those same non-guard fingerprints,
+the host-lease enforcement fixture and documentation. Changed command runners,
+imports, globals, runner declarations,
+product code, workflows, unknown inputs or execution fingerprints retain the
+original daemon scope. `acceptance_scheduling_scope` in the mandatory CI JSON
+reports the proof or fallback reason. Real Git PR/push/queue controls, preflight
+and the full native/Docker contract guard remain required. This removes general
+product smoke coverage for proven author-scheduling-only revisions; every
+selected journey keeps its cases, assertions and deadlines. These infrastructure
+controls add no product coverage. Observed job costs are not measured savings.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes
@@ -324,11 +348,12 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json`, its active profile and the queue position. Each fresh profile
-rejoins the FIFO after the previous profile completes, so existing waiters run
-before this invocation's next profile. A running profile keeps the lease through
-its execution and checkpoint. Waiters start in arrival order when that profile
-releases the host, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Adjacent fresh
+workspace and compile-only examples share one reservation, with a separate
+checkpoint for each. Other fresh profiles rejoin the FIFO, so existing waiters
+run before this invocation's next reservation. A running reservation keeps the
+lease through its execution and checkpoints. Waiters start in arrival order
+when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
@@ -346,17 +371,35 @@ The native author guard and complementary native jobs run the same real-process
 inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
-profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
+profiles and count their common wait once. The signed receipt format is unchanged.
 
 A fresh `guard-contract` also validates its protected input pins, selection
-digest and release recipe before joining the host queue. The required
+digest, release recipe and native fixture inventory before joining the host queue. The required
 `GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
 A mismatch reports the path and observed hash, retains signed preflight progress,
 and exits without taking a queue ticket or starting Docker/native checks.
+The same inventory builder checks the required protocol/native counts, duplicate
+script/log entries and missing fixture files at admission and execution.
+`GUARD_NATIVE_INVENTORY` reports the counts and keeps full acceptance required;
+its argv placeholders do not prepare tools or execute tests. A correctly pinned
+but malformed inventory still refuses while another private workflow holds the
+host, without a ticket or completed guard credit. A valid inventory still waits
+for that holder and executes its required profile.
 Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
 existing paths.
+
+Fresh Windows contract guards and native workspaces check their required
+Windows PowerShell and PowerShell 7 paths before joining the queue. Missing
+tools report how to fix this process's PATH and rerun the same command.
+The native lint and release compiler checks share the same path validator and
+check again at execution; readiness grants no completed-check credit.
+Real Git/SSH/native-process controls remove PowerShell 7 only from a private
+child's PATH while a private holder stays active. Guard and workspace source
+must refuse without a queue ticket, while metadata-only source still completes.
+This adds no product journey coverage and changes no test deadlines.
 
 When both a fresh contract guard and native workspace are required, the workspace's
 existing formatting, metadata and warning-denying lint commands run before the
@@ -386,6 +429,15 @@ The complementary native CI entrypoint uses the same ordering helper and prints
 Its first failed service profile stops the job before release execution; jobs
 selecting only release still run it. Real production-entrypoint child-process
 controls cover failure, complete success and release-only selection.
+
+When native services are selected, preparation resolves their existing grpcurl
+client and actually runs `--version` before native compilation. Windows selects
+Git for Windows Bash explicitly, so an earlier WSL launcher cannot take its place.
+Download and executable failures stop at `NATIVE_SERVICE_TOOL_PREFLIGHT`.
+The later service journey uses that exact resolved file and verifies its bytes
+again; both original service journeys still run. Real Bash/curl proxy-504,
+invalid-executable, offline-cache and unselected-profile controls protect this
+ordering. These are infrastructure checks and add no product journey credit.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
@@ -621,8 +673,9 @@ CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
 older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
-pool explicitly. Compiler jobs stay at one locally, with only compiler workers
-at BelowNormal priority; test processes stay Normal. Before author workspace
+pool explicitly. Local Cargo commands compile with half the logical CPUs, at most one
+job per 3 GiB of memory (`SCODE_ACCEPTANCE_BUILD_JOBS` lowers it), with only compiler workers
+at BelowNormal priority; test processes stay Normal. Hosted runners use every CPU. Before author workspace
 execution and a plan preview for the current host, the mandatory
 `LOCAL_ACCEPTANCE_CONCURRENCY` output reports the current invocation's compiler
 jobs and requested test cap. An explicit cap of one also prints the shell
@@ -750,6 +803,19 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
+On the author's machine, a fresh `native-workspace` and its immediately
+following fresh `native-examples` share one existing FIFO reservation. Their
+order, commands, separate signed results and original command fingerprints
+remain unchanged. Workspace success is checkpointed before examples begin;
+an example failure preserves it for verified resume. All other fresh profiles
+rejoin the FIFO, and reused profiles need no reservation. The mandatory
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups;
+acquisition timing lists both profiles and counts their common wait once.
+This removes an additional queue admission, not the example build. Hosted
+complementary profiles and all native cases remain unchanged. Real private
+Git/SSH/process controls verify the shared acquisition, the existing waiter's
+subsequent turn, failure propagation and full/partial reuse without replaying
+completed work. Population time savings remain unmeasured.
 Changes confined to ordinary individual CLI test files can omit the separate
 example build on both the author and complementary hosts. README and Markdown
 files under `docs/` may accompany them. The selector reads committed Git blobs;
@@ -952,6 +1018,14 @@ archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
 repository disables automatic line-ending conversion without changing author settings.
 
+For shared nextest execution, the CI scope response includes
+`nextest_dependency_scope`: the decision and bound function names, or the reason
+an unknown dependency requires full A2A. It binds transitive module functions
+including the GitHub API/download helpers. Unrelated function bodies omit this
+journey; changed imported context, reachable code, unknown data, rebinding or
+reflection retain it. Real Git/CLI cases exercise actual Windows-helper,
+authorization and asset-identity changes alongside the existing scope matrix.
+
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted
 summary job repeats those checks. Scheduling-only edits keep valid completed
@@ -1142,6 +1216,13 @@ journey coverage.
 CLI A2A and cohost journeys use independent fresh-node jobs after the same pin
 preflight. Each selected job must pass; an unselected job must be skipped.
 Their original shell commands, features, cases and fault assertions remain.
+The managed scode and remote-context journeys run once on the queue tree:
+CLI A2A's `run.sh` owns them when selected; independently selected cohost changes
+run the same script in the cohost job. Missing selection fails before the daemon
+starts. The integrated gate still requires each selected job to pass. Real
+workflow-shell controls retain cohost-only execution and child failure propagation
+and refuse both an omitted journey and duplicate dispatch. This removes a repeated
+invocation and retains each original journey, assertion and deadline.
 An isolated matched GitHub comparison with identical source and full cache hits
 took 825 seconds sequentially and 506 seconds in parallel. Total runner time
 was 825 versus 837 seconds. This one run demonstrates a shorter daemon path,

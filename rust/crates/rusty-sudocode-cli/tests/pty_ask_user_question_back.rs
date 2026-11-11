@@ -205,6 +205,71 @@ fn going_back_reopens_an_answered_question_with_its_answer_selected() {
     assert_eq!(sess.expect_eof().unwrap(), 0);
 }
 
+/// A `boolean` question names no options and still offers a yes/no choice:
+/// Yes and No in the dialog, with the custom-answer row kept, and the answer
+/// reaches the model as `"true"` or `"false"`.
+#[test]
+fn a_boolean_question_offers_yes_and_no() {
+    let env = TestEnv::new("question-boolean");
+    if !env.is_mock() {
+        return;
+    }
+    let input =
+        json!({"questions":[{"id":"proceed", "prompt":"PROCEED_WITH_CLEANUP", "kind":"boolean"}]});
+    let prompt = env.tool_batch_prompt(
+        &json!([{"id":"question-boolean", "name":"AskUserQuestion", "input":input}]),
+    );
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "read-only",
+        "--allowedTools",
+        "AskUserQuestion",
+    ]);
+    common::expect_input_line_cleared(&sess, env.timeout(), "initial prompt");
+    let turn = common::turn_status_marker(&sess);
+    sess.send(&format!("{prompt}\r")).unwrap();
+
+    let dialog = expect_question(&env, &sess, "PROCEED_WITH_CLEANUP");
+    let rows: Vec<&str> = dialog.lines().map(str::trim).collect();
+    for choice in ["Yes", "No"] {
+        assert!(
+            rows.iter().any(|row| row.ends_with(&format!("] {choice}"))),
+            "{choice} is offered:\n{dialog}"
+        );
+    }
+    assert!(
+        dialog.contains("[+]"),
+        "custom answers stay available:\n{dialog}"
+    );
+    sess.send(DOWN).unwrap();
+    expect_selected(&env, &sess, "PROCEED_WITH_CLEANUP", "No");
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &turn, env.timeout(), "boolean question answered");
+
+    let result = result_value(&tool_result(&question_requests(&env), "question-boolean"));
+    assert_eq!(
+        result["answers"],
+        json!([{"id":"proceed", "value":"false", "label":"No"}])
+    );
+    let question = &result["questions"][0];
+    assert_eq!(question["kind"], "boolean");
+    assert_eq!(question["allowCustomInput"], true);
+    let offered: Vec<(&str, &str)> = question["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| {
+            (
+                option["label"].as_str().unwrap(),
+                option["value"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(offered, [("Yes", "true"), ("No", "false")]);
+    sess.send("/exit\r").unwrap();
+    assert_eq!(sess.expect_eof().unwrap(), 0);
+}
+
 fn expect_question(env: &TestEnv, sess: &PtySession, prompt: &str) -> String {
     let screen = common::expect_screen(
         sess,

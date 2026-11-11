@@ -90,3 +90,11 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
   -- --ignored --exact --nocapture | tee "$AUTHON_DATA_DIR/managed-subprocess.log"
 grep -F 'test result: ok. 1 passed; 0 failed;' "$AUTHON_DATA_DIR/managed-subprocess.log" >/dev/null
 echo 'MANAGED SCODE PROCESS E2E OK'
+
+echo "== one remote context: transcript, lease, workspace, mailbox and model on the daemon =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
+  cargo_in_workspace test "${MANIFEST[@]}" --locked -q -p engine-acp --test managed_remote_live \
+  a_remote_managed_agent_keeps_every_effect_on_its_daemon \
+  -- --ignored --exact --nocapture | tee "$AUTHON_DATA_DIR/managed-remote.log"
+grep -F 'test result: ok. 1 passed; 0 failed;' "$AUTHON_DATA_DIR/managed-remote.log" >/dev/null
+echo 'MANAGED REMOTE CONTEXT E2E OK'

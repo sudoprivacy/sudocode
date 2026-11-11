@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -50,7 +52,9 @@ async function checkMcp(scenario: string): Promise<void> {
       assert.equal(JSON.parse((output.content as Array<{text: string}>)[0].text).text, text,
         'MCP wraps the native string once without rewriting or double encoding');
       assert.equal((journal(log).find(row => row.method === '_sudocode/a2a/send')?.input as {message: string}).message, text);
-      await client.callTool({ name: 'scode_agent_list', arguments: { activeOnly: false } });
+      await client.callTool({ name: 'scode_agent_list', arguments: {} });
+      const activeOnly = await client.callTool({ name: 'scode_agent_list', arguments: { activeOnly: true } });
+      assert.equal(activeOnly.isError, true, 'peers have no liveness to filter on; the bridge refuses activeOnly');
       const forged = await client.callTool({ name: 'scode_send', arguments: { to: 'peer', message: 'bad', summary: 'bad sender', sender: 'other' } });
       assert.equal(forged.isError, true, 'unknown sender field must fail before forwarding');
       const structured = await client.callTool({ name: 'scode_send', arguments: { to: 'peer', message: { type: 'shutdown' }, summary: 'bad shape' } });
@@ -128,8 +132,116 @@ async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise
   finally { await client.close(); }
 }
 
+/** Claude Code wake: the bridge spools peers and the asyncRewake hook waiter hands them over with exit 2. */
+async function checkWake(): Promise<void> {
+  const config = path.join(directory, 'wake.json');
+  const log = path.join(directory, 'wake-fixture.jsonl');
+  const auditLog = path.join(directory, 'wake-audit.jsonl');
+  const spool = path.join(directory, 'wake-spool.jsonl');
+  fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, 'channel-allowlist'],
+    workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
+    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log },
+    claudeChannel: { peerPolicy: 'allowlist', peers: ['fixture-peer'], wakeSpool: spool },
+  }), { mode: 0o600 });
+  const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
+  const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--config', config],
+    env: { ...process.env, NODE_PATH: '' } as Record<string, string>, stderr: 'pipe' });
+  const client = new Client({ name: 'wake-smoke', version: '1' });
+  let notifications = 0;
+  client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'), params: z.any() }),
+    () => { notifications += 1; });
+  const wake = () => new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
+    child.on('exit', code => resolve({ code, stderr }));
+  });
+  try {
+    await client.connect(transport);
+    const deadline = Date.now() + 5000;
+    while (!(fs.existsSync(spool) && fs.readFileSync(spool, 'utf8').trim()) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const spooled = fs.readFileSync(spool, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(spooled.map(entry => entry.from), ['fixture-peer'], 'the allowlist still gates spooled peers');
+    assert.equal(notifications, 0, 'a wake spool replaces channel notifications');
+    if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
+    const first = await wake();
+    assert.equal(first.code, 2, 'pending peers wake Claude');
+    assert.match(first.stderr, /^<channel source="nexus_scode" from="fixture-peer" verified="false" kind="message" summary="greeting">\n<mailbox-message from="/);
+    // Delivered entries are not repeated; a second waiter holds the slot until the next peer.
+    const armed = wake();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const duplicate = await wake();
+    assert.equal(duplicate.code, 0, 'one waiter per spool');
+    fs.appendFileSync(spool, JSON.stringify({ at: new Date().toISOString(), from: 'fixture-peer', verified: true,
+      text: '<mailbox-message from="fixture-peer">later</mailbox-message>' }) + '\n');
+    const later = await armed;
+    assert.equal(later.code, 2);
+    assert.doesNotMatch(later.stderr, /greeting/, 'the cursor skips delivered peers');
+    assert.match(later.stderr, /verified="true">\n<mailbox-message from="fixture-peer">later/);
+    assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
+    assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message' && row.delivery === 'wake').length, 1);
+  } finally { await client.close(); }
+}
+
+/** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,
+ * resumes it by session id, and wakes through its own spool. */
+async function checkClaudeAutojoin(): Promise<void> {
+  const state = path.join(directory, 'claude-autojoin');
+  const issuer = path.join(directory, 'claude-issuer');
+  fs.mkdirSync(issuer, { mode: 0o700 });
+  const config = path.join(directory, 'claude-autojoin.json');
+  fs.writeFileSync(config, JSON.stringify({ version: 1, mode: 'claude-autojoin', stateDirectory: state,
+    auditLog: path.join(directory, 'claude-autojoin-audit.jsonl'), peerPolicy: 'allowlist', peers: ['fixture-peer'],
+    enrollmentArgv: [process.execPath, path.join(root, 'test/fixtures/codexAgentEnrollment.cjs'), issuer, 'channel-allowlist'],
+  }), { mode: 0o600 });
+  const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
+  const claims = () => fs.existsSync(path.join(issuer, 'claims.jsonl'))
+    ? journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }> : [];
+  const session = async (sessionId: string) => {
+    const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
+      env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_PROJECT_DIR: directory } as Record<string, string>,
+      stderr: 'pipe' });
+    let stderr = ''; transport.stderr?.on('data', bytes => { stderr += String(bytes); });
+    const client = new Client({ name: 'claude-autojoin', version: '1' });
+    const spool = path.join(state, `${sessionId}.wake.jsonl`);
+    const before = fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
+    try {
+      await client.connect(transport);
+      const deadline = Date.now() + 5000;
+      const count = () => fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
+      while (count() <= before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(count(), before + 1, 'the allowlisted peer reaches this session\'s own spool');
+    } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
+    finally { await client.close(); }
+  };
+  const first = randomUUID(), second = randomUUID();
+  await session(first);
+  assert.equal(claims().length, 1);
+  assert.match(claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
+  assert.equal(claims()[0].threadId, first, 'the session id is the native root');
+  await session(first);
+  assert.equal(claims().length, 1, 'resuming a session reuses its original Agent and ACP session');
+  await session(second);
+  assert.equal(claims().length, 2);
+  assert.notEqual(claims()[1].actor, claims()[0].actor, 'each session gets its own Agent');
+  // The hook names its session through Claude Code's JSON input.
+  const woke = await new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
+    child.on('exit', code => resolve({ code, stderr }));
+    child.stdin!.end(JSON.stringify({ session_id: first, hook_event_name: 'Stop' }));
+  });
+  assert.equal(woke.code, 2);
+  assert.equal((woke.stderr.match(/<channel source="nexus_scode" from="fixture-peer"/g) ?? []).length, 2,
+    'both peers spooled for this session wake it, and none of the other session\'s');
+}
+
 async function main(): Promise<void> {
   for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
+  await checkWake();
+  await checkClaudeAutojoin();
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.

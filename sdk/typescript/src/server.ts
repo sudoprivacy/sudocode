@@ -8,6 +8,8 @@ import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBin
 import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
+import { waitForClaudeWake } from './claudeWake';
+import { claudeWakeSpool, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
 
 interface Manifest {
   sourceCommit: string;
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
     'enroll-codex': {type:'boolean'},
+    'claude-wake': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
@@ -65,6 +68,8 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
+      + 'scode-acp-bridge --claude-wake --config FILE  (Claude Code asyncRewake hook: wait for spooled peers, exit 2 to wake)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
@@ -104,6 +109,24 @@ async function main(): Promise<void> {
   if(values['enroll-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
     await runCodexEnrollment(values.config);return;
+  }
+  if(values['claude-wake']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude-wake'].includes(key)))throw new Error('--claude-wake takes only --config');
+    const raw=JSON.parse(fs.readFileSync(values.config,'utf8'));
+    // An autojoin config names the session's spool from the hook input; a
+    // fixed-session config names its one spool directly.
+    const spool=raw?.mode==='claude-autojoin'
+      ? claudeWakeSpool(readClaudeAutojoinConfig(values.config),String(JSON.parse(await hookInput()||'{}').session_id??''))
+      : raw?.claudeChannel?.wakeSpool;
+    if(typeof spool!=='string')throw new Error('--claude-wake requires claudeChannel.wakeSpool or a claude-autojoin --config');
+    process.exitCode=await waitForClaudeWake(spool);return;
+  }
+  if(values.claude){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude'].includes(key)))throw new Error('--claude takes only --config');
+    for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+      process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
+    }
+    await runClaudeMcp(values.config);return;
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
@@ -152,6 +175,18 @@ async function main(): Promise<void> {
   if(values['codex-owner'])await runCodexMcpOwner(values.config);
   else if(values.codex)await runCodexMcp(values.config,__filename);
   else await runScodeMcp(values.config);
+}
+
+/** Claude Code writes the hook's JSON input to stdin and closes it. */
+function hookInput(): Promise<string> {
+  if (process.stdin.isTTY) return Promise.resolve('');
+  return new Promise((resolve, reject) => {
+    let text = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { text += chunk; });
+    process.stdin.once('end', () => resolve(text));
+    process.stdin.once('error', reject);
+  });
 }
 
 void main().catch(error => { console.error(String(error)); process.exitCode = 1; });

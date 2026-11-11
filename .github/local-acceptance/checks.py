@@ -507,21 +507,107 @@ def terminal_installer_scope(root, base):
     return {"resolved": True, "fault_injection_required": bool(controls), "changed_control_inputs": controls}
 
 
+def windows_native_shells():
+    """Share the existing shell requirements before admission and at execution."""
+    if os.name != "nt":
+        return []
+    system_root = os.environ.get("SystemRoot")
+    legacy = Path(system_root) / "System32/WindowsPowerShell/v1.0/powershell.exe" if system_root else None
+    pwsh = shutil.which("pwsh.exe")
+    shells = [legacy, Path(pwsh) if pwsh else None]
+    missing = [name for name, path in zip(["Windows PowerShell", "PowerShell 7 (pwsh.exe)"], shells)
+               if path is None or not path.is_file()]
+    if missing:
+        raise RuntimeError("Windows native acceptance requires " + ", ".join(missing) + ". "
+                           "Add the existing PowerShell 7 directory to this process's PATH, or install it with "
+                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
+                           "then rerun the same acceptance command. Full acceptance remains required.")
+    return shells
+
+
 def validate_before_host_lease(names, root, output):
     """Reject invalid guard inputs early; execution still stages its own copy."""
+    if set(names) & {"guard-contract", "native-workspace"}:
+        shells = windows_native_shells()
+        if shells:
+            print("NATIVE_HOST_PREREQUISITES=" + json.dumps({
+                "windows_shells": list(map(str, shells)),
+                "stage": "before host queue; execution rechecks these paths",
+                "full_acceptance_required": True,
+            }), flush=True)
     if "guard-contract" not in names:
         return
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
           "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
-    stage_profile_executor(root, execution_policy_ref(), "guard-contract",
-                           output / "guard-contract" / "prequeue-static-policy")
+    executor = stage_profile_executor(root, execution_policy_ref(), "guard-contract",
+                                      output / "guard-contract" / "prequeue-static-policy")
+    spec = importlib.util.spec_from_file_location("prequeue_native_inventory", executor)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    # These paths only construct argv. Tool preparation and actual execution
+    # remain inside the lease; this snapshot grants no completed-check credit.
+    pending = argparse.Namespace(executable=Path("not-prepared-nextest"),
+                                 source_receipt=Path("not-prepared-source.json"), options="{}")
+    fixtures, protocol, native = guard.fixture_inventory(root, output / "guard-contract" / "native", pending)
+    print("GUARD_NATIVE_INVENTORY=" + json.dumps({
+        "protocol": len(protocol), "native": len(native), "total": len(fixtures),
+        "stage": "before host queue; execution rebuilds and rechecks the same inventory",
+        "full_acceptance_required": True,
+    }), flush=True)
     print("GUARD_STATIC_PREFLIGHT: passed; execution will restage and revalidate the protected Git inputs.",
           flush=True)
 
 
+def git_for_windows_bash(path=None):
+    """Git for Windows' own Bash, located from the git on PATH and never WSL's.
+
+    A git hook runs with Git's mingw64/libexec/git-core first on PATH, three
+    levels below the bin/bash.exe of the same installation, so look in every
+    ancestor of the resolved git rather than its parent and grandparent only.
+    """
+    git = shutil.which("git", path=path)
+    if not git:
+        return None
+    for directory in Path(git).resolve().parents:
+        for candidate in (directory / "bash.exe", directory / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def native_services_tool(root, output, execute):
+    """Resolve the existing service client before compilation, retaining its bytes."""
+    bash = git_for_windows_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        raise RuntimeError("Git Bash is required for shared-service credential acceptance")
+    probe = '''import hashlib,json,subprocess,sys
+from pathlib import Path
+binary = Path(sys.argv[1]).resolve(strict=True)
+version = subprocess.check_output([str(binary), "--version"], stderr=subprocess.STDOUT,
+                                  text=True, timeout=5).strip()
+print(json.dumps({"executable": str(binary), "version": version,
+                  "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
+'''
+    # Git for Windows can check shell helpers out as CRLF. Its Bash provides
+    # igncr; keep the original helper's location and normal Unix invocation.
+    arguments = [bash, *(["-o", "igncr"] if os.name == "nt" else []), "-ec",
+                 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
+                 '"$1" -c "$2" "$(native_path "$GRPCURL")"', "scode-services-tool",
+                 sys.executable.replace("\\", "/"), probe]
+    log = output / "000.log"
+    result = execute(arguments, root, log)
+    tool = json.loads(log.read_text(encoding="utf-8"))
+    return {"root": str(root.resolve()), "command": result, "tool": tool, "log": str(log)}
+
+
 def prepare_native_checks(names, root, output, execute):
-    """Install selected Windows terminal inputs before long native compilation."""
+    """Resolve selected native tools before long native compilation."""
     prepared = {}
+    if "native-services" in names:
+        print("NATIVE_SERVICE_TOOL_PREFLIGHT: resolving the existing grpcurl client and running "
+              "--version before compilation. A download or executable failure stops here; "
+              "both original service journeys remain required.", flush=True)
+        run.prepared_services_tool = native_services_tool(root, output / "native-service-tool", execute)
     selected = [name for name in names if name in NATIVE_RUST_PTY_CHECKS]
     if os.name == "nt" and selected:
         print("NATIVE_PREPARATION: installing the selected checksum-pinned Windows terminal host "
@@ -605,11 +691,7 @@ def native_workspace_format(root, cargo, command):
 
 def native_workspace_lint(root, output, base, cargo, command):
     """Run the original lint prefix; a pass alone never completes workspace acceptance."""
-    if os.name == "nt" and not shutil.which("pwsh.exe"):
-        raise RuntimeError("Windows native acceptance requires PowerShell 7 (pwsh.exe) on PATH. "
-                           "Add your existing PowerShell 7 directory to PATH, or install it with "
-                           "`winget install --id Microsoft.PowerShell --exact --source winget`, "
-                           "then rerun the same acceptance command. No workspace compilation started.")
+    windows_native_shells()
     native_workspace_format(root, cargo, command)
     tests = changed_cli_test_targets(root, base)
     scope = {"tests": tests, "targets": None}
@@ -881,6 +963,23 @@ def run(name, root, output, base, execute):
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         native_compiler_context(root, target / "debug" / ("scode" + suffix), output, command)
     elif name == "native-services":
+        try:
+            preparation = run.prepared_services_tool
+        except AttributeError:
+            preparation = None
+        if preparation is None:
+            preparation = native_services_tool(root, output / "service-tool", execute)
+        if preparation["root"] != str(root.resolve()):
+            raise RuntimeError("Prepared service client belongs to a different source directory")
+        tool = preparation["tool"]
+        grpcurl = Path(tool["executable"])
+        if hashlib.sha256(grpcurl.read_bytes()).hexdigest() != tool["sha256"]:
+            raise RuntimeError("Prepared grpcurl bytes changed; repeat native tool preparation")
+        results.append(preparation["command"])
+        # The receipt lists the probe with this profile's commands, and resume
+        # verifies a profile's logs inside its own directory. Keep the probe's
+        # original bytes there, at its result index.
+        (output / f"{len(results) - 1:03d}.log").write_bytes(Path(preparation["log"]).read_bytes())
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
         # Keep Cargo's freshness check, without executing the driver twice.
@@ -892,13 +991,8 @@ def run(name, root, output, base, execute):
         binary = target / "debug" / ("scode" + suffix)
         command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
                 "--artifacts", str(output / "services"))
-        # The existing harness resolves the pinned native grpcurl for each OS.
-        bash = shutil.which("bash")
-        if not bash:
-            raise RuntimeError("Git Bash is required for shared-service credential acceptance")
-        command(bash, "-c", 'source e2e/nexus-a2a/lib.sh; GRPCURL="$(grpcurl_bin)"; '
-                '"$3" e2e/shared-services/existing_box.py --scode "$1" --grpcurl "$(native_path "$GRPCURL")" --artifacts "$2"',
-                "scode-services", str(binary), str(output / "existing-box"), sys.executable.replace("\\", "/"))
+        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -956,27 +1050,28 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/nexus-a2a/lib.sh": "becaa87de0aeadc466de2626dad554ca3df9cd9b10b2ce6612214b7c4b373c70",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "8278cfa3e03d666688d8a634cdaeaab9d25e04c7a024d8aa2c89143bb17b861e",
-        "e2e/local-acceptance/release_artifact_acceptance.py": "157fae30f7fd278e0a44ef6a44b018a5d15429dcb9de6f025bebfc86b7253e00",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
-        ".github/scripts/ci_input_scope.py": "aa49ee8b7b2a8b40087679803c41f4ae0f318a32fa8ef587a9d6c3eb044bef37",
-        ".github/workflows/rust-ci.yml": "8b5d0757f163a08768cdc103df3b04215ba16f29bc644d4c4ede2f2ac5c4a2db",
+        ".github/scripts/ci_input_scope.py": "2a7948d8d32b71d2d373e75b3c96f9beaa71156f071985a8b53d1cfb195a3ae7",
+        ".github/workflows/rust-ci.yml": "be3949990d6174a23cecf47836fc040febdb54d34a367ebd65d9e4f86bba9eb8",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
-        ".github/local-acceptance/cross_platform.py": "db3e7843e3db4c08ef755e6fb15896bcc622764b4ad1dd13d96c768ae2458120",
+        ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "fbd4662ddbb417e1a429bef551ef55e018b0b254024cd151db1de294a370a27b",
+        ".github/local-acceptance/native_guard.py": "cfd1fa7cf9f40917f42a8cc9919625d740f2e6189f6b4a86efd9546a28c21c96",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
-        ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
+        ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "a4dbdbcab45440eb1a3fcc3a026f476a7a842de4c6b2b0e0c04a57873f8e3a98",
+        ".github/scripts/local_acceptance.py": "15c4d23adf8afb81d425d4030d03860570a36f466fe7aecb1a6a6bcc064f780c",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -984,23 +1079,23 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "c5c0b065991d3834cc4fbc61f286f9853e59d1251350d291285602e9ffcc69c0",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "b079530800aa8a9c239de48b2b94c9509bba0c65ea96febf4f290a9160df4d52",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/host_lease_acceptance.py": "8928b11c2448258f0ee0fbf6a9713aa8a71c5dddb4e0485b7c90ac23f903c9ba",
+        "e2e/local-acceptance/host_lease_acceptance.py": "6b5f2f0cc9c8653f33ea4d2f43b403ac8e77aaffdb84bccc42782713c6940656",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "91cf10d403051be6394574b0a92e46e2153e1a0f8aa72965b08a8517392e8c72",
-        "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
+        "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
+        "e2e/local-acceptance/parallel_acceptance.py": "0e062dfe86745b94c2cbb69870098a61a6ce3200cfb8649de2c7979ca9a42977",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "5242a95e8c71c7f25fa6323044dd9925b0dc6de1452986c59fd9c78d0482afe4",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
-        "e2e/local-acceptance/release_acceptance.py": "a58b820d2dc74d1a1828e38f34a3606440df8f941ff9b9f22bf7b6d761c8db87",
+        "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "5ff76c4737b83ef65c4d4076822b61cf503acc1974bccc35bd36b0d867e2f908",
+        "e2e/local-acceptance/run.py": "d33c0617a1ebff3fd56bbe0313de508361a84900f4f5e99e558b89d6ed4170bc",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1057,7 +1152,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '2c751e4c6f6f807b0333e58c38eabb72e4317b47f71377bb8b20aad08ddb4497', 'native-context': '2e1ea30eff75a2d99d3bdf9ed700026cef47af9fc764f13b5a70c91c2900699e'}
+    expected = {'native-release': 'e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca', 'native-context': '3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

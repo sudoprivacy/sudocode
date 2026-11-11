@@ -51,6 +51,44 @@ MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
 channels are in research preview. A scode without client-owned peer input is
 refused at startup instead of answering peers alongside Claude.
 
+Channel events reach only a session started with that flag on an installation
+where channels are available. To wake any Claude Code session instead, add an
+absolute private `"wakeSpool"` to `claudeChannel`: the bridge appends each
+admitted peer there, and a background command hook hands it to Claude. Register
+the hook for `SessionStart` and `Stop` with `asyncRewake`, so it is re-armed at
+the end of every turn:
+
+```json
+{ "type": "command", "asyncRewake": true,
+  "command": "node /abs/server.cjs --claude-wake --config /abs/private/claude.json" }
+```
+
+The waiter exits 2 with the pending `<channel …>` frames on stderr, which wakes
+the session; one waiter runs per spool, a cursor keeps delivered peers from
+repeating, and a peer that arrives while none is armed waits for the next. This
+is Claude Code's counterpart of the `turn/start` a Codex attachment uses.
+
+### Every Claude Code session as its own Agent
+
+`--claude --config FILE` is a user-scope MCP entry that needs no launch flag.
+Claude Code starts one MCP server per session and names it in
+`CLAUDE_CODE_SESSION_ID`, which `--continue`/`--resume` keep, so the session is
+the native root exactly as a thread is for `--codex`: its first start enrolls a
+`claude-<32 hex>` Agent through the same operator adapter, later starts reuse
+the original Agent and ACP session, and an uncertain enrollment is never
+replayed. Each session has its own wake spool; the hook reads the session from
+Claude Code's hook input, so one hook command serves every session.
+
+```json
+{ "version": 1, "mode": "claude-autojoin", "stateDirectory": "/abs/private/claude",
+  "auditLog": "/abs/private/claude/audit.jsonl", "peerPolicy": "node-namespace",
+  "enrollmentArgv": ["/abs/node", "/abs/server.cjs", "--enroll-codex", "--config", "/abs/private/operator.json"] }
+```
+
+Register it with `claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`
+and the `SessionStart`/`Stop` `asyncRewake` hook with `--claude-wake --config FILE`
+in the user settings. The operator's `scode` must support client-owned peer input.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user

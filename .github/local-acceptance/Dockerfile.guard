@@ -20,5 +20,7 @@ COPY compiler-objects /opt/compiler-objects
 RUN mkdir -p /opt/compiler-objects/src \
  && printf 'fn main() {}\n' > /opt/compiler-objects/src/main.rs \
  && nice -n 10 cargo fetch --locked --manifest-path /opt/compiler-objects/Cargo.toml
+COPY compiler_cache.py compiler_seed.py /opt/
+RUN python3 /opt/compiler_seed.py --verify-cache
 COPY guard.py /opt/acceptance-guard.py
 ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

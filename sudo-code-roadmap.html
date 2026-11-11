@@ -482,7 +482,9 @@ These checks add no product journey credit. Hosted object persistence and
 whole-PR latency savings remain unmeasured. The guard image seeds the same pinned
 fixture manifest and lockfile, then verifies Cargo dependency availability with
 network disabled before starting either full matrix. Missing offline inputs fail
-during preparation.</p>
+during preparation. The compiler tool is also provisioned and corruption-checked
+in that image, then verified offline before the matrices; isolated homes retain
+only verified public tools.</p>
 <p>Protected modules and their companion bytes load from the same frozen Git
 policy, including when the managed runner stages <code>protected_profiles.py</code>.
 An altered candidate companion cannot replace those bytes. Scheduling plans and

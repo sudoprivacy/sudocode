@@ -1223,7 +1223,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'd19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9', 'native-context': '921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc'}
+    expected = {'native-release': 'a6c7369764fc812f4ce51ac64264635276b1eb3189a2c7eb26de21645f9a1add', 'native-context': 'e1e2a39e36343b609de69175105428136f33d793ac4eac320e17665fce5d2b51'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1241,21 +1241,21 @@ def container_image_tag(repository, digest):
     return f"{repository}:{digest[:24]}-{uuid.uuid4().hex}"
 
 
-def guard_tool_source(root, policy_ref):
+def guard_tool_source(root, policy_ref, compiler=False):
     """Provision the frozen tool function without duplicating its URL/checksums."""
     import ast
 
     source = subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
     definitions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
-    required = {"github_asset_download", "nextest_binary"}
+    required = {"github_asset_download", "prepare_compiler_cache" if compiler else "nextest_binary"}
     downloaders = [node for node in definitions if node.name == "github_asset_download"]
     if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
            and node.func.id == "github_api_request" for definition in downloaders for node in ast.walk(definition)):
         required.add("github_api_request")
     functions = [node for node in definitions if node.name in required]
     if sorted(node.name for node in functions) != sorted(required):
-        raise RuntimeError("Protected GitHub request/downloader and nextest_binary must each have one definition before building the guard image")
+        raise RuntimeError("Each protected GitHub request/downloader and selected tool preparer must have one definition before building the guard image")
     prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
               "from pathlib import Path\n\n")
     main = '''
@@ -1294,6 +1294,43 @@ if __name__ == "__main__":
         **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
     }), flush=True)
 '''
+    if compiler:
+        prefix += "import importlib.util\n"
+        main = '''
+
+if __name__ == "__main__":
+    socket.setdefaulttimeout(30)
+    output = Path("/opt/compiler-provision")
+    module, tool = prepare_compiler_cache(output)
+    if tool is None:
+        raise RuntimeError("The guard image requires its pinned compiler-cache tool")
+    version = subprocess.check_output([tool["executable"], "--version"], text=True).strip()
+    assert version == "sccache " + module.VERSION, version
+    refused = []
+    if "--verify-cache" in sys.argv:
+        for label, filename, message in [
+            ("archive", tool["archive"], "Compiler-cache archive checksum mismatch"),
+            ("executable", tool["executable"], "Cached compiler-cache executable differs"),
+        ]:
+            path = Path(filename)
+            original = path.read_bytes()
+            path.write_bytes(original + b"controlled guard compiler cache corruption")
+            try:
+                try:
+                    module.prepare(github_asset_download)
+                except RuntimeError as error:
+                    assert message in str(error), str(error)
+                    refused.append(label)
+                else:
+                    raise AssertionError("Modified guard compiler cache was accepted: " + label)
+            finally:
+                path.write_bytes(original)
+        assert module.prepare(github_asset_download) == tool
+        assert subprocess.check_output([tool["executable"], "--version"], text=True).strip() == version
+    print("GUARD_COMPILER_PROVISION=" + json.dumps({
+        **tool, "actual_cli": version, "corrupt_cache_refused": refused,
+    }), flush=True)
+'''
     return (prefix + '\n\n'.join(ast.get_source_segment(source, node) for node in functions) + main).encode("utf-8")
 
 
@@ -1304,7 +1341,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "b21df0c17494cfbec786310c68e9012f2be203cd2448ef31c7a8789786be7974",
+        "Dockerfile.guard": "f4d9d6033273f2b56b42b4f14a4b35af788140cc629ce20734de749b667a5db8",
         "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -1316,19 +1353,23 @@ def guard_image_context(root, policy_ref, context):
                                "contract-update command; no image build started.")
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
-    dependencies = context / "compiler-objects"
-    dependencies.mkdir()
-    for filename in ("Cargo.toml", "Cargo.lock"):
-        relative = "e2e/local-acceptance/compiler-objects." + filename
+    for relative, destination in [
+        ("e2e/local-acceptance/compiler-objects.Cargo.toml", "compiler-objects/Cargo.toml"),
+        ("e2e/local-acceptance/compiler-objects.Cargo.lock", "compiler-objects/Cargo.lock"),
+        (".github/local-acceptance/compiler_cache.py", "compiler_cache.py"),
+    ]:
         contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
         if hashlib.sha256(contents).hexdigest() != native_guard_files()[relative]:
             raise RuntimeError(f"Guard compiler dependency input {relative} differs from its protected pin; "
                                "update the source pin and rerun the supported contract-update before building the image")
-        (dependencies / filename).write_bytes(contents)
+        path = context / destination
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
         inputs_hash.update(relative.encode() + b"\0" + contents + b"\0")
-    seed = guard_tool_source(root, policy_ref)
-    (context / "nextest_seed.py").write_bytes(seed)
-    inputs_hash.update(b"nextest_seed.py\0" + seed + b"\0")
+    for filename, compiler in [("nextest_seed.py", False), ("compiler_seed.py", True)]:
+        seed = guard_tool_source(root, policy_ref, compiler=compiler)
+        (context / filename).write_bytes(seed)
+        inputs_hash.update(filename.encode() + b"\0" + seed + b"\0")
     return inputs_hash.hexdigest()
 
 
@@ -1336,6 +1377,8 @@ def verify_guard_image(image, command):
     """Recheck the image's verified tool offline before the decision matrix."""
     command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
             image, "/opt/nextest_seed.py")
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
+            image, "/opt/compiler_seed.py")
     print("GUARD_COMPILER_DEPENDENCIES: verify the protected manifest/lock dependencies offline "
           "before either guard matrix; original compiler and PTY controls remain required.", flush=True)
     command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "cargo",

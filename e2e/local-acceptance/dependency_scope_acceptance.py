@@ -179,8 +179,38 @@ def workflow_scope(output, environment):
         assert (result.returncode == 0) == succeeds, (values, result.stdout, result.stderr)
         records.append({"script": name, "values": values, "exit_code": result.returncode,
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+    managed_name = "Managed scode against the public nexusd-cluster"
+    assert [line for line in step(managed_name) if line.startswith("        if:")] == [condition]
+    assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(managed_name)
+    cli_entry = (SOURCE / "e2e/nexus-a2a/run.sh").read_text(encoding="utf-8")
+    assert cli_entry.rstrip().endswith('authon_stop\nbash ./run-managed-subprocess.sh\n\necho "E2E OK"')
+    managed = script(managed_name)
+    (output / "managed.sh").write_text(managed, encoding="utf-8")
+    work = output / "managed-workflow"
+    entry = work / "e2e/nexus-a2a/run-managed-subprocess.sh"
+    entry.parent.mkdir(parents=True)
+    entry.write_text('#!/usr/bin/env bash\nset -eu\nprintf "managed\\n" >> "$MANAGED_CALLS"\nexit "$MANAGED_EXIT"\n',
+                     encoding="utf-8")
+    entry.chmod(0o755)
+    managed_records = []
+    for index, (selected, exit_code, calls, succeeds) in enumerate([
+            ("true", 0, 0, True), ("false", 0, 1, True), ("false", 19, 1, False),
+            ("", 0, 0, False), ("unknown", 0, 0, False)]):
+        called = output / f"managed-{index}.calls"
+        result = subprocess.run([bash, "-c", managed], cwd=work, capture_output=True,
+            env={**environment, "A2A_REQUIRED": selected, "MANAGED_EXIT": str(exit_code),
+                 "MANAGED_CALLS": called.as_posix()})
+        log = output / f"managed-{index}.log"
+        log.write_bytes(result.stdout + result.stderr)
+        actual = len(called.read_text().splitlines()) if called.exists() else 0
+        assert actual == calls and (result.returncode == 0) == succeeds, (selected, actual, result.returncode)
+        managed_records.append({"a2a_required": selected, "managed_calls": actual,
+                                "exit_code": result.returncode,
+                                "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+    (output / "managed-result.json").write_text(json.dumps(managed_records, indent=2) + "\n")
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
-    return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
+    return {"actual_workflow_guard_cases": len(records), "managed_dispatch_cases": len(managed_records),
+            "managed_required_once_with_independent_cohost_coverage": True, "cohost_steps_bound_to_selector": True,
             "CLI_and_cohost_steps_bound_to_independent_selectors": True,
             "CLI_and_cohost_jobs_have_no_mutual_dependency": True,
             "three_platform_lint_required_once_on_queue": True,

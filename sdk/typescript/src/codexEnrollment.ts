@@ -77,7 +77,7 @@ function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; 
   const bytes=recordBytes(file);const grant=JSON.parse(bytes.toString('utf8')) as OperatorGrant;
   validateGrant(grant);
   if(!claim || claim.version!==1 || Object.keys(claim).sort().join(',')!=='actor,operationId,threadId,version,workspace'
-      || !/^codex-[0-9a-f]{32}$/.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Codex enrollment claim');
+      || !/^(?:codex|claude)-[0-9a-f]{32}$/.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Agent enrollment claim');
   canonicalWorkspace(claim.workspace);
   // No Node/CA private key or install authority is copied into this response.
   return {grant,grantSha256:createHash('sha256').update(bytes).digest('hex')};

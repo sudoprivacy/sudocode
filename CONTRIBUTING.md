@@ -1333,6 +1333,9 @@ host responsibilities stay bound. Unknown changes refuse reuse. The required
 proof also binds reviewed module initialization and the actual command/selector
 consumer functions after resource normalization. Equal unknown callbacks or
 helper bodies can observe a changed executor and therefore refuse automatically.
+Complete normalized helper-program layouts also bind outer callers, including
+`main` and the check producer; only the literal reviewed-source set is removed
+from its own checksum. Unknown callers keep all current checks.
 `LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED` reports both layouts and the supported
 original-author route; it does not request a personal review or waiver. The required
 interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
@@ -1343,9 +1346,12 @@ preserved. This proof executes no product tests and cannot complete missing
 profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
 original execution, plan/full verification, resume without repeated commands,
 and eighteen independent refusals. Real short-lived children retain exact output,
-normal priority and failure propagation under both wait forms. Two real
+normal priority and failure propagation under both wait forms. Three real
 Git/native paired observer controls require changed child environments to refuse
-reuse, while the prior proof mutant exposes the unsafe acceptance. They add
+reuse at module initialization, a command consumer and an outer producer, while
+the prior proof mutant exposes the unsafe acceptance. All fixture Git/runtime
+and proof children use the existing isolated command environment, including
+when outer hooks export Git repository/index selectors. They add
 no product journey coverage. Measured individual command costs do not establish
 a whole-lifecycle speedup.
 

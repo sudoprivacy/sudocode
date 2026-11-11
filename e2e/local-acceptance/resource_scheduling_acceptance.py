@@ -55,16 +55,14 @@ def verify_command_completion(output, source):
     return observations
 
 
-def verify_unreviewed_resource_context(output, source):
+def verify_unreviewed_resource_context(output, source, command):
     """Retain actual runtime counterexamples to equal-but-unknown source layouts."""
-    import importlib.util
-
     output.mkdir(parents=True, exist_ok=False)
     repository = output / "repository"
     repository.mkdir()
 
     def git(*args):
-        return subprocess.check_output(["git", *args], cwd=repository, stderr=subprocess.PIPE).decode().strip()
+        return command("git", *args, cwd=repository)
 
     git("init", "--initial-branch=main")
     git("config", "user.name", "Resource observer fixture")
@@ -78,16 +76,15 @@ def verify_unreviewed_resource_context(output, source):
     (profiles / "checks.py").write_text('def run(name, root, output, base, execute):\n'
                                        '    return execute(["private-fixture"], root, output)\n', encoding="utf-8")
     modules = []
+    assert source.count("if layout != reviewed:") == 1
+    assert source.count("if source_layout not in reviewed_sources:") == 1
     mutant = source.replace("if layout != reviewed:", "if False:")
+    mutant = mutant.replace("if source_layout not in reviewed_sources:", "if False:")
     assert mutant != source
     for label, text in [("current", source), ("old-behavior", mutant)]:
         path = output / (label + ".py")
         path.write_text(text, encoding="utf-8")
-        spec = importlib.util.spec_from_file_location("resource_observer_" + label, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module.ROOT = repository
-        modules.append(module)
+        modules.append(path)
     wait = """                try:
                     process.wait(timeout=0.15)
                 except subprocess.TimeoutExpired:
@@ -99,14 +96,26 @@ def verify_unreviewed_resource_context(output, source):
     pairs = [
         ("eager-module", source.replace('\ndef read_note(', callback + '\ndef read_note(', 1)),
         ("command-consumer", source.replace('def sha(data):\n', 'def sha(data):\n    ' + effect + '\n', 1)),
+        ("outer-producer", source.replace('def main():\n', 'def main():\n    ' + effect + '\n', 1)),
     ]
     driver = '''import importlib.util,sys
 from pathlib import Path
-spec=importlib.util.spec_from_file_location("observed",sys.argv[1])
+path,log,kind=sys.argv[1:]
+spec=importlib.util.spec_from_file_location("observed",path)
 helper=importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
 helper.ROOT=Path.cwd()
-helper.run_command([sys.executable,"-c","print('first real command')"],Path.cwd(),Path(sys.argv[2]+".first"))
-helper.run_command([sys.executable,"-c","import os; print(os.environ['SCODE_SYNTHETIC_WAIT_OBSERVER'])"],Path.cwd(),Path(sys.argv[2]))
+if kind=="outer-producer":
+    sys.argv=[path,"--help"]
+    try: helper.main()
+    except SystemExit as error: assert error.code==0
+helper.run_command([sys.executable,"-c","print('first real command')"],Path.cwd(),Path(log+".first"))
+helper.run_command([sys.executable,"-c","import os; print(os.environ['SCODE_SYNTHETIC_WAIT_OBSERVER'])"],Path.cwd(),Path(log))
+'''
+    proof_driver = '''import importlib.util,json,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("proof",sys.argv[1]); helper=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper); helper.ROOT=Path.cwd()
+print("RESOURCE_OBSERVER_RESULT="+json.dumps(sorted(helper.resource_equivalent_profiles(sys.argv[2],sys.argv[3],["native-workspace"]))))
 '''
     records = []
     for label, updated in pairs:
@@ -119,14 +128,16 @@ helper.run_command([sys.executable,"-c","import os; print(os.environ['SCODE_SYNT
             path = output / (label + "-" + phase + ".py")
             path.write_text(text, encoding="utf-8")
             log = output / (label + "-" + phase + ".log")
-            result = subprocess.run([sys.executable, "-c", driver, str(path), str(log)], cwd=repository, capture_output=True)
-            log.with_suffix(".stdout").write_bytes(result.stdout)
-            log.with_suffix(".stderr").write_bytes(result.stderr)
-            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            result = command(sys.executable, "-c", driver, path, log, label, cwd=repository)
+            log.with_suffix(".stdout").write_text(result, encoding="utf-8")
             values[phase] = log.read_text(encoding="utf-8").strip()
         assert values == {"before": "baseline", "after": "changed"}
-        assert not modules[0].resource_equivalent_profiles(refs["before"], refs["after"], ["native-workspace"])
-        assert modules[1].resource_equivalent_profiles(refs["before"], refs["after"], ["native-workspace"]) == {"native-workspace"}
+        results = []
+        for module in modules:
+            text = command(sys.executable, "-c", proof_driver, module, refs["before"], refs["after"], cwd=repository)
+            row = next(line for line in text.splitlines() if line.startswith("RESOURCE_OBSERVER_RESULT="))
+            results.append(json.loads(row.split("=", 1)[1]))
+        assert results == [[], ["native-workspace"]]
         records.append({"case": label, "refs": refs, "actual_child_environment": values,
                         "current_refused": True, "old_behavior_exposes_unsafe_reuse": True})
     return records
@@ -256,7 +267,7 @@ Path(out).parent.joinpath('full-note.json').write_text(json.dumps({'version':1,'
     trusted = output / "trusted-verifier.py"
     trusted.write_text(adaptive, encoding="utf-8")
     completion_observations = verify_command_completion(output / "command-completion", adaptive)
-    observer_controls = verify_unreviewed_resource_context(output / "observer-controls", adaptive)
+    observer_controls = verify_unreviewed_resource_context(output / "observer-controls", adaptive, command)
     plan_read = '''import runpy,sys
 from pathlib import Path
 h=runpy.run_path(sys.argv[1]); h['read_execution_plan'].__globals__['ROOT']=Path.cwd()

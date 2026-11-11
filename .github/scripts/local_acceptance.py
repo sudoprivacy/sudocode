@@ -487,6 +487,37 @@ except subprocess.TimeoutExpired:
             "next": "Use the supported original-author acceptance command. Unknown layouts grant no reuse or waiver.",
         }).decode(), flush=True)
         raise ValueError("Unreviewed eager context or command consumer layout; full current checks remain required")
+    # Callers such as main/perform_check can observe the executor too. Keep
+    # complete reviewed program layouts, not only the command's callees. Erase
+    # only this literal allowlist from its own checksum to avoid a hash cycle.
+    program = copy.deepcopy(tree)
+    for index, node in enumerate(program.body):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_command":
+            program.body[index] = function
+        if isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+            declarations = [item for item in node.body if isinstance(item, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                                    for target in item.targets)]
+            if len(declarations) > 1:
+                raise ValueError("Duplicate reviewed source declaration")
+            for declaration in declarations:
+                values = ast.literal_eval(declaration.value)
+                if not isinstance(values, set) or not values or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in values):
+                    raise ValueError("Unknown reviewed source declaration")
+                declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
+    source_layout = sha(canonical(profile_ast_value(program)))
+    reviewed_sources = {
+        "5994969a04ea543c7a96e0e3c0d69be4ffeac9d759452b5d2b14a9b2f6654047",
+        "d428d86b5fc3ffaa3bbb5606e3853420c0f81cafe58c91cd5ed865a3c3dba74e",
+        "5e07512c7277de8ebc37142a1055a6c59001aa2ef821e5d68379ba148356378f",
+    }
+    if source_layout not in reviewed_sources:
+        print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
+            "ref": ref, "observed_source_layout": source_layout, "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command; unreviewed callers grant no reuse.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed complete executor program; full current checks remain required")
     return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
                                                 "executor": profile_ast_value(function), "executor_text": text}).decode()
 

@@ -1116,8 +1116,9 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "2e6155f813f2807f2f6e2ab7cc8a88dcc92587c271dd8284339168ff9b279b15",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "af0b59fdf883922f2aa81906d4a869d19339d71e4a988071ff5a27dcf83e05be",
         ".github/local-acceptance/compiler_cache.py": "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
@@ -1303,7 +1304,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "31205fa178d40cf2ffcd1df0650f0f848db544436f119d57a87ee52a03774704",
+        "Dockerfile.guard": "b21df0c17494cfbec786310c68e9012f2be203cd2448ef31c7a8789786be7974",
         "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -1315,6 +1316,16 @@ def guard_image_context(root, policy_ref, context):
                                "contract-update command; no image build started.")
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
+    dependencies = context / "compiler-objects"
+    dependencies.mkdir()
+    for filename in ("Cargo.toml", "Cargo.lock"):
+        relative = "e2e/local-acceptance/compiler-objects." + filename
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        if hashlib.sha256(contents).hexdigest() != native_guard_files()[relative]:
+            raise RuntimeError(f"Guard compiler dependency input {relative} differs from its protected pin; "
+                               "update the source pin and rerun the supported contract-update before building the image")
+        (dependencies / filename).write_bytes(contents)
+        inputs_hash.update(relative.encode() + b"\0" + contents + b"\0")
     seed = guard_tool_source(root, policy_ref)
     (context / "nextest_seed.py").write_bytes(seed)
     inputs_hash.update(b"nextest_seed.py\0" + seed + b"\0")
@@ -1325,6 +1336,10 @@ def verify_guard_image(image, command):
     """Recheck the image's verified tool offline before the decision matrix."""
     command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
             image, "/opt/nextest_seed.py")
+    print("GUARD_COMPILER_DEPENDENCIES: verify the protected manifest/lock dependencies offline "
+          "before either guard matrix; original compiler and PTY controls remain required.", flush=True)
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "cargo",
+            image, "fetch", "--offline", "--locked", "--manifest-path", "/opt/compiler-objects/Cargo.toml")
 
 
 def prepare_contract_container(root, output, command):

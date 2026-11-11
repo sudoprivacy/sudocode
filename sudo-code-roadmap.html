@@ -479,7 +479,10 @@ guard runs them; cache implementation changes also select the real native
 workspace on author and complementary hosts. Cache hits supply compiler
 objects, never previous test results or a generic source-freshness witness.
 These checks add no product journey credit. Hosted object persistence and
-whole-PR latency savings remain unmeasured.</p>
+whole-PR latency savings remain unmeasured. The guard image seeds the same pinned
+fixture manifest and lockfile, then verifies Cargo dependency availability with
+network disabled before starting either full matrix. Missing offline inputs fail
+during preparation.</p>
 <p>Protected modules and their companion bytes load from the same frozen Git
 policy, including when the managed runner stages <code>protected_profiles.py</code>.
 An altered candidate companion cannot replace those bytes. Scheduling plans and

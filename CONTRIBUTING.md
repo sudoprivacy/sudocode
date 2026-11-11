@@ -1430,6 +1430,9 @@ runs inside the existing native-cache guard. Cache code changes additionally
 select the actual native workspace on author and complementary hosts. These
 checks add no product coverage credit. Hosted object persistence and whole-PR
 savings are not established by the private fixture's cache-hit counts.
+The guard image fetches the fixture's exact shared Cargo manifest and lockfile
+while building. A network-disabled Cargo fetch verifies those dependencies
+before either full matrix starts; missing offline inputs fail at preparation.
 Protected profile modules and their compiler-cache companion are materialized
 from the same frozen Git policy. A candidate's working-tree companion is never
 an execution source. The original cache tests also exercise this managed loader.

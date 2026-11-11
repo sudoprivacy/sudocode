@@ -45,18 +45,7 @@ def run(output):
             raise RuntimeError("The compiler-object fixture requires a pinned supported platform")
         nextest = checks.nextest_binary(output)
         workspaces = [output / name for name in ("source-a", "source-b")]
-        manifest = '''[workspace]
-[package]
-name="compiler-object-consumer"
-version="0.0.0"
-edition="2021"
-[features]
-enabled=["memchr/std"]
-[dependencies]
-memchr={version="=2.8.3",default-features=false}
-[dev-dependencies]
-pty-expect={git="https://github.com/sudoprivacy/pty-expect",rev="85d3cfc96fdd8e68579a11a63c5dc53cf11edc1b"}
-'''
+        manifest = Path(__file__).with_name("compiler-objects.Cargo.toml").read_text(encoding="utf-8")
         main = '''fn main() {
     assert_eq!(memchr::memchr(b'x', b"xy"), Some(0));
     assert!(option_env!("CARGO_TARGET_DIR").is_some(), "preserve compiler environment");

@@ -151,7 +151,7 @@ def run_case(output, order):
         current = json.loads(next(line.split("=", 1)[1] for line in lines
                                   if line.startswith("LOCAL_ACCEPTANCE_CONCURRENCY=")))
         assert current["source"] == "current invocation environment"
-        assert current["compiler_jobs_per_cargo"] == helper.build_jobs() and current["requested_test_worker_cap"] == cap
+        assert current["compiler_jobs_setting"] == "SCODE_ACCEPTANCE_BUILD_JOBS" and current["requested_test_worker_cap"] == cap
         assert (b"runs native test cases serially" in preview.stdout) == (cap == "1")
         preview_plans.append(json.loads(next(line.split("=", 1)[1] for line in lines
                                             if line.startswith("ACCEPTANCE_PLAN="))))

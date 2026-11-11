@@ -25,10 +25,8 @@ def execute(command, cwd, log, env=None):
     # Hosted compilers have no foreground work to protect and use every CPU.
     # Local callers keep the shared host budget; cache restore keeps the
     # publisher's environment.
-    jobs = (os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else helper.build_jobs()
-    return helper.run_command(command, cwd, log, {
-        **(env or {}), "CARGO_BUILD_JOBS": str(jobs),
-    })
+    hosted = {"CARGO_BUILD_JOBS": str(os.cpu_count() or 1)} if os.environ.get("GITHUB_ACTIONS") == "true" else {}
+    return helper.run_command(command, cwd, log, {**(env or {}), **hosted})
 
 
 native_checks = os.environ["ACCEPTANCE_NATIVE_CHECKS"].split()

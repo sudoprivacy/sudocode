@@ -124,16 +124,10 @@ def contract_hash(ref):
 
 
 def executor_source(ref):
-    """run_command and the build_jobs it applies, so either change binds evidence.
-
-    A ref without build_jobs yields exactly its run_command source, keeping
-    earlier recipe hashes and their reviewed equivalences unchanged.
-    """
     source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    lines = source.splitlines()
-    functions = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)}
-    selected = [functions[name] for name in ["build_jobs", "run_command"] if name in functions]
-    return "\n\n\n".join("\n".join(lines[node.lineno - 1:node.end_lineno]) for node in selected)
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
 
 
 def commands_hash(ref):
@@ -808,12 +802,12 @@ def report_plan(plan, current_environment=False):
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
-        jobs = build_jobs()
-        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": jobs,
+        rule = "half the logical CPUs, at most one per 3 GiB of memory"
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": rule,
                        "compiler_jobs_setting": "SCODE_ACCEPTANCE_BUILD_JOBS",
                        "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
-        lines.append(f"Author-native Cargo compilation uses {jobs} job{'s' if jobs != 1 else ''} per command "
-                     "at BelowNormal priority. Native test processes use "
+        lines.append(f"Author-native Cargo compilation uses {rule} per command (SCODE_ACCEPTANCE_BUILD_JOBS "
+                     "lowers it) at BelowNormal priority. Native test processes use "
                      + ("the protected profile default." if cap is None else
                         f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
         try:
@@ -965,27 +959,6 @@ def authorized_policy(head, base, trusted, api=github_api):
     return head
 
 
-def build_jobs():
-    """Cargo jobs per acceptance command on this host.
-
-    Compilers already run at BelowNormal priority, so foreground work keeps the
-    CPU it needs; a serial build only lengthened every queued acceptance. Use
-    half the logical CPUs and at most one job per 3 GiB of memory, so linking
-    test binaries in parallel cannot exhaust a small host.
-    SCODE_ACCEPTANCE_BUILD_JOBS lowers the result and never raises it.
-    """
-    import psutil
-
-    cpus = os.cpu_count() or 1
-    jobs = max(1, min(cpus // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
-    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
-    if cap is not None:
-        if not cap.isdigit() or int(cap) < 1:
-            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
-        jobs = min(jobs, int(cap))
-    return jobs
-
-
 def run_command(command, cwd, log, env=None):
     """Keep tests Normal while lowering only this command's compiler children."""
     import psutil
@@ -1029,7 +1002,18 @@ def run_command(command, cwd, log, env=None):
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
-    environment.update({"CARGO_BUILD_JOBS": str(build_jobs()), "CARGO_INCREMENTAL": "0",
+    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+    jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+    if cap is not None:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+        jobs = min(jobs, int(cap))
+    environment.update({"CARGO_BUILD_JOBS": str(jobs), "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
     # Neither ambient credentials, SDK discovery nor per-command overrides may

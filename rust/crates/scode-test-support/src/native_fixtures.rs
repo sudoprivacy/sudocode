@@ -45,7 +45,7 @@ pub fn verify_owned_runtime_process(
 
 /// Make an index unreadable while its native processes and locks remain live.
 /// Unix moves its directory; Windows denies enumeration without touching the
-/// already-open ownership handles. Dropping the guard restores the exact state.
+/// already-open ownership handles. Dropping the guard restores native ACL policy.
 pub struct DirectoryReadFault {
     root: PathBuf,
     is_active: bool,
@@ -54,7 +54,7 @@ pub struct DirectoryReadFault {
     #[cfg(windows)]
     fixture_root: PathBuf,
     #[cfg(windows)]
-    original_acl: String,
+    original_acl: serde_json::Value,
 }
 
 impl DirectoryReadFault {
@@ -75,14 +75,17 @@ impl DirectoryReadFault {
             #[cfg(windows)]
             fixture_root: fixture_root.to_path_buf(),
             #[cfg(windows)]
-            original_acl: windows_control(
-                fixture_root,
-                &[
-                    "-Operation".as_ref(),
-                    "ReadDirectoryAcl".as_ref(),
-                    "-Target".as_ref(),
-                    root.as_os_str(),
-                ],
+            original_acl: native_acl_snapshot(
+                windows_control(
+                    fixture_root,
+                    &[
+                        "-Operation".as_ref(),
+                        "ReadDirectoryAcl".as_ref(),
+                        "-Target".as_ref(),
+                        root.as_os_str(),
+                    ],
+                )
+                .expect("read owned directory ACL before fault"),
             )
             .expect("snapshot owned directory ACL before fault"),
         };
@@ -96,16 +99,23 @@ impl DirectoryReadFault {
         {
             // Retain the restoration guard even if applying the ACL fails.
             fault.is_active = true;
-            windows_control(
-                fixture_root,
-                &[
-                    "-Operation".as_ref(),
-                    "DenyDirectoryRead".as_ref(),
-                    "-Target".as_ref(),
-                    root.as_os_str(),
-                ],
+            let denied = native_acl_snapshot(
+                windows_control(
+                    fixture_root,
+                    &[
+                        "-Operation".as_ref(),
+                        "DenyDirectoryRead".as_ref(),
+                        "-Target".as_ref(),
+                        root.as_os_str(),
+                    ],
+                )
+                .expect("deny enumeration of owned directory"),
             )
-            .expect("deny enumeration of owned directory");
+            .expect("read denied native ACL policy");
+            assert_ne!(
+                denied["policy"], fault.original_acl["policy"],
+                "native deny must change policy"
+            );
         }
         assert!(
             std::fs::read_dir(root).is_err(),
@@ -122,7 +132,10 @@ impl DirectoryReadFault {
         std::fs::rename(&self.hidden, &self.root).map_err(|error| error.to_string())?;
         #[cfg(windows)]
         {
-            let restored = windows_control(
+            let descriptor = self.original_acl["descriptor"]
+                .as_str()
+                .ok_or("missing original native ACL descriptor")?;
+            let restored = native_acl_snapshot(windows_control(
                 &self.fixture_root,
                 &[
                     "-Operation".as_ref(),
@@ -130,11 +143,14 @@ impl DirectoryReadFault {
                     "-Target".as_ref(),
                     self.root.as_os_str(),
                     "-Value".as_ref(),
-                    self.original_acl.as_ref(),
+                    descriptor.as_ref(),
                 ],
-            )?;
-            if restored != self.original_acl {
-                return Err("restored directory ACL differs from its snapshot".into());
+            )?)?;
+            if restored["policy"] != self.original_acl["policy"] {
+                return Err(format!(
+                    "restored native ACL policy differs: original={}; restored={restored}",
+                    self.original_acl
+                ));
             }
         }
         self.is_active = false;
@@ -153,6 +169,28 @@ impl Drop for DirectoryReadFault {
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn native_acl_snapshot(raw: String) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    let policy = &value["policy"];
+    let is_null_dacl = policy.get("dacl_revision") == Some(&serde_json::Value::Null)
+        && policy.get("aces") == Some(&serde_json::Value::Null);
+    let is_present_dacl = policy["dacl_revision"].is_u64()
+        && policy["aces"]
+            .as_array()
+            .is_some_and(|aces| aces.iter().all(serde_json::Value::is_string));
+    if !value["descriptor"].is_string()
+        || !policy.is_object()
+        || !policy["owner"].is_string()
+        || !policy["group"].is_string()
+        || !policy["control_flags"].is_u64()
+        || !(is_null_dacl || is_present_dacl)
+    {
+        return Err(format!("invalid native ACL snapshot: {value}"));
+    }
+    Ok(value)
 }
 
 #[cfg(windows)]

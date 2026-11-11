@@ -57,4 +57,31 @@ if ($Operation -eq 'DenyDirectoryRead') {
     Set-Acl -LiteralPath $Target -AclObject $Acl
     $Acl = Get-Acl -LiteralPath $Target
 }
-Write-Output $Acl.GetSecurityDescriptorSddlForm($Access)
+# Match native policy, not incidental SDDL auto-inheritance bookkeeping. Windows
+# may set SE_DACL_AUTO_INHERITED after Set-Acl. Keep every other control bit and
+# exact ordered ACE bytes, including masks, SIDs and per-ACE inheritance flags.
+$Raw = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+    $Acl.GetSecurityDescriptorBinaryForm(), 0
+)
+$AceValues = $null
+$Revision = $null
+if ($null -ne $Raw.DiscretionaryAcl) {
+    $Revision = [int]$Raw.DiscretionaryAcl.Revision
+    $AceValues = @(
+        foreach ($Ace in $Raw.DiscretionaryAcl) {
+            $Bytes = [byte[]]::new($Ace.BinaryLength)
+            $Ace.GetBinaryForm($Bytes, 0)
+            [Convert]::ToBase64String($Bytes)
+        }
+    )
+}
+[ordered]@{
+    descriptor = $Acl.GetSecurityDescriptorSddlForm($Access)
+    policy = [ordered]@{
+        owner = $Raw.Owner.Value
+        group = $Raw.Group.Value
+        control_flags = ([int]$Raw.ControlFlags -band (-bnot 0x0400))
+        dacl_revision = $Revision
+        aces = $AceValues
+    }
+} | ConvertTo-Json -Depth 4 -Compress

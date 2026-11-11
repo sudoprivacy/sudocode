@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
-  realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+  realpathSync, unlinkSync, writeSync } from 'node:fs';
+import { rename } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import * as path from 'node:path';
 import type { ScodeAcpConfig } from './scodeAcp';
 
@@ -96,9 +98,17 @@ export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
   return profile;
 }
 
-export function writeBinding(directory: string, binding: CodexBinding, create = false): void {
+export async function writeBinding(directory: string, binding: CodexBinding, create = false): Promise<void> {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, `${binding.threadId}.json`);
+  const original = create ? undefined : readFileSync(file);
+  if (original) {
+    const previous = JSON.parse(original.toString('utf8')) as CodexBinding;
+    if (['version','origin','threadId','actor','operationId','workspace','canonicalWorkspace']
+      .some(key => previous[key as keyof CodexBinding] !== binding[key as keyof CodexBinding])) {
+      throw new Error('Durable binding identity changed before local publication');
+    }
+  }
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = openSync(temporary, 'wx', 0o600);
   try {
@@ -106,7 +116,27 @@ export function writeBinding(directory: string, binding: CodexBinding, create = 
     finally { closeSync(handle); }
     // Exclusive initial publication cannot overwrite an existing mapping.
     if (create) linkSync(temporary, file);
-    else renameSync(temporary, file);
+    else {
+      // Windows can temporarily deny replacement while another process holds
+      // the destination without delete sharing. Retry only publication of the
+      // same fsynced bytes, never enrollment, ACP or a native input operation.
+      // The sole owner still fences this file; changed bytes refuse recovery.
+      const deadline = performance.now() + 1000;
+      let firstError: unknown;
+      for (;;) {
+        if (!readFileSync(file).equals(original!)) {
+          throw new Error('Durable binding changed during local publication', {cause:firstError});
+        }
+        try { await rename(temporary, file); break; }
+        catch (error) {
+          firstError ??= error;
+          if (process.platform !== 'win32'
+              || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+              || performance.now() >= deadline) throw firstError;
+          await delay(Math.min(20, Math.max(1, deadline - performance.now())));
+        }
+      }
+    }
     if (create) unlinkSync(temporary);
     if (process.platform !== 'win32') {
       const parent = openSync(directory, 'r');

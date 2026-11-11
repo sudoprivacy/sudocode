@@ -106,7 +106,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   for (const binding of bindings.values()) {
     if (binding.state === 'provisioning') {
       binding.state = 'recovery_required';
-      save(binding);
+      await save(binding);
     }
   }
   const stopOwner = async (owner: Owner) => {
@@ -121,7 +121,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd,
         canonicalWorkspace: canonicalWorkspace(thread.cwd), state: 'pending' };
       // Persist the original operation BEFORE asking any enrollment authority.
-      save(binding, true);
+      await save(binding, true);
       bindings.set(thread.id, binding);
     }
     const owner: Owner = { binding };
@@ -132,22 +132,27 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
       if (binding.state === 'pending') {
         binding.state = 'provisioning';
-        save(binding);
+        await save(binding);
         try {
+          if (closed) throw new CodexEnrollmentError('not_submitted', 'Owner closed before enrollment submission');
           const profile = await config.resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
             operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
           if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
           binding.configFile = profile.configFile;
           bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
           binding.state = 'ready';
-          save(binding);
+          await save(binding);
         } catch (error) {
           binding.state = error instanceof CodexEnrollmentError && error.outcome === 'not_submitted' ? 'pending' : 'recovery_required';
           if(binding.state==='pending')owner.retryAt=performance.now()+2000;
-          save(binding);
+          try { await save(binding); }
+          catch (persistenceError) {
+            throw new AggregateError([error,persistenceError], 'Enrollment outcome and recovery-state persistence both failed', {cause:error});
+          }
           throw error;
         }
       }
+      if (closed) return;
       const profile = boundProfile(binding);
       let callback: CodexCallback | undefined;
 

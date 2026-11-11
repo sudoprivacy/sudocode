@@ -131,9 +131,7 @@ async function main(): Promise<void> {
   }
   if(values.claude){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude'].includes(key)))throw new Error('--claude takes only --config');
-    for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
-      process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
-    }
+    installCommandShutdownSignals();
     await runClaudeMcp(values.config);return;
   }
   if(values['bind-codex']){

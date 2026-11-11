@@ -1139,7 +1139,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3', 'native-context': '70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869'}
+    expected = {'native-release': '9f32fc62034869e9c82b19a30bf934a11dc8643d7d99e5147ac7780547973c23', 'native-context': 'e33171d538d3f335574eb7dbde3e5e8fc799e296d851d817c722d566b08e38c7'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

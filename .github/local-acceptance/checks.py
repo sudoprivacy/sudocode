@@ -450,6 +450,31 @@ def stable_performance_power(output):
 NATIVE_RUST_PTY_CHECKS = {"native-workspace", "native-resize", "native-release", "native-services"}
 
 
+def compiler_cache_profiles():
+    return NATIVE_RUST_PTY_CHECKS | {"native-context", "native-cohost", "native-examples"}
+
+
+def prepare_compiler_cache(output):
+    """Bind the separate cache implementation before loading or executing it."""
+    contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
+    if hashlib.sha256(contents).hexdigest() != "37ad51519f7a3142300ec558598f7058adb2193924a21e8b535dc3623b2ad22f":
+        raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
+                           f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
+                           "prepare_compiler_cache, then rerun the original supported contract-update command. "
+                           "No native build has started.")
+    # A fresh path prevents timestamp-based Python bytecode reuse across trees.
+    with tempfile.TemporaryDirectory(prefix="scode-compiler-cache-") as private:
+        path = Path(private) / "compiler_cache.py"
+        path.write_bytes(contents)
+        spec = importlib.util.spec_from_file_location("verified_compiler_cache", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    tool = module.prepare(github_asset_download)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "compiler-cache-source.json").write_text(json.dumps(tool, indent=2) + "\n", encoding="utf-8")
+    return module, tool
+
+
 def native_target_directory(root):
     return Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target")).resolve()
 
@@ -603,6 +628,8 @@ print(json.dumps({"executable": str(binary), "version": version,
 def prepare_native_checks(names, root, output, execute):
     """Resolve selected native tools before long native compilation."""
     prepared = {}
+    if any(name in compiler_cache_profiles() for name in names):
+        run.prepared_compiler_cache = prepare_compiler_cache(output / "compiler-cache-tool")
     if "native-services" in names:
         print("NATIVE_SERVICE_TOOL_PREFLIGHT: resolving the existing grpcurl client and running "
               "--version before compilation. A download or executable failure stops here; "
@@ -811,7 +838,46 @@ def native_release_journeys(root, binary, output, base, cargo, command, env):
     native_compiler_context(root, binary, output, command)
 
 
+def native_compiler_run(name, root, output, base, execute):
+    """Keep one finite server around the original profile, including failures."""
+    selected = execute
+
+    def command(argv, cwd, log, env=None):
+        return selected(argv, cwd, log, env)
+
+    # Re-enter the original dispatcher with a scoped callback. Keeping this
+    # branch inside the native cases preserves unrelated profile fingerprints.
+    command.compiler_cache_scope = True
+    try:
+        request = run.workspace_lint_request
+    except AttributeError:
+        request = None
+    try:
+        prepared = run.prepared_compiler_cache
+    except AttributeError:
+        prepared = None
+    if request is not None or prepared is None:
+        return run(name, root, output, base, command)
+    module, tool = prepare_compiler_cache(output / "compiler-cache")
+    if tool is None:
+        return run(name, root, output, base, command)
+    print("COMPILER_CACHE: pinned local objects, 2 GiB maximum; independent Cargo outputs and original "
+          "source/features/environment keys. Explicit user wrappers/configuration remain authoritative; "
+          "busy storage adds no wait. This is not a source-freshness attestation.", flush=True)
+    with module.session(tool, output / "compiler-cache", execute) as active:
+        selected = active.execute
+        return run(name, root, output, base, command)
+
+
 def run(name, root, output, base, execute):
+    if name in {"native-workspace", "native-resize", "native-release", "native-services",
+                "native-context", "native-cohost", "native-examples"}:
+        try:
+            cached = execute.compiler_cache_scope
+        except AttributeError:
+            cached = False
+        if not cached:
+            return native_compiler_run(name, root, output, base, execute)
     output.mkdir(parents=True, exist_ok=True)
     results = []
     rust = root / "rust"
@@ -1050,9 +1116,12 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "de4eed8534d1b16cde811403b13a5cc1021ffd2708db5f1adbf72164e428e6b6",
+        ".github/local-acceptance/compiler_cache.py": "37ad51519f7a3142300ec558598f7058adb2193924a21e8b535dc3623b2ad22f",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
-        ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
+        ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
@@ -1066,7 +1135,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "cfd1fa7cf9f40917f42a8cc9919625d740f2e6189f6b4a86efd9546a28c21c96",
+        ".github/local-acceptance/native_guard.py": "18b1af6f7b49753d41f9b9551168d1d55d530d5843cb426e33f0d8ebd4d8a726",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
@@ -1086,7 +1155,7 @@ def native_guard_files():
         "e2e/local-acceptance/host_lease_acceptance.py": "6b5f2f0cc9c8653f33ea4d2f43b403ac8e77aaffdb84bccc42782713c6940656",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_cache_acceptance.py": "171729bd1351c3d03f89678f29d87eadc3e45305da9e7c5c655ca880977f6d24",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
         "e2e/local-acceptance/parallel_acceptance.py": "0e062dfe86745b94c2cbb69870098a61a6ce3200cfb8649de2c7979ca9a42977",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
@@ -1096,7 +1165,7 @@ def native_guard_files():
         "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "cc1ff8e34a12ebcac284330497a26c4ea5af336cd208e1ab2a8531e83180eeb0",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "d33c0617a1ebff3fd56bbe0313de508361a84900f4f5e99e558b89d6ed4170bc",
+        "e2e/local-acceptance/run.py": "453b4bca68e242e4635490e97e45dbb0124195b78c43c2e0a71ac5f4fa24cd66",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1140,7 +1209,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "a485949e946bd8788994b911171c194fec10f006d630377f87684b419336bc5a":
+    if actual_scope != "4e7fb701f5ccb3726b4322de85711a2528a8816770065db8e460457d14d6c360":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -1153,7 +1222,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'd2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63', 'native-context': '66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9'}
+    expected = {'native-release': '31063076ed660b45c9b39adba2bd2e1b89504d656bf8c073ff8a002422bb9323', 'native-context': '299f5f3a70a2bb5da1877aea3ddcfec0a1a697fc1a2988428bedeb638460bc3f'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

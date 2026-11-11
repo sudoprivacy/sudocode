@@ -42,6 +42,7 @@
     },
     "native-workspace": {
       "include": [
+        ".github/local-acceptance/compiler_cache.py",
         "rust/**",
         "e2e/**",
         "spec/**"

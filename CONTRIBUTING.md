@@ -1410,6 +1410,26 @@ environment hash. Required output prints `CI_CACHE_LAYOUT` and `CI_CACHE_BINDING
 Real Cargo/native-process acceptance checks both layouts, dependency reuse,
 fresh candidate execution and refusal of a conflicting target. It adds no product
 journey coverage; real hosted restores establish remote cache hits and timings.
+Native Rust profiles also use checksum-pinned sccache 0.19.0 with a local
+2 GiB compiler-object cache. Cargo outputs remain in their original target;
+the object cache never supplies a previous test result or a source-freshness
+attestation. Original Cargo arguments and environment settings, including target
+inheritance in nested Cargo and compile-time environment reads, are retained.
+Explicit caller wrappers and sccache settings remain authoritative.
+Each profile owns a private server and stops it on success or failure. A retained
+ownership record prevents reuse of storage after an interrupted parent while
+its server is still alive; the tool's 10-minute idle timeout bounds orphaned
+servers. Client-side compilation keeps rustc under the original priority observer.
+Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+storage uses the original Cargo command immediately, without another wait.
+The early workspace-lint handoff keeps its existing exact command recipe.
+`compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
+processes with independent outputs, changed features/compile-time environment,
+an original failing source, repaired source and explicit-wrapper controls. It
+runs inside the existing native-cache guard. Cache code changes additionally
+select the actual native workspace on author and complementary hosts. These
+checks add no product coverage credit. Hosted object persistence and whole-PR
+savings are not established by the private fixture's cache-hit counts.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

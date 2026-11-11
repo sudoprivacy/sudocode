@@ -680,12 +680,20 @@ def production_build_paths(paths, base, head, *, opt_in=None):
     return [path for path in paths if path not in ignored]
 
 
-def isolated_cli_test_inputs(paths, head):
-    """Prove that only existing individual CLI test modules changed in Git."""
+def cli_test_input_paths(paths):
+    """Share the ordinary test filename boundary without granting mode coverage."""
     inputs = [path for path in paths if path != "README.md"
               and not (path.startswith("docs/") and path.endswith(".md"))]
     pattern = r"rust/crates/rusty-sudocode-cli/tests/([A-Za-z0-9_]+)\.rs"
     if not inputs or any(not re.fullmatch(pattern, path) for path in inputs):
+        return None
+    return inputs
+
+
+def isolated_cli_test_inputs(paths, head):
+    """Prove that only existing individual CLI test modules changed in Git."""
+    inputs = cli_test_input_paths(paths)
+    if inputs is None:
         return False
     try:
         # Deleted, redirected and unknown files retain ordinary example builds.
@@ -705,10 +713,6 @@ def selected(policy, paths, *, base=None, head=None):
         separate_examples = head is None or committed_test_groups(head)
         isolated_tests = head is not None and isolated_cli_test_inputs(paths, head)
         separate_examples = separate_examples and not isolated_tests
-        if head is not None:
-            print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head, "separate_profile": separate_examples,
-                  "reason": "isolated_cli_tests" if isolated_tests else
-                            "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     opt_in = opt_in_test_target_inputs(paths, base, head) if base and head else set()
     product_paths = production_build_paths(paths, base, head, opt_in=opt_in) if base and head else paths
     functional_native = "native-context" if "native-context" in policy["checks"] else "native-release"
@@ -733,6 +737,21 @@ def selected(policy, paths, *, base=None, head=None):
                    for p in (product_paths if name in product_profiles
                              else [p for p in paths if p not in opt_in] if name in {"rendering", "browser"}
                              else paths)))]
+    full_workspace_examples = "native-workspace" in names and cli_test_input_paths(paths) is None
+    combined_examples = ("native-examples" in names and full_workspace_examples
+                         and policy["checks"]["native-examples"].get("targets", DEFAULT_NATIVE_TARGETS)
+                         == policy["checks"]["native-workspace"].get("targets", DEFAULT_NATIVE_TARGETS))
+    if combined_examples:
+        # The protected full workspace command now compiles these same examples.
+        # Different host targets retain the standalone profile and its coverage.
+        names.remove("native-examples")
+    if "native-examples" in policy["checks"] and any(path.startswith("rust/") for path in paths):
+        print("EXAMPLE_BUILD_SCOPE=" + json.dumps({"head": head,
+              "separate_profile": "native-examples" in names,
+              "compiled_in_workspace": full_workspace_examples,
+              "reason": "isolated_cli_tests" if isolated_tests else
+                        "compiled_in_workspace" if combined_examples else
+                        "grouped_or_unknown_source" if separate_examples else "original_target_selection"}), flush=True)
     harness = [path for path in paths if path.startswith("e2e/nexus-a2a/")
                and not path.lower().endswith((".md", ".html"))]
     if base and head and harness and "native-workspace" in policy["checks"] and "native-workspace" not in names:

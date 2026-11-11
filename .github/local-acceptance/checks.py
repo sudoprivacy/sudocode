@@ -811,6 +811,13 @@ def native_release_journeys(root, binary, output, base, cargo, command, env):
     native_compiler_context(root, binary, output, command)
 
 
+def build_native_examples(cargo):
+    """Compile and link the original examples without running their entry points."""
+    print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
+          "This command never runs example entry points.", flush=True)
+    cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
+
+
 def run(name, root, output, base, execute):
     output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -905,6 +912,9 @@ def run(name, root, output, base, execute):
             native_tests(*arguments)
         else:
             targets = scope["targets"]
+            # Keep example linking inside the same complete workspace receipt,
+            # before expensive test work and without another FIFO acquisition.
+            build_native_examples(cargo)
             command(sys.executable, "e2e/build-metadata/run.py",
                     extra={"BUILD_METADATA_EVIDENCE": str(output / "build-metadata")})
             cargo("test", "--locked", "--manifest-path", "vendor/codex-mermaid/Cargo.toml", "--target-dir", str(target))
@@ -917,9 +927,7 @@ def run(name, root, output, base, execute):
             # Stable nextest excludes doctests; retain Cargo's separate path.
             cargo("test", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--doc")
     elif name == "native-examples":
-        print("Compile-only examples: building the normal example binaries with the workspace mailbox feature graph. "
-              "This profile never runs example entry points.", flush=True)
-        cargo("build", "--workspace", "--locked", "--features", "engine-acp/mailbox", "--examples")
+        build_native_examples(cargo)
     elif name == "native-resize":
         installer_scope = {**terminal_installer_scope(root, base), "windows_host": os.name == "nt"}
         (output / "installer-scope.json").write_text(json.dumps(installer_scope, indent=2), encoding="utf-8")
@@ -1071,7 +1079,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "a4dbdbcab45440eb1a3fcc3a026f476a7a842de4c6b2b0e0c04a57873f8e3a98",
+        ".github/scripts/local_acceptance.py": "ed32a0ae7b96af31151009a8c65a37c4dd5d0eec40eb601aa072ee811097b1f6",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1081,8 +1089,8 @@ def native_guard_files():
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "1cc868f9be1ce1b00b352585980ac5dee74c683fe1525bc6571dd0a0c8974085",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
-        "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
+        "e2e/local-acceptance/examples_acceptance.py": "ff5bfd92a0e1da45ad31f713a49629b5c129ccca8e8e5de31a6564f4f2c7d135",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "0e916e7f33ba1d594e07eb0780dc2c595bab9abfc0d0dcf59adf90a27a57038d",
         "e2e/local-acceptance/host_lease_acceptance.py": "8236c0986d1ebc9ec114baaff5ce11c152ec73202f13e207a090fa2de6e44802",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",

@@ -776,15 +776,21 @@ for a committed source without group files or declarations. The verifier reads
 Git/TOML only; escaped declarations, missing/invalid metadata, outside workspace
 members and grouped sources require fresh validation. This conditional pair
 cannot authorize the new grouped execution from an old original-target pass.
-Grouped or unknown sources also select `native-examples`: a separate normal
-`cargo build --workspace --locked --features engine-acp/mailbox --examples` on
-the author and complementary hosts. It compiles and links examples without
-running their entry points. Explicit nextest target selection otherwise omits
-this original default Cargo/nextest compile-only coverage. Known ungrouped
-sources retain their existing selection without adding a duplicate example
-build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
-native guard proves normal linking, no implicit example execution and refusal
-of a deliberately broken example. These checks add no product PTY coverage.
+Complete `native-workspace` execution includes the normal
+`cargo build --workspace --locked --features engine-acp/mailbox --examples`
+before later native work. It compiles and links examples without running their
+entry points. Explicit nextest target selection otherwise omits this original
+default Cargo/nextest compile-only coverage. When workspace and example host
+targets match, the public plan omits the duplicate `native-examples` profile:
+the same command belongs to the workspace's signed receipt and needs no second
+FIFO acquisition. Different host targets, nonordinary inputs confined to CLI
+test paths, and standalone callers retain the original example profile.
+`EXAMPLE_BUILD_SCOPE` explains both decisions.
+The changed workspace recipe requires fresh qualification; an older workspace
+receipt cannot supply the new example command. Real native controls check
+normal linking, no implicit example execution, distinct-host retention and a
+link-only failure before long native work. These checks add no product PTY
+coverage or measured population saving.
 Changes confined to ordinary individual CLI test files can omit the separate
 example build on both the author and complementary hosts. README and Markdown
 files under `docs/` may accompany them. The selector reads committed Git blobs;

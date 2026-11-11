@@ -386,7 +386,10 @@ pub fn record(name: &str) {
         assert "rendering" not in checks, (label, text)
         assert "native-workspace" in checks
         if expected:
-            assert "native-examples" in checks, text
+            assert "native-examples" not in checks, text
+            examples = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                                       if line.startswith("EXAMPLE_BUILD_SCOPE=")))
+            assert examples["compiled_in_workspace"] and not examples["separate_profile"], text
         if not scope_cases:
             # Exercise the public planner in a deep output directory without
             # another Cargo build or checkout. All inputs remain Git objects.
@@ -534,7 +537,10 @@ pub fn record(name: &str) {
                        "--host", "windows", "--architecture", "AMD64", cwd=root).read_text(encoding="utf-8")
         plan = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
                                if line.startswith("ACCEPTANCE_PLAN=")))
-        assert ("native-examples" in plan["local_checks"]) == expected, text
+        examples = json.loads(next(line.split("=", 1)[1] for line in text.splitlines()
+                                   if line.startswith("EXAMPLE_BUILD_SCOPE=")))
+        assert ("native-examples" in plan["local_checks"]) == examples["separate_profile"], text
+        assert (examples["compiled_in_workspace"] or examples["separate_profile"]) == expected, text
         assert "native-workspace" in plan["local_checks"], text
         return plan
 

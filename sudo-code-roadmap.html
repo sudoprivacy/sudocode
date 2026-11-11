@@ -1322,15 +1322,19 @@ test harness; they do not establish live Anthropic behavior or cache hits.
 Production compaction, context limits and cache-prefix checks are unchanged.</p>
 <p><strong>Preserve compile-only examples.</strong> A real Cargo/nextest canary
 confirmed that default selection compiles examples, while explicit grouped
-target selection omits them. Grouped or unknown sources therefore select the
-separate <code>native-examples</code> profile on the author and complementary
-hosts: normal Cargo build/link with the workspace mailbox feature graph, without
-running example entry points. Known ungrouped sources keep their existing
-selection and avoid a duplicate build. The mandatory plan prints
-<code>EXAMPLE_BUILD_SCOPE</code>. Real native guard processes prove compilation,
-linking, no implicit execution and refusal of a broken example. Existing signed
-workspace execution stays reusable for the same head when its recipe is
-unchanged; the newly selected example check still requires actual execution.</p>
+target selection omits them. Complete <code>native-workspace</code> execution
+therefore builds and links the original examples with the mailbox feature
+graph before later native work, without running example entry points. Matching
+workspace/example host targets omit the separate <code>native-examples</code>
+profile and its additional FIFO acquisition; its original command is included
+in the workspace's signed receipt. Distinct host targets, nonordinary inputs
+confined to CLI test paths, and standalone callers retain the original profile.
+The mandatory plan prints
+<code>EXAMPLE_BUILD_SCOPE</code>. Real native controls require compilation,
+linking, no implicit execution, distinct-host retention and a link-only failure
+before long native work. Older workspace receipts lack the new command and
+must qualify the changed recipe. No product case is removed, and population
+or whole-PR time savings remain unmeasured.</p>
 <p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
 changes contain only ordinary individual CLI test files, optionally accompanied
 by README or Markdown files under <code>docs/</code>, author and complementary
@@ -1677,12 +1681,15 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     <tr>
       <td>Compile-only examples</td>
       <td>Normal example binaries are compiled and linked. Grouped/unknown
-      sources use <code>native-examples</code>; original selection retains its
-      existing behavior. Isolated individual CLI test changes omit the separate
-      unchanged example build; shared/production/unknown inputs retain it.
+      sources include their original example build in <code>native-workspace</code>.
+      Matching host targets omit a second profile/FIFO acquisition; distinct
+      targets retain <code>native-examples</code>. Isolated individual CLI test
+      changes omit unchanged examples; shared/production/unknown inputs retain
+      compilation and linking.
       Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
-      <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
+      <td><code>native-workspace</code> / <code>native-examples</code> /
+      <code>examples_acceptance.py</code></td>
     </tr>
     <tr>
       <td>Native release stream/resume and startup</td>

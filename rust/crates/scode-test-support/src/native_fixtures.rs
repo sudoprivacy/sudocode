@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 pub fn verify_owned_runtime_process(
     terminal: &pty_expect::PtySession,
     runtime_pid: u32,
-    _executable: &Path,
-    _fixture_root: &Path,
+    executable: &Path,
+    fixture_root: &Path,
 ) -> Result<(), String> {
     let transport_pid = terminal.process_id().ok_or("PTY has no process")?;
     #[cfg(windows)]
@@ -16,7 +16,7 @@ pub fn verify_owned_runtime_process(
         let reported = runtime_pid.to_string();
         let transport = transport_pid.to_string();
         windows_control(
-            _fixture_root,
+            fixture_root,
             &[
                 "-Operation".as_ref(),
                 "VerifyProcess".as_ref(),
@@ -25,13 +25,14 @@ pub fn verify_owned_runtime_process(
                 "-Value".as_ref(),
                 transport.as_ref(),
                 "-Executable".as_ref(),
-                _executable.as_os_str(),
+                executable.as_os_str(),
             ],
         )?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
+        let _ = (executable, fixture_root);
         if transport_pid == runtime_pid {
             Ok(())
         } else {
@@ -59,7 +60,9 @@ pub struct DirectoryReadFault {
 impl DirectoryReadFault {
     /// Refuse ineffective faults and retain restoration through assertion unwinds.
     #[must_use]
-    pub fn new(root: &Path, _fixture_root: &Path) -> Self {
+    pub fn new(root: &Path, fixture_root: &Path) -> Self {
+        #[cfg(not(windows))]
+        let _ = fixture_root;
         assert!(
             std::fs::read_dir(root).is_ok(),
             "fixture index must start readable"
@@ -70,10 +73,10 @@ impl DirectoryReadFault {
             #[cfg(not(windows))]
             hidden: root.with_extension("held-aside"),
             #[cfg(windows)]
-            fixture_root: _fixture_root.to_path_buf(),
+            fixture_root: fixture_root.to_path_buf(),
             #[cfg(windows)]
             original_acl: windows_control(
-                _fixture_root,
+                fixture_root,
                 &[
                     "-Operation".as_ref(),
                     "ReadDirectoryAcl".as_ref(),
@@ -94,7 +97,7 @@ impl DirectoryReadFault {
             // Retain the restoration guard even if applying the ACL fails.
             fault.is_active = true;
             windows_control(
-                _fixture_root,
+                fixture_root,
                 &[
                     "-Operation".as_ref(),
                     "DenyDirectoryRead".as_ref(),

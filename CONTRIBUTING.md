@@ -221,6 +221,15 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Changes confined to `.github/scripts/ci_input_scope.py` do not rerun the
+unchanged daemon journeys or three-platform workspace Clippy. The selector
+does not build or launch the product. Its real Git PR/push/queue matrix,
+existing scoped executor controls and complete native/Docker contract guard
+remain mandatory. CI reports `selector_only_product_checks_skipped` when this
+reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
+or out of product source retain their original checks. This deliberately
+removes general product smoke coverage from selector-only queue revisions;
+no selected journey, assertion or deadline is shortened.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes
@@ -971,6 +980,14 @@ The policy-guard fixture reconstructs exact pinned LF bytes after a Windows
 archive converts line endings. It accepts the reconstruction only when SHA256
 matches the original protected pin; changed content still fails. Its private Git
 repository disables automatic line-ending conversion without changing author settings.
+
+For shared nextest execution, the CI scope response includes
+`nextest_dependency_scope`: the decision and bound function names, or the reason
+an unknown dependency requires full A2A. It binds transitive module functions
+including the GitHub API/download helpers. Unrelated function bodies omit this
+journey; changed imported context, reachable code, unknown data, rebinding or
+reflection retain it. Real Git/CLI cases exercise actual Windows-helper,
+authorization and asset-identity changes alongside the existing scope matrix.
 
 A failed native matrix job cancels the other pending/running platforms. The
 trusted publisher checks the actual completed jobs directly; no second hosted

@@ -8,7 +8,7 @@
 //! kernel or a direct model endpoint.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use runtime::fs_backend::FsLock;
 use runtime::mailbox::Mailbox;
@@ -41,6 +41,10 @@ pub struct ManagedRuntimeContext {
     /// on its own kernel; an out-of-process agent can only take it under its
     /// own credential, on the daemon that stores the session.
     pub(crate) session_locks: SessionLocks,
+    /// The first lease release that did not succeed, for the host's teardown
+    /// outcome. A failed release keeps the lock until its TTL, which errs
+    /// toward exclusivity, but it is still not a confirmed cleanup.
+    lease_release_failure: Arc<Mutex<Option<String>>>,
 }
 
 /// A co-host's session lease: a kernel lock held by the agent's pid, taken
@@ -49,6 +53,7 @@ struct KernelLease<K: KernelConvenience> {
     kernel: Arc<K>,
     path: String,
     id: String,
+    release_failure: Arc<Mutex<Option<String>>>,
 }
 
 impl<K: KernelConvenience + Send + Sync> FsLock for KernelLease<K> {
@@ -63,7 +68,15 @@ impl<K: KernelConvenience + Send + Sync> FsLock for KernelLease<K> {
 
 impl<K: KernelConvenience> Drop for KernelLease<K> {
     fn drop(&mut self) {
-        let _ = self.kernel.sys_unlock(&self.path, &self.id, false);
+        let failure = match self.kernel.sys_unlock(&self.path, &self.id, false) {
+            Ok(true) => return,
+            Ok(false) => format!("session lease {} was no longer held at release", self.path),
+            Err(error) => format!("release session lease {}: {error:?}", self.path),
+        };
+        self.release_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(failure);
     }
 }
 
@@ -110,6 +123,8 @@ impl ManagedRuntimeContext {
         });
         let lock_kernel = Arc::clone(kernel);
         let pid = desc.pid.clone();
+        let lease_release_failure = Arc::new(Mutex::new(None));
+        let release_failure = Arc::clone(&lease_release_failure);
         let session_locks: SessionLocks = Arc::new(move |path: &str| {
             let id = lock_kernel
                 .sys_lock(path, "", 1, SESSION_LEASE_TTL_SECS, &pid)
@@ -119,16 +134,19 @@ impl ManagedRuntimeContext {
                     kernel: Arc::clone(&lock_kernel),
                     path: path.to_owned(),
                     id,
+                    release_failure: Arc::clone(&release_failure),
                 }) as Arc<dyn FsLock>
             }))
         });
-        Ok(Self::assemble(
+        let mut context = Self::assemble(
             desc,
             fs,
             local_directory,
             authenticated_senders,
             session_locks,
-        ))
+        );
+        context.lease_release_failure = lease_release_failure;
+        Ok(context)
     }
 
     /// An agent hosted out of process, on `client`: an already-authenticated
@@ -200,6 +218,7 @@ impl ManagedRuntimeContext {
             shell_root,
             mailbox,
             session_locks,
+            lease_release_failure: Arc::default(),
         }
     }
 
@@ -214,5 +233,13 @@ impl ManagedRuntimeContext {
     #[must_use]
     pub fn mailbox(&self) -> Arc<Mailbox> {
         Arc::clone(&self.mailbox)
+    }
+
+    /// Where an observed lease release failure is recorded. A host reads it
+    /// after teardown, because a lease is released when its session engine
+    /// ends rather than when the host asks.
+    #[must_use]
+    pub fn lease_release_failure(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.lease_release_failure)
     }
 }

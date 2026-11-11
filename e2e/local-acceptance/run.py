@@ -98,6 +98,7 @@ def scope_acceptance(directory):
         assert f"clippy_executor_required={str(clippy_executor).lower()}" in output.read_text()
         assert f"gzip_codec_required={str(gzip_codec).lower()}" in output.read_text()
         assert f"vfs_cache_required={str(vfs_cache).lower()}" in output.read_text()
+        return json.loads(result.stdout)
 
     def expect_native_targets(base, targets):
         selector = SOURCE / ".github/local-acceptance/checks.py"
@@ -119,7 +120,7 @@ def scope_acceptance(directory):
             SOURCE / ".github/scripts/local_acceptance.py", policy, diff_base, cwd=repository))
 
     cases = [("docs/note.md", False, False, False), (".github/workflows/rust-ci.yml", False, True, True),
-             (".github/scripts/ci_input_scope.py", False, True, True),
+             (".github/scripts/ci_input_scope.py", False, False, False),
              ("rust/crates/api/src/lib.rs", True, True, True), ("e2e/nexus-a2a/run.sh", False, True, False),
              ("spec/cache_metrics.json", True, True, True), ("rust/crates/runtime/src/prompt.md", True, True, True),
              ("spec/local_acceptance.json", False, False, False),
@@ -181,7 +182,7 @@ def scope_acceptance(directory):
         for event_name, event in [("push", {"before": base, "after": head}),
                                   ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
                                   ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
-            expect_scope(event_name, event, live, daemon, clippy, path in {
+            result = expect_scope(event_name, event, live, daemon, clippy, path in {
                 ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/local-acceptance/checks.py",
                 ".github/scripts/local_acceptance.py", "e2e/local-acceptance/benchmark_targets_acceptance.py",
                 "e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
@@ -199,12 +200,66 @@ def scope_acceptance(directory):
                 a2a=daemon and path not in {
                 ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/action.yml",
                 ".github/workflows/ci-vfs-search-cache.yml"})
-    # The batch imports only the shared nextest helpers. Unrelated function
-    # bodies stay outside its scope; unknown helper globals remain required.
+            if path == ".github/scripts/ci_input_scope.py":
+                assert result["selector_only_product_checks_skipped"] is True, result
+                assert set(selected_checks(base)) == {"preflight", "guard-contract"}
+    # A selection-only edit cannot suppress a mixed workflow, product or
+    # daemon-harness change. Use the same real committed PR/push/queue events.
+    selector = repository / ".github/scripts/ci_input_scope.py"
+    for companion, live, clippy in [
+            (".github/workflows/rust-ci.yml", False, True),
+            ("rust/crates/runtime/src/selector_fixture.rs", True, True),
+            ("e2e/nexus-a2a/run.sh", False, False)]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        selector.write_text(selector.read_text() + "selection edit\n")
+        file = repository / companion
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text((file.read_text() if file.exists() else "") + "mixed input\n")
+        command("git", "add", ".", cwd=repository)
+        command("git", "commit", "-m", "Selector and actual execution input", cwd=repository)
+        head = command("git", "rev-parse", "HEAD", cwd=repository)
+        for event_name, event in [("push", {"before": base, "after": head}),
+                ("pull_request", {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}),
+                ("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}})]:
+            result = expect_scope(event_name, event, live, True, clippy,
+                benchmark=True, container=True, clippy_executor=True, gzip_codec=True, vfs_cache=True)
+            assert result["selector_only_product_checks_skipped"] is False, result
+    for source_path, target_path in [(".github/scripts/ci_input_scope.py",
+                                    "rust/crates/runtime/src/moved_selector.rs"),
+                                   ("rust/crates/runtime/src/moved_selector.rs",
+                                    ".github/scripts/ci_input_scope.py")]:
+        base = command("git", "rev-parse", "HEAD", cwd=repository)
+        command("git", "mv", source_path, target_path, cwd=repository)
+        command("git", "commit", "-m", "Move across selector and product boundary", cwd=repository)
+        head = command("git", "rev-parse", "HEAD", cwd=repository)
+        result = expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}},
+            True, True, True, benchmark=True, container=True, clippy_executor=True, gzip_codec=True, vfs_cache=True)
+        assert result["selector_only_product_checks_skipped"] is False, result
+        assert "native-workspace" in selected_checks(base)
+    print("PASS: selector-only edits retain the full contract; mixed inputs and both rename directions retain product checks")
+    # Bind the actual nextest/download call graph across committed Git trees.
+    # Unknown, rebound and reflective dependencies retain full A2A acceptance.
     checks = repository / ".github/local-acceptance/checks.py"
     small_module = ('def nextest_binary(output):\n    return output\n'
                     'def nextest_options(output):\n    return []\n'
                     'def unrelated():\n    return 1\n')
+    chain = (small_module.replace("return output", "return fetch(output)")
+             + 'def fetch(output):\n    return request(output)\n'
+             + 'def request(output):\n    return output\n')
+    builtin_shadow = (small_module.replace("return output", "return len(output)")
+                      + 'def len(output):\n    return 11\n')
+    nested = chain.replace('return request(output)',
+                           'def nested():\n        return request(output)\n    return nested()')
+    constructor_shadow = ('from pathlib import Path\n' + small_module
+                          + 'def factory(value):\n    return 11\n'
+                          + 'Path = factory\ndef unused(value=Path("fixture")):\n    pass\n')
+    decorator_shadow = ('from contextlib import contextmanager\n' + small_module
+                        + 'def factory(value):\n    return value\n'
+                        + 'contextmanager = factory\n@contextmanager\ndef unused():\n    pass\n')
+    actual_module = (SOURCE / ".github/local-acceptance/checks.py").read_text()
+    actual_unrelated = actual_module.replace('Windows native acceptance requires ',
+                                             'Windows native shell preparation requires ')
+    assert actual_unrelated != actual_module
     checks.write_text(small_module)
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "baseline nextest execution dependencies", cwd=repository)
@@ -212,8 +267,29 @@ def scope_acceptance(directory):
         ("unrelated body", small_module, small_module.replace("return 1", "return 2"), False),
         ("executor option", small_module, small_module.replace("return []", "return [1]"), True),
         ("module assignment", small_module, small_module + "extra = 1\n", True),
-        ("unknown helper global", small_module.replace("return output", "return unrelated()"),
+        ("transitive helper body", small_module.replace("return output", "return unrelated()"),
          small_module.replace("return output", "return unrelated()").replace("return 1", "return 2"), True),
+        ("unrelated with transitive helpers", chain, chain.replace("return 1", "return 2"), False),
+        ("transitive request body", chain, chain.replace("return output", "return str(output)"), True),
+        ("nested request body", nested, nested.replace("return output", "return str(output)"), True),
+        ("builtin function shadow", builtin_shadow, builtin_shadow.replace("return 11", "return 12"), True),
+        ("unchanged builtin shadow", builtin_shadow, builtin_shadow.replace("return 1\n", "return 2\n"), False),
+        ("module function rebound", chain + 'fetch = request\n',
+         (chain + 'fetch = request\n').replace("return 1", "return 2"), True),
+        ("unknown data dependency", chain.replace("return request(output)", "return configuration"),
+         chain.replace("return request(output)", "return configuration").replace("return 1", "return 2"), True),
+        ("reflective dependency", chain.replace("return request(output)", "return globals()['request'](output)"),
+         chain.replace("return request(output)", "return globals()['request'](output)").replace("return 1", "return 2"), True),
+        ("builtin attribute reflection", 'import builtins\n' + chain.replace("return request(output)", "return builtins.globals()['request'](output)"),
+         ('import builtins\n' + chain.replace("return request(output)", "return builtins.globals()['request'](output)")).replace("return 1", "return 2"), True),
+        ("unknown helper default", chain.replace("def fetch(output):", "def fetch(output=unrelated()):"),
+         chain.replace("def fetch(output):", "def fetch(output=unrelated()):").replace("return 1", "return 2"), True),
+        ("shadowed default constructor", constructor_shadow, constructor_shadow.replace("return 11", "return 12"), True),
+        ("shadowed import-time decorator", decorator_shadow, decorator_shadow.replace("return value", "return (value,)"), True),
+        ("actual unrelated Windows helper", actual_module, actual_unrelated, False),
+        ("actual API authorization helper", actual_module, actual_module.replace('Bearer {token}', 'Fixture {token}'), True),
+        ("actual asset identity helper", actual_module,
+         actual_module.replace("release['tag_name'] != tag", "release['tag_name'] == tag"), True),
     ]:
         checks.write_text(before)
         command("git", "add", ".", cwd=repository)
@@ -223,8 +299,17 @@ def scope_acceptance(directory):
         command("git", "add", ".", cwd=repository)
         command("git", "commit", "-m", label, cwd=repository)
         head = command("git", "rev-parse", "HEAD", cwd=repository)
-        expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, False, required, False,
-                     benchmark=True, container=True, gzip_codec=True, cohost=False, a2a=required)
+        print(f"NEXTEST_DEPENDENCY_SCOPE: {label}; daemon/A2A={required}; base={base}; head={head}", flush=True)
+        result = expect_scope("merge_group", {"merge_group": {"base_sha": base, "head_sha": head}}, False, required, False,
+                              benchmark=True, container=True, gzip_codec=True, cohost=False, a2a=required)
+        details = result["nextest_dependency_scope"]
+        if label in {"module function rebound", "unknown data dependency", "reflective dependency",
+                     "builtin attribute reflection", "unknown helper default",
+                     "shadowed default constructor", "shadowed import-time decorator"}:
+            assert details["decision"] == "unknown" and details["reason"] and details["full_a2a_required"], details
+        else:
+            assert details["decision"] == ("changed" if required else "unchanged"), details
+            assert {"nextest_binary", "nextest_options"} <= set(details["bound_functions"]), details
     # Mixed edits and moves must retain A2A: only a cache-only diff omits it.
     base = command("git", "rev-parse", "HEAD", cwd=repository)
     (repository / ".github/scripts/vfs_search_cache.py").write_text("changed cache helper\n")

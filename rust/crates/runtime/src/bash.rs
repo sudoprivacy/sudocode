@@ -1280,7 +1280,7 @@ fn prepare_command(
         return prepared;
     }
 
-    let mut prepared = Command::new("sh");
+    let mut prepared = Command::new(posix_shell());
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
@@ -1306,7 +1306,7 @@ fn prepare_tokio_command(
             cmd.envs(launcher.env);
             cmd
         } else {
-            let mut cmd = TokioCommand::new("sh");
+            let mut cmd = TokioCommand::new(posix_shell());
             cmd.arg("-lc").arg(command);
             if sandbox_status.filesystem_active {
                 cmd.env("HOME", cwd.join(".sandbox-home"));
@@ -1323,6 +1323,111 @@ fn prepare_tokio_command(
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
+}
+
+/// The shell that shell commands and background commands run under: `sh`
+/// from `PATH`, or on Windows, the `sh.exe` of the Git installation on `PATH`
+/// when no `sh.exe` is (see [`git_for_windows_sh`]).
+fn posix_shell() -> std::ffi::OsString {
+    if cfg!(windows) {
+        if let Some(shell) = git_for_windows_sh(std::env::var_os("PATH").as_deref()) {
+            return shell.into_os_string();
+        }
+    }
+    "sh".into()
+}
+
+/// Git for Windows usually puts only its `cmd` directory on `PATH`, which has
+/// `git.exe` but no `sh.exe`, so `sh` alone fails with "program not found"
+/// for every shell command. The installation ships its own `bin\sh.exe` in
+/// the Git root, which is `cmd`'s parent (or `mingw64\bin`'s grandparent). It
+/// keeps the working directory under `-lc` and puts Git's tools on `PATH`.
+/// `None` when a `sh.exe` is on `PATH` already, or no Git root has one.
+fn git_for_windows_sh(paths: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let dirs: Vec<_> = std::env::split_paths(paths?).collect();
+    if dirs.iter().any(|dir| dir.join("sh.exe").is_file()) {
+        return None;
+    }
+    dirs.iter()
+        .filter(|dir| dir.join("git.exe").is_file())
+        .flat_map(|dir| dir.ancestors().skip(1).take(2))
+        .map(|root| root.join("bin").join("sh.exe"))
+        .find(|shell| shell.is_file())
+}
+
+#[cfg(test)]
+mod git_for_windows_sh_tests {
+    use super::git_for_windows_sh;
+    use std::path::{Path, PathBuf};
+
+    fn layout(name: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sudocode-git-sh-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, b"").expect("write");
+        }
+        root
+    }
+
+    fn path_of(root: &Path, dirs: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(dirs.iter().map(|dir| root.join(dir))).expect("join paths")
+    }
+
+    #[test]
+    fn the_sh_of_the_git_root_on_path_is_found_when_no_sh_is() {
+        let root = layout(
+            "found",
+            &[
+                "Git/cmd/git.exe",
+                "Git/bin/sh.exe",
+                "Mingw/mingw64/bin/git.exe",
+                "Mingw/bin/sh.exe",
+            ],
+        );
+        let shell = |dirs: &[&str]| git_for_windows_sh(Some(path_of(&root, dirs).as_os_str()));
+
+        assert_eq!(
+            shell(&["tools", "Git/cmd"]),
+            Some(root.join("Git/bin/sh.exe"))
+        );
+        assert_eq!(
+            shell(&["Mingw/mingw64/bin"]),
+            Some(root.join("Mingw/bin/sh.exe"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_sh_already_on_path_or_a_git_without_one_leaves_plain_sh() {
+        let root = layout(
+            "none",
+            &[
+                "Git/cmd/git.exe",
+                "Git/bin/sh.exe",
+                "msys/usr/bin/sh.exe",
+                "Bare/cmd/git.exe",
+            ],
+        );
+        let shell = |dirs: &[&str]| git_for_windows_sh(Some(path_of(&root, dirs).as_os_str()));
+
+        assert_eq!(
+            shell(&["Git/cmd", "msys/usr/bin"]),
+            None,
+            "an sh on PATH runs as sh"
+        );
+        assert_eq!(shell(&["Bare/cmd"]), None, "a Git root without bin/sh.exe");
+        assert_eq!(shell(&["nothing-here"]), None);
+        assert_eq!(git_for_windows_sh(None), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // `#[cfg(unix)]` because every test in this module exercises

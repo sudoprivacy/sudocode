@@ -21,6 +21,22 @@ use crate::managed::managed_session_config;
 
 type StateObserver = Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>;
 
+/// Close every session and receiver, then fold in an observed lease release
+/// failure: only `Ok` is a confirmed end of this host.
+async fn confirmed_cleanup(
+    registry: Arc<SessionRegistry>,
+    lease_release_failure: &Mutex<Option<String>>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || registry.close_all())
+        .await
+        .unwrap_or_else(|error| Err(format!("session cleanup did not finish: {error}")))?;
+    lease_release_failure
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .map_or(Ok(()), Err)
+}
+
 struct Factory {
     prepared: Mutex<Option<PreparedManagedAgent>>,
     session_id: String,
@@ -114,6 +130,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
         let context = ManagedRuntimeContext::cohost(&kernel, &desc, self.authenticated_senders)?;
         let prepared = prepare_managed_agent(&context, options.resume_session_id.as_deref())
             .map_err(|error| error.to_string())?;
+        let lease_release_failure = context.lease_release_failure();
         let peer_mailbox = prepared.mailbox();
         let session_id = prepared.durable_session_id().to_string();
         // This signal terminates the HOST. Turn cancellation belongs to each
@@ -142,6 +159,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
+        let agent_pid = desc.pid.clone();
         std::thread::Builder::new().name(format!("managed-session-{}", desc.pid)).spawn(move || {
             runtime.block_on(async move {
                 let read_mailbox = Arc::clone(&mailbox);
@@ -190,9 +208,15 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
                 };
                 thread_registry.cancel_all();
                 thread_stop.abort();
-                let closing = Arc::clone(&thread_registry);
-                let _ = tokio::task::spawn_blocking(move || closing.close_all()).await;
+                let cleanup = confirmed_cleanup(Arc::clone(&thread_registry), &lease_release_failure).await;
                 let reason = result.err().map_or_else(|| "session connection closed".into(), |e| e.to_string());
+                // Closed and Terminated are a confirmed end: every writer and
+                // receiver joined. An unconfirmed cleanup stays nonterminal,
+                // so the registry keeps exclusive custody of this instance.
+                if let Err(cleanup) = cleanup {
+                    eprintln!("managed session {agent_pid} cleanup unconfirmed ({reason}): {cleanup}");
+                    return;
+                }
                 let closed_reason = reason.clone();
                 let _ = tokio::task::spawn_blocking(move || mailbox.send(SessionPayload::Closed { reason: closed_reason })).await;
                 (observer)(AgentState::Terminated, Some(reason));

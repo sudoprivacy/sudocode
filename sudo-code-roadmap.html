@@ -215,6 +215,29 @@ verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
+<p><strong>Selection-script changes (2026-11-11).</strong>
+Edits confined to <code>.github/scripts/ci_input_scope.py</code> omit unchanged
+CLI/co-host daemon journeys and three-platform workspace Clippy. Real Git
+PR/push/queue selection, existing scoped executor controls and the complete
+native/Docker contract guard remain required. The mandatory CI JSON reports
+<code>selector_only_product_checks_skipped</code>. Workflow edits, mixed product
+or daemon-harness changes and moves across the product boundary retain their
+checks. This deliberately removes general product smoke coverage from
+selector-only queue revisions; it does not shorten any selected case or add
+feature coverage. Savings depend on the changed inputs and queue load.</p>
+
+<p><strong>Bind transitive shared tool inputs (2026-11-11).</strong>
+The daemon/A2A selector binds the functions reached by the shared nextest
+helpers, including GitHub API authorization and asset download. Unrelated
+function edits in the acceptance dispatcher omit the unchanged journey.
+Changed imported context or reachable functions retain it; unknown data,
+rebinding and runtime reflection require the full journey. The mandatory CI
+JSON includes the bound names or the conservative fallback reason. Real Git
+and CLI regressions cover the actual Windows helper, authorization and asset
+identity branches, with existing PR/push/queue and native selection checks
+retained. Product journeys, tool pins and assertions are unchanged. These
+infrastructure checks add no feature rows; elapsed savings remain unmeasured.</p>
+
 <p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
 run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
 locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs

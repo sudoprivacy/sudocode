@@ -151,7 +151,15 @@ finally:
 def grpcurl_preflight(output, profiles, helper):
     """Exercise the original Bash/curl resolver and actual cached native client."""
     output.mkdir(parents=True)
-    seed = profiles.native_services_tool(SOURCE, output / "seed", helper.run_command)
+    # Only Git and the system directories: a grpcurl installed on the host
+    # (for example Homebrew's) must not stand in for the resolver's download.
+    path = os.pathsep.join([str(Path(shutil.which("git")).resolve().parent),
+                           *([str(Path(shutil.which("git")).resolve().parents[1] / folder)
+                              for folder in ["bin", "usr/bin", "mingw64/bin"]] if os.name == "nt" else []),
+                           os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32")
+                           if os.name == "nt" else "/usr/bin", "/bin"])
+    seed = profiles.native_services_tool(SOURCE, output / "seed",
+                                         lambda command, cwd, log: helper.run_command(command, cwd, log, {"PATH": path}))
     binary = Path(seed["tool"]["executable"])
     assert "1.9.4" in seed["tool"]["version"], seed
     requests = []
@@ -214,11 +222,6 @@ finally:
                     executable.parent.mkdir(parents=True)
                     executable.write_bytes(binary.read_bytes() if state == "valid" else b"invalid native executable\n")
                     executable.chmod(0o755)
-                path = os.pathsep.join([str(Path(shutil.which("git")).resolve().parent),
-                                       *([str(Path(shutil.which("git")).resolve().parents[1] / folder)
-                                          for folder in ["bin", "usr/bin", "mingw64/bin"]] if os.name == "nt" else []),
-                                       os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32")
-                                       if os.name == "nt" else "/usr/bin", "/bin"])
                 address = f"http://127.0.0.1:{proxy.server_port}"
                 environment = {**os.environ, "PATH": path, "GRPCURL_CACHE": str(cache),
                                "HTTPS_PROXY": address, "https_proxy": address, "NO_PROXY": "", "no_proxy": ""}

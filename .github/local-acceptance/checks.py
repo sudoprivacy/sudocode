@@ -1074,7 +1074,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "6e57fa4c286f52f7d70b2a7135fd7e2d52230c678f74531c5464b5da35a05779",
+        "e2e/local-acceptance/native_lint_acceptance.py": "507db46f7eeb82f6a92bd1947ff71d57ba0482af46c1e22b3fe5d0c3c2fd38b0",
         "e2e/local-acceptance/parallel_acceptance.py": "e03e4ace090c5e3ac379361fddeebc3ce3d0b21c02fd1a1fceda94e72d4fe813",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",

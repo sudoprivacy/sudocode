@@ -217,7 +217,7 @@ def workflow_scope(output, environment):
             "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
 
-def scheduling_scope(output, environment):
+def scheduling_scope(output, environment, *, metadata_only=False):
     """Run the actual selector on committed scheduling edits and conservative controls."""
     output.mkdir()
     repository = output / "repository"
@@ -243,6 +243,7 @@ def scheduling_scope(output, environment):
     runner = ".github/scripts/local_acceptance.py"
     profiles = ".github/local-acceptance/checks.py"
     names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+             "e2e/local-acceptance/resource_scheduling_acceptance.py",
              "e2e/local-acceptance/host_lease_acceptance.py"]
     sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
     git("init", "--initial-branch=main")
@@ -254,15 +255,15 @@ def scheduling_scope(output, environment):
     git("commit", "-m", "Original committed scheduling scope inputs")
     base = git("rev-parse", "HEAD")
 
-    def insert_body(source, name):
+    def insert_body(source, name, statement="pass"):
         node = next(node for node in ast.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == name)
         lines = source.splitlines(keepends=True)
-        lines.insert(node.body[0].lineno - 1, "    pass\n")
+        lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
         return "".join(lines)
 
-    def observe(label, first, head, expected, *, rust=False):
-        for event_name in ["pull_request", "push", "merge_group"]:
+    def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None):
+        for event_name in events or ["pull_request", "push", "merge_group"]:
             if event_name == "pull_request":
                 event = {"pull_request": {"base": {"sha": first}, "head": {"sha": head}}}
             elif event_name == "push":
@@ -283,10 +284,19 @@ def scheduling_scope(output, environment):
             actual = json.loads(result.stdout)
             assert actual["daemon_required"] == str(not expected).lower(), (label, actual)
             assert actual["a2a_required"] == actual["cohost_required"] == actual["daemon_required"], (label, actual)
-            assert actual["live_required"] == actual["clippy_required"] == str(rust).lower(), (label, actual)
-            if expected:
-                assert actual["acceptance_scheduling_scope"]["decision"] == "unchanged_queue_executors", actual
-                assert actual["acceptance_scheduling_scope"]["contract_guard_required"] is True, actual
+            if kind == "scheduling":
+                assert actual["live_required"] == actual["clippy_required"] == str(rust).lower(), (label, actual)
+                if expected:
+                    assert actual["acceptance_scheduling_scope"]["decision"] == "unchanged_queue_executors", actual
+                    assert actual["acceptance_scheduling_scope"]["contract_guard_required"] is True, actual
+            else:
+                assert actual["live_required"] == str(rust).lower(), (label, actual)
+                assert actual["clippy_required"] == str(rust if clippy is None else clippy).lower(), (label, actual)
+                if expected:
+                    assert actual["acceptance_metadata_scope"]["decision"] == "unchanged_queue_executors", actual
+                    assert actual["acceptance_metadata_scope"]["fingerprint_source"] == "protected_base", actual
+                    assert actual["acceptance_metadata_scope"]["contract_guard_required"] is True, actual
+                    assert actual["acceptance_metadata_scope"]["generic_queue_daemon_smoke_omitted"] is True, actual
             assert actual["benchmark_required"] == actual["container_required"] == "true", actual
             records.append({"case": label, "event": event_name, "base": first, "head": head,
                             "expected_scheduling_only": expected, "actual": actual,
@@ -327,45 +337,110 @@ def scheduling_scope(output, environment):
         ("changed-profile-execution", {runner: pure, profiles: insert_body(sources[profiles], "run")}, False),
         ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
     ]
-    for label, edits, expected in cases:
+    if not metadata_only:
+        for label, edits, expected in cases:
+            git("switch", "--detach", base)
+            for name, contents in edits.items():
+                write(name, contents)
+            git("add", ".")
+            git("commit", "-m", "Scope control " + label)
+            observe(label, base, git("rev-parse", "HEAD"), expected, rust=label == "mixed-product-source")
+        for label, declaration in [
+            ("external-reference", "def external_control():\n    return profile_reservations\n"),
+            ("external-namespace", 'def external_control():\n    return globals().get("profile_" + "reservations")\n'),
+            ("external-exec", 'def external_control(current_runner, namespace):\n'
+                              '    exec(compile(current_runner, namespace["__file__"], "exec"), namespace)\n'),
+        ]:
+            git("switch", "--detach", base)
+            write(runner, sources[runner] + "\n" + declaration)
+            git("add", ".")
+            git("commit", "-m", "Unchanged external observer " + label)
+            before = git("rev-parse", "HEAD")
+            write(runner, pure + "\n" + declaration)
+            git("add", ".")
+            git("commit", "-m", "Scheduling edit with existing external observer " + label)
+            observe(label, before, git("rev-parse", "HEAD"), False)
+        git("switch", "--detach", base)
+        # Commit mode-only trees through private indexes; no OS symlink privilege
+        # or mutation of a caller's worktree/index is needed.
+        for mode in ["100755", "120000"]:
+            index = output / (mode + ".index")
+            values = {"GIT_INDEX_FILE": str(index)}
+            git("read-tree", base, overrides=values)
+            blob = git("rev-parse", base + ":" + runner)
+            git("update-index", "--cacheinfo", f"{mode},{blob},{runner}", overrides=values)
+            tree = git("write-tree", overrides=values)
+            head = git("commit-tree", tree, "-p", base, "-m", "Committed mode boundary " + mode)
+            observe("mode-" + mode, base, head, False)
+    metadata_functions = ["commands_hash", "profile_commands_hashes", "reachable_profile_commands_hashes",
+                          "resource_executor_identity", "resource_equivalent_profiles", "compatible_native_dispatcher",
+                          "compatible_profile_commands", "verify_execution_plan", "verify_envelope"]
+    metadata_source = insert_body(sources[runner], "verify_envelope")
+    companion = "e2e/local-acceptance/resource_scheduling_acceptance.py"
+    changed_companion = sources[companion] + "\n# Private metadata enforcement input.\n"
+    metadata_pins = sources[profiles]
+    for name, contents in [(runner, metadata_source), (companion, changed_companion)]:
+        metadata_pins, count = re.subn(r'("' + re.escape(name) + r'": ")[0-9a-f]{64}(")',
+            lambda match: match[1] + hashlib.sha256(contents.encode()).hexdigest() + match[2], metadata_pins)
+        assert count == 1, name
+    declaration = next(node for node in ast.parse(sources[runner]).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "verify_envelope")
+    missing = sources[runner].splitlines(keepends=True)
+    del missing[declaration.lineno - 1:declaration.end_lineno]
+    forged = insert_body(sources[runner], "reachable_profile_commands_hashes",
+                         "return {name: 'forged-fingerprint' for name in names}")
+    all_bodies = sources[runner]
+    for name in metadata_functions:
+        all_bodies = insert_body(all_bodies, name)
+    metadata_cases = [("single-verifier", {runner: metadata_source}, True),
+                      ("all-verifier-bodies", {runner: all_bodies}, True)]
+    metadata_cases += [
+        ("fixture-and-pins", {runner: metadata_source, profiles: metadata_pins, companion: changed_companion}, True),
+        ("process-executor", {runner: insert_body(metadata_source, "run_command")}, False),
+        ("selector-function", {runner: insert_body(metadata_source, "selected")}, False),
+        ("module-global", {runner: metadata_source + "\nMETADATA_SCOPE_STATE = True\n"}, False),
+        ("signature", {runner: metadata_source.replace("completed_only=False):", "completed_only=True):")}, False),
+        ("decorator", {runner: metadata_source.replace("\ndef verify_envelope(", "\n@((lambda function: function))\ndef verify_envelope(")}, False),
+        ("missing-function", {runner: "".join(missing)}, False),
+        ("duplicate-function", {runner: metadata_source + "\ndef verify_envelope(*args):\n    return None\n"}, False),
+        ("new-helper", {runner: metadata_source + "\ndef unknown_metadata_helper():\n    pass\n"}, False),
+        ("forged-fingerprint-and-command", {runner: forged, profiles: insert_body(sources[profiles], "run")}, False),
+        ("profile-command", {runner: metadata_source, profiles: insert_body(sources[profiles], "run")}, False),
+        ("policy", {runner: metadata_source, "spec/local_acceptance.json": json.dumps({"version": 1, "repository": "changed", "checks": {}})}, False),
+        ("signers", {runner: metadata_source, "spec/local_acceptance_signers.json": '{"version":1,"signers":{}}'}, False),
+        ("unknown-input", {runner: metadata_source, ".github/unknown-metadata.py": "# Unknown input\n"}, False),
+        ("product", {runner: metadata_source, "rust/crates/runtime/src/metadata_scope.rs": "// Product input\n"}, False),
+        ("workflow", {runner: metadata_source, ".github/workflows/rust-ci.yml": "# Changed workflow\n"}, False),
+    ]
+    for label, edits, expected in metadata_cases:
         git("switch", "--detach", base)
         for name, contents in edits.items():
             write(name, contents)
         git("add", ".")
-        git("commit", "-m", "Scope control " + label)
-        observe(label, base, git("rev-parse", "HEAD"), expected, rust=label == "mixed-product-source")
-    for label, declaration in [
-        ("external-reference", "def external_control():\n    return profile_reservations\n"),
-        ("external-namespace", 'def external_control():\n    return globals().get("profile_" + "reservations")\n'),
-        ("external-exec", 'def external_control(current_runner, namespace):\n'
-                          '    exec(compile(current_runner, namespace["__file__"], "exec"), namespace)\n'),
-    ]:
+        git("commit", "-m", "Verifier metadata scope " + label)
+        observe("metadata-" + label, base, git("rev-parse", "HEAD"), expected,
+                kind="metadata", rust=label == "product", clippy=label in {"product", "workflow"},
+                events=None if label in {"single-verifier", "forged-fingerprint-and-command"} else ["merge_group"])
+    for label, body in [("static-observer", "return verify_envelope"),
+                        ("dynamic-observer", 'return globals().get("verify_" + "envelope")'),
+                        ("frame-observer", "return RUNNER_CODE")]:
         git("switch", "--detach", base)
-        write(runner, sources[runner] + "\n" + declaration)
+        observer = sources[runner] + "\ndef metadata_observer():\n    " + body + "\n"
+        observer = insert_body(observer, "run_command", "metadata_observer()")
+        write(runner, observer)
         git("add", ".")
-        git("commit", "-m", "Unchanged external observer " + label)
+        git("commit", "-m", "Existing queue observer " + label)
         before = git("rev-parse", "HEAD")
-        write(runner, pure + "\n" + declaration)
+        write(runner, insert_body(observer, "verify_envelope"))
         git("add", ".")
-        git("commit", "-m", "Scheduling edit with existing external observer " + label)
-        observe(label, before, git("rev-parse", "HEAD"), False)
-    git("switch", "--detach", base)
-    # Commit mode-only trees through private indexes; no OS symlink privilege
-    # or mutation of a caller's worktree/index is needed.
-    for mode in ["100755", "120000"]:
-        index = output / (mode + ".index")
-        values = {"GIT_INDEX_FILE": str(index)}
-        git("read-tree", base, overrides=values)
-        blob = git("rev-parse", base + ":" + runner)
-        git("update-index", "--cacheinfo", f"{mode},{blob},{runner}", overrides=values)
-        tree = git("write-tree", overrides=values)
-        head = git("commit-tree", tree, "-p", base, "-m", "Committed mode boundary " + mode)
-        observe("mode-" + mode, base, head, False)
+        git("commit", "-m", "Metadata edit observed by queue consumer " + label)
+        observe("metadata-" + label, before, git("rev-parse", "HEAD"), False, kind="metadata", events=["merge_group"])
     assert not git("status", "--porcelain"), "Private source/index changed after mode-only controls"
     result = {"status": "PASS", "cases": records, "git_commands": commands,
+              "targeted_metadata_only": metadata_only,
               "scope": "Actual Git commits and original PR/push/queue selector CLI. No Cargo, daemon, provider or product coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    print(f"PASS: {len(records)} real Git/event scheduling scope and conservative execution/mode boundaries", flush=True)
+    print(f"PASS: {len(records)} real Git/event scheduling/verifier scope and conservative execution/mode boundaries", flush=True)
     return result
 
 
@@ -474,6 +549,7 @@ def run(output):
     original_cohost = cohost()
     workflow = workflow_scope(output / "workflow-scope", environment)
     scheduling = scheduling_scope(output / "scheduling-scope", environment)
+    assert scheduling["targeted_metadata_only"] is False, "Required fixture must execute all original scheduling controls"
     development = application + '[dev-dependencies]\nscope-helper={path="../helper"}\n'
     write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
     write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); }\n')

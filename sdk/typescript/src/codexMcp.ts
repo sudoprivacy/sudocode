@@ -126,7 +126,7 @@ export async function prepareExistingCodexBinding(file: string, existing: Existi
       threadId:existing.threadId,workspace:existing.workspace,canonicalWorkspace:canonicalWorkspace(existing.workspace),
       actor:existing.actor,configFile:existing.configFile,state:'ready'};
     bindProfile(binding, profile);
-    writeBinding(config.stateDirectory, binding, true);
+    await writeBinding(config.stateDirectory, binding, true);
     return {prepared:true,startedAgent:false,threadId:existing.threadId,actor:existing.actor,acpSessionId:existing.acpSessionId};
   } finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
 }

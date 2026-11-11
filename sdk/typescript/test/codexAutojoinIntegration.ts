@@ -11,7 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
-const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
+const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(process.env.SCODE_AUTOJOIN_TEST_LIBRARY
+  ?? path.join(root,'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(),process.platform==='win32'
   ? "codex-owner ' & 🧪-" : 'codex-autojoin-'));
 const workspaceAlias = path.join(directory,'workspace-alias');
@@ -471,6 +472,70 @@ async function main() {
   assert.throws(()=>process.kill(acpStarted.pid,0),{code:'ESRCH'},'shutdown must close its ACP child');
   const released=createServer();released.listen(reserved.port,'127.0.0.1');await once(released,'listening');
   await new Promise<void>(resolve=>released.close(()=>resolve()));
+  if (process.platform === 'win32') {
+    // Reproduce an actual post-enrollment Windows rename refusal with another
+    // process's native file handle, not a mocked fs or a longer PTY deadline.
+    for (const transient of [true,false]) {
+      const threadId=randomUUID();loaded=[threadId];nativeWorkspace=fs.realpathSync.native(directory);
+      const stateDirectory=path.join(directory,transient?'transient-publication':'held-publication');
+      const bindingFile=path.join(stateDirectory,threadId+'.json');
+      const submitted: CodexAgentClaim[]=[];
+      let holder: ChildProcess | undefined;
+      let holderExit: Promise<unknown> | undefined;
+      const publicationConfig={...config,stateDirectory,async resolveAgent(claim:CodexAgentClaim){
+        submitted.push(claim);
+        const profile=await config.resolveAgent(claim);
+        const powershell=path.join(process.env.SystemRoot!,'System32/WindowsPowerShell/v1.0/powershell.exe');
+        holder=spawn(powershell,['-NoLogo','-NoProfile','-NonInteractive','-File',
+          path.join(root,'test/fixtures/windowsBindingHold.ps1'),bindingFile],
+        {stdio:['pipe','pipe','pipe'],windowsHide:true});
+        holderExit=once(holder,'close');
+        let output='',error='';holder.stdout!.on('data',bytes=>{output+=String(bytes);});
+        holder.stderr!.on('data',bytes=>{error+=String(bytes);});
+        const end=Date.now()+5000;
+        while(!output.includes('held')) {
+          assert.equal(holder.exitCode,null,error);assert.ok(Date.now()<end,'Windows binding holder did not become ready');
+          await new Promise(resolve=>setTimeout(resolve,10));
+        }
+        if(transient)holder.stdin!.end('delayed\n');
+        return profile;
+      }};
+      try {
+        owner=await connectCodexAutojoin(publicationConfig);
+        assert.equal(submitted.length,1,'local publication must never resubmit enrollment');
+        if(transient) {
+          assert.equal(owner.status()[0].state,'connected','transient Windows binding replacement must retain the original enrollment');
+          const binding=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
+          assert.equal(binding.state,'ready');assert.equal(binding.actor,submitted[0].actor);
+          assert.equal(binding.operationId,submitted[0].operationId);
+          assert.equal(owner.connectionFor(threadId).sessionId,'fixture-'+submitted[0].operationId);
+          await owner.close();owner=undefined;
+          owner=await connectCodexAutojoin(publicationConfig);
+          assert.equal(submitted.length,1,'restart uses the committed original profile');
+          assert.equal(owner.connectionFor(threadId).sessionId,'fixture-'+submitted[0].operationId);
+        } else {
+          assert.equal(owner.status()[0].state,'recovery_required');
+          assert.throws(()=>owner!.connectionFor(threadId));
+          const original=fs.readFileSync(bindingFile,'utf8');
+          assert.equal(JSON.parse(original).state,'provisioning','failed replacement must retain the previous durable record');
+          await owner.refresh();assert.equal(submitted.length,1);
+          holder!.stdin!.end('release\n');await holderExit;
+          await owner.close();owner=undefined;
+          owner=await connectCodexAutojoin(publicationConfig);
+          assert.equal(submitted.length,1,'persistent write failure and restart cannot invent another identity');
+          assert.equal(owner.status()[0].state,'recovery_required');
+          const retained=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
+          assert.equal(retained.actor,submitted[0].actor);assert.equal(retained.operationId,submitted[0].operationId);
+        }
+        console.log('PASS Windows binding publication '+(transient?'temporary hold preserves original enrollment and restart':'persistent hold retains Unknown without re-enrollment'));
+      } finally {
+        if(holder?.exitCode===null && !holder.stdin!.writableEnded)holder.stdin!.end('release\n');
+        if(holderExit)await holderExit;
+        await owner?.close();owner=undefined;
+      }
+    }
+    loaded=[];
+  }
   console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, single-respondent peer delivery, initial audit refusal, audit-failure cleanup, first-MCP readiness and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

@@ -1314,7 +1314,7 @@ if __name__ == "__main__":
     refused = []
     if "--verify-cache" in sys.argv:
         for label, filename, message in [
-            ("archive", tool["archive"], "Compiler-cache archive checksum mismatch"),
+            ("archive", tool["archive"], "Pinned compiler-cache archive checksum mismatch"),
             ("executable", tool["executable"], "Cached compiler-cache executable differs"),
         ]:
             path = Path(filename)

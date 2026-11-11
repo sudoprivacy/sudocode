@@ -802,9 +802,12 @@ def report_plan(plan, current_environment=False):
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
-        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+        rule = "half the logical CPUs, at most one per 3 GiB of memory"
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": rule,
+                       "compiler_jobs_setting": "SCODE_ACCEPTANCE_BUILD_JOBS",
                        "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
-        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+        lines.append(f"Author-native Cargo compilation uses {rule} per command (SCODE_ACCEPTANCE_BUILD_JOBS "
+                     "lowers it) at BelowNormal priority. Native test processes use "
                      + ("the protected profile default." if cap is None else
                         f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
         try:
@@ -816,7 +819,7 @@ def report_plan(plan, current_environment=False):
                      else "unset SCODE_ACCEPTANCE_TEST_THREADS")
             lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
                          f"To use the protected test-pool default, run `{clear}` before retrying this command. "
-                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
+                         "Cargo compilation keeps its independent job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -999,7 +1002,18 @@ def run_command(command, cwd, log, env=None):
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
-    environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
+    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+    jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+    if cap is not None:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+        jobs = min(jobs, int(cap))
+    environment.update({"CARGO_BUILD_JOBS": str(jobs), "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
     # Neither ambient credentials, SDK discovery nor per-command overrides may

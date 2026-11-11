@@ -658,8 +658,9 @@ CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
 older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
-pool explicitly. Compiler jobs stay at one locally, with only compiler workers
-at BelowNormal priority; test processes stay Normal. Before author workspace
+pool explicitly. Local Cargo commands compile with half the logical CPUs, at most one
+job per 3 GiB of memory (`SCODE_ACCEPTANCE_BUILD_JOBS` lowers it), with only compiler workers
+at BelowNormal priority; test processes stay Normal. Hosted runners use every CPU. Before author workspace
 execution and a plan preview for the current host, the mandatory
 `LOCAL_ACCEPTANCE_CONCURRENCY` output reports the current invocation's compiler
 jobs and requested test cap. An explicit cap of one also prints the shell

@@ -1,11 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { connectCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
 import { connectScode, type ScodeConnection, type ScodePeerMessage } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
-import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
-  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
+import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
+  writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
@@ -113,37 +112,16 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     await owner.connection?.close();
   };
   const open = async (thread: Thread) => {
-    let binding = bindings.get(thread.id);
-    if (!binding) {
-      binding = { version: 2, origin: 'enrollment', actor: `codex-${randomUUID().replaceAll('-', '')}`,
-        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd,
-        canonicalWorkspace: canonicalWorkspace(thread.cwd), state: 'pending' };
-      // Persist the original operation BEFORE asking any enrollment authority.
-      save(binding, true);
-      bindings.set(thread.id, binding);
-    }
+    const binding = claimBinding(config.stateDirectory, bindings, { id: thread.id, cwd: thread.cwd, frontend: 'codex' });
     const owner: Owner = { binding };
     owners.set(thread.id, owner);
     try {
-      assertWorkspace(binding,thread.cwd);
-      if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
-      if (binding.state === 'pending') {
-        binding.state = 'provisioning';
-        save(binding);
-        try {
-          const profile = await config.resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
-            operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
-          if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
-          binding.configFile = profile.configFile;
-          bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
-          binding.state = 'ready';
-          save(binding);
-        } catch (error) {
-          binding.state = error instanceof CodexEnrollmentError && error.outcome === 'not_submitted' ? 'pending' : 'recovery_required';
-          if(binding.state==='pending')owner.retryAt=performance.now()+2000;
-          save(binding);
-          throw error;
-        }
+      try {
+        await provisionBinding(config.stateDirectory, binding, thread.cwd, config.resolveAgent,
+          error => error instanceof CodexEnrollmentError && error.outcome === 'not_submitted');
+      } catch (error) {
+        if (binding.state === 'pending') owner.retryAt = performance.now() + 2000;
+        throw error;
       }
       const profile = boundProfile(binding);
       let callback: CodexCallback | undefined;

@@ -33,7 +33,7 @@ def referenced_globals(table):
 
 
 def unchanged_profile_execution(base, head):
-    """Use protected-base code so an edited fingerprint cannot prove itself safe."""
+    """Use comparison-base code; the merge queue supplies its protected base."""
     previous = json.loads(git("show", f"{base}:{POLICY}"))
     current = json.loads(git("show", f"{head}:{POLICY}"))
     if previous != current:
@@ -66,6 +66,9 @@ def metadata_only_inputs(paths, base, head, details):
     if runner not in paths or not set(paths) <= allowed:
         details.update(decision="not_applicable")
         return False
+    base_kind = {"merge_group": "protected_merge_queue_base", "pull_request": "target_merge_base",
+                 "push": "push_previous_commit"}.get(os.environ.get("GITHUB_EVENT_NAME"), "caller_comparison_base")
+    details.update(comparison_base=base, comparison_base_kind=base_kind)
     metadata = {"commands_hash", "profile_commands_hashes", "reachable_profile_commands_hashes",
                 "resource_executor_identity", "resource_equivalent_profiles", "compatible_native_dispatcher",
                 "compatible_profile_commands", "verify_execution_plan", "verify_envelope"}
@@ -131,7 +134,7 @@ def metadata_only_inputs(paths, base, head, details):
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),
                        consumer_functions=current[2], profiles=names,
-                       fingerprint_source="protected_base", contract_guard_required=True,
+                       fingerprint_source="comparison_base", contract_guard_required=True,
                        generic_queue_daemon_smoke_omitted=True)
         return True
     except (ValueError, SyntaxError, TypeError, KeyError, AttributeError, ImportError, OSError,

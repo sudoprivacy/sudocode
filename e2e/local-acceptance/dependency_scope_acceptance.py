@@ -294,7 +294,11 @@ def scheduling_scope(output, environment, *, metadata_only=False):
                 assert actual["clippy_required"] == str(rust if clippy is None else clippy).lower(), (label, actual)
                 if expected:
                     assert actual["acceptance_metadata_scope"]["decision"] == "unchanged_queue_executors", actual
-                    assert actual["acceptance_metadata_scope"]["fingerprint_source"] == "protected_base", actual
+                    assert actual["acceptance_metadata_scope"]["fingerprint_source"] == "comparison_base", actual
+                    assert actual["acceptance_metadata_scope"]["comparison_base"] == first, actual
+                    assert actual["acceptance_metadata_scope"]["comparison_base_kind"] == {
+                        "merge_group": "protected_merge_queue_base", "pull_request": "target_merge_base",
+                        "push": "push_previous_commit"}[event_name], actual
                     assert actual["acceptance_metadata_scope"]["contract_guard_required"] is True, actual
                     assert actual["acceptance_metadata_scope"]["generic_queue_daemon_smoke_omitted"] is True, actual
             assert actual["benchmark_required"] == actual["container_required"] == "true", actual

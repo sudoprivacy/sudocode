@@ -251,7 +251,10 @@ code outside the nine reported verifier/fingerprint bodies. Process execution
 and the selector/dependency consumers must not observe those bodies, dynamic
 namespaces or the managed runner code frame. The existing exact self-frame
 capture remains bound for managed refresh. Non-guard profiles are compared
-with the protected base's fingerprint implementation, so an edited candidate
+with the comparison base's fingerprint implementation. The queue uses its
+protected base; PRs use the target merge base, and push records name their prior
+branch commit. The required JSON identifies that source commit and its kind;
+final acceptance continues through the protected gate. An edited candidate
 algorithm cannot bless a changed command. Companion paths are limited to
 those metadata enforcement fixtures and protected pins. New declarations,
 function signatures, command effects, policy, signer, workflow, product and

@@ -334,7 +334,8 @@ def resource_executor_identity(ref):
     row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
         raise ValueError("Compiler resource identity requires a regular committed executor")
-    tree = ast.parse(tracked(ref, path).decode("utf-8"))
+    source = tracked(ref, path).decode("utf-8")
+    tree = ast.parse(source)
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     reserved = {"os", "psutil", "max", "min", "str", "int", "RuntimeError"}
     if any(node.name in reserved for node in functions):
@@ -393,7 +394,14 @@ def resource_executor_identity(ref):
     index = next(index for index, key in enumerate(settings.keys)
                  if isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS")
     selected = settings.values[index]
+    if selected.lineno != selected.end_lineno:
+        raise ValueError("Unknown multiline compiler environment field")
+    lines = source.splitlines(keepends=True)[function.lineno - 1:function.end_lineno]
+    line = selected.lineno - function.lineno
+    lines[line] = lines[line][:selected.col_offset] + '"1"' + lines[line][selected.end_col_offset:]
+    budget_form = "serial"
     if profile_ast_value(selected) == profile_ast_value(ast.parse("str(jobs)", mode="eval").body):
+        budget_form = "adaptive"
         budget = ast.parse('''
 jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
 cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
@@ -405,14 +413,25 @@ if cap is not None:
         at = function.body.index(statement)
         if at < 3 or profile_ast_value(function.body[at - 3:at]) != profile_ast_value(budget):
             raise ValueError("Unknown compiler budget calculation or effects")
+        del lines[function.body[at - 3].lineno - function.lineno:function.body[at - 1].end_lineno - function.lineno + 1]
         del function.body[at - 3:at]
         settings.values[index] = ast.Constant(value="1")
     elif not isinstance(selected, ast.Constant) or selected.value != "1":
         raise ValueError("Unknown serial compiler budget")
     if any(isinstance(node, ast.Name) and node.id in {"jobs", "cap"} for node in ast.walk(function)):
         raise ValueError("Compiler budget is observed outside its environment field")
-    return canonical({"mode": row[0], "context": profile_ast_value(contexts),
-                      "executor": profile_ast_value(function)}).decode()
+    text = "".join(lines)
+    budget_comment = """    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+"""
+    if text.count(budget_comment) > 1:
+        raise ValueError("Duplicate compiler budget explanation")
+    text = text.replace(budget_comment, "", 1)
+    return budget_form, canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                                   "executor": profile_ast_value(function), "executor_text": text}).decode()
 
 
 def resource_equivalent_profiles(before, after, names):
@@ -425,8 +444,12 @@ def resource_equivalent_profiles(before, after, names):
     try:
         before = value("rev-parse", f"{before}^{{commit}}")
         after = value("rev-parse", f"{after}^{{commit}}")
-        previous = reachable_profile_commands_hashes(before, names, executor_identity=resource_executor_identity(before))
-        current = reachable_profile_commands_hashes(after, names, executor_identity=resource_executor_identity(after))
+        old_budget, old_executor = resource_executor_identity(before)
+        new_budget, new_executor = resource_executor_identity(after)
+        if old_budget == new_budget:
+            return set()
+        previous = reachable_profile_commands_hashes(before, names, executor_identity=old_executor)
+        current = reachable_profile_commands_hashes(after, names, executor_identity=new_executor)
         return {name for name in names if previous[name] == current[name]}
     except (ValueError, TypeError, KeyError, StopIteration, SyntaxError, RuntimeError, subprocess.CalledProcessError):
         return set()
@@ -463,10 +486,16 @@ def execute(command, cwd, log, env=None):
             functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "execute"]
             if len(functions) != 1 or profile_ast_value(functions[0]) not in [profile_ast_value(form) for form in forms]:
                 raise ValueError("Unknown native dispatch or environment effects")
-            functions[0].body = ast.parse("return helper.run_command(command, cwd, log, env or {})").body
-            return profile_ast_value(tree)
+            function = functions[0]
+            form = [profile_ast_value(item) for item in forms].index(profile_ast_value(function))
+            # A changed dispatcher must actually switch known budget forms.
+            # All bytes outside that function, including comments, stay bound.
+            lines = contents.decode("utf-8").splitlines(keepends=True)
+            outside = "".join(lines[:function.lineno - 1] + lines[function.end_lineno:])
+            return form, outside
 
-        return identity(old[1]) == identity(current[1])
+        previous, updated = identity(old[1]), identity(current[1])
+        return previous[0] != updated[0] and previous[1] == updated[1]
     except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
         return False
 

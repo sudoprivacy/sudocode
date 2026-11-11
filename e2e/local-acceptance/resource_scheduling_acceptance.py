@@ -164,6 +164,8 @@ h['read_execution_plan'](sys.argv[2],sys.argv[3],sys.argv[3],signers_ref=sys.arg
         ("unknown-budget", helper_path, executor_change('jobs = max(1, min((os.cpu_count()', 'jobs = max(2, min((os.cpu_count()')),
         ("budget-leak", helper_path, executor_change('    environment.update({"CARGO_BUILD_JOBS": str(jobs)', '    environment["SCODE_MODEL"] = str(jobs)\n    environment.update({"CARGO_BUILD_JOBS": str(jobs)')),
         ("shadow-budget-call", helper_path, adaptive.replace('\ndef run_command(', '\ndef max(*args):\n    raise RuntimeError("UNKNOWN_RESOURCE_EFFECT")\n\ndef run_command(', 1)),
+        ("executor-comment", helper_path, executor_change("    import psutil\n", "    import psutil\n    # Changed executor without a resource transition.\n")),
+        ("dispatcher-comment", dispatch_path, dispatcher + "\n# Changed native dispatch.\n"),
         ("dispatcher-env", dispatch_path, dispatcher.replace('"CARGO_BUILD_JOBS": str(os.cpu_count() or 1)', '"CARGO_BUILD_JOBS": str(os.cpu_count() or 1), "SCODE_MODEL": "changed"', 1)),
         ("dispatcher-state", dispatch_path, 'UNKNOWN_RESOURCE_STATE = 1\n' + dispatcher),
         ("image", ".github/local-acceptance/Dockerfile", "FROM scratch\nENV DIFFERENT_IMAGE=1\n"),

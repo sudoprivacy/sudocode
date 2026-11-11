@@ -1056,9 +1056,10 @@ Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselecte
 profile controls cover this ordering. Both original service journeys remain
 required; product coverage counts and budgets are unchanged. This adds
 infrastructure fault coverage and makes no whole-PR speedup claim.</p>
-<p><strong>Rejoin the FIFO between fresh profiles (2026-11-06).</strong>
-Each running profile keeps the existing exclusive host lease through execution
-and its signed checkpoint. Its next fresh profile rejoins the queue after existing
+<p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
+Each running reservation keeps the existing exclusive host lease through execution
+and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
+examples share one reservation; other fresh profiles rejoin the queue after existing
 waiters. Metadata and fully verified reused results retain their path without a
 host wait; native tool preparation still occurs once in the first fresh slot.
 Required output reports the reservation boundary and active holder profile.
@@ -1331,6 +1332,19 @@ selection and avoid a duplicate build. The mandatory plan prints
 linking, no implicit execution and refusal of a broken example. Existing signed
 workspace execution stays reusable for the same head when its recipe is
 unchanged; the newly selected example check still requires actual execution.</p>
+<p><strong>Share one author reservation for workspace and examples.</strong>
+Adjacent fresh <code>native-workspace</code> and <code>native-examples</code>
+keep their original order, commands, separate signed results and execution
+fingerprints while sharing the existing host FIFO acquisition. Workspace
+success is checkpointed before examples start. An example failure preserves
+that result, and verified resume executes only unfinished profiles. Other
+fresh work still rejoins the FIFO; completed profiles need no reservation.
+Mandatory <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> output lists the groups,
+and acquisition records list both profiles with their common wait counted once.
+Real private Git/SSH/process controls require existing-waiter handoff after
+the pair, failure propagation and full/partial reuse. No example build, native
+case, complementary platform or deadline is removed. This avoids one author
+queue admission; population time savings remain unmeasured.</p>
 <p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
 changes contain only ordinary individual CLI test files, optionally accompanied
 by README or Markdown files under <code>docs/</code>, author and complementary
@@ -1680,6 +1694,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       sources use <code>native-examples</code>; original selection retains its
       existing behavior. Isolated individual CLI test changes omit the separate
       unchanged example build; shared/production/unknown inputs retain it.
+      Adjacent fresh author workspace/example profiles can share one FIFO
+      reservation while retaining both original signed results and commands.
       Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>

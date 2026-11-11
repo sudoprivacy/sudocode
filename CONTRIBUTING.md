@@ -221,6 +221,15 @@ does not enter the co-host build, while shared runtime changes rebuild it.
 Actual repository metadata requires a binary-only CLI without workspace
 dependents. This removes co-host execution on CLI-only revisions; CLI changes
 are still exercised against real daemons. Scope guards add no journey coverage.
+Changes confined to `.github/scripts/ci_input_scope.py` do not rerun the
+unchanged daemon journeys or three-platform workspace Clippy. The selector
+does not build or launch the product. Its real Git PR/push/queue matrix,
+existing scoped executor controls and complete native/Docker contract guard
+remain mandatory. CI reports `selector_only_product_checks_skipped` when this
+reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
+or out of product source retain their original checks. This deliberately
+removes general product smoke coverage from selector-only queue revisions;
+no selected journey, assertion or deadline is shortened.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes

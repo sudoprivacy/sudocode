@@ -906,10 +906,23 @@ fn local_directory_missing_live_routing_is_unknown_and_recovers() {
         before["runtime"]["instance"]
     );
 
-    let inaccessible_root = {
-        let _fault = common::DirectoryReadFault::new(&root, env.workspace_root());
-        observer.discovered()
-    };
+    let observer_instance = discovered_instance(&mut first, &observer.session);
+    let observer_pid = u32::try_from(
+        observer_instance["runtime"]["update"]["identity"]["os_pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .expect("observer reports a native PID");
+    let fault = common::DirectoryReadFault::new(
+        &root,
+        env.workspace_root(),
+        &observer.terminal,
+        observer_pid,
+        &common::scode_bin(),
+    );
+    let inaccessible_root = observer.discovered();
+    fault.assert_unreadable();
+    drop(fault);
     assert!(
         !inaccessible_root["runtime_discovery"]["unavailable"]
             .as_array()

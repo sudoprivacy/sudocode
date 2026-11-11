@@ -43,6 +43,8 @@ pub fn verify_owned_runtime_process(
 pub struct DirectoryReadFault {
     root: PathBuf,
     is_active: bool,
+    // Restore the reader's original token after restoring the directory ACL.
+    _read_bypass: Option<ReadBypassGuard>,
     #[cfg(not(windows))]
     hidden: PathBuf,
     #[cfg(windows)]
@@ -54,7 +56,13 @@ pub struct DirectoryReadFault {
 impl DirectoryReadFault {
     /// Refuse ineffective faults and retain restoration through assertion unwinds.
     #[must_use]
-    pub fn new(root: &Path, fixture_root: &Path) -> Self {
+    pub fn new(
+        root: &Path,
+        fixture_root: &Path,
+        terminal: &pty_expect::PtySession,
+        runtime_pid: u32,
+        executable: &Path,
+    ) -> Self {
         #[cfg(not(windows))]
         let _ = fixture_root;
         assert!(
@@ -64,6 +72,16 @@ impl DirectoryReadFault {
         let mut fault = Self {
             root: root.to_path_buf(),
             is_active: false,
+            _read_bypass: if cfg!(windows) {
+                Some(ReadBypassGuard::new(
+                    fixture_root,
+                    terminal,
+                    runtime_pid,
+                    executable,
+                ))
+            } else {
+                None
+            },
             #[cfg(not(windows))]
             hidden: root.with_extension("held-aside"),
             #[cfg(windows)]
@@ -111,11 +129,33 @@ impl DirectoryReadFault {
                 "native deny must change policy"
             );
         }
-        assert!(
-            std::fs::read_dir(root).is_err(),
-            "native fault must actually block enumeration"
-        );
+        fault.assert_unreadable();
         fault
+    }
+
+    /// Verify the native fault still holds across an external process query.
+    pub fn assert_unreadable(&self) {
+        let error = std::fs::read_dir(&self.root)
+            .expect_err("native fault must actually block enumeration");
+        eprintln!(
+            "owned directory fault: root={}, pid={}, error={error:?}",
+            self.root.display(),
+            std::process::id()
+        );
+        #[cfg(windows)]
+        {
+            let actual = windows_control(
+                &self.fixture_root,
+                &[
+                    "-Operation".as_ref(),
+                    "ReadDirectoryAcl".as_ref(),
+                    "-Target".as_ref(),
+                    self.root.as_os_str(),
+                ],
+            )
+            .expect("audit native ACL while the directory fault is held");
+            eprintln!("owned directory fault ACL: {actual}");
+        }
     }
 
     fn restore(&mut self) -> Result<(), String> {
@@ -160,6 +200,94 @@ impl Drop for DirectoryReadFault {
                 eprintln!("could not restore owned directory fault: {error}");
             } else {
                 panic!("could not restore owned directory fault: {error}");
+            }
+        }
+    }
+}
+
+struct ReadBypassGuard {
+    root: PathBuf,
+    arguments: Vec<std::ffi::OsString>,
+    original: serde_json::Value,
+}
+
+impl ReadBypassGuard {
+    fn new(
+        root: &Path,
+        terminal: &pty_expect::PtySession,
+        runtime_pid: u32,
+        executable: &Path,
+    ) -> Self {
+        verify_owned_runtime_process(terminal, runtime_pid, executable, root)
+            .expect("read privilege belongs to the exact owned native PTY runtime");
+        let arguments = vec![
+            "-Operation".into(),
+            "SetReadBypass".into(),
+            "-Target".into(),
+            runtime_pid.to_string().into(),
+            "-Value".into(),
+            terminal.process_id().unwrap().to_string().into(),
+            "-Executable".into(),
+            executable.as_os_str().to_owned(),
+        ];
+        let raw = windows_control(
+            root,
+            &arguments.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+        )
+        .expect("disable only the owned directory reader's backup privilege");
+        let original: serde_json::Value = serde_json::from_str(&raw)
+            .expect("native read privilege control returns its original state");
+        assert_eq!(original["pid"].as_u64(), Some(u64::from(runtime_pid)));
+        assert!(original["creation_ticks"].is_string(), "{original}");
+        assert!(original["present"].is_boolean(), "{original}");
+        assert!(original["was_enabled"].is_boolean(), "{original}");
+        assert_eq!(original["enabled"], false, "{original}");
+        eprintln!("owned directory reader backup privilege: {original}");
+        Self {
+            root: root.to_path_buf(),
+            arguments,
+            original,
+        }
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        let mut arguments: Vec<&std::ffi::OsStr> =
+            self.arguments.iter().map(AsRef::as_ref).collect();
+        let original = if self.original["was_enabled"] == true {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
+        let creation = self.original["creation_ticks"].as_str().unwrap();
+        arguments.extend(
+            ["-ReadBypass", original, "-ExpectedCreationTicks", creation].map(std::ffi::OsStr::new),
+        );
+        let raw = windows_control(&self.root, &arguments)?;
+        let restored: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        if restored["enabled"] != self.original["was_enabled"]
+            || restored["was_enabled"] != false
+            || restored["present"] != self.original["present"]
+            || restored["pid"] != self.original["pid"]
+            || restored["creation_ticks"] != self.original["creation_ticks"]
+        {
+            return Err(format!(
+                "native read privilege differs: original={}; restored={restored}",
+                self.original
+            ));
+        }
+        eprintln!("restored owned directory reader backup privilege: {restored}");
+        Ok(())
+    }
+}
+
+impl Drop for ReadBypassGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            if std::thread::panicking() {
+                eprintln!("could not restore owned reader token: {error}");
+            } else {
+                panic!("could not restore owned reader token: {error}");
             }
         }
     }

@@ -329,7 +329,7 @@ def committed_test_groups(head):
 
 
 def resource_executor_identity(ref):
-    """Recognize only the serial/adaptive compiler budget; retain all other code."""
+    """Normalize only known compiler budgets and command-completion waits."""
     path = ".github/scripts/local_acceptance.py"
     row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
@@ -337,7 +337,7 @@ def resource_executor_identity(ref):
     source = tracked(ref, path).decode("utf-8")
     tree = ast.parse(source)
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    reserved = {"os", "psutil", "max", "min", "str", "int", "RuntimeError"}
+    reserved = {"os", "psutil", "time", "subprocess", "max", "min", "str", "int", "RuntimeError"}
     if any(node.name in reserved for node in functions):
         raise ValueError("Compiler budget helper is shadowed by a module function")
     if len({node.name for node in functions}) != len(functions):
@@ -363,7 +363,8 @@ def resource_executor_identity(ref):
             for alias in statement.names:
                 binding = alias.asname or alias.name.split(".")[0]
                 if alias.name == "*" or (binding in reserved and not (
-                        isinstance(statement, ast.Import) and alias.name == "os" and alias.asname is None)):
+                        isinstance(statement, ast.Import) and alias.name in {"os", "time", "subprocess"}
+                        and alias.asname is None)):
                     raise ValueError("Compiler budget namespace has an unknown import")
     imports = [node for node in contexts if isinstance(node, ast.Import)
                and any(alias.name == "os" and alias.asname is None for alias in node.names)]
@@ -430,8 +431,30 @@ if cap is not None:
     if text.count(budget_comment) > 1:
         raise ValueError("Duplicate compiler budget explanation")
     text = text.replace(budget_comment, "", 1)
-    return budget_form, canonical({"mode": row[0], "context": profile_ast_value(contexts),
-                                   "executor": profile_ast_value(function), "executor_text": text}).decode()
+    poll = ast.parse("process.poll() is None", mode="eval").body
+    loops = [node for node in ast.walk(function)
+             if isinstance(node, ast.While) and profile_ast_value(node.test) == profile_ast_value(poll)]
+    if len(loops) != 1 or len(loops[0].body) != 2:
+        raise ValueError("Unknown command-completion supervision loop")
+    sleep = ast.parse("time.sleep(0.15)").body[0]
+    notify = ast.parse("""try:
+    process.wait(timeout=0.15)
+except subprocess.TimeoutExpired:
+    pass
+""").body[0]
+    wait = loops[0].body[-1]
+    wait_form = "sleep"
+    if profile_ast_value(wait) == profile_ast_value(notify):
+        wait_form = "completion"
+        original = "\n".join(source.splitlines()[wait.lineno - 1:wait.end_lineno])
+        if text.count(original) != 1:
+            raise ValueError("Unknown command-completion wait source")
+        text = text.replace(original, "                time.sleep(0.15)", 1)
+        loops[0].body[-1] = sleep
+    elif profile_ast_value(wait) != profile_ast_value(sleep):
+        raise ValueError("Unknown command-completion wait or effects")
+    return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                                                "executor": profile_ast_value(function), "executor_text": text}).decode()
 
 
 def resource_equivalent_profiles(before, after, names):
@@ -540,7 +563,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
         if resources:
             print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
                 "original_policy": previous, "current_policy": value("rev-parse", policy_ref),
-                "profiles": sorted(resources), "proof": "only_known_compiler_budget_forms",
+                "profiles": sorted(resources), "proof": "only_known_compiler_budget_or_completion_wait_forms",
                 "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
             }).decode(), flush=True)
         equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
@@ -1227,7 +1250,10 @@ def run_command(command, cwd, log, env=None):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                time.sleep(0.15)
+                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass
         except BaseException:
             # Interrupting owned validation must not orphan compiler children.
             for child in psutil.Process(process.pid).children(recursive=True)[::-1]:

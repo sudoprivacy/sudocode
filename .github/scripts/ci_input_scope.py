@@ -35,7 +35,7 @@ def referenced_globals(table):
 
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
-REVIEWED_VERIFIER_LAYOUT = "7aa45a70af2c3fc23e807a7b0b3ca98770387d8e296923eac773d41cb7cc42b6"
+REVIEWED_VERIFIER_LAYOUT = "f9a29308bfcd542150bf53bbf7a2ddf4445e8979d53f625c53a4fe16c51c53b5"
 
 
 def verifier_layout_digest(source, mode, consumers):

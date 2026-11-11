@@ -9,6 +9,52 @@ import subprocess
 import sys
 
 
+def verify_command_completion(output, source):
+    """Compare original/new supervisors with real child exit and error results."""
+    import importlib.util
+    import psutil
+
+    output.mkdir(parents=True, exist_ok=False)
+    wait = """                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass"""
+    assert source.count(wait) == 1
+    original = output / "original-supervisor.py"
+    original.write_text(source.replace(wait, "                time.sleep(0.15)", 1), encoding="utf-8")
+    version = subprocess.check_output(["git", "--version"])
+    observations = []
+    for name, path in [("original", original), ("completion", output.parent / "trusted-verifier.py")]:
+        spec = importlib.util.spec_from_file_location("completion_" + name, path)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        log = output / f"{name}-short.log"
+        result = helper.run_command(["git", "--version"], output, log)
+        assert result["exit_code"] == 0 and log.read_bytes() == version
+        rows = [result["elapsed_seconds"]]
+        code = ('import psutil,sys; '
+                'assert psutil.Process().nice()==' + str(psutil.Process().nice()) + '; '
+                'sys.stdout.buffer.write(b"original-child-output\\x00\\n")')
+        priority = output / f"{name}-priority.log"
+        helper.run_command([sys.executable, "-c", code], output, priority)
+        assert priority.read_bytes() == b"original-child-output\x00\n"
+        long_log = output / f"{name}-pending.log"
+        pending = helper.run_command([sys.executable, "-c", 'import time; time.sleep(0.35); print("finished")'], output, long_log)
+        assert pending["exit_code"] == 0 and pending["elapsed_seconds"] >= 0.35
+        assert long_log.read_bytes().strip() == b"finished"
+        failure = output / f"{name}-failure.log"
+        try:
+            helper.run_command([sys.executable, "-c", 'import sys; print("actual exit 7"); sys.exit(7)'], output, failure)
+        except RuntimeError:
+            failed = json.loads(failure.with_suffix(".command.json").read_bytes())
+            assert failed["exit_code"] == 7 and failure.read_bytes().strip() == b"actual exit 7"
+            assert failed["log_sha256"] == hashlib.sha256(failure.read_bytes()).hexdigest()
+        else:
+            raise AssertionError("Completion wait discarded an actual child failure")
+        observations.append({"supervisor": name, "short_command_seconds": rows})
+    return observations
+
+
 def verify_resource_scheduling(output, source, command):
     output.mkdir(parents=True, exist_ok=False)
     work = output / "author"
@@ -42,6 +88,13 @@ def verify_resource_scheduling(output, source, command):
     assert serial_function.count('"CARGO_BUILD_JOBS": str(jobs)') == 1
     serial_function = serial_function.replace('"CARGO_BUILD_JOBS": str(jobs)', '"CARGO_BUILD_JOBS": "1"')
     serial = "".join(lines[:function.lineno - 1]) + serial_function + "".join(lines[function.end_lineno:])
+    serial_completion = serial
+    completion_wait = """                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass"""
+    assert serial.count(completion_wait) == 1
+    serial = serial.replace(completion_wait, "                time.sleep(0.15)", 1)
     dispatcher = (source / ".github/local-acceptance/cross_platform.py").read_text(encoding="utf-8")
     execute = next(node for node in ast.parse(dispatcher).body if isinstance(node, ast.FunctionDef) and node.name == "execute")
     lines = dispatcher.splitlines(keepends=True)
@@ -125,6 +178,7 @@ Path(out).parent.joinpath('full-note.json').write_text(json.dumps({'version':1,'
     current = commit("Evolve compiler budget without changing commands or checks")
     trusted = output / "trusted-verifier.py"
     trusted.write_text(adaptive, encoding="utf-8")
+    completion_observations = verify_command_completion(output / "command-completion", adaptive)
     plan_read = '''import runpy,sys
 from pathlib import Path
 h=runpy.run_path(sys.argv[1]); h['read_execution_plan'].__globals__['ROOT']=Path.cwd()
@@ -135,6 +189,15 @@ h['read_execution_plan'](sys.argv[2],sys.argv[3],sys.argv[3],signers_ref=sys.arg
     full_output = run(sys.executable, trusted, "verify", "--head", head, "--base", current, "--policy-ref", current)
     assert "LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" in full_output
     assert f"Verified {head[:12]}" in full_output
+    # Completion notification alone must also preserve the original signed
+    # plan and full result, without requiring a compiler-budget transition.
+    run("git", "checkout", "-b", "completion-only", protected)
+    write(".github/scripts/local_acceptance.py", serial_completion)
+    completion_only = commit("Change only command-completion waiting")
+    wait_plan = run(sys.executable, "-c", plan_read, trusted, head, completion_only)
+    assert "LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE=" in wait_plan
+    wait_full = run(sys.executable, trusted, "verify", "--head", head, "--base", completion_only, "--policy-ref", completion_only)
+    assert f"Verified {head[:12]}" in wait_full
     # Disabling the new proof recreates the original refusal, with valid SSH
     # evidence and the same immutable source/plan. It cannot manufacture a pass.
     legacy = adaptive.replace('return {name for name in names if previous[name] == current[name]}', 'return set()')
@@ -170,6 +233,10 @@ h['read_execution_plan'](sys.argv[2],sys.argv[3],sys.argv[3],signers_ref=sys.arg
         ("dispatcher-state", dispatch_path, 'UNKNOWN_RESOURCE_STATE = 1\n' + dispatcher),
         ("image", ".github/local-acceptance/Dockerfile", "FROM scratch\nENV DIFFERENT_IMAGE=1\n"),
         ("workflow", ".github/workflows/local-acceptance.yml", "# Different native workflow\n"),
+        ("completion-interval", helper_path, executor_change("process.wait(timeout=0.15)", "process.wait(timeout=0.16)")),
+        ("completion-catch", helper_path, executor_change("except subprocess.TimeoutExpired:", "except Exception:")),
+        ("completion-effect", helper_path, executor_change("process.wait(timeout=0.15)", "process.wait(timeout=0.15)\n                    environment.clear()")),
+        ("shadow-wait-module", helper_path, adaptive.replace('\ndef run_command(', '\ndef subprocess(*args):\n    raise RuntimeError("UNKNOWN_WAIT_EFFECT")\n\ndef run_command(', 1)),
     ]
     for index, (name, filename, content) in enumerate(mutations):
         run("git", "checkout", "-b", f"resource-control-{index}", current)
@@ -194,6 +261,7 @@ h['read_execution_plan'](sys.argv[2],sys.argv[3],sys.argv[3],signers_ref=sys.arg
     result = {"status": "PASS", "original_head": head, "original_policy": protected,
               "current_policy": current, "original_real_commands": 2, "migration_real_commands": 0,
               "mutation_refusals": records, "original_notes_signatures_logs_and_first_clock_preserved": True,
+              "completion_only_plan_and_full_preserved": True, "completion_observations": completion_observations,
               "scope": "Private Git/SSH/CLI plan/full/resume controls. No product or missing-platform acceptance."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result), flush=True)

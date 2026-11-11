@@ -805,11 +805,15 @@ const HOST_TERMINAL_HINTS: &[&str] = &[
     "WT_SESSION",
 ];
 
-/// `cd` into `dir` and exec through `/usr/bin/env` without host config or
-/// terminal hints; the caller appends the child's own variables and argv.
+/// `cd` into `dir` and exec through `/usr/bin/env` without host config,
+/// terminal hints or the host session's plan file; the caller appends the
+/// child's own variables and argv. A `scode` session exports
+/// `SUDOCODE_PLAN_FILE` to everything it starts, so a suite run from inside
+/// one would have every child read and write that session's plan: parallel
+/// tests overwrite each other's saved plan before reading it back.
 fn exec_env_prefix(dir: &str) -> String {
     let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR -u SUDOCODE_PLAN_FILE",
         shell_quote(dir)
     );
     for hint in HOST_TERMINAL_HINTS {

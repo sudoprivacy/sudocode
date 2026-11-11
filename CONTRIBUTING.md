@@ -358,10 +358,17 @@ records the total wait across acquisitions as `host_lease_wait_seconds` and each
 profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
 
 A fresh `guard-contract` also validates its protected input pins, selection
-digest and release recipe before joining the host queue. The required
+digest, release recipe and native fixture inventory before joining the host queue. The required
 `GUARD_STATIC_PREFLIGHT` output states that full execution remains required.
 A mismatch reports the path and observed hash, retains signed preflight progress,
 and exits without taking a queue ticket or starting Docker/native checks.
+The same inventory builder checks the required protocol/native counts, duplicate
+script/log entries and missing fixture files at admission and execution.
+`GUARD_NATIVE_INVENTORY` reports the counts and keeps full acceptance required;
+its argv placeholders do not prepare tools or execute tests. A correctly pinned
+but malformed inventory still refuses while another private workflow holds the
+host, without a ticket or completed guard credit. A valid inventory still waits
+for that holder and executes its required profile.
 Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their

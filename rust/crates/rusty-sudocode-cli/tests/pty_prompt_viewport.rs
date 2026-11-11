@@ -6,7 +6,7 @@ use pty_expect::PtySession;
 use serde_json::json;
 
 fn start(env: &TestEnv, enabled: bool, light: bool) -> PtySession {
-    let mut session = env.spawn_with_env(
+    let session = env.spawn_with_env_at_size(
         &["--permission-mode", "read-only"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
@@ -19,8 +19,9 @@ fn start(env: &TestEnv, enabled: bool, light: bool) -> PtySession {
             ("NO_COLOR", ""),
             ("COLORFGBG", if light { "0;15" } else { "15;0" }),
         ],
+        32,
+        96,
     );
-    session.resize(32, 96).unwrap();
     common::expect_screen(
         &session,
         |s| s.contains('❯'),
@@ -82,7 +83,7 @@ fn streaming_and_resume_share_the_inline_editor() {
         common::expect_input_line(&session, "draft界", env.timeout(), "draft survives resize");
         finish(&mut session, &env);
         let requests_before = env.captured_message_bodies().len();
-        let mut resumed = env.spawn_with_env(
+        let mut resumed = env.spawn_with_env_at_size(
             &["--resume", "latest", "--permission-mode", "read-only"],
             &[
                 ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
@@ -91,8 +92,9 @@ fn streaming_and_resume_share_the_inline_editor() {
                     if enabled { "1" } else { "0" },
                 ),
             ],
+            32,
+            96,
         );
-        resumed.resize(32, 96).unwrap();
         common::expect_screen(
             &resumed,
             |s| s.contains("ViewportRow089") && s.contains('❯'),
@@ -128,7 +130,7 @@ fn live_and_resumed_prompts_share_the_editor_surface() {
             "submitted and live prompts use one style"
         );
         finish(&mut session, &env);
-        let mut resumed = env.spawn_with_env(
+        let mut resumed = env.spawn_with_env_at_size(
             &["--resume", "latest", "--permission-mode", "read-only"],
             &[
                 ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
@@ -138,8 +140,9 @@ fn live_and_resumed_prompts_share_the_editor_surface() {
                 ("NO_COLOR", ""),
                 ("COLORFGBG", if light { "0;15" } else { "15;0" }),
             ],
+            32,
+            96,
         );
-        resumed.resize(32, 96).unwrap();
         common::expect_screen(
             &resumed,
             |s| s.contains("Say hello briefly") && s.contains('❯'),
@@ -210,15 +213,16 @@ fn disabled_experiment_retains_inline_input() {
 #[test]
 fn no_color_keeps_the_editor_plain() {
     let env = TestEnv::new_mock("prompt-viewport-no-color");
-    let mut session = env.spawn_with_env(
+    let mut session = env.spawn_with_env_at_size(
         &["--permission-mode", "read-only"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
             ("SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT", "1"),
             ("NO_COLOR", "1"),
         ],
+        32,
+        96,
     );
-    session.resize(32, 96).unwrap();
     common::expect_screen(
         &session,
         |s| s.contains('❯'),

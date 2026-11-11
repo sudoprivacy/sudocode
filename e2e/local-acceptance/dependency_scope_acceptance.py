@@ -1,6 +1,7 @@
 """Exercise development-only build selection through real Git, Cargo and CLI."""
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -186,6 +187,158 @@ def workflow_scope(output, environment):
             "main_preflight_removed_and_independent_cache_publishers_retained": True}
 
 
+def scheduling_scope(output, environment):
+    """Run the actual selector on committed scheduling edits and conservative controls."""
+    output.mkdir()
+    repository = output / "repository"
+    repository.mkdir()
+    records, commands = [], []
+
+    def git(*args, data=None, overrides=None):
+        argv = ["git", *map(str, args)]
+        result = subprocess.run(argv, cwd=repository, input=data, capture_output=True,
+                                env={**environment, **(overrides or {})})
+        index = len(commands)
+        (output / f"git-{index:03}.stdout").write_bytes(result.stdout)
+        (output / f"git-{index:03}.stderr").write_bytes(result.stderr)
+        commands.append({"argv": argv, "exit_code": result.returncode})
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        return result.stdout.decode().strip()
+
+    def write(name, contents):
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    runner = ".github/scripts/local_acceptance.py"
+    profiles = ".github/local-acceptance/checks.py"
+    names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+             "e2e/local-acceptance/host_lease_acceptance.py"]
+    sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Scheduling Scope E2E")
+    git("config", "user.email", "scheduling-scope@example.invalid")
+    for name, contents in sources.items():
+        write(name, contents)
+    git("add", ".")
+    git("commit", "-m", "Original committed scheduling scope inputs")
+    base = git("rev-parse", "HEAD")
+
+    def insert_body(source, name):
+        node = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == name)
+        lines = source.splitlines(keepends=True)
+        lines.insert(node.body[0].lineno - 1, "    pass\n")
+        return "".join(lines)
+
+    def observe(label, first, head, expected, *, rust=False):
+        for event_name in ["pull_request", "push", "merge_group"]:
+            if event_name == "pull_request":
+                event = {"pull_request": {"base": {"sha": first}, "head": {"sha": head}}}
+            elif event_name == "push":
+                event = {"before": first, "after": head}
+            else:
+                event = {"merge_group": {"base_sha": first, "head_sha": head}}
+            prefix = output / f"{label}-{event_name}"
+            event_path, github_output = prefix.with_suffix(".event.json"), prefix.with_suffix(".output")
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            github_output.touch()
+            argv = [sys.executable, str(SOURCE / ".github/scripts/ci_input_scope.py")]
+            result = subprocess.run(argv, cwd=repository, env={**environment,
+                "GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_OUTPUT": str(github_output)}, capture_output=True)
+            prefix.with_suffix(".stdout").write_bytes(result.stdout)
+            prefix.with_suffix(".stderr").write_bytes(result.stderr)
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            actual = json.loads(result.stdout)
+            assert actual["daemon_required"] == str(not expected).lower(), (label, actual)
+            assert actual["a2a_required"] == actual["cohost_required"] == actual["daemon_required"], (label, actual)
+            assert actual["live_required"] == actual["clippy_required"] == str(rust).lower(), (label, actual)
+            if expected:
+                assert actual["acceptance_scheduling_scope"]["decision"] == "unchanged_queue_executors", actual
+                assert actual["acceptance_scheduling_scope"]["contract_guard_required"] is True, actual
+            assert actual["benchmark_required"] == actual["container_required"] == "true", actual
+            records.append({"case": label, "event": event_name, "base": first, "head": head,
+                            "expected_scheduling_only": expected, "actual": actual,
+                            "stdout_sha256": hashlib.sha256(result.stdout).hexdigest()})
+
+    pure = insert_body(sources[runner], "host_acceptance_lease")
+    changed_fixture = sources[names[-1]] + "\n# Private enforcement-fixture input.\n"
+    changed_pins = sources[profiles]
+    for name, contents in [(runner, pure), (names[-1], changed_fixture)]:
+        changed_pins, count = re.subn(r'("' + re.escape(name) + r'": ")[0-9a-f]{64}(")',
+            lambda match: match[1] + hashlib.sha256(contents.encode()).hexdigest() + match[2], changed_pins)
+        assert count == 1, name
+    missing = sources[runner].splitlines(keepends=True)
+    declaration = next(node for node in ast.parse(sources[runner]).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "host_acceptance_lease")
+    first_line = min([declaration.lineno, *[node.lineno for node in declaration.decorator_list]])
+    del missing[first_line - 1:declaration.end_lineno]
+    cases = [
+        ("lease-body", {runner: pure}, True),
+        ("check-body", {runner: insert_body(sources[runner], "perform_check")}, True),
+        ("reservation-body", {runner: insert_body(sources[runner], "profile_reservations")}, True),
+        ("fixture-and-pins", {runner: pure, profiles: changed_pins, names[-1]: changed_fixture}, True),
+        ("command-body", {runner: insert_body(sources[runner], "run_command")}, False),
+        ("selection-body", {runner: insert_body(sources[runner], "selected")}, False),
+        ("module-global", {runner: pure + "\nSCHEDULING_SCOPE_CONTROL = True\n"}, False),
+        ("changed-signature", {runner: sources[runner].replace(
+            "def host_acceptance_lease(attempt, head):", "def host_acceptance_lease(attempt, head=None):")}, False),
+        ("changed-decorator", {runner: sources[runner].replace(
+            "@contextlib.contextmanager\ndef host_acceptance_lease", "@((lambda function: function))\ndef host_acceptance_lease")}, False),
+        ("reservation-default", {runner: sources[runner].replace(
+            "def profile_reservations(ordered, pending):", "def profile_reservations(ordered, pending=None):")}, False),
+        ("reservation-annotation", {runner: sources[runner].replace(
+            "def profile_reservations(ordered, pending):", "def profile_reservations(ordered: int, pending):")}, False),
+        ("missing-scheduling-function", {runner: "".join(missing)}, False),
+        ("duplicate-definition", {runner: pure + "\ndef host_acceptance_lease(attempt, head):\n    pass\n"}, False),
+        ("unknown-mixed-input", {runner: pure, ".github/unrecognized.py": "# Conservative mixed input\n"}, False),
+        ("mixed-product-source", {runner: pure, "rust/crates/runtime/src/scheduling_scope.rs": "// Product input\n"}, False),
+        ("changed-profile-execution", {runner: pure, profiles: insert_body(sources[profiles], "run")}, False),
+        ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
+    ]
+    for label, edits, expected in cases:
+        git("switch", "--detach", base)
+        for name, contents in edits.items():
+            write(name, contents)
+        git("add", ".")
+        git("commit", "-m", "Scope control " + label)
+        observe(label, base, git("rev-parse", "HEAD"), expected, rust=label == "mixed-product-source")
+    for label, declaration in [
+        ("external-reference", "def external_control():\n    return profile_reservations\n"),
+        ("external-namespace", 'def external_control():\n    return globals().get("profile_" + "reservations")\n'),
+        ("external-exec", 'def external_control(current_runner, namespace):\n'
+                          '    exec(compile(current_runner, namespace["__file__"], "exec"), namespace)\n'),
+    ]:
+        git("switch", "--detach", base)
+        write(runner, sources[runner] + "\n" + declaration)
+        git("add", ".")
+        git("commit", "-m", "Unchanged external observer " + label)
+        before = git("rev-parse", "HEAD")
+        write(runner, pure + "\n" + declaration)
+        git("add", ".")
+        git("commit", "-m", "Scheduling edit with existing external observer " + label)
+        observe(label, before, git("rev-parse", "HEAD"), False)
+    git("switch", "--detach", base)
+    # Commit mode-only trees through private indexes; no OS symlink privilege
+    # or mutation of a caller's worktree/index is needed.
+    for mode in ["100755", "120000"]:
+        index = output / (mode + ".index")
+        values = {"GIT_INDEX_FILE": str(index)}
+        git("read-tree", base, overrides=values)
+        blob = git("rev-parse", base + ":" + runner)
+        git("update-index", "--cacheinfo", f"{mode},{blob},{runner}", overrides=values)
+        tree = git("write-tree", overrides=values)
+        head = git("commit-tree", tree, "-p", base, "-m", "Committed mode boundary " + mode)
+        observe("mode-" + mode, base, head, False)
+    assert not git("status", "--porcelain"), "Private source/index changed after mode-only controls"
+    result = {"status": "PASS", "cases": records, "git_commands": commands,
+              "scope": "Actual Git commits and original PR/push/queue selector CLI. No Cargo, daemon, provider or product coverage."}
+    (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"PASS: {len(records)} real Git/event scheduling scope and conservative execution/mode boundaries", flush=True)
+    return result
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     repository = output / "repository"
@@ -290,6 +443,7 @@ def run(output):
 
     original_cohost = cohost()
     workflow = workflow_scope(output / "workflow-scope", environment)
+    scheduling = scheduling_scope(output / "scheduling-scope", environment)
     development = application + '[dev-dependencies]\nscope-helper={path="../helper"}\n'
     write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
     write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); }\n')
@@ -730,6 +884,7 @@ def run(output):
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,
               "workflow_scope": workflow,
+              "scheduling_scope": scheduling,
               "compiler_priority": expected_priority,
               "scope": "Actual Git/public planner and Cargo/native canaries. No product runtime, provider or performance coverage claimed."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")

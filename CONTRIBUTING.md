@@ -230,6 +230,21 @@ reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
 or out of product source retain their original checks. This deliberately
 removes general product smoke coverage from selector-only queue revisions;
 no selected journey, assertion or deadline is shortened.
+Author-scheduling edits can also omit unchanged daemon journeys. This requires
+regular committed runner files with the same mode and identical module code
+outside `host_acceptance_lease` and `perform_check` bodies and the plain
+`profile_reservations(ordered, pending)` declaration. The required policy and
+every non-guard reachable execution fingerprint must still match. Companion
+edits are limited to dispatcher changes with those same non-guard fingerprints,
+the host-lease enforcement fixture and documentation. Changed command runners,
+imports, globals, runner declarations,
+product code, workflows, unknown inputs or execution fingerprints retain the
+original daemon scope. `acceptance_scheduling_scope` in the mandatory CI JSON
+reports the proof or fallback reason. Real Git PR/push/queue controls, preflight
+and the full native/Docker contract guard remain required. This removes general
+product smoke coverage for proven author-scheduling-only revisions; every
+selected journey keeps its cases, assertions and deadlines. These infrastructure
+controls add no product coverage. Observed job costs are not measured savings.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes

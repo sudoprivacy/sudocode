@@ -539,8 +539,21 @@ def validate_before_host_lease(names, root, output):
         return
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
           "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
-    stage_profile_executor(root, execution_policy_ref(), "guard-contract",
-                           output / "guard-contract" / "prequeue-static-policy")
+    executor = stage_profile_executor(root, execution_policy_ref(), "guard-contract",
+                                      output / "guard-contract" / "prequeue-static-policy")
+    spec = importlib.util.spec_from_file_location("prequeue_native_inventory", executor)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    # These paths only construct argv. Tool preparation and actual execution
+    # remain inside the lease; this snapshot grants no completed-check credit.
+    pending = argparse.Namespace(executable=Path("not-prepared-nextest"),
+                                 source_receipt=Path("not-prepared-source.json"), options="{}")
+    fixtures, protocol, native = guard.fixture_inventory(root, output / "guard-contract" / "native", pending)
+    print("GUARD_NATIVE_INVENTORY=" + json.dumps({
+        "protocol": len(protocol), "native": len(native), "total": len(fixtures),
+        "stage": "before host queue; execution rebuilds and rechecks the same inventory",
+        "full_acceptance_required": True,
+    }), flush=True)
     print("GUARD_STATIC_PREFLIGHT: passed; execution will restage and revalidate the protected Git inputs.",
           flush=True)
 
@@ -1053,7 +1066,7 @@ def native_guard_files():
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "db3e7843e3db4c08ef755e6fb15896bcc622764b4ad1dd13d96c768ae2458120",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "fbd4662ddbb417e1a429bef551ef55e018b0b254024cd151db1de294a370a27b",
+        ".github/local-acceptance/native_guard.py": "cfd1fa7cf9f40917f42a8cc9919625d740f2e6189f6b4a86efd9546a28c21c96",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "98b861c11fa102c92d158412e7d96cfaff7b427a2ae919250d801a6fb783fc77",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
@@ -1070,11 +1083,11 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/host_lease_acceptance.py": "54426be8abe9d5d0810e4ddb3d24b0ff763758c4575b5b699807b1970fde0c9e",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8236c0986d1ebc9ec114baaff5ce11c152ec73202f13e207a090fa2de6e44802",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
-        "e2e/local-acceptance/native_lint_acceptance.py": "6e57fa4c286f52f7d70b2a7135fd7e2d52230c678f74531c5464b5da35a05779",
+        "e2e/local-acceptance/native_lint_acceptance.py": "b89f76790ca36916cd08680cfa07bff96ca305ea542becb39d49a979f12a378a",
         "e2e/local-acceptance/parallel_acceptance.py": "3b78635c542e26bcb500af9383fd02937137024805618049c0c2a77f27242220",
         "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",

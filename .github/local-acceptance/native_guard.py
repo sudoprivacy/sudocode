@@ -13,40 +13,8 @@ import sys
 SOURCE = Path(__file__).resolve().parents[2]
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--executable", type=Path, required=True)
-    parser.add_argument("--source-receipt", type=Path, required=True)
-    parser.add_argument("--options", required=True)
-    args = parser.parse_args()
-    repository, output = args.repository.resolve(), args.output.resolve()
-    if output == SOURCE or SOURCE in output.parents or output == repository or repository in output.parents:
-        raise RuntimeError("Keep native guard outputs outside the source checkout")
-    output.mkdir(parents=True, exist_ok=False)
-    spec = importlib.util.spec_from_file_location("native_guard_profiles", SOURCE / ".github/local-acceptance/checks.py")
-    profiles = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(profiles)
-    print("GUARD_NATIVE_TOOL_PREFLIGHT: prepare and verify the platform-pinned protoc before "
-          "the native matrix; isolated fixtures copy only that tool cache, never home or lease claims.", flush=True)
-    protoc = profiles.cohost_protoc()
-    if protoc is not None:
-        (output / "protoc-source.json").write_text(json.dumps({
-            "version": "3.20.2", "executable": str(protoc),
-            "executable_sha256": hashlib.sha256(protoc.read_bytes()).hexdigest(),
-        }, indent=2) + "\n")
-    spec = importlib.util.spec_from_file_location("native_executor", SOURCE / ".github/scripts/local_acceptance.py")
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
-    helper.ROOT = repository
-    # The isolated tool snapshot needs Git discovery for fixture-environment cleanup.
-    commands = [helper.run_command(["git", "init", "--initial-branch=main", str(SOURCE)],
-                                  output, output / "snapshot-git.log")]
-    configured = helper.git("config", "--get", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
-    if configured:
-        commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
-                                          SOURCE, output / "toolchain-config.log"))
+def fixture_inventory(repository, output, args):
+    """Validate the same command list before queueing and before execution, without running it."""
     fixtures = []
 
     def fixture(command, cwd, log):
@@ -123,7 +91,56 @@ def main():
     ], SOURCE, output / "native-lint.log")
     protocol = [row for row in fixtures if Path(row["command"][1]).name == "parallel_acceptance.py"]
     native = [row for row in fixtures if row not in protocol]
-    assert len(protocol) == 1 and len(native) == 14
+    if len(protocol) != 1 or len(native) != 14:
+        raise RuntimeError(f"Native guard inventory requires 1 protocol and 14 native fixtures; "
+                           f"found {len(protocol)} protocol and {len(native)} native. "
+                           "Reconcile the fixture list and required counts, then rerun the same acceptance command. "
+                           "Full guard execution remains required.")
+    scripts = [Path(row["command"][1]) for row in fixtures]
+    logs = [row["log"] for row in fixtures]
+    if len(set(scripts)) != len(scripts) or len(set(logs)) != len(logs):
+        raise RuntimeError("Native guard inventory contains duplicate fixture scripts or command logs")
+    for script in scripts:
+        if not script.is_file():
+            raise RuntimeError(f"Native guard inventory fixture is missing: {script}")
+    return fixtures, protocol, native
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--executable", type=Path, required=True)
+    parser.add_argument("--source-receipt", type=Path, required=True)
+    parser.add_argument("--options", required=True)
+    args = parser.parse_args()
+    repository, output = args.repository.resolve(), args.output.resolve()
+    if output == SOURCE or SOURCE in output.parents or output == repository or repository in output.parents:
+        raise RuntimeError("Keep native guard outputs outside the source checkout")
+    fixtures, protocol, native = fixture_inventory(repository, output, args)
+    output.mkdir(parents=True, exist_ok=False)
+    spec = importlib.util.spec_from_file_location("native_guard_profiles", SOURCE / ".github/local-acceptance/checks.py")
+    profiles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiles)
+    print("GUARD_NATIVE_TOOL_PREFLIGHT: prepare and verify the platform-pinned protoc before "
+          "the native matrix; isolated fixtures copy only that tool cache, never home or lease claims.", flush=True)
+    protoc = profiles.cohost_protoc()
+    if protoc is not None:
+        (output / "protoc-source.json").write_text(json.dumps({
+            "version": "3.20.2", "executable": str(protoc),
+            "executable_sha256": hashlib.sha256(protoc.read_bytes()).hexdigest(),
+        }, indent=2) + "\n")
+    spec = importlib.util.spec_from_file_location("native_executor", SOURCE / ".github/scripts/local_acceptance.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    helper.ROOT = repository
+    # The isolated tool snapshot needs Git discovery for fixture-environment cleanup.
+    commands = [helper.run_command(["git", "init", "--initial-branch=main", str(SOURCE)],
+                                  output, output / "snapshot-git.log")]
+    configured = helper.git("config", "--get", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
+    if configured:
+        commands.append(helper.run_command(["git", "config", "localAcceptance.vsdevcmd", configured],
+                                          SOURCE, output / "toolchain-config.log"))
     configuration = output / "native-parallel.json"
     configuration.write_text(json.dumps({
         "version": 1, "kind": "native-policy", "root": str(SOURCE), "branches": [

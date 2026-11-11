@@ -249,6 +249,10 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     git("init", "--initial-branch=main")
     git("config", "user.name", "Scheduling Scope E2E")
     git("config", "user.email", "scheduling-scope@example.invalid")
+    configuration = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
+        cwd=SOURCE, env=environment, capture_output=True, text=True).stdout.strip()
+    if configuration:
+        git("config", "localAcceptance.vsdevcmd", configuration)
     for name, contents in sources.items():
         write(name, contents)
     git("add", ".")
@@ -262,7 +266,7 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
         return "".join(lines)
 
-    def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None):
+    def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None, overrides=None):
         for event_name in events or ["pull_request", "push", "merge_group"]:
             if event_name == "pull_request":
                 event = {"pull_request": {"base": {"sha": first}, "head": {"sha": head}}}
@@ -275,7 +279,7 @@ def scheduling_scope(output, environment, *, metadata_only=False):
             event_path.write_text(json.dumps(event), encoding="utf-8")
             github_output.touch()
             argv = [sys.executable, str(SOURCE / ".github/scripts/ci_input_scope.py")]
-            result = subprocess.run(argv, cwd=repository, env={**environment,
+            result = subprocess.run(argv, cwd=repository, env={**environment, **(overrides or {}),
                 "GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event_path),
                 "GITHUB_OUTPUT": str(github_output)}, capture_output=True)
             prefix.with_suffix(".stdout").write_bytes(result.stdout)
@@ -439,9 +443,90 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         git("add", ".")
         git("commit", "-m", "Metadata edit observed by queue consumer " + label)
         observe("metadata-" + label, before, git("rev-parse", "HEAD"), False, kind="metadata", events=["merge_group"])
+    # Import-time observers can affect actual command environments even when
+    # run_command itself and all metadata declarations compare equal.
+    def verifier_value(source, value):
+        node = next(item for item in ast.parse(source).body
+                    if isinstance(item, ast.FunctionDef) and item.name == "verify_envelope")
+        lines = source.splitlines(keepends=True)
+        return "".join(lines[:node.body[0].lineno - 1]) + "    return " + repr(value) + "\n" + "".join(lines[node.end_lineno:])
+
+    observer_body = (
+        '    value = verify_envelope(None, None, None, None)\n'
+        '    os.environ["SCODE_METADATA_CANARY"] = value\n'
+        '    marker = os.environ.get("SCODE_METADATA_IMPORT_MARKER")\n'
+        '    if marker:\n'
+        '        Path(marker).write_text(value)\n')
+    observers = {
+        "module-call": "def metadata_import_observer():\n" + observer_body + "\nmetadata_import_observer()\n",
+        "default-call": "def metadata_default_observer():\n" + observer_body + "    return value\n\n"
+                        "def metadata_unused(value=metadata_default_observer()):\n    return value\n",
+        "decorator-call": "def metadata_decorator_observer(function):\n" + observer_body + "    return function\n\n"
+                          "@metadata_decorator_observer\ndef metadata_unused():\n    return None\n",
+    }
+    imports = []
+    mutant_dir = output / "old-behavior-mutant"
+    mutant_dir.mkdir()
+    selector_source = (SOURCE / ".github/scripts/ci_input_scope.py").read_text(encoding="utf-8")
+    assert selector_source.count("if current[3] != REVIEWED_VERIFIER_LAYOUT:") == 1
+    mutant = selector_source.replace("if current[3] != REVIEWED_VERIFIER_LAYOUT:", "if False:", 1)
+    (mutant_dir / "ci_input_scope.py").write_text(mutant, encoding="utf-8")
+    (mutant_dir / "local_acceptance.py").write_text(sources[runner], encoding="utf-8")
+    for label, observer in observers.items():
+        git("switch", "--detach", base)
+        before_source = verifier_value(sources[runner], "before")
+        at = before_source.index('if __name__ == "__main__":')
+        before_source = before_source[:at] + observer + "\n" + before_source[at:]
+        write(runner, before_source)
+        git("add", ".")
+        git("commit", "-m", "Existing eager observer " + label)
+        first = git("rev-parse", "HEAD")
+        write(runner, verifier_value(before_source, "after"))
+        git("add", ".")
+        git("commit", "-m", "Verifier body observed at import " + label)
+        head = git("rev-parse", "HEAD")
+        marker = output / (label + ".unexpected-import")
+        observe("metadata-import-" + label, first, head, False, kind="metadata", events=["merge_group"],
+                overrides={"SCODE_METADATA_IMPORT_MARKER": str(marker)})
+        assert not marker.exists(), "Scope proof imported an unreviewed comparison-base constructor"
+        event = output / (label + ".mutant-event.json")
+        event.write_text(json.dumps({"merge_group": {"base_sha": first, "head_sha": head}}))
+        github_output = output / (label + ".mutant-output")
+        github_output.touch()
+        argv = [sys.executable, str(mutant_dir / "ci_input_scope.py")]
+        result = subprocess.run(argv, cwd=repository, env={**environment,
+            "GITHUB_EVENT_NAME": "merge_group", "GITHUB_EVENT_PATH": str(event),
+            "GITHUB_OUTPUT": str(github_output), "SCODE_METADATA_IMPORT_MARKER": str(marker)}, capture_output=True)
+        (output / (label + ".mutant.stdout")).write_bytes(result.stdout)
+        (output / (label + ".mutant.stderr")).write_bytes(result.stderr)
+        assert result.returncode == 0, result.stderr
+        old = json.loads(result.stdout)
+        assert old["daemon_required"] == "false", "Old-behavior control must expose the unsafe omission"
+        assert marker.read_text() == "before", "Old proof must actually execute the comparison-base constructor"
+        values = {}
+        for state, ref in [("before", first), ("after", head)]:
+            helper_path = output / (label + "-" + state + "-runner.py")
+            helper_path.write_text(git("show", f"{ref}:{runner}"), encoding="utf-8")
+            log = output / (label + "-" + state + "-native.log")
+            loader = ('import importlib.util,sys\nfrom pathlib import Path\n'
+                'spec=importlib.util.spec_from_file_location("private_observer",sys.argv[1])\n'
+                'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);m.ROOT=Path(sys.argv[2])\n'
+                'm.run_command([sys.executable,"-c",sys.argv[4]],m.ROOT,Path(sys.argv[3]))\n')
+            child = subprocess.run([sys.executable, "-c", loader, str(helper_path), str(repository), str(log),
+                'import os;print(os.environ["SCODE_METADATA_CANARY"])'],
+                cwd=repository, env={key: value for key, value in environment.items()
+                                     if key != "SCODE_METADATA_IMPORT_MARKER"}, capture_output=True)
+            (output / (label + "-" + state + ".stdout")).write_bytes(child.stdout)
+            (output / (label + "-" + state + ".stderr")).write_bytes(child.stderr)
+            assert child.returncode == 0, child.stderr
+            values[state] = log.read_text().strip()
+        assert values == {"before": "before", "after": "after"}, values
+        imports.append({"case": label, "base": first, "head": head, "new_scope_refused_without_import": True,
+                        "old_behavior_mutant_unsafe_skip": True, "actual_native_child_values": values})
     assert not git("status", "--porcelain"), "Private source/index changed after mode-only controls"
     result = {"status": "PASS", "cases": records, "git_commands": commands,
               "targeted_metadata_only": metadata_only,
+              "actual_import_observer_controls": imports,
               "scope": "Actual Git commits and original PR/push/queue selector CLI. No Cargo, daemon, provider or product coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"PASS: {len(records)} real Git/event scheduling/verifier scope and conservative execution/mode boundaries", flush=True)

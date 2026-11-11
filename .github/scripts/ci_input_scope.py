@@ -4,6 +4,7 @@
 import ast
 import builtins
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import os
@@ -30,6 +31,33 @@ def referenced_globals(table):
         result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
         pending.extend(current.get_children())
     return result
+
+
+
+# Unknown import/declaration/consumer layouts retain the generic daemon jobs.
+REVIEWED_VERIFIER_LAYOUT = "7aa45a70af2c3fc23e807a7b0b3ca98770387d8e296923eac773d41cb7cc42b6"
+
+
+def verifier_layout_digest(source, mode, consumers):
+    """Bind reviewed eager context, every declaration and complete consumer code."""
+    tree = ast.parse(source)
+    # Python normalizes CRLF while compiling; retain all other source text.
+    lines = source.replace("\r\n", "\n").splitlines(keepends=True)
+    layout = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            if node.body[0].lineno <= node.lineno:
+                raise ValueError("Unknown inline runner declaration")
+            first = min([node.lineno, *[item.lineno for item in node.decorator_list]])
+            item = {"function": node.name,
+                    "declaration": "".join(lines[first - 1:node.body[0].lineno - 1])}
+            if node.name in consumers:
+                item["consumer"] = "".join(lines[first - 1:node.end_lineno])
+        else:
+            item = {"context": "".join(lines[node.lineno - 1:node.end_lineno])}
+        layout.append(item)
+    encoded = json.dumps({"mode": mode, "layout": layout}, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def unchanged_profile_execution(base, head):
@@ -125,12 +153,15 @@ def metadata_only_inputs(paths, base, head, details):
                      or (isinstance(item, (ast.ClassDef, ast.AsyncFunctionDef)) and item.name in metadata | roots)
                      for item in ast.walk(node)):
                 raise ValueError("Module context observes a changed verifier or namespace")
-        return row[0], ast.dump(tree, include_attributes=False), sorted(bound)
+        return row[0], ast.dump(tree, include_attributes=False), sorted(bound), verifier_layout_digest(source, row[0], bound)
 
     try:
         previous, current = identity(base), identity(head)
         if previous != current:
             raise ValueError("Code outside verifier bodies or function declarations changed")
+        details.update(reviewed_layout=REVIEWED_VERIFIER_LAYOUT, observed_layout=current[3])
+        if current[3] != REVIEWED_VERIFIER_LAYOUT:
+            raise ValueError("Runner imports, declarations or consumers are outside the reviewed layout; full daemon checks continue")
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),
                        consumer_functions=current[2], profiles=names,

@@ -18,6 +18,7 @@ use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
     user_ctx, wait_for_agent_reply,
 };
+use kernel::core::agents::host_cleanup::HostCleanupOutcome;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
@@ -745,13 +746,39 @@ fn wait_idle(kernel: &Kernel, pid: &serde_json::Value) {
     }
 }
 
+/// Cancel is a stop request: the original host keeps custody until its own
+/// teardown has joined, and the service reports that cleanup as pending
+/// meanwhile. Wait for the retirement the host publishes.
 fn stop_session(kernel: &Kernel, pid: &serde_json::Value) {
-    managed_call(
+    if let Err(error) = managed_call(
         kernel,
         "cancel_v1",
         &serde_json::json!({"session_id":pid,"mode":"session"}),
-    )
-    .unwrap();
+    ) {
+        assert!(
+            error.contains("host cleanup unconfirmed") && error.contains("Pending"),
+            "cancel failed for a reason other than pending cleanup: {error}"
+        );
+    }
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
+    loop {
+        let state = managed_call(
+            kernel,
+            "get_session_v1",
+            &serde_json::json!({"session_id":pid}),
+        );
+        if state
+            .as_ref()
+            .map_or(true, |state| state["state"] == "terminated")
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled host did not retire: {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn await_new_reply(
@@ -1157,10 +1184,16 @@ fn a_cohost_that_closes_cleanly_is_terminated() {
         states.observer(),
     )
     .expect("spawn the co-host");
+    let cleanup = handle.cleanup.clone();
     complete_turn_then_stop(&world, agent_id, handle);
     assert!(
         states.terminated_within(Duration::from_secs(30)),
         "a confirmed teardown publishes Terminated"
+    );
+    assert_eq!(
+        cleanup.outcome(),
+        HostCleanupOutcome::Joined,
+        "the registry's latch accepted the joined teardown before Terminated"
     );
 }
 
@@ -1196,6 +1229,7 @@ fn a_cohost_whose_engine_is_stuck_in_a_tool_is_not_terminated() {
     entered
         .recv_timeout(Duration::from_mins(1))
         .expect("the agent's read tool reached the held read");
+    let cleanup = handle.cleanup.clone();
     handle.abort_signal.abort();
     let _ = handle.join.join();
     // Engine reap, bridge stop and completion retirement wait 30 s each.
@@ -1203,12 +1237,22 @@ fn a_cohost_whose_engine_is_stuck_in_a_tool_is_not_terminated() {
         !states.terminated_within(Duration::from_secs(120)),
         "a host whose engine is still inside a tool must not be reported terminated"
     );
+    assert!(
+        matches!(cleanup.outcome(), HostCleanupOutcome::Unconfirmed(_)),
+        "the host completed the registry's latch as unconfirmed: {:?}",
+        cleanup.outcome()
+    );
     // Had the outcome still been pending, the release would now let teardown
     // confirm; the latched unconfirmed result must stay.
     drop(release);
     assert!(
         !states.terminated_within(Duration::from_secs(20)),
         "a late release must not turn an unconfirmed teardown into Terminated"
+    );
+    assert!(
+        matches!(cleanup.outcome(), HostCleanupOutcome::Unconfirmed(_)),
+        "a late release must not turn the latch into joined: {:?}",
+        cleanup.outcome()
     );
 }
 
@@ -1243,9 +1287,15 @@ fn a_cohost_whose_session_lease_was_broken_is_not_terminated() {
         .clone()
         .expect("a write into the session ran while the host held its lease");
     eprintln!("[test] broke the session lease {lease}");
+    let cleanup = handle.cleanup.clone();
     complete_turn_then_stop(&world, agent_id, handle);
     assert!(
         !states.terminated_within(Duration::from_secs(30)),
         "a host that could not release its lease must not be reported terminated"
+    );
+    assert!(
+        matches!(&cleanup.outcome(), HostCleanupOutcome::Unconfirmed(error) if error.contains(&lease)),
+        "the latch carries the failed release of {lease}: {:?}",
+        cleanup.outcome()
     );
 }

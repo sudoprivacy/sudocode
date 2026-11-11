@@ -79,6 +79,15 @@ pub async fn serve_managed(
     context: ManagedRuntimeContext,
     transport: impl ConnectTo<Agent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (result, cleanup) = serve_managed_sessions(context, transport).await;
+    primary_outcome(result, cleanup)
+}
+
+/// The transport's end and the confirmed cleanup of every session, apart.
+pub(crate) async fn serve_managed_sessions(
+    context: ManagedRuntimeContext,
+    transport: impl ConnectTo<Agent>,
+) -> (Result<(), Box<dyn std::error::Error>>, Result<(), String>) {
     let config = managed_session_config(&managed_model(context.descriptor()));
     let registry = Arc::new(SessionRegistry::with_hosted_factory(Arc::new(
         ManagedSessions { context },
@@ -89,8 +98,15 @@ pub async fn serve_managed(
     let cleanup = tokio::task::spawn_blocking(move || closing.close_all())
         .await
         .unwrap_or_else(|error| Err(format!("session cleanup did not finish: {error}")));
-    // The transport's own error stays the primary one; a cleanup failure is
-    // reported when the transport ended cleanly and logged otherwise.
+    (result, cleanup)
+}
+
+/// The transport's own error stays the primary one; a cleanup failure is
+/// reported when the transport ended cleanly and logged otherwise.
+pub(crate) fn primary_outcome(
+    result: Result<(), Box<dyn std::error::Error>>,
+    cleanup: Result<(), String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match (result, cleanup) {
         (Ok(()), Err(cleanup)) => Err(cleanup.into()),
         (Err(primary), Err(cleanup)) => {

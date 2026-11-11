@@ -7,6 +7,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+# These native fixture controls use only this executable's builtin modules.
+# Intermediate Python/Rust parents can retain PowerShell 7 module paths.
+$env:PSModulePath = [System.IO.Path]::Combine($PSHOME, 'Modules')
 
 if ($Operation -eq 'VerifyProcess') {
     $RuntimeId = [uint32]$Target

@@ -86,7 +86,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
         ],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    common::expect_input_line_cleared(&sess, env.timeout(), "repl ready");
+    sess.expect("❯").expect("should see REPL prompt");
 
     let prompt = env.prompt(
         "Call write_plan with a short markdown plan as `content`. Just call the tool.",
@@ -149,7 +149,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
         ],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    common::expect_input_line_cleared(&sess, env.timeout(), "repl ready");
+    sess.expect("❯").expect("should see REPL prompt");
 
     let prompt = env.prompt(
         "Call write_plan with a short markdown plan as `content`. Just call the tool.",

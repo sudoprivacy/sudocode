@@ -146,6 +146,11 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    /// Observation metadata stays readable while a turn owns the model mutex.
+    /// The session handle remains its writer, through `rebuild_locked` below.
+    runtime_identity: std::sync::Arc<std::sync::RwLock<runtime::runtime_status::RuntimeIdentity>>,
+    runtime_observation:
+        Option<std::sync::Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
     host_context_required: std::sync::atomic::AtomicBool,
     background_tasks: runtime::background_tasks::BackgroundTasks,
     /// A cancellation endpoint that stays accessible while compaction holds
@@ -219,7 +224,13 @@ impl SessionEngine {
         host_prompt_sections: Vec<String>,
         allows_session_replacement: bool,
     ) -> Result<Self, String> {
+        let runtime_identity = runtime::runtime_status::RuntimeIdentity {
+            session_id: Some(session.handle.id.clone()),
+            os_pid: Some(std::process::id()),
+        };
         Ok(Self {
+            runtime_observation: session.host.runtime_observation.clone(),
+            runtime_identity: std::sync::Arc::new(std::sync::RwLock::new(runtime_identity)),
             host_context_required: std::sync::atomic::AtomicBool::new(false),
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             turn_inputs: runtime::turn_input::TurnInputInbox::default(),
@@ -577,6 +588,10 @@ impl SessionEngine {
         };
         session.runtime = runtime;
         session.handle = handle;
+        self.runtime_identity
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session_id = Some(session.handle.id.clone());
         Ok(())
     }
 
@@ -1091,6 +1106,28 @@ fn require_fit_without_compaction(
 }
 
 impl engine_core::EngineDelegate for SessionEngine {
+    fn observe_runtime_status(
+        &self,
+        read: runtime::runtime_status::RuntimeStatusReader,
+    ) -> Option<Box<dyn Send>> {
+        let host = self.runtime_observation.as_ref()?;
+        let identity = std::sync::Arc::downgrade(&self.runtime_identity);
+        host.bind(std::sync::Arc::new(move || {
+            let identity = identity.upgrade()?;
+            let before = identity.try_read().ok()?.clone();
+            let status = read()?;
+            // A reset can change SID while a turn owns the model mutex. Refuse
+            // a torn snapshot without waiting for that turn or retaining it.
+            if before != *identity.try_read().ok()? {
+                return None;
+            }
+            Some(runtime::runtime_status::RuntimeFacts {
+                identity: before,
+                status,
+            })
+        }))
+    }
+
     fn requires_host_context(&self) -> bool {
         self.host_context_required
             .load(std::sync::atomic::Ordering::SeqCst)

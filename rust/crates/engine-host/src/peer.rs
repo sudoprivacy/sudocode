@@ -23,6 +23,8 @@ use runtime::nexus_mailbox::Config;
 use runtime::FsBackend;
 use runtime::HookAbortSignal;
 
+mod runtime_observation;
+
 /// Blocking-tail wait per receive iteration on the node.
 const INBOX_WAIT_MS: u64 = 500;
 
@@ -34,6 +36,7 @@ enum NodeState {
     Ready {
         config: Config,
         backend: Arc<dyn FsBackend>,
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
     },
 }
 
@@ -52,7 +55,7 @@ impl NodeBinding {
             NodeState::Pending { endpoint, .. } => endpoint.clone(),
             NodeState::Ready { backend, .. } => return Ok(Arc::clone(backend)),
         };
-        let resolved: Result<(Config, Arc<dyn FsBackend>), String> = (|| {
+        let resolved = (|| -> Result<_, String> {
             let config = Config::from_node_record(&self.agent)?.ok_or_else(|| {
                 "the selected node record is no longer available; A2A remains on the node namespace".to_string()
             })?;
@@ -62,17 +65,18 @@ impl NodeBinding {
             // the existing cert-only backend; no per-request token or local
             // identity reference is substituted for that server verification.
             let backend: Arc<dyn FsBackend> = Arc::new(NexusVfsFsBackend::from_arc_mtls(
-                client,
+                Arc::clone(&client),
                 String::new(),
                 "root",
             ));
-            Ok((config, backend))
+            Ok((config, backend, client))
         })();
         match resolved {
-            Ok((config, backend)) => {
+            Ok((config, backend, client)) => {
                 *state = NodeState::Ready {
                     config,
                     backend: Arc::clone(&backend),
+                    client,
                 };
                 Ok(backend)
             }
@@ -224,6 +228,15 @@ pub fn node(agent: &str) -> Option<Arc<Node>> {
 }
 
 impl Node {
+    pub(crate) fn observation_host(
+        &self,
+        kernel: Arc<kernel::kernel::Kernel>,
+    ) -> Arc<dyn runtime::runtime_status::RuntimeObservationHost> {
+        Arc::new(runtime_observation::NodeRuntimeHost::new(
+            Arc::clone(&self.binding),
+            kernel,
+        ))
+    }
     /// The actual authenticated backend shared with this actor's mailbox.
     /// Resolve only when a configured Nexus model mount needs it.
     #[inline]

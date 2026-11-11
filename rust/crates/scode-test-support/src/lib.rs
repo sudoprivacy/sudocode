@@ -1,6 +1,9 @@
 //! Shared native PTY fixtures. Caller modules supply their lazy executable resolver.
 #![allow(dead_code)] // each test file uses a subset
 
+mod native_fixtures;
+pub use native_fixtures::{verify_owned_runtime_process, DirectoryReadFault};
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;

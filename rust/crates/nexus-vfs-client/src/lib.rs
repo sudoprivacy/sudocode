@@ -112,6 +112,7 @@ enum VfsOp {
         method: String,
         payload: Vec<u8>,
         auth_token: String,
+        deadline: std::time::Instant,
         resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
     },
     /// Append one frame to a `DT_STREAM`; returns the offset it landed at.
@@ -254,6 +255,7 @@ impl NexusVfsClient {
                     let ch = match tls {
                         None => builder.connect_lazy(),
                         Some(t) => {
+                            lib::transport_primitives::ensure_crypto_provider();
                             let cfg = tonic::transport::ClientTlsConfig::new()
                                 .ca_certificate(tonic::transport::Certificate::from_pem(t.ca_pem))
                                 .identity(tonic::transport::Identity::from_pem(
@@ -447,25 +449,52 @@ impl NexusVfsClient {
                                     method,
                                     payload,
                                     auth_token,
+                                    deadline,
                                     resp,
                                 } => {
-                                    let r = client
-                                        .call(deadlined(
-                                            CallRequest {
-                                                method,
-                                                payload,
-                                                auth_token,
-                                            },
-                                            OP_DEADLINE,
+                                    // The wire header starts after readiness.
+                                    // One absolute clock also covers the lazy
+                                    // TLS/HTTP2 queue and the final response.
+                                    let result = tokio::time::timeout_at(
+                                        tokio::time::Instant::from_std(deadline),
+                                        async {
+                                            let remaining = deadline.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            );
+                                            if remaining.is_zero() {
+                                                Err(io::Error::new(
+                                                    io::ErrorKind::TimedOut,
+                                                    "Call expired before transport admission",
+                                                ))
+                                            } else {
+                                                let r = client
+                                                    .call(deadlined(
+                                                        CallRequest {
+                                                            method,
+                                                            payload,
+                                                            auth_token,
+                                                        },
+                                                        remaining,
+                                                    ))
+                                                    .await;
+                                                grpc_result(r, |r| {
+                                                    if r.is_error {
+                                                        Err(vfs_err(&r.payload))
+                                                    } else {
+                                                        Ok(r.payload)
+                                                    }
+                                                })
+                                            }
+                                        },
+                                    )
+                                    .await
+                                    .unwrap_or_else(|_| {
+                                        Err(io::Error::new(
+                                            io::ErrorKind::TimedOut,
+                                            "Call exceeded its transport deadline",
                                         ))
-                                        .await;
-                                    let _ = resp.send(grpc_result(r, |r| {
-                                        if r.is_error {
-                                            Err(vfs_err(&r.payload))
-                                        } else {
-                                            Ok(r.payload)
-                                        }
-                                    }));
+                                    });
+                                    let _ = resp.send(result);
                                 }
                                 VfsOp::StreamWrite {
                                     path,
@@ -935,16 +964,35 @@ impl NexusVfsClient {
     /// Generic Call RPC — sends `method` + JSON `payload` through the
     /// nexus VFS `Call` endpoint. Returns the response payload bytes.
     pub fn call(&self, method: &str, payload: &[u8], auth_token: &str) -> io::Result<Vec<u8>> {
+        self.call_with_deadline(method, payload, auth_token, OP_DEADLINE)
+    }
+
+    /// Bound queue admission, channel readiness and the transport reply.
+    /// A timeout after sending does not prove a mutation was not applied.
+    pub fn call_with_deadline(
+        &self,
+        method: &str,
+        payload: &[u8],
+        auth_token: &str,
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
+        if timeout.is_zero() || timeout > OP_DEADLINE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Call deadline is outside the supported range",
+            ));
+        }
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
             .send(VfsOp::Call {
                 method: method.to_owned(),
                 payload: payload.to_vec(),
                 auth_token: auth_token.to_owned(),
+                deadline: std::time::Instant::now() + timeout,
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        await_reply(&resp_rx, timeout + HANDOFF_GRACE)
     }
 
     /// Inspect a directory entry through the typed Stat RPC.

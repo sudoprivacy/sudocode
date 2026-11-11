@@ -238,6 +238,19 @@ pub(crate) struct EventSink {
     pub(crate) inputs: Arc<crate::session_inputs::SessionInputs>,
 }
 
+fn snapshot_runtime_status(
+    state: &Mutex<engine_events::EngineState>,
+    background: runtime::runtime_status::BackgroundTaskSummary,
+) -> engine_events::RuntimeStatus {
+    let foreground = *state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    engine_events::RuntimeStatus {
+        foreground,
+        background,
+    }
+}
+
 impl EventSink {
     pub(crate) fn new(
         tx: &Arc<std::sync::mpsc::Sender<EngineEvent>>,
@@ -264,14 +277,19 @@ impl EventSink {
         &self,
         tasks: &runtime::background_tasks::BackgroundTasks,
     ) -> engine_events::RuntimeStatus {
-        let foreground = *self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        engine_events::RuntimeStatus {
-            foreground,
-            background: tasks.summary(),
-        }
+        snapshot_runtime_status(&self.state, tasks.summary())
+    }
+
+    pub(crate) fn runtime_status_reader(
+        &self,
+        delegate: Weak<dyn crate::EngineDelegate>,
+    ) -> runtime::runtime_status::RuntimeStatusReader {
+        let state = Arc::downgrade(&self.state);
+        Arc::new(move || {
+            let background = delegate.upgrade()?.runtime_status_background()?;
+            let state = state.upgrade()?;
+            Some(snapshot_runtime_status(&state, background))
+        })
     }
 
     pub(crate) fn send(&self, event: EngineEvent) -> Result<(), std::sync::mpsc::SendError<()>> {

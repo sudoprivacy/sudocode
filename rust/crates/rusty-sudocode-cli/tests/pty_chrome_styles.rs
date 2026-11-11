@@ -529,8 +529,11 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
-    expect_style(&sess, "✓", ("Idx(2)", false, false));
-    expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
+    // Icons take the tool card status colors: finished is a finished card's
+    // green, in progress a running card's amber, open a queued card's gray.
+    expect_style(&sess, "✓", ("Rgb(166, 227, 161)", false, false));
+    expect_style(&sess, "■", (DARK_AMBER, false, false));
+    expect_style(&sess, "□", (DARK_SECONDARY, false, false));
     expect_style(&sess, "Checking styles", ("Default", true, false));
     expect_style(&sess, "Finished parser", ("Default", false, true));
     expect_style(&sess, "Review output", ("Default", false, false));
@@ -557,7 +560,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     };
     let env = TestEnv::new("info-shared-green");
     let store = env.workspace_root().join("todos.json");
-    std::fs::write(&store, r#"[{"content":"Check info colors","status":"in_progress","activeForm":"Checking info colors"}]"#).unwrap();
+    std::fs::write(&store, r#"[{"content":"Ship info colors","status":"completed","activeForm":"Shipping info colors"},{"content":"Check info colors","status":"in_progress","activeForm":"Checking info colors"}]"#).unwrap();
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
         &[
@@ -573,9 +576,10 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line_cleared(&sess, env.timeout(), "info input ready");
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
-    expect_style(&sess, "1 todos", ("Default", true, false));
-    // Information icons keep their semantic green; activity uses neutral text.
-    expect_style(&sess, "■", (green, false, false));
+    expect_style(&sess, "2 todos", ("Default", true, false));
+    // A finished todo shares the finished tool card's green; activity uses
+    // neutral text.
+    expect_style(&sess, "✓", (green, false, false));
     let marker = common::turn_status_marker(&sess);
     let prompt = env.prompt(
         "What is 17 times 23? Work it out, then give the number.",

@@ -651,7 +651,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
 pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardContent {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-    tool_card_content(name, &in_val, None, ToolStatus::Running)
+    tool_card_content(name, &in_val, None, ToolStatus::Running, 0)
 }
 
 /// The single source of truth for a tool card's semantic content, shared by the
@@ -663,12 +663,15 @@ pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardConten
 /// tool's real arguments (command, path, pattern…), so a tool can never render
 /// a bodyless summary that hides what it was called with. The optional `body`
 /// carries the result (stdout, diff, matches). On error the identity still
-/// shows the arguments and the error text becomes the body.
+/// shows the arguments and the error text becomes the body. `width` is the
+/// terminal width the card will be painted at, for a body laid out to it (the
+/// todo list); 0 when it is not known yet.
 pub(crate) fn tool_card_content(
     name: &str,
     input: &serde_json::Value,
     output: Option<&serde_json::Value>,
     status: ToolStatus,
+    width: usize,
 ) -> ToolCardContent {
     match ToolKind::from_name(name) {
         Some(ToolKind::Bash) => shell_card("Bash", input, output),
@@ -693,7 +696,7 @@ pub(crate) fn tool_card_content(
         Some(ToolKind::Skill) => skill_card(input, output, status),
         Some(ToolKind::ReadToolOutput) => read_tool_output_card(input, output, status),
         Some(ToolKind::WebSearch) => web_search_card(input, output, status),
-        Some(ToolKind::TodoWrite) => todo::card(name, output),
+        Some(ToolKind::TodoWrite) => todo::card(name, output, width),
         Some(ToolKind::Monitor) => monitor_card(input, output),
         None => generic_tool_card(name, input, output, status),
     }
@@ -786,6 +789,17 @@ impl ToolCardContent {
     }
 }
 
+/// Tests paint a card at the current terminal width.
+#[cfg(test)]
+pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
+    render_tool_card_with_width(
+        content,
+        status,
+        crate::render::query_terminal_width(),
+        false,
+    )
+}
+
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
 /// syntax-theme green (ok), or red (error). A call that is still queued or
@@ -798,15 +812,7 @@ impl ToolCardContent {
 /// keeps output copy-pasteable and pipe-safe, matching Sudo Code's scrollback
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
-pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    render_tool_card_with_width(
-        content,
-        status,
-        crate::render::query_terminal_width(),
-        false,
-    )
-}
-
+///
 /// The layout owner supplies its width, so all cards in one UI frame use the
 /// same terminal-size snapshot instead of racing independent ioctl queries.
 /// `is_pulse_low` draws a running card's frame at the quiet point of its pulse.
@@ -887,7 +893,9 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
     } else {
         status
     };
-    let mut content = tool_card_content(name, &in_val, Some(&out_val), status);
+    // One width for the body's layout and the frame around it.
+    let term_width = crate::render::query_terminal_width();
+    let mut content = tool_card_content(name, &in_val, Some(&out_val), status, term_width);
     if is_error {
         // The extractor's success body (if any) is meaningless on failure;
         // replace it with the raw error text so the identity + error read
@@ -908,7 +916,7 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
             None => feedback_body,
         });
     }
-    render_tool_card(&content, status)
+    render_tool_card_with_width(&content, status, term_width, false)
 }
 
 /// Read a string field that may live in the tool's `input` (arguments) or its
@@ -3935,7 +3943,7 @@ mod tests {
             "old_string": "line one\nline two\nline three",
             "new_string": "new one\nnew two",
         });
-        let content = tool_card_content("edit_file", &input, None, ToolStatus::Running);
+        let content = tool_card_content("edit_file", &input, None, ToolStatus::Running, 0);
         let plain = strip_ansi(&render_tool_card(&content, ToolStatus::Running));
         assert!(plain.contains("Editing src/main.rs"), "{plain}");
         assert!(plain.contains("1 -line one"), "{plain}");

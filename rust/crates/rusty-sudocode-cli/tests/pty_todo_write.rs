@@ -225,6 +225,67 @@ fn todo(content: &str, status: &str) -> String {
     format!(r#"{{"content":"{content}","status":"{status}","activeForm":"Doing {content}"}}"#)
 }
 
+/// The reported dense list: in the live panel a long item wraps under its own
+/// label, not under the icon, and is cut to the rows its status allows (three
+/// in progress, two open), so the panel stays a glance.
+#[test]
+fn long_todos_wrap_under_their_label_and_are_cut_to_a_glance() {
+    let env = TestEnv::new("todo-panel-long-items");
+    let store = env.workspace_root().join("todos.json");
+    let long = "wire the managed child entry through the bootstrap line on private stdin then the typed ready or error reply then ACP on the same reader and report each outcome to the root agent before the next step starts";
+    std::fs::write(
+        &store,
+        format!("[{},{}]", todo(long, "in_progress"), todo(long, "pending")),
+    )
+    .expect("seed long todos");
+    let mut sess = env.spawn_with_env_at_size(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_TODO_STORE", store.to_str().unwrap())],
+        30,
+        60,
+    );
+    common::expect_input_line_cleared(&sess, env.timeout(), "input ready");
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains(" todos ("),
+        env.timeout(),
+        "todo panel painted",
+    );
+    let rows: Vec<String> = sess.render(|screen| {
+        let raw = screen.raw();
+        raw.rows(0, raw.size().1).collect()
+    });
+    let header = rows
+        .iter()
+        .position(|row| row.contains(" todos ("))
+        .expect("todo header row");
+    let mut items: Vec<Vec<&str>> = Vec::new();
+    for row in &rows[header + 1..] {
+        if row.starts_with("  \u{25a0} ") || row.starts_with("  \u{25a1} ") {
+            items.push(vec![row]);
+        } else if row.starts_with("    ") && !row.starts_with("     ") && !items.is_empty() {
+            items.last_mut().unwrap().push(row);
+        } else {
+            break;
+        }
+    }
+    let rows_per_item: Vec<usize> = items.iter().map(Vec::len).collect();
+    assert_eq!(rows_per_item, [3, 2], "rows per item: {rows:#?}");
+    assert!(
+        items[0][0].starts_with("  \u{25a0} Doing wire"),
+        "{items:?}"
+    );
+    assert!(items[1][0].starts_with("  \u{25a1} wire"), "{items:?}");
+    for item in &items {
+        assert!(
+            item.last().unwrap().trim_end().ends_with('\u{2026}'),
+            "a cut item ends with …: {item:?}"
+        );
+    }
+    sess.send("/exit\r").unwrap();
+    let _ = sess.expect_eof();
+}
+
 #[test]
 fn todo_header_counts_in_progress_once_and_open_as_pending() {
     let mixed = format!(

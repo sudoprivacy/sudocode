@@ -1440,7 +1440,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n",
                 "- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n",
                 "- Send the full list each call; it replaces the previous one.\n",
-                "- Keep one item `in_progress` at a time and mark it `completed` when done."
+                "- Keep one item `in_progress` at a time and mark it `completed` when done.\n",
+                "- Keep each item to one short line naming the work; put details, evidence and status in your messages, not in the list."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1451,12 +1452,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": { "type": "string", "description": "Imperative description of the work" },
+                                "content": { "type": "string", "description": "Imperative description of the work, in one short line" },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"]
                                 },
-                                "activeForm": { "type": "string", "description": "Present-continuous label shown while in_progress" }
+                                "activeForm": { "type": "string", "description": "Present-continuous label shown while in_progress, in one short line" }
                             },
                             "required": ["content", "status", "activeForm"],
                             "additionalProperties": false

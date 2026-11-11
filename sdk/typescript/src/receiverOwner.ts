@@ -56,6 +56,11 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
     Buffer.from(windowsProcessOwnerSource, 'utf16le').toString('base64')],
   { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
   let buffer = '', stderr = '', settled = false, closing = false, bootstrapComplete = false;
+  const startedAt = performance.now();
+  let lastPhase = 'spawn_requested';
+  const phases: { phase: string; elapsedMs: number }[] = [];
+  const diagnostic = () => `ownerMonitor=${JSON.stringify({ pid: child.pid ?? null,
+    lastPhase, elapsedMs: Math.round(performance.now() - startedAt), phases, stderr })}`;
   let finish!: (result: ReceiverOwnerEnd) => void;
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };
@@ -73,13 +78,13 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
   });
   // Initial qualification can refuse; it is never used as a recurring liveness
   // timer. After readiness the OS wait, not elapsed wall time, decides exit.
-  const startup = setTimeout(() => refuse(new Error('Receiver owner qualification timed out; liveness UNKNOWN')), 10000);
+  const startup = setTimeout(() => refuse(new Error(`Receiver owner qualification timed out; liveness UNKNOWN; ${diagnostic()}`)), 10000);
   const onAbort = () => { refuse(new Error('Receiver owner qualification cancelled')); child.stdin.end(); };
   signal?.addEventListener('abort', onAbort, { once: true });
   if (signal?.aborted) onAbort();
   const closed = new Promise<void>(resolve => child.once('close', (code, exitSignal) => {
     clearTimeout(startup); signal?.removeEventListener('abort', onAbort);
-    refuse(new Error(`Receiver owner monitor closed before qualification: ${code}/${exitSignal}; ${stderr}`));
+    refuse(new Error(`Receiver owner monitor closed before qualification: ${code}/${exitSignal}; ${diagnostic()}`));
     end(closing ? { reason: 'channel_closed' } : {
       reason: 'monitor_failed', detail: `Owner liveness UNKNOWN: monitor closed ${code}/${exitSignal}; ${stderr}`,
     });
@@ -99,6 +104,14 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
         const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
         if (!line) continue;
         const value = JSON.parse(line);
+        // Diagnostic milestones never confer readiness, liveness or cleanup.
+        // Keep the exact original deadline and retain the bounded stderr tail.
+        if (['bootstrap_started', 'bootstrap_complete', 'request_received', 'owner_opened',
+          'receiver_opened', 'captured', 'ready', 'ended', 'error'].includes(value.phase)) {
+          lastPhase = value.phase;
+          if (phases.length < 12) phases.push({ phase: value.phase, elapsedMs: Math.round(performance.now() - startedAt) });
+        }
+        if (['bootstrap_started', 'request_received', 'owner_opened', 'receiver_opened'].includes(value.phase)) continue;
         if (value.phase === 'bootstrap_complete' && !bootstrapComplete) {
           bootstrapComplete = true; continue;
         }

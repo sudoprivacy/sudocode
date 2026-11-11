@@ -6,6 +6,8 @@ export const windowsProcessOwnerSource = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::WriteLine('{"phase":"bootstrap_started"}')
+[Console]::Out.Flush()
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -73,7 +75,9 @@ $selected = $null
 $receiver = $null
 try {
     $request = [Console]::In.ReadLine() | ConvertFrom-Json
+    [Console]::WriteLine('{"phase":"request_received"}')
     $selected = [ScodeProcessOwner]::new([int]$request.pid)
+    [Console]::WriteLine('{"phase":"owner_opened"}')
     $identity = @{platform='win32'; pid=$selected.Pid; createdFiletime100ns=$selected.CreatedFiletime100ns; exe=$selected.Exe}
     if ($request.mode -eq 'capture') {
         [Console]::WriteLine((@{phase='captured'; identity=$identity} | ConvertTo-Json -Compress))
@@ -82,6 +86,7 @@ try {
             throw 'Selected process identity differs; do not adopt a replacement PID'
         }
         $receiver = [ScodeProcessOwner]::new([int]$request.receiverPid)
+        [Console]::WriteLine('{"phase":"receiver_opened"}')
         $selected.RequireAlive()
         [Console]::WriteLine((@{phase='ready'; identity=$identity} | ConvertTo-Json -Compress))
         $reason = $selected.Wait($receiver)

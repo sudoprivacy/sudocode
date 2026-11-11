@@ -107,6 +107,9 @@ async function main(){
           // original compiler refusal (or be downgraded by that refusal).
           assert.match(state.error,/original qualification failure: Error: Receiver owner monitor closed before qualification:/);
           assert.match(state.error,/Add-Type/);
+          assert.match(state.error,/ownerMonitor=/);
+          assert.match(state.error,/"lastPhase":"bootstrap_started"/);
+          assert.match(state.error,/"elapsedMs":\d+/);
           originalFailure=state.error;break;
         }
         assert.ok(Date.now()<readyDeadline,failureStderr);await delay(30);

@@ -109,6 +109,27 @@ the session; one waiter runs per spool, a cursor keeps delivered peers from
 repeating, and a peer that arrives while none is armed waits for the next. This
 is Claude Code's counterpart of the `turn/start` a Codex attachment uses.
 
+### Every Claude Code session as its own Agent
+
+`--claude --config FILE` is a user-scope MCP entry that needs no launch flag.
+Claude Code starts one MCP server per session and names it in
+`CLAUDE_CODE_SESSION_ID`, which `--continue`/`--resume` keep, so the session is
+the native root exactly as a thread is for `--codex`: its first start enrolls a
+`claude-<32 hex>` Agent through the same operator adapter, later starts reuse
+the original Agent and ACP session, and an uncertain enrollment is never
+replayed. Each session has its own wake spool; the hook reads the session from
+Claude Code's hook input, so one hook command serves every session.
+
+```json
+{ "version": 1, "mode": "claude-autojoin", "stateDirectory": "/abs/private/claude",
+  "auditLog": "/abs/private/claude/audit.jsonl", "peerPolicy": "node-namespace",
+  "enrollmentArgv": ["/abs/node", "/abs/server.cjs", "--enroll-codex", "--config", "/abs/private/operator.json"] }
+```
+
+Register it with `claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`
+and the `SessionStart`/`Stop` `asyncRewake` hook with `--claude-wake --config FILE`
+in the user settings. The operator's `scode` must support client-owned peer input.
+
 ## Global native Codex attachment
 
 The `--codex` entry connects all loaded user-root threads through one per-user

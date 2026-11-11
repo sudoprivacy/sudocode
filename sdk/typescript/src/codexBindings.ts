@@ -179,3 +179,53 @@ export function readBindings(directory: string): Map<string, CodexBinding> {
   }
   return result;
 }
+
+/** A native root that receives its own Agent: a Codex thread or a Claude Code session. */
+export interface NativeRoot { id: string; cwd: string; frontend: 'codex' | 'claude' }
+
+/** The enrollment authority's answer for one claim (see enrollCodexAgent). */
+export interface ProvisionedAgent { actor: string; configFile: string; workspaceBinding?: CodexWorkspaceBinding }
+
+/** Return the root's durable binding, persisting a new pending one first. A new
+ * actor is `<frontend>-<32 hex>`, the only names operator enrollment issues. */
+export async function claimBinding(directory: string, bindings: Map<string, CodexBinding>, root: NativeRoot): Promise<CodexBinding> {
+  const existing = bindings.get(root.id);
+  if (existing) return existing;
+  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: `${root.frontend}-${randomUUID().replaceAll('-', '')}`,
+    operationId: randomUUID(), threadId: root.id, workspace: root.cwd,
+    canonicalWorkspace: canonicalWorkspace(root.cwd), state: 'pending' };
+  // Persist the original operation BEFORE asking any enrollment authority.
+  await writeBinding(directory, binding, true);
+  bindings.set(root.id, binding);
+  return binding;
+}
+
+/** Bring a binding to `ready` through its original operation. A refusal the
+ * authority attests was never submitted stays pending; any other failure is
+ * recovery_required, so an uncertain issuance is never replayed or reminted. */
+export async function provisionBinding(directory: string, binding: CodexBinding, cwd: string,
+  resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<ProvisionedAgent>,
+  notSubmitted: (error: unknown) => boolean): Promise<void> {
+  assertWorkspace(binding, cwd);
+  if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
+  if (binding.state !== 'pending') return;
+  binding.state = 'provisioning';
+  await writeBinding(directory, binding);
+  try {
+    const profile = await resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
+      operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
+    if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
+    binding.configFile = profile.configFile;
+    bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
+    binding.state = 'ready';
+    await writeBinding(directory, binding);
+  } catch (error) {
+    binding.state = notSubmitted(error) ? 'pending' : 'recovery_required';
+    try { await writeBinding(directory, binding); }
+    catch (persistenceError) {
+      throw new AggregateError([error, persistenceError], 'Enrollment outcome and recovery-state persistence both failed', { cause: error });
+    }
+    throw error;
+  }
+}
+

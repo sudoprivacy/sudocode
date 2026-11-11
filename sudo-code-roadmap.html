@@ -1080,7 +1080,15 @@ holder remains active; metadata-only source still completes. No product
 coverage, assertion or deadline is removed by this prerequisite check.</p>
 <p><strong>Reject invalid guard inputs before queueing (2026-11-06).</strong>
 Fresh contract guards reuse the existing static staging checks before entering
-the host queue: protected file pins, selection digest and release recipe.
+the host queue: protected file pins, selection digest, release recipe and native
+fixture inventory. The same inventory builder checks protocol/native counts,
+duplicate scripts/logs and missing scripts before admission and execution.
+<code>GUARD_NATIVE_INVENTORY</code> reports counts without preparing tools or
+executing tests. Real Git/SSH/native-process controls correctly pin malformed
+inventories: count, duplicate and missing-script errors refuse before a held
+private queue; a valid list still waits and executes its required profile.
+These infrastructure controls add no product journey coverage or measured
+population saving; passing-run cases, deadlines and full guard remain required.
 Required <code>GUARD_STATIC_PREFLIGHT</code> output explains the check and keeps
 full execution required. An actual malformed pin is refused while another
 private workflow holds the host, with zero host wait, no queue ticket and no

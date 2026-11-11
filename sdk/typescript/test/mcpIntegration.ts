@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -277,6 +278,59 @@ async function checkWake(): Promise<void> {
   } finally { await client.close(); }
 }
 
+/** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,
+ * resumes it by session id, and wakes through its own spool. */
+async function checkClaudeAutojoin(): Promise<void> {
+  const state = path.join(directory, 'claude-autojoin');
+  const issuer = path.join(directory, 'claude-issuer');
+  fs.mkdirSync(issuer, { mode: 0o700 });
+  const config = path.join(directory, 'claude-autojoin.json');
+  fs.writeFileSync(config, JSON.stringify({ version: 1, mode: 'claude-autojoin', stateDirectory: state,
+    auditLog: path.join(directory, 'claude-autojoin-audit.jsonl'), peerPolicy: 'allowlist', peers: ['fixture-peer'],
+    enrollmentArgv: [process.execPath, path.join(root, 'test/fixtures/codexAgentEnrollment.cjs'), issuer, 'channel-allowlist'],
+  }), { mode: 0o600 });
+  const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
+  const claims = () => fs.existsSync(path.join(issuer, 'claims.jsonl'))
+    ? journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }> : [];
+  const session = async (sessionId: string) => {
+    const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
+      env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_PROJECT_DIR: directory } as Record<string, string>,
+      stderr: 'pipe' });
+    let stderr = ''; transport.stderr?.on('data', bytes => { stderr += String(bytes); });
+    const client = new Client({ name: 'claude-autojoin', version: '1' });
+    const spool = path.join(state, `${sessionId}.wake.jsonl`);
+    const before = fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
+    try {
+      await client.connect(transport);
+      const deadline = Date.now() + 5000;
+      const count = () => fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
+      while (count() <= before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(count(), before + 1, 'the allowlisted peer reaches this session\'s own spool');
+    } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
+    finally { await client.close(); }
+  };
+  const first = randomUUID(), second = randomUUID();
+  await session(first);
+  assert.equal(claims().length, 1);
+  assert.match(claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
+  assert.equal(claims()[0].threadId, first, 'the session id is the native root');
+  await session(first);
+  assert.equal(claims().length, 1, 'resuming a session reuses its original Agent and ACP session');
+  await session(second);
+  assert.equal(claims().length, 2);
+  assert.notEqual(claims()[1].actor, claims()[0].actor, 'each session gets its own Agent');
+  // The hook names its session through Claude Code's JSON input.
+  const woke = await new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
+    child.on('exit', code => resolve({ code, stderr }));
+    child.stdin!.end(JSON.stringify({ session_id: first, hook_event_name: 'Stop' }));
+  });
+  assert.equal(woke.code, 2);
+  assert.equal((woke.stderr.match(/<channel source="nexus_scode" from="fixture-peer"/g) ?? []).length, 2,
+    'both peers spooled for this session wake it, and none of the other session\'s');
+}
+
 async function main(): Promise<void> {
   // A focused regression control can supply the previous bridge executable.
   // Normal source and portable-package acceptance still run every case below.
@@ -287,6 +341,7 @@ async function main(): Promise<void> {
   }
   for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
   await checkWake();
+  await checkClaudeAutojoin();
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'delayed-initialize', 'closing-initialize', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.

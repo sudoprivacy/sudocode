@@ -194,7 +194,8 @@ function readHeader(socket: Socket): Promise<unknown> {
   });
 }
 
-async function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
+/** Run the operator's enrollment adapter for one claim and check its answer's shape. */
+export async function enroll(argv: string[], claim: CodexAgentClaim): Promise<CodexAgentProfile> {
   const profile = await runEnrollmentCommand(argv, claim) as CodexAgentProfile;
   if(!profile || Object.keys(profile).some(key=>!['actor','configFile','workspaceBinding'].includes(key))) throw new Error('Invalid enrollment response');
   return profile;

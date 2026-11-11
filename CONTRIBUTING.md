@@ -1216,6 +1216,13 @@ journey coverage.
 CLI A2A and cohost journeys use independent fresh-node jobs after the same pin
 preflight. Each selected job must pass; an unselected job must be skipped.
 Their original shell commands, features, cases and fault assertions remain.
+The managed scode and remote-context journeys run once on the queue tree:
+CLI A2A's `run.sh` owns them when selected; independently selected cohost changes
+run the same script in the cohost job. Missing selection fails before the daemon
+starts. The integrated gate still requires each selected job to pass. Real
+workflow-shell controls retain cohost-only execution and child failure propagation
+and refuse both an omitted journey and duplicate dispatch. This removes a repeated
+invocation and retains each original journey, assertion and deadline.
 An isolated matched GitHub comparison with identical source and full cache hits
 took 825 seconds sequentially and 506 seconds in parallel. Total runner time
 was 825 versus 837 seconds. This one run demonstrates a shorter daemon path,

@@ -373,9 +373,19 @@ jobs:
       # The same managed agent hosted OUT of the daemon: the public
       # nexusd-cluster and an owner credential, with every session effect over
       # that one authenticated connection. This is the co-host's replacement.
+      # run.sh already requires this exact journey when CLI A2A is selected.
+      # Preserve it here for independently selected co-host changes.
       - name: Managed scode against the public nexusd-cluster
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
-        run: e2e/nexus-a2a/run-managed-subprocess.sh
+        env:
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+        run: |
+          set -eu
+          case "$A2A_REQUIRED" in
+            true) echo 'Managed scode is required by CLI A2A run.sh; the integrated gate requires that job to pass.' ;;
+            false) e2e/nexus-a2a/run-managed-subprocess.sh ;;
+            *) echo '::error::Missing CLI A2A input decision; no managed daemon started'; exit 1 ;;
+          esac
 
       - name: Conditional owner content survives a co-host process restart
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'

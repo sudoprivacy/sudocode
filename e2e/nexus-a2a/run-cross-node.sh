@@ -43,6 +43,10 @@ fi
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-xnode.XXXXXX")"
 FOUNDER_PID=
 JOINER_PID=
+show_node_log() {
+  # Startup logs contain an enrollment token, including on readiness failures.
+  tail -"$2" "$1" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
+}
 cleanup() {
   local status=$?
   [ -n "$JOINER_PID" ] && kill "$JOINER_PID" 2>/dev/null || true
@@ -50,8 +54,7 @@ cleanup() {
   if [ "$status" -ne 0 ]; then
     for node in founder joiner; do
       echo "== $node log after cross-node failure ==" >&2
-      # Startup logs contain a join token. Never expose it in CI output.
-      tail -100 "$DATA_DIR/$node.log" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
+      show_node_log "$DATA_DIR/$node.log" 100
     done
   fi
   if [ "${NEXUS_A2A_KEEP_WORK:-0}" = 1 ]; then
@@ -71,7 +74,7 @@ wait_log() {
     sleep 1
   done
   echo "!! '$needle' never appeared in $file" >&2
-  tail -40 "$file" >&2
+  show_node_log "$file" 40
   return 1
 }
 
@@ -107,7 +110,7 @@ AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
 AUTHON_PORT="$FOUNDER_PORT"
 AUTHON_ZONE="$ZONE"
 AUTHON_DATA_DIR="$DATA_DIR/a"
-PROBE_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
+PROBE_BUNDLE="$(authon_mint "live-probe")" || { show_node_log "$DATA_DIR/founder.log" 40; exit 1; }
 RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
 SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
 
@@ -122,7 +125,7 @@ RUST_LOG=info \
   "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
   >"$DATA_DIR/founder.log" 2>&1 &
 FOUNDER_PID=$!
-wait_log "$DATA_DIR/founder.log" "stream-wakeup" 45
+wait_log "$DATA_DIR/founder.log" "VFS data plane ready" 45
 
 # The founder prints a join token (`K10<pw>::server:SHA256:<ca-fp>`) at boot when
 # started with --accept-enrollments. Grab it for the joiner's auto-enroll.
@@ -133,7 +136,7 @@ for i in $(seq 1 30); do
   [ -n "$TOKEN" ] && break
   sleep 1
 done
-[ -n "$TOKEN" ] || { echo "!! founder never printed a join token" >&2; tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
+[ -n "$TOKEN" ] || { echo "!! founder never printed a join token" >&2; show_node_log "$DATA_DIR/founder.log" 40; exit 1; }
 echo "   got a token"
 
 # The joiner auto-enrolls at boot: --token presents it to the founder's
@@ -155,10 +158,12 @@ JOINER_PID=$!
 # behind returns not-found.
 wait_log "$DATA_DIR/joiner.log" "local raft state caught up to leader" 90
 
-# Both observers must be armed or the wake below cannot happen on either side.
-echo "== waiting for both nodes to arm their a2a stream-wakeup observers =="
+# Wake observers follow zone materialization and have no startup log marker.
+# Keep the joiner's applied-state barrier above; the actual parked read below
+# proves that a peer append wakes the receiver through its own apply observer.
+echo "== waiting for both VFS data planes before the actual peer-wakeup check =="
 for node in founder joiner; do
-  wait_log "$DATA_DIR/$node.log" "stream-wakeup" 30
+  wait_log "$DATA_DIR/$node.log" "VFS data plane ready" 30
 done
 
 echo "== [cross-node] a peer node's write wakes a parked blocking tail =="

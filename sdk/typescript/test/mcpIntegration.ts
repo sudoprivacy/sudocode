@@ -164,7 +164,7 @@ async function checkWake(): Promise<void> {
     const spooled = fs.readFileSync(spool, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(spooled.map(entry => entry.from), ['fixture-peer'], 'the allowlist still gates spooled peers');
     assert.equal(notifications, 0, 'a wake spool replaces channel notifications');
-    assert.equal(fs.statSync(spool).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
     const first = await wake();
     assert.equal(first.code, 2, 'pending peers wake Claude');
     assert.match(first.stderr, /^<channel source="nexus_scode" from="fixture-peer" verified="false" kind="message" summary="greeting">\n<mailbox-message from="/);

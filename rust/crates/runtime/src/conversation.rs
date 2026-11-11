@@ -773,6 +773,8 @@ pub const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
 /// `execute` without reading `ctx`.
 #[derive(Debug, Clone, Default)]
 pub struct ToolDispatchContext {
+    /// Host-owned instance discovery; independent of transcript/model history.
+    pub runtime_observation: Option<Arc<dyn crate::runtime_status::RuntimeObservationHost>>,
     /// The parent's assistant message that emitted the currently-
     /// executing `tool_use`. `None` when the caller isn't inside a
     /// parent's tool loop (test harnesses, direct executor invocations).

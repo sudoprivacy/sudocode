@@ -1,5 +1,8 @@
 //! Presentation only: never replace the tool result persisted or sent to the model.
 
+use engine_core::engine_events::{
+    EngineState, InputReason, RuntimeAvailability, RuntimeObservation, RuntimePresence,
+};
 use serde_json::Value;
 use std::fmt::Write as _;
 
@@ -162,8 +165,30 @@ pub(super) fn agent_list_card(
         return generic_tool_card("agent_list", input, Some(output), status);
     }
     let _ = write!(header, " · {} agents", agents.len());
+    let is_incomplete = output.get("runtime_discovery").is_some_and(|coverage| {
+        coverage.get("unsupported").and_then(Value::as_bool) == Some(true)
+            || coverage
+                .get("unknown_instances")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+            || coverage
+                .get("unavailable")
+                .and_then(Value::as_array)
+                .is_some_and(|scopes| !scopes.is_empty())
+    });
+    if is_incomplete {
+        header.push_str(" · observations incomplete");
+    }
     if agents.is_empty() {
-        return ToolCardContent::new(header, "No agents found".into());
+        return ToolCardContent::new(
+            header,
+            if is_incomplete {
+                "Runtime observations unavailable"
+            } else {
+                "No agents found"
+            }
+            .into(),
+        );
     }
     let mut rows = Vec::new();
     for agent in agents.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
@@ -182,7 +207,13 @@ pub(super) fn agent_list_card(
                 let _ = write!(row, " · updated {age}");
             }
         }
-        if let Some(active) = agent.get("active").and_then(Value::as_bool) {
+        if let Some(runtime) = agent.get("runtime") {
+            let Ok(observation) = serde_json::from_value::<RuntimeObservation>(runtime.clone())
+            else {
+                return generic_tool_card("agent_list", input, Some(output), status);
+            };
+            row.push_str(&runtime_labels(&observation));
+        } else if let Some(active) = agent.get("active").and_then(Value::as_bool) {
             row.push_str(if active { " · active" } else { " · inactive" });
         }
         for key in ["role", "task_id"] {
@@ -199,4 +230,45 @@ pub(super) fn agent_list_card(
         ));
     }
     ToolCardContent::new(header, rows.join("\n"))
+}
+
+fn runtime_labels(observation: &RuntimeObservation) -> String {
+    let identity = &observation.instance;
+    let mut labels = format!(
+        " · instance {}/{}",
+        identity.registry_id.chars().take(8).collect::<String>(),
+        identity.incarnation.chars().take(8).collect::<String>()
+    );
+    labels.push_str(if observation.presence == RuntimePresence::Online {
+        " · online"
+    } else {
+        " · presence unknown"
+    });
+    let Some(update) = observation
+        .update
+        .as_ref()
+        .filter(|_| observation.availability == RuntimeAvailability::Fresh)
+    else {
+        labels.push_str(" · activity unknown");
+        return labels;
+    };
+    labels.push_str(match update.status.foreground {
+        EngineState::Idle => " · idle",
+        EngineState::Running => " · running",
+        EngineState::AwaitingInput(InputReason::Permission) => " · waiting for permission",
+        EngineState::AwaitingInput(InputReason::Question) => " · waiting for answer",
+    });
+    let tasks = update.status.background;
+    if tasks.terminals > 0
+        || tasks.agents > 0
+        || tasks.execution_unconfirmed > 0
+        || tasks.tool_operations > 0
+    {
+        let _ = write!(
+            labels,
+            " · background shells={} agents={} · operations={} · unconfirmed={}",
+            tasks.terminals, tasks.agents, tasks.tool_operations, tasks.execution_unconfirmed
+        );
+    }
+    labels
 }

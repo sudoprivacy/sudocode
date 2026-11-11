@@ -81,6 +81,15 @@ age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.
 
+Runtime discovery is separate from these stored descriptions. `agent_list`
+adds one `runtime` row per observed instance, including foreground
+state, a permission/question waiting reason and independent background task
+counts. Several instances can share an Agent name or session ID. Unsupported,
+stale or unreachable observations remain unknown; an empty list is conclusive
+only within its reported discovery coverage. `active_only` retains positively
+online instances and running subagent tasks. See the shared
+[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest
 preserved user intent are appended only to the existing final compaction

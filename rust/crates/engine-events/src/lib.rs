@@ -224,38 +224,12 @@ pub enum CompletionReceipt {
     Retry,
 }
 
-/// The request which owns the foreground input surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputReason {
-    Permission,
-    Question,
-}
-
-/// Foreground operation state, independent of renderer and storage backend.
-/// Background tasks retain their own session-owned registry and lifecycle.
-///
-/// The engine enters [`Self::AwaitingInput`] when it emits a permission or
-/// question request, and returns to [`Self::Running`] when that prompt releases
-/// input. Independent tools can continue while the prompt owns input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "state", content = "waiting_for", rename_all = "snake_case")]
-pub enum EngineState {
-    /// No foreground operation in flight; background tasks may still run.
-    Idle,
-    /// A turn, management operation or direct tool call is executing.
-    Running,
-    /// A prompt owns input. Other tools and provider streaming may continue.
-    AwaitingInput(InputReason),
-}
-
-/// A selected engine instance's current facts, independent of its host or PID.
-/// This observation neither proves global presence nor grants tool control.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeStatus {
-    pub foreground: EngineState,
-    pub background: runtime::background_tasks::BackgroundTaskSummary,
-}
+// Keep the existing engine seam names while sharing one protocol definition
+// with local and remote runtime hosts. Neither host defines a second state enum.
+pub use runtime::runtime_status::{
+    ForegroundState as EngineState, InputReason, RuntimeAvailability, RuntimeObservation,
+    RuntimePresence, RuntimeStatus,
+};
 
 /// End-of-turn aggregate — absorbs `runtime::TurnSummary` minus the message
 /// vectors (which are streamed incrementally as [`EngineEvent::TextDelta`],

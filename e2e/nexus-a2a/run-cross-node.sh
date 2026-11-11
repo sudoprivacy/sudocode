@@ -64,35 +64,29 @@ trap cleanup EXIT
 
 mkdir -p "$DATA_DIR"/{a,b}/{data,id}
 
-wait_log() {
-  local file="$1" needle="$2" budget="$3" i
-  for i in $(seq 1 "$budget"); do
-    grep -q "$needle" "$file" 2>/dev/null && { echo "   $needle (after ~${i}s)"; return 0; }
-    sleep 1
-  done
-  echo "!! '$needle' never appeared in $file" >&2
-  tail -40 "$file" >&2
-  return 1
-}
-
 # Fresh data AND identity per node. `identity.json` carries the peer address
 # book, so a reused one leaves a daemon rejoining a cluster that is not there.
 # TLS is ON (NEXUS_NO_TLS unset); --accept-enrollments makes the founder sign
 # joiner certs and print a ready join token at boot.
 echo "== founder on :${FOUNDER_PORT} (owns ${ZONE}, TLS on, accepts enrollments) =="
-env $NO_CONV \
-NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
-NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
-NEXUS_API_KEY_SECRET="$SECRET" \
-NEXUS_ADVERTISE_ADDR="$FOUNDER" \
-NEXUS_CLUSTER_INIT="$ZONE" \
-NEXUS_CLUSTER_INIT_MOUNTS="/agents=$ZONE" \
-RUST_LOG=info \
-  "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
-  >"$DATA_DIR/founder.log" 2>&1 &
-FOUNDER_PID=$!
+# Named zones can load on demand. Retain the founder's declared topology
+# across both boots, like authon_boot, so each boot publishes the same namespace.
+start_founder() {
+  env $NO_CONV \
+  NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
+  NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
+  NEXUS_API_KEY_SECRET="$SECRET" \
+  NEXUS_ADVERTISE_ADDR="$FOUNDER" \
+  NEXUS_CLUSTER_INIT="$ZONE" \
+  NEXUS_CLUSTER_INIT_MOUNTS="/agents=$ZONE" \
+  RUST_LOG=info \
+    "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
+    >"$DATA_DIR/founder.log" 2>&1 &
+  FOUNDER_PID=$!
+}
+start_founder
 
-wait_log "$DATA_DIR/founder.log" "Static topology applied" 45
+authon_wait_log_file "$DATA_DIR/founder.log" "Static topology applied" 45
 
 # Mint before admitting the second voter. An offline mint needs the founder
 # stopped; stopping it after the join leaves a two-voter zone without quorum
@@ -110,19 +104,12 @@ AUTHON_DATA_DIR="$DATA_DIR/a"
 PROBE_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
 RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
 SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
+RUNTIME_BUNDLE="$(authon_mint "runtime-directory-probe")" || exit 1
 
 echo "== restart the founder =="
 mv "$DATA_DIR/founder.log" "$DATA_DIR/founder-bootstrap.log"
-env $NO_CONV \
-NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
-NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
-NEXUS_API_KEY_SECRET="$SECRET" \
-NEXUS_ADVERTISE_ADDR="$FOUNDER" \
-RUST_LOG=info \
-  "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
-  >"$DATA_DIR/founder.log" 2>&1 &
-FOUNDER_PID=$!
-wait_log "$DATA_DIR/founder.log" "stream-wakeup" 45
+start_founder
+authon_wait_log_file "$DATA_DIR/founder.log" "VFS data plane ready" 45
 
 # The founder prints a join token (`K10<pw>::server:SHA256:<ca-fp>`) at boot when
 # started with --accept-enrollments. Grab it for the joiner's auto-enroll.
@@ -153,12 +140,14 @@ JOINER_PID=$!
 # Ready when it has caught up to the leader's log, not merely when it answered a
 # dial: the tests read a stream the founder created, and a joiner that is up but
 # behind returns not-found.
-wait_log "$DATA_DIR/joiner.log" "local raft state caught up to leader" 90
+authon_wait_log_file "$DATA_DIR/joiner.log" "local raft state caught up to leader" 90
 
-# Both observers must be armed or the wake below cannot happen on either side.
-echo "== waiting for both nodes to arm their a2a stream-wakeup observers =="
+# Observer installation precedes the production data-plane-ready event. The
+# obsolete per-zone "stream-wakeup" log is no longer emitted. The real blocking
+# read/write journey below remains the oracle that proves cross-node wakeup.
+echo "== waiting for both nodes to finish wiring their data planes =="
 for node in founder joiner; do
-  wait_log "$DATA_DIR/$node.log" "stream-wakeup" 30
+  authon_wait_log_file "$DATA_DIR/$node.log" "VFS data plane ready" 30
 done
 
 echo "== [cross-node] a peer node's write wakes a parked blocking tail =="
@@ -183,5 +172,16 @@ NEXUS_A2A_TEST_ENDPOINT="$JOINER_ENDPOINT" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDE
   NEXUS_A2A_TEST_CERT_DIR="$PROBE_BUNDLE" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime \
   --test mailbox_nexus_live live_agent_list_sees_every_peer_from_either_node -- --ignored --nocapture
+
+echo "== [cross-node] short runtime calls bound cold and warm transport admission =="
+NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RUNTIME_BUNDLE" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime \
+  --test mailbox_nexus_live live_runtime_call_deadline_covers_transport_admission -- --exact --ignored --nocapture
+
+echo "== [cross-node] runtime observations retain independent CLI instances =="
+NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_PEER_ENDPOINT="$JOINER_ENDPOINT" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$RUNTIME_BUNDLE" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test acp_a2a_receive live_runtime_directory_tracks_same_agent_instances_across_nodes -- --ignored --nocapture
 
 echo "CROSS-NODE E2E OK"

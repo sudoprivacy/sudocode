@@ -1591,7 +1591,9 @@ dependencies = [
  "backends",
  "commands",
  "engine-core",
+ "futures",
  "kernel",
+ "lib",
  "llm-mount",
  "managed-agent",
  "mock-anthropic-service",
@@ -1608,6 +1610,7 @@ dependencies = [
  "tokio",
  "tools",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3057,6 +3060,7 @@ name = "nexus-vfs-client"
 version = "0.2.41"
 dependencies = [
  "kernel",
+ "lib",
  "serde_json",
  "tokio",
  "tonic",

@@ -80,18 +80,7 @@ impl HostedSessionFactory for Factory {
     }
 
     fn state_changed(&self, state: engine_core::EngineState) {
-        let reason = match state {
-            engine_core::EngineState::AwaitingInput(reason) => Some(match reason {
-                engine_core::engine_events::InputReason::Permission => "permission".into(),
-                engine_core::engine_events::InputReason::Question => "question".into(),
-            }),
-            _ => None,
-        };
-        let state = match state {
-            engine_core::EngineState::Idle => AgentState::Ready,
-            engine_core::EngineState::Running => AgentState::Busy,
-            engine_core::EngineState::AwaitingInput(_) => AgentState::AwaitingInput,
-        };
+        let (state, reason) = AgentState::project_foreground(state);
         (self.observer)(state, reason);
     }
 }
@@ -127,7 +116,8 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
             .session_endpoint
             .clone()
             .ok_or("managed session has no mailbox endpoint")?;
-        let context = ManagedRuntimeContext::cohost(&kernel, &desc, self.authenticated_senders)?;
+        let context = ManagedRuntimeContext::cohost(&kernel, &desc, self.authenticated_senders)?
+            .with_runtime_observation(options.runtime_observation.clone());
         let prepared = prepare_managed_agent(&context, options.resume_session_id.as_deref())
             .map_err(|error| error.to_string())?;
         let lease_release_failure = context.lease_release_failure();

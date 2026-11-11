@@ -460,6 +460,28 @@ advertised typed pre-admission refusal is not_submitted. Listing means
 visibility/addressability, not online proof. The host binds actual actor and
 namespace; the wrapper does not accept a caller-selected sender.
 
+`scode_status` separates transport attachment from input and delivery progress.
+Each attached autojoin row includes the actual receiver PID, executable path,
+ACP SID, and `receiver.input`: the negotiated input owner, last observed queue
+state/revision/count, and retained last error. An unobserved queue is `unknown`.
+Foreign-session, stale and malformed updates cannot clear a failure. These
+observations never flush a queue, resume a user interruption, or replay input.
+
+`delivery` reports the durable callback inbox separately: pending count, current
+failure/cleanup state, and the last actual downstream queue acceptance. A closed
+ACP child does not clear `cleanup_unknown`. A client-owned peer callback can
+continue while the model's input queue is paused; a session-owned paused/error
+queue is `input_blocked`. Downstream failure is `delivery_blocked`. `connected`
+alone proves neither end-to-end delivery nor that the frontend woke. Match the
+original delivery/queue/turn receipts before claiming recovery.
+
+For upgrades, compare the **running** executable and installed SDK with their
+qualified artifacts, rather than only checking a prepared package. A legacy
+owner without per-receiver recovery cannot be repaired by killing its child:
+the remaining owner may retain a disconnected binding. Preserve its pending
+inputs and original actor/SID, then use the qualified owner transition. Do not
+expand a messaging-only tool allowlist to make a filesystem health probe pass.
+
 The MCP handshake is available while the original ACP session is connecting.
 `scode_status` reports that state, and commands return `not_submitted` until
 the session is ready. A slow first connection cannot hold up the MCP handshake;

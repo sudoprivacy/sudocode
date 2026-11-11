@@ -17,6 +17,12 @@ const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
       ...(peerOwned ? { _meta: { sudocode: { peerInput: { version: peerOwned } } } } : {}) };
   })
   .onRequest(acp.methods.agent.session.new, () => ({ sessionId }))
+  .onRequest('_fixture/input-state', value=>value, async ctx=>{
+    await ctx.client.notify('_sudocode/session/input_update', {
+      sessionId:ctx.params.sessionId ?? sessionId,update:ctx.params.update,
+    });
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, async ctx => {
     if (scenario === 'load-fails') throw new Error('Fixture refuses this native session');
     sessionId = ctx.params.sessionId;

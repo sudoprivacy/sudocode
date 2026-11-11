@@ -3,6 +3,8 @@ import { connectRecoveringCodex, CodexRequestError, type CodexConnection, type C
 import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
 import { connectScode, ScodeCleanupUnknownError, type ScodeConnection, type ScodePeerMessage } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
+import type { ScodeReceiveHealth } from './scodeReceiveHealth';
+import type { CodexDeliveryStatus } from './codexInbox';
 import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
   writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
@@ -67,7 +69,8 @@ export interface CodexAutojoin {
   readonly canRetire: boolean;
   /** Host-supplied MCP metadata selects an already loaded root, never arguments. */
   connectionFor(threadId: unknown): ScodeConnection;
-  status(): Array<{threadId: string; actor: string; state: string; error?: string}>;
+  status(): Array<{threadId: string; actor: string; state: string; error?: string;
+    receiver?: {pid:number; executable:string; sessionId:string; input:ScodeReceiveHealth}; delivery?:CodexDeliveryStatus}>;
   refresh(): Promise<void>;
   close(): Promise<void>;
 }
@@ -274,10 +277,18 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       }
       return owner.connection;
     },
-    status: () => [...owners.values()].map(owner => ({threadId:owner.binding.threadId,actor:owner.binding.actor,
-      state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
-        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
-        : owner.verified ? 'connected' : 'connecting',error:owner.error})),
+    status: () => [...owners.values()].map(owner => {
+      const input=owner.connection?.receiveHealth, delivery=owner.callback?.status();
+      return {threadId:owner.binding.threadId,actor:owner.binding.actor,
+        state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
+          : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
+          : delivery?.state==='cleanup_unknown' ? 'cleanup_unknown' : owner.connection?.closed ? 'disconnected'
+          : delivery?.state==='blocked' ? 'delivery_blocked'
+          : input?.inputOwner==='session' && ['paused','error'].includes(input.state) ? 'input_blocked'
+          : owner.verified ? 'connected' : 'connecting',error:owner.error,
+        ...(owner.connection&&input?{receiver:{pid:owner.connection.pid,executable:owner.connection.executable,
+          sessionId:owner.connection.sessionId,input}}:{}),...(delivery?{delivery}:{})};
+    }),
     close,
   };
 }

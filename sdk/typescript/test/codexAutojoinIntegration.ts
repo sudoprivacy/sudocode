@@ -313,6 +313,14 @@ async function main() {
   const deliveryCalls=calls.length,deliveryRows=rows().length;
   owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:path.join(directory,'delivery-bindings')});
   const peerSession=owner.connectionFor(ids[0]);
+  await peerSession.request('_fixture/input-state',{update:{kind:'error',message:'old model health probe failure'}});
+  await peerSession.request('_fixture/input-state',{update:{kind:'state',state:{revision:1,paused:true,running:false,pending:[]}}});
+  const paused=owner.status()[0];
+  assert.equal(paused.receiver?.input.state,'paused');
+  assert.equal(paused.receiver?.input.inputOwner,'client');
+  assert.equal(paused.state,'connected','client-owned peer delivery is independent of a paused model queue');
+  assert.equal(paused.receiver?.sessionId,peerSession.sessionId);
+  assert.equal(paused.receiver?.pid,peerSession.pid);
   await peerSession.request('_fixture/peer',{from:'stranger',text:'the allowlist must refuse'});
   await assert.rejects(peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true}));
   await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'peer data 零 🧪'});
@@ -325,6 +333,9 @@ async function main() {
   }
   await new Promise(resolve=>setTimeout(resolve,200));
   assert.equal(turnStarts().length,1,'only the allowlisted peer on the original session is admitted');
+  assert.equal(owner.status()[0].delivery?.state,'idle');
+  assert.equal(owner.status()[0].delivery?.pendingCount,0);
+  assert.ok(owner.status()[0].delivery?.lastQueuedAt,'actual durable queue acceptance is reported separately');
   assert.equal(turnStarts()[0].params.threadId,ids[0]);
   const delivered=JSON.parse(turnStarts()[0].params.input[0].text.split('\n').slice(1).join('\n'));
   assert.equal(delivered.message.sudocode.a2a.from,'fixture-peer');
@@ -414,10 +425,13 @@ async function main() {
       await new Promise(resolve=>setTimeout(resolve,20));
     }
     let originalCleanup: unknown;
+    assert.equal(owner.status()[0].state,'cleanup_unknown','a connected receiver must expose unjoined downstream cleanup');
+    assert.equal(owner.status()[0].delivery?.pendingCount,1);
     await assert.rejects(owner.close(),error=>{
       originalCleanup=error;return /cleanup unconfirmed/.test(String(error));
     });
     assert.equal(sibling.closed,true,'callback failure must not skip sibling ACP cleanup');
+    assert.equal(owner.status()[0].state,'cleanup_unknown','closed ACP does not erase unjoined downstream custody');
     assert.equal((await sibling.exited).code,0);
     await assert.rejects(owner.close(),error=>error===originalCleanup);
     owner=undefined;

@@ -76,6 +76,10 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
       _meta:{sudocode:{a2a:{from,kind:'message'}}}});
     return {};
   })
+  .onRequest('_fixture/input-state', value=>value, async ctx=>{
+    await ctx.client.notify('_sudocode/session/input_update',{sessionId,update:ctx.params.update});
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, ctx => {
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
     // A client that owns peer input hears peers even before its own startup completes.

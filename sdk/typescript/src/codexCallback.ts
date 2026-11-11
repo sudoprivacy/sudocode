@@ -6,7 +6,7 @@ import { requireScodeNodeIdentity, type ScodeA2aResult } from './scodeA2a';
 import { enqueueCodexPeerNotification, validateCodexNativeQueueConfig, type CodexNativeQueueConfig,
   type CodexNativeQueueReceipt } from './codexNativeQueue';
 import { codexPeerData } from './codexPeerData';
-import { openCodexInbox } from './codexInbox';
+import { openCodexInbox, type CodexDeliveryStatus } from './codexInbox';
 
 export interface CodexCallbackConfig extends CodexConnectionConfig {
   threadId: string;
@@ -22,6 +22,7 @@ export interface CodexCallbackConfig extends CodexConnectionConfig {
  * input (`onPeerMessage`), so the Codex frontend is the only respondent. */
 export interface CodexCallback {
   receive(message: ScodePeerMessage): void;
+  status(): CodexDeliveryStatus;
   close(): Promise<void>;
 }
 
@@ -79,7 +80,7 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
   let delivery: CodexCallback;
   try { delivery = createCodexCallback(native.request, config, sessionId); }
   catch (error) { await close(); throw error; }
-  return { receive(message) { if (closed) throw new Error('Callback owner closed; retain upstream delivery'); delivery.receive(message); },
+  return { status:()=>delivery.status(),receive(message) { if (closed) throw new Error('Callback owner closed; retain upstream delivery'); delivery.receive(message); },
     async close() { await delivery.close(); await close(); } };
 }
 
@@ -116,6 +117,7 @@ function createFilteredCallback(config: Pick<CodexCallbackConfig, 'threadId' | '
     return forward(message, eventId);
   }, entry => appendFileSync(config.log, JSON.stringify({ at: new Date().toISOString(), peerPolicy, ...entry })+'\n', { mode: 0o600 }));
   return {
+    status:()=>inbox.status(),
     receive(message) { if (admitted(message)) inbox.receive(message); },
     close: () => inbox.close(),
   };

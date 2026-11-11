@@ -14,12 +14,19 @@ interface Record {
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const eventName = /^[a-f0-9-]{36}\.json$/;
 
+export interface CodexDeliveryStatus {
+  state: 'idle' | 'pending' | 'delivering' | 'blocked' | 'cleanup_unknown' | 'closed';
+  pendingCount: number;
+  lastError?: {at: string; message: string};
+  lastQueuedAt?: string;
+}
+
 /** A private durable handoff, separate from the diagnostic JSONL log. Only
  * idempotent downstream operations may be recovered from these pending rows.
  * Done receipts survive restart and upstream cursor replay. */
 export function openCodexInbox(log: string, threadId: string, sessionId: string,
   deliver: (message: ScodePeerMessage, eventId: string) => Promise<unknown>,
-  observe: (entry: object) => void): { receive(message: ScodePeerMessage): void; close(): Promise<void> } {
+  observe: (entry: object) => void): { receive(message: ScodePeerMessage): void; status(): CodexDeliveryStatus; close(): Promise<void> } {
   const directory = log + '.inbox';
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (!lstatSync(directory).isDirectory()) throw new Error('Callback inbox must be a private directory');
@@ -34,6 +41,8 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
   const sequences = new Set<number>();
   let closed = false, timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
   let cleanupError: CodexCleanupUnknownError | undefined;
+  let lastError: CodexDeliveryStatus['lastError'], lastQueuedAt: string | undefined;
+  let deliveryFailed = false;
   const report = (entry: object) => { try { observe(entry); } catch (error) { process.stderr.write(`Callback audit: ${String(error)}\n`); } };
   const file = (id: string) => path.join(directory, id + '.json');
   const save = (record: Record) => {
@@ -80,8 +89,10 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
           const result = await deliver(record.message!, record.eventId);
           const done: Record = { ...record, state: 'done' }; delete done.message;
           save(done); pending.delete(record.eventId);
+          deliveryFailed = false; lastQueuedAt = new Date().toISOString();
           report({ eventId: record.eventId, phase: 'queued', ...(result as object), receipt: result });
         } catch (error) {
+          deliveryFailed = true; lastError = {at:new Date().toISOString(),message:String(error).slice(0,2048)};
           if (error instanceof CodexCleanupUnknownError) cleanupError ??= error;
           report({ eventId: record.eventId, phase: 'pending', attempts: record.attempts, error: String(error), ...(error instanceof CodexRequestError ? {outcome: error.outcome} : {}) });
         }
@@ -94,6 +105,8 @@ export function openCodexInbox(log: string, threadId: string, sessionId: string,
   };
   schedule();
   return {
+    status() { return {state:cleanupError?'cleanup_unknown':closed?'closed':deliveryFailed?'blocked':active?'delivering':pending.size?'pending':'idle',
+      pendingCount:pending.size,...(lastError?{lastError:{...lastError}}:{}),...(lastQueuedAt?{lastQueuedAt}:{})}; },
     receive(message) {
       if (closed) throw new Error('Callback owner closed; upstream must retain delivery');
       if (Buffer.byteLength(JSON.stringify(message)) > 256 * 1024) throw new Error('Peer delivery exceeds durable inbox limit');

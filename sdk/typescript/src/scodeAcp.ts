@@ -5,6 +5,7 @@ import { Readable, Writable } from 'node:stream';
 import { ReadableStream, TransformStream, WritableStream } from 'node:stream/web';
 import * as acp from '@agentclientprotocol/sdk';
 import { timeout } from './timeout';
+import { observeScodeInput, type ScodeReceiveHealth } from './scodeReceiveHealth';
 
 export type {
   ContentBlock, InitializeResponse, PromptResponse, RequestPermissionRequest,
@@ -111,6 +112,9 @@ export interface ScodeConnection {
   readonly pid: number;
   readonly sessionId: string;
   readonly closed: boolean;
+  /** A connection alone does not prove its input queue is making progress. */
+  readonly receiveHealth: ScodeReceiveHealth;
+  readonly executable: string;
   readonly initialized: acp.InitializeResponse;
   readonly exited: Promise<{ code: number | null; signal: ChildProcess['signalCode'] }>;
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
@@ -204,6 +208,8 @@ export async function connectScode(
   const child = spawn(config.scodeArgv[0], config.scodeArgv.slice(1), {
     cwd: config.workspace, env, stdio: ['pipe','pipe','pipe'], windowsHide: true, shell: false,
   });
+  let sessionId = config.acpSessionId ?? '';
+  let receiveHealth: ScodeReceiveHealth = {inputOwner:config.onPeerMessage?'client':'session',state:'unknown'};
   const closing = new AbortController();
   let stopped = false;
   let closePromise: Promise<void> | undefined;
@@ -241,6 +247,7 @@ export async function connectScode(
     } catch (error) { report(error); }
   });
   const trace = (direction: 'incoming' | 'outgoing', message: unknown) => {
+    if (direction === 'incoming') receiveHealth = observeScodeInput(receiveHealth,sessionId,message);
     try {
       config.onProtocol?.(direction, message);
       if (config.protocolLog) {
@@ -261,7 +268,6 @@ export async function connectScode(
       abort(error) { return writer.abort(error); },
     }),
   };
-  let sessionId = config.acpSessionId ?? '';
   const app = acp.client({ name: 'scode-acp-client' })
     .onRequest(acp.methods.client.session.requestPermission, async ctx => {
       if (!config.onPermission) {
@@ -370,6 +376,9 @@ export async function connectScode(
     return {
       pid: child.pid, sessionId, initialized, exited,
       get closed() { return stopped || !!closePromise; },
+      get receiveHealth() { return {...receiveHealth,...(stopped||closePromise?{state:'closed' as const}:{}),
+        ...(receiveHealth.lastError?{lastError:{...receiveHealth.lastError}}:{})}; },
+      executable: config.scodeArgv[0],
       request,
       notify(method, params) {
         if (stopped || closePromise) {

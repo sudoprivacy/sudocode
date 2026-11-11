@@ -545,14 +545,26 @@ def validate_before_host_lease(names, root, output):
           flush=True)
 
 
+def git_for_windows_bash(path=None):
+    """Git for Windows' own Bash, located from the git on PATH and never WSL's.
+
+    A git hook runs with Git's mingw64/libexec/git-core first on PATH, three
+    levels below the bin/bash.exe of the same installation, so look in every
+    ancestor of the resolved git rather than its parent and grandparent only.
+    """
+    git = shutil.which("git", path=path)
+    if not git:
+        return None
+    for directory in Path(git).resolve().parents:
+        for candidate in (directory / "bash.exe", directory / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def native_services_tool(root, output, execute):
     """Resolve the existing service client before compilation, retaining its bytes."""
-    bash = shutil.which("bash")
-    if os.name == "nt":
-        git = shutil.which("git")
-        candidates = [Path(git).resolve().parent / "bash.exe",
-                      Path(git).resolve().parent.parent / "bin/bash.exe"] if git else []
-        bash = next((str(path) for path in candidates if path.is_file()), None)
+    bash = git_for_windows_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
         raise RuntimeError("Git Bash is required for shared-service credential acceptance")
     probe = '''import hashlib,json,subprocess,sys
@@ -572,7 +584,7 @@ print(json.dumps({"executable": str(binary), "version": version,
     log = output / "000.log"
     result = execute(arguments, root, log)
     tool = json.loads(log.read_text(encoding="utf-8"))
-    return {"root": str(root.resolve()), "command": result, "tool": tool}
+    return {"root": str(root.resolve()), "command": result, "tool": tool, "log": str(log)}
 
 
 def prepare_native_checks(names, root, output, execute):
@@ -951,6 +963,10 @@ def run(name, root, output, base, execute):
         if hashlib.sha256(grpcurl.read_bytes()).hexdigest() != tool["sha256"]:
             raise RuntimeError("Prepared grpcurl bytes changed; repeat native tool preparation")
         results.append(preparation["command"])
+        # The receipt lists the probe with this profile's commands, and resume
+        # verifies a profile's logs inside its own directory. Keep the probe's
+        # original bytes there, at its result index.
+        (output / f"{len(results) - 1:03d}.log").write_bytes(Path(preparation["log"]).read_bytes())
         # Cargo's test graph unifies dev-dependency features. A normal build
         # after workspace tests recompiles the CLI and its shared dependencies.
         # Keep Cargo's freshness check, without executing the driver twice.
@@ -1050,7 +1066,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "938bfbfbe1e3969aa50a26c763ec0e78dc96ec458e33e234a02aed8ff138659b",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "1cc868f9be1ce1b00b352585980ac5dee74c683fe1525bc6571dd0a0c8974085",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
@@ -1123,7 +1139,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '2c751e4c6f6f807b0333e58c38eabb72e4317b47f71377bb8b20aad08ddb4497', 'native-context': '2e1ea30eff75a2d99d3bdf9ed700026cef47af9fc764f13b5a70c91c2900699e'}
+    expected = {'native-release': 'bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3', 'native-context': '70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

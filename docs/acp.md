@@ -455,6 +455,30 @@ error. Disconnects or unsupported hosts do not establish that an Agent is
 offline. Counts and foreground state are observations of independently moving
 work, not a grant of human control; use the pause/fence protocol for takeover.
 
+The `agent_list` tool also exposes `runtime` on observed instance rows and
+`runtime_discovery` on its result. Several rows can have the same Agent name
+or SID. Only the current running instance is excluded, using its registry
+scope and registration incarnation. SID and operating-system PID are
+diagnostic fields; neither is an instance identity or an authorization grant.
+
+Each observation separates `presence` (`online` or `unknown`) from
+`availability` (`fresh`, `stale`, `unsupported`, or `unavailable`). Only fresh
+facts include an `update`; stale work is never rendered as idle. Heartbeats
+can confirm attendance while the foreground and counts remain unknown.
+`activeOnly` retains positively online peer instances and active workers;
+`unknown_instances` and unavailable scopes retain incomplete coverage even
+when that filter returns no rows. An incomplete empty result does not prove
+that every Agent is offline.
+
+Standalone hosts expose weak engine readers through a process-owned local
+directory. Its private filesystem entries contain routing and read-only
+connection material, never mutable activity or session output. Native
+ownership release retires a crashed process's route. A selected Nexus node
+uses its existing authenticated client and scoped registry instead, with no
+disk-namespace fallback. Cohosted engines bind the same facts reader directly
+to their existing managed registry instance. All three paths consume the
+engine lifecycle and task registry used by `_sudocode/session/status`.
+
 ### Closing a peer session
 
 When the last session for an agent closes, the server stops and joins that

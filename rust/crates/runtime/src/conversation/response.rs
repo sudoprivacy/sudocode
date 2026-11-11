@@ -15,6 +15,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         prompter: &Option<&mut dyn PermissionPrompter>,
     ) -> ToolDispatchContext {
         ToolDispatchContext {
+            runtime_observation: None,
             parent_assistant_message: None,
             parent_session_messages: self.session.messages.clone(),
             tool_results_dir: self.session.tool_results_dir(),

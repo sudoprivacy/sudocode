@@ -245,6 +245,26 @@ and the full native/Docker contract guard remain required. This removes general
 product smoke coverage for proven author-scheduling-only revisions; every
 selected journey keeps its cases, assertions and deadlines. These infrastructure
 controls add no product coverage. Observed job costs are not measured savings.
+Verifier-body-only edits can also omit the two generic queue daemon jobs.
+The committed runner must keep its mode, declarations, module context and all
+code outside the nine reported verifier/fingerprint bodies. Process execution
+and the selector/dependency consumers must not observe those bodies, dynamic
+namespaces or the managed runner code frame. The existing exact self-frame
+capture remains bound for managed refresh. Non-guard profiles are compared
+with the comparison base's fingerprint implementation. The queue uses its
+protected base; PRs use the target merge base, and push records name their prior
+branch commit. The required JSON identifies that source commit and its kind;
+final acceptance continues through the protected gate. An edited candidate
+algorithm cannot bless a changed command. Companion paths are limited to
+those metadata enforcement fixtures and protected pins. New declarations,
+function signatures, command effects, policy, signer, workflow, product and
+unknown mixed inputs keep the original daemon checks. The mandatory CI JSON
+prints `acceptance_metadata_scope` with its proof or conservative fallback.
+Preflight and the complete native/Docker contract guard still run. This removes
+general daemon smoke coverage for qualifying verifier-body changes; selected
+journeys keep every case, assertion and deadline. Real private Git PR/push/queue
+controls retain the original 66 scheduling events and 25 bounded metadata events.
+They add no product coverage. Observed previous job times are not measured savings.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes
@@ -1290,6 +1310,22 @@ permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
+
+Compiler-budget evolution can preserve an older signed execution plan and its
+completed native profiles. The verifier derives this proof from both committed
+sources: only the known serial/adaptive compiler-budget calculations and matching
+native forwarding forms may differ. Original signed fingerprints must first
+match their original source. All remaining selected commands, assertions, test
+pools, retries, deadlines, environment, Docker images, workflow and current
+host responsibilities stay bound. Unknown changes refuse reuse. The required
+interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
+`LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE`; a refusal prints
+`LOCAL_ACCEPTANCE_PLAN_RECOVERY`, including that blindly renewing the same-head
+plan is unsupported. Old plans, signatures, logs and the first timing record are
+preserved. This proof executes no product tests and cannot complete missing
+profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
+original execution, plan/full verification, resume without repeated commands,
+and fourteen independent refusals; they add no product journey coverage.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

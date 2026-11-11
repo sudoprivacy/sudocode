@@ -41,6 +41,9 @@ backends = { workspace = true }
 # MCP discovery/dispatch drives an isolated Tokio runtime; tool payloads and the
 # degraded-server report serialize through serde_json.
 tokio = { version = "1", features = ["rt-multi-thread"] }
+lib = { workspace = true, features = ["transport"] }
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
 serde_json.workspace = true
 # The tool executor deserializes each tool's JSON input into a typed request.
 serde = { version = "1", features = ["derive"] }

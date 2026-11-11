@@ -146,20 +146,26 @@ authon_stop() {
   AUTHON_DAEMON_PID=
 }
 
-# Wait until the daemon log contains a needle, or fail loud with a tail.
-authon_wait_log() {
-  local needle="$1" budget="${2:-45}" i
+# Wait on an actual boot event, retaining the same bounded observation for
+# single-node and two-node harnesses. Log tails may contain enrollment tokens.
+authon_wait_log_file() {
+  local file="$1" needle="$2" budget="${3:-45}" offset="${4:-0}" i
   for i in $(seq 1 "$budget"); do
-    if tail -c "+$((AUTHON_LOG_OFFSET + 1))" "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null \
+    if tail -c "+$((offset + 1))" "$file" 2>/dev/null \
       | grep -F -- "$needle" >/dev/null; then
       echo "   $needle (after ~${i}s)"
       return 0
     fi
     sleep 1
   done
-  echo "!! daemon never logged '$needle'" >&2
-  tail -40 "$AUTHON_DATA_DIR/daemon.log" >&2
+  echo "!! daemon never logged '$needle' in $file" >&2
+  tail -40 "$file" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
   return 1
+}
+
+# Wait until the current daemon generation logs a needle.
+authon_wait_log() {
+  authon_wait_log_file "$AUTHON_DATA_DIR/daemon.log" "$1" "${2:-45}" "$AUTHON_LOG_OFFSET"
 }
 
 # Mint a CA-signed agent bundle offline and print its directory (daemon form).

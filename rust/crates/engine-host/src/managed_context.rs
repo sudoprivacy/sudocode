@@ -41,6 +41,10 @@ pub struct ManagedRuntimeContext {
     /// on its own kernel; an out-of-process agent can only take it under its
     /// own credential, on the daemon that stores the session.
     pub(crate) session_locks: SessionLocks,
+    /// The owning host's optional exact-instance observation capability.
+    /// It never supplies a second backend, store or model route.
+    pub(crate) runtime_observation:
+        Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
     /// The first lease release that did not succeed, for the host's teardown
     /// outcome. A failed release keeps the lock until its TTL, which errs
     /// toward exclusivity, but it is still not a confirmed cleanup.
@@ -218,8 +222,20 @@ impl ManagedRuntimeContext {
             shell_root,
             mailbox,
             session_locks,
+            runtime_observation: None,
             lease_release_failure: Arc::default(),
         }
+    }
+
+    /// Carry a registry-owned observation binding into the shared host context.
+    /// Unsupported hosts leave this absent; an open backend never implies idle.
+    #[must_use]
+    pub fn with_runtime_observation(
+        mut self,
+        observation: Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
+    ) -> Self {
+        self.runtime_observation = observation;
+        self
     }
 
     /// The agent instance this context is bound to.

@@ -159,6 +159,23 @@ pub trait EngineDelegate: Send + Sync + 'static {
         None
     }
 
+    /// Read metadata without retaining task output or persistence ownership.
+    fn runtime_status_background(&self) -> Option<runtime::runtime_status::BackgroundTaskSummary> {
+        Some(self.background_tasks().map_or_else(
+            runtime::runtime_status::BackgroundTaskSummary::default,
+            |tasks| tasks.summary(),
+        ))
+    }
+
+    /// Bind this engine's facts to its host. Network admission must stay off
+    /// the engine startup path; dropping the guard retires only this binding.
+    fn observe_runtime_status(
+        &self,
+        _read: runtime::runtime_status::RuntimeStatusReader,
+    ) -> Option<Box<dyn Send>> {
+        None
+    }
+
     /// Fence every main and child tool before cancellation. The host waits for
     /// the turn and actual workers before acknowledging human ownership.
     fn begin_tool_pause(&self) -> Result<u64, String> {
@@ -394,6 +411,8 @@ async fn drive(
     evt_tx: EventSink,
 ) {
     let subagents = SubagentRelay::new(evt_tx.clone());
+    let _runtime_observation =
+        delegate.observe_runtime_status(evt_tx.runtime_status_reader(Arc::downgrade(&delegate)));
 
     // A cancelled prompt can reply after the next turn starts. Never reuse
     // its id for a new question or permission request in this engine session.

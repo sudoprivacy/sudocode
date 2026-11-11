@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 kernel = { workspace = true }
+lib = { workspace = true, features = ["transport"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 serde_json = { workspace = true }

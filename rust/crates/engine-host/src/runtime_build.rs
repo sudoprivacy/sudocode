@@ -36,6 +36,8 @@ use crate::tool_executor::{permission_policy, CliToolExecutor};
 /// A co-host's process directory does not identify a session. Its descriptor
 /// supplies the project and identity; resources are discovered in that project.
 pub struct HostContext {
+    /// Instance routing is supplied by the host; foreground facts stay in the seam.
+    pub runtime_observation: Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
     /// Co-hosted model traffic must use the session's Nexus filesystem.
     pub require_model_mount: bool,
     /// Filesystem the file tools read and write through, and the SSOT for the
@@ -107,8 +109,16 @@ impl HostContext {
         // afterwards would leave the kernel's view of who is writing and the
         // prompt's claim about who this is free to disagree.
         let agent_name = agent_name_under(&cwd);
-        let fs = crate::local_kernel::boot_session_fs(&cwd, &extra_roots, &agent_name)?;
+        let (fs, kernel) = crate::local_kernel::boot_session_host(&cwd, &extra_roots, &agent_name)?;
+        let runtime_observation = match crate::peer::attach(&agent_name) {
+            crate::peer::Peer::Disk(_) => Some(Arc::new(
+                crate::local_runtime::LocalRuntimeHost::new(kernel, &agent_name)?,
+            )
+                as Arc<dyn runtime::runtime_status::RuntimeObservationHost>),
+            crate::peer::Peer::Node(node) => Some(node.observation_host(kernel)),
+        };
         Ok(Self {
+            runtime_observation,
             fs,
             // The CLI's three roots are one directory: what it reads its config
             // from, what its tools address, and where its shell runs.
@@ -150,6 +160,7 @@ impl HostContext {
             .unwrap_or_else(|| cohost_shell_root(name));
         std::fs::create_dir_all(&shell_root)?;
         Ok(Self {
+            runtime_observation: ctx.runtime_observation.clone(),
             fs: Arc::clone(&ctx.fs),
             shell_root,
             config_root: std::env::current_dir()?,
@@ -824,6 +835,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry.clone(),
         mcp_state.clone(),
     );
+    tool_executor.set_runtime_observation(host.runtime_observation.clone());
     // Hand the dispatcher this session's peer mailbox, so a recipient name means
     // the same destination to the `send` tool, to a sub-agent reporting back,
     // and to the receiver tailing its own inbox.

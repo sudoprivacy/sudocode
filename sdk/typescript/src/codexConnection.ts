@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { Duplex } from 'node:stream';
 import WebSocket from 'ws';
 import { timeout } from './timeout';
+import { requireDurableCodexQueue } from './codexCapabilities';
 
 export interface CodexConnectionConfig {
   codexArgv: string[];
@@ -10,6 +11,8 @@ export interface CodexConnectionConfig {
   env?: Record<string, string>;
   closeTimeoutMs?: number;
   onNotificationError?: (error: unknown) => void | Promise<void>;
+  /** Require a versioned response from every actual server connection. */
+  requireDurableQueue?: boolean;
 }
 
 export interface CodexNotification {
@@ -47,7 +50,8 @@ export function validateCodexConnectionConfig(config: CodexConnectionConfig): vo
         || Object.entries(config.env).some(([name, value]) => !name || /[=\0]/.test(name)
           || typeof value !== 'string' || value.includes('\0'))))
       || (config.closeTimeoutMs !== undefined && (!Number.isFinite(config.closeTimeoutMs) || config.closeTimeoutMs <= 0))
-      || (config.onNotificationError !== undefined && typeof config.onNotificationError !== 'function')) {
+      || (config.onNotificationError !== undefined && typeof config.onNotificationError !== 'function')
+      || (config.requireDurableQueue !== undefined && typeof config.requireDurableQueue !== 'boolean')) {
     throw new Error('Invalid native Codex connection configuration');
   }
 }
@@ -181,6 +185,7 @@ export async function connectCodex(
       child.once('error', error => { clearTimeout(timer); reject(error); });
     });
     const initialized = await request('initialize', { clientInfo: { name: 'scode-acp-client', version: '1.0.0' }, capabilities: { experimentalApi: true } });
+    if (config.requireDurableQueue) requireDurableCodexQueue(initialized);
     socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }));
     return { initialized, request, close, exited, get connected() { return !closed && !failure && socket.readyState === WebSocket.OPEN; },
       get lastNotificationError() { return lastNotificationError; } };

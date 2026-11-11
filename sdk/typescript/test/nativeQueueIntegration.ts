@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     await enqueueCodexPeerNotification({...base,onProducerObservation:async()=>{throw new Error('async diagnostic');}},
       nativeThread,message,randomUUID());
     for(const [scenario,outcome,appends] of [
-      ['loaded-before','not_sent',0],['server-request','not_sent',0],['loaded-after','unknown',1],
+      ['old-native','not_sent',0],['loaded-before','not_sent',0],['server-request','not_sent',0],['loaded-after','unknown',1],
       ['late-load','unknown',1],['loss','unknown',1],['post-error','unknown',1],['ignore-eof','unknown',1],
     ] as const) {
       fs.writeFileSync(journal,'');

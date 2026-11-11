@@ -7,6 +7,7 @@ import { CodexCleanupUnknownError, CodexRequestError, validateCodexConnectionCon
 import { codexPeerData } from './codexPeerData';
 import type { ScodePeerMessage } from './scodeAcp';
 import { timeout } from './timeout';
+import { requireDurableCodexQueue } from './codexCapabilities';
 
 export interface CodexNativeQueueConfig extends CodexConnectionConfig {
   /** Explicit existing native home; never inferred from the scode workspace. */
@@ -137,7 +138,8 @@ export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfi
   })();
   observe({ phase: 'spawned', pid: child.pid });
   try {
-    await request('initialize', { clientInfo: { name: 'scode-native-queue', version: '1.0.0' }, capabilities: { experimentalApi: true } });
+    const initialized = await request('initialize', { clientInfo: { name: 'scode-native-queue', version: '1.0.0' }, capabilities: { experimentalApi: true } });
+    requireDurableCodexQueue(initialized);
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }) + '\n');
     await inventory('before');
     const result = await request('thread/queue/addOnce', { threadId, input: [{ type: 'text', text }], clientUserMessageId: eventId }) as {

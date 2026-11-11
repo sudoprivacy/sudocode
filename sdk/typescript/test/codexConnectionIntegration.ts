@@ -23,6 +23,7 @@ async function main(): Promise<void> {
   const original = process.env.CODEX_THREAD_ID ?? 'fixture-original';
   let state = 'idle';
   let connections = 0, dropNextDelivery = false;
+  let durableQueueVersion: unknown = 1;
   const accepted = new Map<string, any>();
   server.on('connection', socket => {
     connections++;
@@ -65,7 +66,8 @@ async function main(): Promise<void> {
         socket.send(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: {queuedSubmission: accepted.get(key)} }));
         return;
       }
-      const result = call.method === 'initialize' ? { userAgent: 'native-protocol-fixture/0.163.0' }
+      const result = call.method === 'initialize' ? { userAgent: 'native-protocol-fixture/0.163.0',
+        ...(durableQueueVersion === undefined ? {} : {serverCapabilities:{durableQueueAddOnce:durableQueueVersion}}) }
         : call.method === 'thread/loaded/list' ? { data: [original, 'another'], nextCursor: null }
           : call.method === 'thread/read' ? { thread: { id: call.params.threadId, cwd: directory, status: { type: state } } }
             : call.method === 'thread/turns/list' ? { data: [{ id: 'running', status: 'inProgress' }] }
@@ -100,7 +102,7 @@ async function main(): Promise<void> {
       if (event.method === 'fixture/async-throw') return Promise.reject(new Error('asynchronous observer failed'));
     });
     try {
-      assert.deepEqual(native.initialized, { userAgent: 'native-protocol-fixture/0.163.0' });
+      assert.deepEqual(native.initialized, { userAgent: 'native-protocol-fixture/0.163.0', serverCapabilities:{durableQueueAddOnce:1} });
       assert.deepEqual(await native.request('thread/loaded/list', {}), { data: [original, 'another'], nextCursor: null });
       await waitFor(() => events.includes('thread/started'));
       assert.equal(connections, 1, 'inventory and notifications share the same official-proxy connection');
@@ -146,6 +148,25 @@ async function main(): Promise<void> {
     await assert.rejects(connectCodex({ codexArgv: [path.join(directory, 'missing-native-binary')] }), /ENOENT|exited/);
     await assert.rejects(connectCodex({ ...config,
       codexArgv: [...config.codexArgv.slice(0, -1), 'http-refusal'] }), /Unexpected server response: 503/);
+
+    for (const version of [undefined, 0, '1', 2]) {
+      durableQueueVersion = version;
+      const before = calls.length;
+      await assert.rejects(connectCodex({...config, requireDurableQueue:true}), /did not negotiate durable/);
+      assert.deepEqual(calls.slice(before).map(call=>call.method), ['initialize'],
+        'a version label cannot replace actual capability; no application request is sent');
+    }
+    durableQueueVersion = 1;
+    const qualified = await connectRecoveringCodex({...config, requireDurableQueue:true});
+    try {
+      await qualified.request('thread/loaded/list', {});
+      await assert.rejects(qualified.request('fixture/drop', {}));
+      durableQueueVersion = undefined;
+      const before = calls.length;
+      await assert.rejects(qualified.request('thread/queue/addOnce', {threadId:original}), /did not negotiate durable/);
+      assert.deepEqual(calls.slice(before).map(call=>call.method), ['initialize'],
+        'same-address reconnect to an older server refuses before a write; no legacy fallback');
+    } finally { await qualified.close(); durableQueueVersion = 1; }
 
     // POSIX inherited pipe lifetime is the failure trigger here. Windows
     // cleanup ownership has its separate real bootstrap-failure regression.

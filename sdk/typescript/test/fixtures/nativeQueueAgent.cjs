@@ -12,6 +12,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   send({id:call.id,method:'account/chatgptAuthTokens/refresh',params:{}});return;
  }
  let result={};
+ if(call.method==='initialize'&&scenario!=='old-native')result={serverCapabilities:{durableQueueAddOnce:1}};
  if(call.method==='thread/loaded/list'){
   inventory++;result={data:scenario==='loaded-before'||(scenario==='loaded-after'&&inventory===2)?['other-root']:[],nextCursor:null};
  }

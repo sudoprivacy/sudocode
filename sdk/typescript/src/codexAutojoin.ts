@@ -138,6 +138,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       // Codex is the agent its peers address: the owned scode hands each peer
       // message over instead of answering it with its own model.
       const connection = await connectScode({ ...profile, onPeerMessage: message => {
+        if (!native.connected) throw new Error('Native durable ingress unavailable; retain delivery upstream');
         if(callback) { callback.receive(message); return; }
         if(pending.length>=64) throw new Error('ACP identity verification pending; retain delivery upstream');
         return new Promise<void>((resolve,reject) => pending.push({message,resolve,reject}));
@@ -244,7 +245,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     refreshing = chain.finally(() => { refreshing = undefined; });
     return refreshing;
   };
-  native = await connectRecoveringCodex(config.native, notification => {
+  native = await connectRecoveringCodex({...config.native, requireDurableQueue:true}, notification => {
     if (['thread/started', 'thread/closed'].includes(notification.method)) void refresh();
   });
   const timer = setInterval(() => { void refresh(); }, config.pollIntervalMs ?? 1000);
@@ -284,6 +285,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
           : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
           : delivery?.state==='cleanup_unknown' ? 'cleanup_unknown' : owner.connection?.closed ? 'disconnected'
           : delivery?.state==='blocked' ? 'delivery_blocked'
+          : !native.connected || inventoryError ? 'native_unavailable'
           : input?.inputOwner==='session' && ['paused','error'].includes(input.state) ? 'input_blocked'
           : owner.verified ? 'connected' : 'connecting',error:owner.error,
         ...(owner.connection&&input?{receiver:{pid:owner.connection.pid,executable:owner.connection.executable,

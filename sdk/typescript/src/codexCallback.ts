@@ -68,7 +68,7 @@ export async function connectCodexCallback(config: CodexCallbackConfig, sessionI
       enqueueCodexPeerNotification({ ...config, nativeHome }, config.threadId, message, eventId));
   }
   log({ phase: 'connecting', threadId: config.threadId, sessionId });
-  const native = await connectRecoveringCodex(config);
+  const native = await connectRecoveringCodex({...config, requireDurableQueue:true});
   const close = async () => { closed = true; await native.close(); };
   let closed = false;
   try {

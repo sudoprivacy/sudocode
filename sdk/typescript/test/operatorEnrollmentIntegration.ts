@@ -29,7 +29,7 @@ const server=new WebSocketServer({host:'127.0.0.1',port:0});
 server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call.method);
   if(call.id===undefined)return;
-  const result=call.method==='initialize'?{}:call.method==='thread/loaded/list'?{data:loaded,nextCursor:null}
+  const result=call.method==='initialize'?{serverCapabilities:{durableQueueAddOnce:1}}:call.method==='thread/loaded/list'?{data:loaded,nextCursor:null}
     :call.method==='thread/read'?{thread:{id:call.params.threadId,cwd:workspace,status:{type:'idle'},
       parentThreadId:null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true}}
     :call.method==='thread/queue/addOnce'?{queuedSubmission:{id:randomUUID(),

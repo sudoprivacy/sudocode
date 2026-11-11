@@ -713,3 +713,16 @@ the recipient before the send; one run did not deliver within its unchanged
 30-second budget. That unresolved receiver-reentry observation is retained as
 a separate native lifetime/lease concern. The append fixture avoids that
 unnecessary setup and does not claim to validate same-agent cold handoff.
+
+Durable Codex ingress requires the actual server's `initialize` response to
+advertise `serverCapabilities.durableQueueAddOnce: 1` on each connection,
+including a replacement proxy after reconnect. The CLI version or SDK package
+alone cannot establish this: the proxy can reach an older shared daemon.
+Autojoin refuses admission before enrollment or starting a peer receiver when
+the capability is absent. An unavailable native connection retains incoming
+delivery upstream; existing locally persisted input remains pending. A native
+queue producer checks its own handshake before submitting any write. There is
+no fallback to `turn/start`, `turn/steer` or non-idempotent `thread/queue/add`.
+This admission change requires a newly qualified native/SDK pair; previously
+qualified e690 binaries without the capability declaration are not accepted by
+the new gate. It does not restart a running native daemon or user frontend.

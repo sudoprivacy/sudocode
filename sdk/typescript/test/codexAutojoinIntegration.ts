@@ -32,6 +32,7 @@ let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindow
 let holdReads = false;
 let initialNativeOffline = true;
 let dropQueueOnce = false;
+let nativeDurableQueue = false;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -52,7 +53,7 @@ server.on('connection',socket=>socket.on('message',bytes=>{
     parentThreadId:null as string|null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true};
   if(thread.id===ids[2]){thread.threadSource='subagent';thread.parentThreadId=ids[0];}
   if(thread.id===ids[3])thread.threadSource='guardian_review';
-  const result=call.method==='initialize'?{userAgent:'fixture'}:call.method==='thread/loaded/list'
+  const result=call.method==='initialize'?{userAgent:'fixture',...(nativeDurableQueue?{serverCapabilities:{durableQueueAddOnce:1}}:{})}:call.method==='thread/loaded/list'
     ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}
       :call.method==='thread/queue/addOnce'?{queuedSubmission:{id:call.params.clientUserMessageId,clientUserMessageId:call.params.clientUserMessageId,input:call.params.input}}:{};
   const reply = () => {if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));};
@@ -81,6 +82,12 @@ async function main() {
   assert.equal(enrollments.length, 0, 'offline startup cannot invent a new agent');
   assert.throws(()=>owner!.connectionFor(ids[0]), /inventory unavailable/);
   initialNativeOffline=false;
+  await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
+  assert.equal(enrollments.length,0,'a reachable old native daemon cannot enroll or acknowledge peer input');
+  assert.equal(owner.canRetire,false,'unsupported ingress is not an empty native inventory');
+  assert.equal(rows().length,0,'unsupported native starts no Scode receiver');
+  assert.throws(()=>owner!.connectionFor(ids[0]),/did not negotiate durable/);
+  nativeDurableQueue=true;
   await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
   assert.equal(owner.status().length,2,'subagents and feature workers never become root Agents');
   const first=owner.status();assert.equal(new Set(first.map(row=>row.actor)).size,2);

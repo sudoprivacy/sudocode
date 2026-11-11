@@ -4622,6 +4622,8 @@ dependencies = [
  "futures-util",
  "indicatif",
  "iocraft",
+ "kernel",
+ "managed-agent",
  "mock-anthropic-service",
  "nexus-vfs-client",
  "nix 0.29.0",

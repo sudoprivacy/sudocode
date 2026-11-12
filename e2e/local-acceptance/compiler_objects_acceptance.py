@@ -49,6 +49,11 @@ def run(output):
         main = '''fn main() {
     assert_eq!(memchr::memchr(b'x', b"xy"), Some(0));
     assert!(option_env!("CARGO_TARGET_DIR").is_some(), "preserve compiler environment");
+    if let Some(cap) = option_env!("SCODE_ACCEPTANCE_BUILD_JOBS") {
+        let requested: usize = cap.parse().unwrap();
+        let actual: usize = env!("CARGO_BUILD_JOBS").parse().unwrap();
+        assert!(actual <= requested, "the executor exceeded its explicit compiler-job cap");
+    }
     println!("MARKER:{}:{}", env!("CACHE_COMPILE_INPUT"), cfg!(feature="enabled"));
 }
 '''

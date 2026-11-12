@@ -23,4 +23,5 @@ RUN mkdir -p /opt/compiler-objects/src \
 COPY compiler_cache.py compiler_seed.py /opt/
 RUN python3 /opt/compiler_seed.py --verify-cache
 COPY guard.py /opt/acceptance-guard.py
+ENV SCODE_ACCEPTANCE_BUILD_JOBS=1
 ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

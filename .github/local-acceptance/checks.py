@@ -1118,7 +1118,7 @@ def native_guard_files():
         **preflight_guard_files(),
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "af0b59fdf883922f2aa81906d4a869d19339d71e4a988071ff5a27dcf83e05be",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "33177b56c3fc2572d12cdd73ec8ca829c7768215738266547aac2c0c25df70f3",
         ".github/local-acceptance/compiler_cache.py": "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
@@ -1346,8 +1346,8 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "f4d9d6033273f2b56b42b4f14a4b35af788140cc629ce20734de749b667a5db8",
-        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+        "Dockerfile.guard": "594155f083bb48afb0d936043019e02a639897dfc5c61b97162f4edf7cb2bb7c",
+        "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
         contents = subprocess.check_output(["git", "show", f"{policy_ref}:.github/local-acceptance/{name}", "--"], cwd=root)

@@ -485,6 +485,11 @@ network disabled before starting either full matrix. Missing offline inputs fail
 during preparation. The compiler tool is also provisioned and corruption-checked
 in that image, then verified offline before the matrices; isolated homes retain
 only verified public tools.</p>
+<p>The guard image explicitly selects one compiler job through the executor's
+supported cap and checks that setting at entry. Its two-CPU, 2 GiB and 256-PID
+limits are retained. A compiled canary checks the effective Cargo job count
+against the declared cap; a plain Cargo environment default does not override
+the executor's automatic host-sized budget.</p>
 <p>Protected modules and their companion bytes load from the same frozen Git
 policy, including when the managed runner stages <code>protected_profiles.py</code>.
 An altered candidate companion cannot replace those bytes. Scheduling plans and

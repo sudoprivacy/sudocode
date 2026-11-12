@@ -1437,6 +1437,11 @@ The same image provisions the pinned compiler tool and rejects corrupted archive
 and executable bytes before retaining the intact tool. Both tools are rechecked
 with networking disabled before the matrices; isolated homes copy verified public
 tool bytes, never compiler objects or lease claims.
+The guard image declares the executor's `SCODE_ACCEPTANCE_BUILD_JOBS=1` cap
+explicitly and checks it at entry. Its existing two-CPU, 2 GiB and 256-PID limits
+remain unchanged. The compiled canary also checks the effective Cargo job count
+against an explicit executor cap. A plain Cargo environment default alone does
+not constrain the executor's automatic host-sized budget.
 Protected profile modules and their compiler-cache companion are materialized
 from the same frozen Git policy. A candidate's working-tree companion is never
 an execution source. The original cache tests also exercise this managed loader.

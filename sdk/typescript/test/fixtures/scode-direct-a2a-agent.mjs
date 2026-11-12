@@ -32,10 +32,11 @@ const inputDigest = (tool, params) => {
   }
   return hash.digest('hex');
 };
-const result = (value, tool, input) => {
-  const content = JSON.stringify(value);
-  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([0])); frame(hash, content);
-  return { content, isError: scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
+// `failure` is a tool result scode reports as an error, audited like any other.
+const result = (value, tool, input, failure) => {
+  const content = failure ?? JSON.stringify(value);
+  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([failure ? 1 : 0])); frame(hash, content);
+  return { content, isError: failure !== undefined || scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
     version: 1, commandId: `external-a2a-${randomUUID()}`, sessionId: scenario === 'bad-audit' ? 'wrong' : sessionId,
     actor, namespaceRoot: '', tool,
     requestedInputSha256: inputDigest(tool, input), effectiveInputSha256: inputDigest(tool, input), resultSha256: hash.digest('hex'),
@@ -109,7 +110,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     // whose validity window has not opened yet on this host.
     const refused=process.env.SCODE_DIRECT_FIXTURE_LIST_REFUSED;
     if(refused&&existsSync(refused)){
-      return { content: 'list recipients at /agents: status: Unknown, message: "transport error"', isError: true };
+      return result(undefined, 'agent_list', ctx.params, 'list recipients at /agents: status: Unknown, message: "transport error"');
     }
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })

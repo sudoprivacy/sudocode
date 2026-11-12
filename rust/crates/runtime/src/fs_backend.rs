@@ -2363,6 +2363,61 @@ impl NexusVfsFsBackend {
     }
 }
 
+/// How long a link written through a zone leader may take to become visible on this
+/// node before the replica is reported as lagging.
+const LINK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read a link back after `Setattr`. Two different things can stand between the
+/// write and a usable link, and only one of them is permanent:
+/// - a daemon that predates the wire field drops the target silently (an unknown
+///   proto field is ignored by design), so the entry exists as a link to NOWHERE and
+///   the index would name a conversation nobody can follow;
+/// - a node that forwarded the write to its zone's leader shows the entry only once
+///   its own replica applies it, so a stat right after can miss it.
+/// Retries only while the entry is not visible yet, for at most `wait`.
+fn verify_link(
+    alias: &str,
+    target: &str,
+    wait: std::time::Duration,
+    mut stat: impl FnMut() -> io::Result<nexus_vfs_client::VfsStat>,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut delay = std::time::Duration::from_millis(50);
+    loop {
+        match stat() {
+            Ok(found) => {
+                return match found.link_target {
+                    Some(got) if got == target => Ok(()),
+                    Some(got) => Err(io::Error::other(format!(
+                        "{alias}: link target came back as {got:?}, expected {target:?}"
+                    ))),
+                    None => Err(io::Error::other(format!(
+                        "{alias}: the daemon stored the link without a target — it is older \
+                         than the `Setattr` link_target field, so the index would name a \
+                         conversation nobody can follow"
+                    ))),
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "{alias}: the node accepted the link but still does not show it \
+                             after {wait:?}: this node's replica of the zone is behind its \
+                             leader (replica lag), so the conversation is indexed only once \
+                             it catches up"
+                        ),
+                    ));
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl FsBackend for NexusVfsFsBackend {
     fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
         let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
@@ -2540,26 +2595,12 @@ impl FsBackend for NexusVfsFsBackend {
         let alias = &self.authorize_target(alias, ResourceAccessKind::Write)?;
         let target = &self.authorize_target(target, ResourceAccessKind::Write)?;
         if let Some(parent) = std::path::Path::new(alias).parent() {
-            let _ = self.create_dir_all(&parent.to_string_lossy());
+            self.create_dir_all(&parent.to_string_lossy())?;
         }
         self.client.ensure_link(alias, target, &self.auth_token)?;
-        // Read the target back, because a daemon that predates the wire field ignores
-        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
-        // the chat-list index would list a peer whose conversation cannot be found.
-        // An unknown proto field is dropped silently by design, so the only way to know
-        // it landed is to ask. One stat, on a provisioning path that runs once per
-        // conversation.
-        match self.read_link(alias) {
-            Ok(got) if got == *target => Ok(()),
-            Ok(got) => Err(io::Error::other(format!(
-                "{alias}: link target came back as {got:?}, expected {target:?}"
-            ))),
-            Err(e) => Err(io::Error::other(format!(
-                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
-                 is older than the `Setattr` link_target field, so the index would name \
-                 a conversation nobody can follow"
-            ))),
-        }
+        verify_link(alias, target, LINK_VISIBILITY_WAIT, || {
+            self.remote_stat(alias)
+        })
     }
 
     /// Follow a link planted by [`Self::link`] — the target out of its metadata.
@@ -2672,6 +2713,89 @@ impl FsBackend for NexusVfsFsBackend {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn link_stat(target: Option<&str>) -> nexus_vfs_client::VfsStat {
+        nexus_vfs_client::VfsStat {
+            size: 0,
+            is_directory: false,
+            entry_type: 6,
+            zone_id: "sharedzone".into(),
+            modified_at_ms: None,
+            link_target: target.map(str::to_owned),
+        }
+    }
+
+    fn not_found() -> io::Error {
+        io::Error::new(io::ErrorKind::NotFound, ": not found")
+    }
+
+    /// A link the local replica has not applied yet appears without an error.
+    #[test]
+    fn a_link_that_appears_after_replica_lag_is_accepted() {
+        let mut calls = 0;
+        verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_secs(2),
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(not_found())
+                } else {
+                    Ok(link_stat(Some("/conversations/c")))
+                }
+            },
+        )
+        .expect("a link that becomes visible is accepted");
+        assert_eq!(calls, 3);
+    }
+
+    /// A link that never becomes visible is replica lag, never an old daemon.
+    #[test]
+    fn a_link_that_stays_invisible_reports_replica_lag() {
+        let error = verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_millis(120),
+            || Err(not_found()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("replica lag"), "{error}");
+        assert!(!error.to_string().contains("older than"), "{error}");
+    }
+
+    /// Only an entry stored without its target means the daemon dropped the field.
+    #[test]
+    fn a_link_stored_without_target_reports_an_old_daemon() {
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(None))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("older than the `Setattr` link_target field"),
+            "{error}"
+        );
+        let wrong = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(Some("/u")))
+        })
+        .unwrap_err();
+        assert!(wrong.to_string().contains("came back as"), "{wrong}");
+    }
+
+    /// Any other stat failure is returned as is, without waiting.
+    #[test]
+    fn a_failed_stat_is_returned_unchanged() {
+        let started = std::time::Instant::now();
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(5), || {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     fn temp_path(label: &str) -> String {
         let nanos = SystemTime::now()

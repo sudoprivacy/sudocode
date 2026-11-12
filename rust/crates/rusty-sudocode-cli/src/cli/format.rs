@@ -59,10 +59,11 @@ impl ToolInputRegistry {
     }
 }
 
-/// `true` for Text blocks the runtime injected (date announcements,
-/// rollover reminders, task notifications) rather than the user typing.
-/// These travel to the model inside user messages but must not surface
-/// in user-facing echoes: transcript replay and ↑-history recall.
+/// `true` for Text blocks the runtime wraps in `<system-reminder>` (the date
+/// announcement and rollover reminder, for example) rather than the user
+/// typing. These travel to the model inside user messages but must not
+/// surface in user-facing echoes: transcript replay and ↑-history recall.
+/// Task notifications are `<task-notification>` blocks and do not match.
 pub(crate) fn is_system_reminder_text(text: &str) -> bool {
     text.trim_start().starts_with("<system-reminder>")
 }

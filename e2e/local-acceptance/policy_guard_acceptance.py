@@ -208,6 +208,11 @@ def main():
         expected_affected = {"guard-contract"}
         if relative in profiles.preflight_guard_files():
             expected_affected.add("preflight")
+        if relative == ".github/local-acceptance/compiler_cache.py":
+            expected_affected.update({
+                "native-workspace", "native-examples", "native-resize", "native-release",
+                "native-context", "native-services", "native-cohost",
+            })
         assert affected == expected_affected, (relative, affected)
         if relative == ".github/local-acceptance/native_guard.py":
             # Follow the actual preflight path against the changed policy while

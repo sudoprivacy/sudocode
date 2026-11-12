@@ -149,10 +149,13 @@ def run(name, root, output, base, execute):
             assert message in (output / f"{name}.log").read_text(encoding="utf-8")
         else:
             raise AssertionError(f"Native launcher accepted {name}")
+    compiler = load("compiler_objects_native_fixture", SOURCE / "e2e/local-acceptance/compiler_objects_acceptance.py")
+    compiler.run(output / "compiler-objects")
     result = {"status": "PASS", "publisher_consumer_target_identical": True,
               "pre_restore_environment_unchanged": True, "actual_candidate_executed": True,
               "shared_dependency_bytes_and_mtime_preserved": True, "wrong_target_and_non_native_refused": True,
               "prerequisite_precedes_Cargo_and_failed_prerequisite_stops_native_profiles": True,
+              "compiler_objects": str(output / "compiler-objects/result.json"),
               "scope": "Actual configuration CLI, native launcher, Cargo and native processes. Remote cache restore and product journeys qualify in real CI; this fixture grants no product coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result), flush=True)

@@ -125,6 +125,7 @@ def main():
     print("GUARD_NATIVE_TOOL_PREFLIGHT: prepare and verify the platform-pinned protoc before "
           "the native matrix; isolated fixtures copy only that tool cache, never home or lease claims.", flush=True)
     protoc = profiles.cohost_protoc()
+    profiles.prepare_compiler_cache(output / "compiler-cache-tool")
     if protoc is not None:
         (output / "protoc-source.json").write_text(json.dumps({
             "version": "3.20.2", "executable": str(protoc),

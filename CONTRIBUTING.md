@@ -1410,6 +1410,52 @@ environment hash. Required output prints `CI_CACHE_LAYOUT` and `CI_CACHE_BINDING
 Real Cargo/native-process acceptance checks both layouts, dependency reuse,
 fresh candidate execution and refusal of a conflicting target. It adds no product
 journey coverage; real hosted restores establish remote cache hits and timings.
+Native Rust profiles also use checksum-pinned sccache 0.19.0 with a local
+2 GiB compiler-object cache. Cargo outputs remain in their original target;
+the object cache never supplies a previous test result or a source-freshness
+attestation. Original Cargo arguments and environment settings, including target
+inheritance in nested Cargo and compile-time environment reads, are retained.
+Explicit caller wrappers and sccache settings remain authoritative.
+Each profile owns a private server and stops it on success or failure. A retained
+ownership record prevents reuse of storage after an interrupted parent while
+its server is still alive; the tool's 10-minute idle timeout bounds orphaned
+servers. Client-side compilation keeps rustc under the original priority observer.
+Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+storage uses the original Cargo command immediately, without another wait.
+The early workspace-lint handoff keeps its existing exact command recipe.
+`compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
+processes with independent outputs, changed features/compile-time environment,
+an original failing source, repaired source and explicit-wrapper controls. It
+runs inside the existing native-cache guard. Cache code changes additionally
+select the actual native workspace on author and complementary hosts. These
+checks add no product coverage credit. Hosted object persistence and whole-PR
+savings are not established by the private fixture's cache-hit counts.
+The guard image fetches the fixture's exact shared Cargo manifest and lockfile
+while building. A network-disabled Cargo fetch verifies those dependencies
+before either full matrix starts; missing offline inputs fail at preparation.
+The same image provisions the pinned compiler tool and rejects corrupted archive
+and executable bytes before retaining the intact tool. Both tools are rechecked
+with networking disabled before the matrices; isolated homes copy verified public
+tool bytes, never compiler objects or lease claims.
+The guard image declares the executor's `SCODE_ACCEPTANCE_BUILD_JOBS=1` cap
+explicitly and checks it at entry. Its existing two-CPU, 2 GiB and 256-PID limits
+remain unchanged. The compiled canary also checks the effective Cargo job count
+against an explicit executor cap. A plain Cargo environment default alone does
+not constrain the executor's automatic host-sized budget.
+Protected profile modules and their compiler-cache companion are materialized
+from the same frozen Git policy. A candidate's working-tree companion is never
+an execution source. The original cache tests also exercise this managed loader.
+Scheduling plans and completed receipts share the existing exact recipe approval
+lookup in protected policy, including the source-without-test-groups condition.
+Original signatures, source/tree/base, author/platform responsibility, required
+checks, native workflow and dispatcher checks remain mandatory. This preserves
+an authentic plan when only an explicitly approved equivalent recipe advances;
+it records no completed check. `LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE`
+reports the exact accepted profile set. Actual Git/SSH/HTTP/finalizer controls
+retain original notes, logs and process counts; undeclared, malformed and
+cross-profile approvals still refuse. Cache migration approves only the prior
+native recipes whose unchanged core commands were source-verified. The changed
+guard remains fresh and cache implementation changes select the real workspace.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

@@ -26,7 +26,10 @@ def git(*args):
 
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
-REVIEWED_VERIFIER_LAYOUT = "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766"
+REVIEWED_VERIFIER_LAYOUTS = {
+    "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
+    "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
+}
 
 
 def verifier_layout_digest(source, mode, consumers):
@@ -150,8 +153,8 @@ def metadata_only_inputs(paths, base, head, details):
         previous, current = identity(base), identity(head)
         if previous != current:
             raise ValueError("Code outside verifier bodies or function declarations changed")
-        details.update(reviewed_layout=REVIEWED_VERIFIER_LAYOUT, observed_layout=current[3])
-        if current[3] != REVIEWED_VERIFIER_LAYOUT:
+        details.update(reviewed_layouts=sorted(REVIEWED_VERIFIER_LAYOUTS), observed_layout=current[3])
+        if current[3] not in REVIEWED_VERIFIER_LAYOUTS:
             raise ValueError("Runner imports, declarations or consumers are outside the reviewed layout; full daemon checks continue")
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),

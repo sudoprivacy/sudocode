@@ -450,6 +450,31 @@ def stable_performance_power(output):
 NATIVE_RUST_PTY_CHECKS = {"native-workspace", "native-resize", "native-release", "native-services"}
 
 
+def compiler_cache_profiles():
+    return NATIVE_RUST_PTY_CHECKS | {"native-context", "native-cohost", "native-examples"}
+
+
+def prepare_compiler_cache(output):
+    """Bind the separate cache implementation before loading or executing it."""
+    contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
+    if hashlib.sha256(contents).hexdigest() != "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7":
+        raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
+                           f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
+                           "prepare_compiler_cache, then rerun the original supported contract-update command. "
+                           "No native build has started.")
+    # A fresh path prevents timestamp-based Python bytecode reuse across trees.
+    with tempfile.TemporaryDirectory(prefix="scode-compiler-cache-") as private:
+        path = Path(private) / "compiler_cache.py"
+        path.write_bytes(contents)
+        spec = importlib.util.spec_from_file_location("verified_compiler_cache", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    tool = module.prepare(github_asset_download)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "compiler-cache-source.json").write_text(json.dumps(tool, indent=2) + "\n", encoding="utf-8")
+    return module, tool
+
+
 def native_target_directory(root):
     return Path(os.environ.get("CARGO_TARGET_DIR", root / "rust/target")).resolve()
 
@@ -603,6 +628,8 @@ print(json.dumps({"executable": str(binary), "version": version,
 def prepare_native_checks(names, root, output, execute):
     """Resolve selected native tools before long native compilation."""
     prepared = {}
+    if any(name in compiler_cache_profiles() for name in names):
+        run.prepared_compiler_cache = prepare_compiler_cache(output / "compiler-cache-tool")
     if "native-services" in names:
         print("NATIVE_SERVICE_TOOL_PREFLIGHT: resolving the existing grpcurl client and running "
               "--version before compilation. A download or executable failure stops here; "
@@ -811,7 +838,46 @@ def native_release_journeys(root, binary, output, base, cargo, command, env):
     native_compiler_context(root, binary, output, command)
 
 
+def native_compiler_run(name, root, output, base, execute):
+    """Keep one finite server around the original profile, including failures."""
+    selected = execute
+
+    def command(argv, cwd, log, env=None):
+        return selected(argv, cwd, log, env)
+
+    # Re-enter the original dispatcher with a scoped callback. Keeping this
+    # branch inside the native cases preserves unrelated profile fingerprints.
+    command.compiler_cache_scope = True
+    try:
+        request = run.workspace_lint_request
+    except AttributeError:
+        request = None
+    try:
+        prepared = run.prepared_compiler_cache
+    except AttributeError:
+        prepared = None
+    if request is not None or prepared is None:
+        return run(name, root, output, base, command)
+    module, tool = prepare_compiler_cache(output / "compiler-cache")
+    if tool is None:
+        return run(name, root, output, base, command)
+    print("COMPILER_CACHE: pinned local objects, 2 GiB maximum; unchanged Cargo output layout and original "
+          "source/features/environment keys. Explicit user wrappers/configuration remain authoritative; "
+          "busy storage adds no wait. This is not a source-freshness attestation.", flush=True)
+    with module.session(tool, output / "compiler-cache", execute) as active:
+        selected = active.execute
+        return run(name, root, output, base, command)
+
+
 def run(name, root, output, base, execute):
+    if name in {"native-workspace", "native-resize", "native-release", "native-services",
+                "native-context", "native-cohost", "native-examples"}:
+        try:
+            cached = execute.compiler_cache_scope
+        except AttributeError:
+            cached = False
+        if not cached:
+            return native_compiler_run(name, root, output, base, execute)
     output.mkdir(parents=True, exist_ok=True)
     results = []
     rust = root / "rust"
@@ -1050,28 +1116,32 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
+        "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "33177b56c3fc2572d12cdd73ec8ca829c7768215738266547aac2c0c25df70f3",
+        ".github/local-acceptance/compiler_cache.py": "35a0c3335d0e5a4e07570cb5fd75edfe60f5d61cd5514738efb35cf744f630e7",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
-        ".github/local-acceptance/prepare_tools.py": "c2c02c8b9767f2b4c1aa2526c687254c3fe023d2931b86224c07f2211d43a9c6",
+        ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
         ".github/actions/release-artifact/action.yml": "1f39a2fdd9bd079d6dd458ddac43b9168e6df70e59976c64217d044d2f4c7a10",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "46a6183ba3a1001b6e755df1bd0cd64879131587cf458ac588f0da2414fb006c",
         "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
         "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
-        ".github/scripts/ci_input_scope.py": "72f1f54436d542773f8eaa9e2076cbfedc407d515a8a52ff712e8935f0c55cb7",
+        ".github/scripts/ci_input_scope.py": "592e0df76cf8cb43f4d8b723f3cfeac42103997e04a108f277c3864a26caa5ac",
         ".github/workflows/rust-ci.yml": "be3949990d6174a23cecf47836fc040febdb54d34a367ebd65d9e4f86bba9eb8",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "cfd1fa7cf9f40917f42a8cc9919625d740f2e6189f6b4a86efd9546a28c21c96",
+        ".github/local-acceptance/native_guard.py": "18b1af6f7b49753d41f9b9551168d1d55d530d5843cb426e33f0d8ebd4d8a726",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "963a3818c30413ded67c12437c6de990f5041a62bf7d1b690d69f55d77d62dda",
+        ".github/scripts/local_acceptance.py": "0c83a0040c05ed4836b8af84b799c3fd9c712f9ab98bce67f7b9aef8fda571d5",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
         ".github/workflows/ci-dependency-cache.yml": "9e7626539640a935a38100ce187a6fcb073780e57e37821550e5d713e0312cb4",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1079,24 +1149,24 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2c2dac64ddfb93633525c7e46817a735acff47fbd0009612b9a49af57a1484c7",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "ebe15c35ce4015f29b2699f6fe9dc8149fa51aaf390076c33fe4625715205864",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "0d7ddf8c693c5530d8949b5e90a58b9fada7d4781447dcff0aca864718b751bd",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
         "e2e/local-acceptance/host_lease_acceptance.py": "6b5f2f0cc9c8653f33ea4d2f43b403ac8e77aaffdb84bccc42782713c6940656",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "f4ef0c2f720313b51e97f292d6625560771c5c01963415ccea4642778bbfa59b",
+        "e2e/local-acceptance/native_cache_acceptance.py": "171729bd1351c3d03f89678f29d87eadc3e45305da9e7c5c655ca880977f6d24",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
-        "e2e/local-acceptance/parallel_acceptance.py": "0e062dfe86745b94c2cbb69870098a61a6ce3200cfb8649de2c7979ca9a42977",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
+        "e2e/local-acceptance/parallel_acceptance.py": "5cb522ab539da4437b075555d711c26a572017dbad5ea8f255e4014dbb5a07a5",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
         "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "cc1ff8e34a12ebcac284330497a26c4ea5af336cd208e1ab2a8531e83180eeb0",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "d33c0617a1ebff3fd56bbe0313de508361a84900f4f5e99e558b89d6ed4170bc",
+        "e2e/local-acceptance/run.py": "453b4bca68e242e4635490e97e45dbb0124195b78c43c2e0a71ac5f4fa24cd66",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "fcfa9fc3aaebfa3d5cbb23dedab803f26671f13e58d3d51e1db994640bff6786",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1140,7 +1210,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "a485949e946bd8788994b911171c194fec10f006d630377f87684b419336bc5a":
+    if actual_scope != "4e7fb701f5ccb3726b4322de85711a2528a8816770065db8e460457d14d6c360":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -1153,7 +1223,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'd2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63', 'native-context': '66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9'}
+    expected = {'native-release': 'd19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9', 'native-context': '921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1172,20 +1242,25 @@ def container_image_tag(repository, digest):
 
 
 def guard_tool_source(root, policy_ref):
+    """Preserve the existing nextest image seed and its public interface."""
+    return guard_tool_variant_source(root, policy_ref, False)
+
+
+def guard_tool_variant_source(root, policy_ref, compiler):
     """Provision the frozen tool function without duplicating its URL/checksums."""
     import ast
 
     source = subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py", "--"], cwd=root).decode("utf-8")
     definitions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
-    required = {"github_asset_download", "nextest_binary"}
+    required = {"github_asset_download", "prepare_compiler_cache" if compiler else "nextest_binary"}
     downloaders = [node for node in definitions if node.name == "github_asset_download"]
     if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
            and node.func.id == "github_api_request" for definition in downloaders for node in ast.walk(definition)):
         required.add("github_api_request")
     functions = [node for node in definitions if node.name in required]
     if sorted(node.name for node in functions) != sorted(required):
-        raise RuntimeError("Protected GitHub request/downloader and nextest_binary must each have one definition before building the guard image")
+        raise RuntimeError("Each protected GitHub request/downloader and selected tool preparer must have one definition before building the guard image")
     prefix = ("import hashlib, io, json, os, platform, socket, subprocess, sys, tarfile, tempfile, urllib.request, zipfile\n"
               "from pathlib import Path\n\n")
     main = '''
@@ -1224,6 +1299,43 @@ if __name__ == "__main__":
         **receipt, "actual_cli": version, "corrupt_cache_refused": refused,
     }), flush=True)
 '''
+    if compiler:
+        prefix += "import importlib.util\n"
+        main = '''
+
+if __name__ == "__main__":
+    socket.setdefaulttimeout(30)
+    output = Path("/opt/compiler-provision")
+    module, tool = prepare_compiler_cache(output)
+    if tool is None:
+        raise RuntimeError("The guard image requires its pinned compiler-cache tool")
+    version = subprocess.check_output([tool["executable"], "--version"], text=True).strip()
+    assert version == "sccache " + module.VERSION, version
+    refused = []
+    if "--verify-cache" in sys.argv:
+        for label, filename, message in [
+            ("archive", tool["archive"], "Pinned compiler-cache archive checksum mismatch"),
+            ("executable", tool["executable"], "Cached compiler-cache executable differs"),
+        ]:
+            path = Path(filename)
+            original = path.read_bytes()
+            path.write_bytes(original + b"controlled guard compiler cache corruption")
+            try:
+                try:
+                    module.prepare(github_asset_download)
+                except RuntimeError as error:
+                    assert message in str(error), str(error)
+                    refused.append(label)
+                else:
+                    raise AssertionError("Modified guard compiler cache was accepted: " + label)
+            finally:
+                path.write_bytes(original)
+        assert module.prepare(github_asset_download) == tool
+        assert subprocess.check_output([tool["executable"], "--version"], text=True).strip() == version
+    print("GUARD_COMPILER_PROVISION=" + json.dumps({
+        **tool, "actual_cli": version, "corrupt_cache_refused": refused,
+    }), flush=True)
+'''
     return (prefix + '\n\n'.join(ast.get_source_segment(source, node) for node in functions) + main).encode("utf-8")
 
 
@@ -1234,8 +1346,8 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "31205fa178d40cf2ffcd1df0650f0f848db544436f119d57a87ee52a03774704",
-        "guard.py": "aa5b4f97745372efeef46c6502980fd31427617ef0b7f7418b907f213839a308",
+        "Dockerfile.guard": "594155f083bb48afb0d936043019e02a639897dfc5c61b97162f4edf7cb2bb7c",
+        "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
         contents = subprocess.check_output(["git", "show", f"{policy_ref}:.github/local-acceptance/{name}", "--"], cwd=root)
@@ -1246,9 +1358,23 @@ def guard_image_context(root, policy_ref, context):
                                "contract-update command; no image build started.")
         (context / destination).write_bytes(contents)
         inputs_hash.update(name.encode() + b"\0" + contents + b"\0")
-    seed = guard_tool_source(root, policy_ref)
-    (context / "nextest_seed.py").write_bytes(seed)
-    inputs_hash.update(b"nextest_seed.py\0" + seed + b"\0")
+    for relative, destination in [
+        ("e2e/local-acceptance/compiler-objects.Cargo.toml", "compiler-objects/Cargo.toml"),
+        ("e2e/local-acceptance/compiler-objects.Cargo.lock", "compiler-objects/Cargo.lock"),
+        (".github/local-acceptance/compiler_cache.py", "compiler_cache.py"),
+    ]:
+        contents = subprocess.check_output(["git", "show", f"{policy_ref}:{relative}"], cwd=root)
+        if hashlib.sha256(contents).hexdigest() != native_guard_files()[relative]:
+            raise RuntimeError(f"Guard compiler dependency input {relative} differs from its protected pin; "
+                               "update the source pin and rerun the supported contract-update before building the image")
+        path = context / destination
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+        inputs_hash.update(relative.encode() + b"\0" + contents + b"\0")
+    for filename, compiler in [("nextest_seed.py", False), ("compiler_seed.py", True)]:
+        seed = guard_tool_variant_source(root, policy_ref, compiler)
+        (context / filename).write_bytes(seed)
+        inputs_hash.update(filename.encode() + b"\0" + seed + b"\0")
     return inputs_hash.hexdigest()
 
 
@@ -1256,6 +1382,12 @@ def verify_guard_image(image, command):
     """Recheck the image's verified tool offline before the decision matrix."""
     command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
             image, "/opt/nextest_seed.py")
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
+            image, "/opt/compiler_seed.py")
+    print("GUARD_COMPILER_DEPENDENCIES: verify the protected manifest/lock dependencies offline "
+          "before either guard matrix; original compiler and PTY controls remain required.", flush=True)
+    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "cargo",
+            image, "fetch", "--offline", "--locked", "--manifest-path", "/opt/compiler-objects/Cargo.toml")
 
 
 def prepare_contract_container(root, output, command):

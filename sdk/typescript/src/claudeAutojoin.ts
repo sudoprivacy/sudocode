@@ -1,5 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { boundProfile, claimBinding, identifier, provisionBinding, readBindings } from './codexBindings';
 import { CodexEnrollmentError } from './codexAutojoin';
 import { enroll } from './codexMcp';
@@ -7,8 +9,8 @@ import { runScodeMcp, type ScodeMcpConfig } from './mcp';
 import { registerCommandShutdown } from './lifecycle';
 
 /**
- * Every Claude Code session joins the agent network as its own Agent, the way
- * each Codex thread does, with no launch flag. Claude Code starts one MCP server
+ * Every interactive Claude Code session joins the agent network as its own
+ * Agent, the way each user root thread of Codex does, with no launch flag. Claude Code starts one MCP server
  * per session and names the session in CLAUDE_CODE_SESSION_ID (stable across
  * --continue/--resume), so the session id is the native root: the first start
  * enrolls `claude-<32 hex>` through the operator's adapter, later starts reuse
@@ -45,6 +47,16 @@ export function readClaudeAutojoinConfig(file: string): ClaudeAutojoinConfig {
   return config;
 }
 
+/** Claude Code's human-driven entrypoints. Print-mode, SDK, CI and hosted
+ * sessions have no user to address, like a Codex thread that is not a user
+ * root, so they run without an Agent. A missing or other entrypoint fails
+ * closed. The MCP entry and the wake hook both decide with this predicate. */
+const INTERACTIVE_ENTRYPOINTS = new Set(['cli', 'claude-vscode', 'claude-desktop']);
+
+export function joinsAgentNetwork(environment: NodeJS.ProcessEnv): boolean {
+  return INTERACTIVE_ENTRYPOINTS.has(environment.CLAUDE_CODE_ENTRYPOINT ?? '');
+}
+
 /** The session's private spool, shared by its bridge and its wake hook. */
 export function claudeWakeSpool(config: ClaudeAutojoinConfig, sessionId: string): string {
   if (!identifier(sessionId)) throw new Error('A Claude Code session id is required');
@@ -55,6 +67,11 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
   registerShutdown?: typeof registerCommandShutdown;
 } = {}): Promise<void> {
   const config = readClaudeAutojoinConfig(file);
+  if (!joinsAgentNetwork(environment)) {
+    // Claude Code still starts the entry; a server without tools adds nothing.
+    await new McpServer({ name: 'nexus-scode', version: '1.0.0' }).connect(new StdioServerTransport());
+    return;
+  }
   const sessionId = environment.CLAUDE_CODE_SESSION_ID ?? '';
   if (!identifier(sessionId)) throw new Error('--claude runs as a Claude Code MCP server; CLAUDE_CODE_SESSION_ID is missing');
   const workspace = environment.CLAUDE_PROJECT_DIR || process.cwd();

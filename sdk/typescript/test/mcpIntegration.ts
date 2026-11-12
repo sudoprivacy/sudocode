@@ -201,7 +201,8 @@ async function checkClaudeAutojoin(): Promise<void> {
     ? journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }> : [];
   const session = async (sessionId: string) => {
     const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
-      env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_PROJECT_DIR: directory } as Record<string, string>,
+      env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ID: sessionId,
+        CLAUDE_PROJECT_DIR: directory } as Record<string, string>,
       stderr: 'pipe' });
     let stderr = ''; transport.stderr?.on('data', bytes => { stderr += String(bytes); });
     const client = new Client({ name: 'claude-autojoin', version: '1' });
@@ -226,13 +227,30 @@ async function checkClaudeAutojoin(): Promise<void> {
   await session(second);
   assert.equal(claims().length, 2);
   assert.notEqual(claims()[1].actor, claims()[0].actor, 'each session gets its own Agent');
+  // A print-mode session has no user to address: no Agent, no tools, no spool.
+  const scripted = randomUUID();
+  const printTransport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
+    env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CLAUDE_CODE_SESSION_ID: scripted,
+      CLAUDE_PROJECT_DIR: directory } as Record<string, string>, stderr: 'pipe' });
+  const printClient = new Client({ name: 'claude-print', version: '1' });
+  try {
+    await printClient.connect(printTransport);
+    assert.deepEqual((await printClient.listTools()).tools, [], 'a print-mode session runs without an Agent');
+  } finally { await printClient.close(); }
+  assert.equal(claims().length, 2, 'a print-mode session enrolls nothing');
+  assert.ok(!fs.existsSync(path.join(state, `${scripted}.wake.jsonl`)) && !fs.existsSync(path.join(state, `${scripted}.mcp.json`)));
   // The hook names its session through Claude Code's JSON input.
-  const woke = await new Promise<{ code: number | null; stderr: string }>(resolve => {
-    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'] });
+  const wake = (entrypoint: string) => new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'],
+      env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: entrypoint } });
     let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
     child.on('exit', code => resolve({ code, stderr }));
     child.stdin!.end(JSON.stringify({ session_id: first, hook_event_name: 'Stop' }));
   });
+  const unarmed = await wake('sdk-cli');
+  assert.equal(unarmed.code, 0, 'a session without an Agent never arms a waiter');
+  assert.equal(unarmed.stderr, '');
+  const woke = await wake('cli');
   assert.equal(woke.code, 2);
   assert.equal((woke.stderr.match(/<channel source="nexus_scode" from="fixture-peer"/g) ?? []).length, 2,
     'both peers spooled for this session wake it, and none of the other session\'s');

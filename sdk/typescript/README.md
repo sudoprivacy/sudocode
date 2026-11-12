@@ -72,8 +72,11 @@ is Claude Code's counterpart of the `turn/start` a Codex attachment uses.
 
 `--claude --config FILE` is a user-scope MCP entry that needs no launch flag.
 Claude Code starts one MCP server per session and names it in
-`CLAUDE_CODE_SESSION_ID`, which `--continue`/`--resume` keep, so the session is
-the native root exactly as a thread is for `--codex`: its first start enrolls a
+`CLAUDE_CODE_SESSION_ID`, which `--continue`/`--resume` keep, so an interactive
+session is the native root exactly as a user root thread is for `--codex`.
+Interactive means a `CLAUDE_CODE_ENTRYPOINT` of `cli`, `claude-vscode` or
+`claude-desktop`; print-mode, SDK, CI and hosted sessions run the entry without
+tools or an Agent, and their hook arms no waiter. The session's first start enrolls a
 `claude-<32 hex>` Agent through the same operator adapter, later starts reuse
 the original Agent and ACP session, and an uncertain enrollment is never
 replayed. Each session has its own wake spool; the hook reads the session from

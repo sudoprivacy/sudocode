@@ -9,7 +9,7 @@ import { shutdownCommand } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
 import { waitForClaudeWake } from './claudeWake';
-import { claudeWakeSpool, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
+import { claudeWakeSpool, joinsAgentNetwork, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
 
 interface Manifest {
   sourceCommit: string;
@@ -115,8 +115,11 @@ async function main(): Promise<void> {
     const raw=JSON.parse(fs.readFileSync(values.config,'utf8'));
     // An autojoin config names the session's spool from the hook input; a
     // fixed-session config names its one spool directly.
-    const spool=raw?.mode==='claude-autojoin'
-      ? claudeWakeSpool(readClaudeAutojoinConfig(values.config),String(JSON.parse(await hookInput()||'{}').session_id??''))
+    const autojoin=raw?.mode==='claude-autojoin'?readClaudeAutojoinConfig(values.config):undefined;
+    // A session that runs without an Agent has no spool to wait on.
+    if(autojoin&&!joinsAgentNetwork(process.env))return;
+    const spool=autojoin
+      ? claudeWakeSpool(autojoin,String(JSON.parse(await hookInput()||'{}').session_id??''))
       : raw?.claudeChannel?.wakeSpool;
     if(typeof spool!=='string')throw new Error('--claude-wake requires claudeChannel.wakeSpool or a claude-autojoin --config');
     process.exitCode=await waitForClaudeWake(spool);return;

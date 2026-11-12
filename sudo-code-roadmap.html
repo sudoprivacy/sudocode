@@ -1700,6 +1700,20 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><code>pty_bash_mode</code></td>
     </tr>
     <tr>
+      <td>Mosswork author validation</td>
+      <td><code>make all</code> and <code>make precommit</code> check backend
+      lint/format and frontend formatting before typechecking and tests.
+      Formatting errors preserve the source and Git index; the mandatory output
+      directs the author to run <code>make format-all</code> and refresh staged
+      inputs or the validation snapshot. Real Make/Git/backend controls check
+      early refusal, manual repair, unchanged inputs and propagation of a real
+      pytest failure. Full-suite and testmon recipes, assertions, worker defaults
+      and deadlines are retained.</td>
+      <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/c15d2ed0fdd58b893047c3f1558b05e11ecccb03/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
+    </tr>
+    <tr>
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact

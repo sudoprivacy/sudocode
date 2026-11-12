@@ -25,7 +25,7 @@ export function runEnrollmentCommand(argv: string[], claim: CodexAgentClaim): Pr
       try {
         if(failure)throw failure;
         const result = JSON.parse(bytes.toString('utf8'));
-        if(result && ['not_submitted','unknown'].includes(result.outcome) && typeof result.detail==='string') {
+        if(result && ['not_submitted','resumable','unknown'].includes(result.outcome) && typeof result.detail==='string') {
           throw new CodexEnrollmentError(result.outcome,result.detail);
         }
         if(code!==0)throw new Error(`Enrollment exited ${code}; recover the original operation`);

@@ -360,8 +360,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                     .session
                     .compaction
                     .as_ref()
-                    .map(|c| c.pre_compact_discovered_tools.clone())
-                    .unwrap_or_default(),
+                    .map_or_default(|c| c.pre_compact_discovered_tools.clone()),
             };
             // Race the API stream (which includes the retry loop) against
             // the abort signal so ESC/Ctrl-C cancels even during retries.

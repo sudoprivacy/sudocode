@@ -2609,26 +2609,18 @@ fn liveness_diagnostic(
             })
         })
         .map(|event| {
-            let attrs = event["attributes"]
-                .as_object()
-                .map(|attrs| {
-                    attrs
-                        .iter()
-                        .filter(|(key, _)| {
-                            matches!(
-                                key.as_str(),
-                                "attempt"
-                                    | "status"
-                                    | "error"
-                                    | "reason"
-                                    | "elapsed_ms"
-                                    | "request_id"
-                            )
-                        })
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect::<serde_json::Map<_, _>>()
-                })
-                .unwrap_or_default();
+            let attrs = event["attributes"].as_object().map_or_default(|attrs| {
+                attrs
+                    .iter()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.as_str(),
+                            "attempt" | "status" | "error" | "reason" | "elapsed_ms" | "request_id"
+                        )
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>()
+            });
             json!({"event": event["event"], "attributes": attrs})
         })
         .take(64)

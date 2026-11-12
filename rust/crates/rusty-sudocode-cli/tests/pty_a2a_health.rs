@@ -119,8 +119,7 @@ fn status(session: &mut PtySession) -> Status {
             .lines()
             .rev()
             .find(|line| line.trim_start().starts_with(label))
-            .map(|line| line.trim_start()[label.len()..].trim().to_string())
-            .unwrap_or_default()
+            .map_or_default(|line| line.trim_start()[label.len()..].trim().to_string())
     };
     Status {
         receiving: last("Receiver").starts_with("receiving"),

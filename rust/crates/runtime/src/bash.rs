@@ -1126,8 +1126,7 @@ impl BackgroundShell {
                         task.exit_code = status.code();
                         task.activity = describe_exit_status(status)
                             .as_ref()
-                            .map(ShellStatus::wire)
-                            .unwrap_or_default();
+                            .map_or_default(ShellStatus::wire);
                     });
                     if let Some(journal) = &self.journal {
                         #[cfg(unix)]

@@ -1807,8 +1807,7 @@ pub(crate) fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSe
     let mut discovered: BTreeSet<String> = session
         .compaction
         .as_ref()
-        .map(|c| c.pre_compact_discovered_tools.clone())
-        .unwrap_or_default();
+        .map_or_default(|c| c.pre_compact_discovered_tools.clone());
     for message in &session.messages {
         for block in &message.blocks {
             if let ContentBlock::ToolResult {

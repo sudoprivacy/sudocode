@@ -452,8 +452,7 @@ fn run_config_account(
     let known: Vec<&str> = config
         .auth_modes
         .get("proxy")
-        .map(|accounts| accounts.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|accounts| accounts.keys().map(String::as_str).collect());
     let candidates = || {
         if known.is_empty() {
             "<none configured under auth_modes.proxy>".to_string()
@@ -1540,16 +1539,14 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         let branch = session
             .branch_name
             .as_deref()
-            .map(|b| format!("  branch={b}"))
-            .unwrap_or_default();
+            .map_or_default(|b| format!("  branch={b}"));
         let latest = if i == 0 { "  (latest)" } else { "" };
         let summary = session
             .summary
             .as_deref()
             .map(cli::session::format_session_summary)
             .filter(|summary| !summary.is_empty())
-            .map(|summary| format!("  summary={summary}"))
-            .unwrap_or_default();
+            .map_or_default(|summary| format!("  summary={summary}"));
         println!(
             "  {id}  {msgs} msgs  {age}{branch}{summary}{latest}",
             id = session.id,
@@ -4723,8 +4720,7 @@ impl LiveCli {
         let endpoint =
             engine_core::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
                 .ok()
-                .map(|r| r.base_url)
-                .unwrap_or_default();
+                .map_or_default(|r| r.base_url);
 
         render::startup::banner(&[
             format!("  {DIM}Model{RESET}            {}", model),
@@ -6341,7 +6337,7 @@ impl LiveCli {
                     manager
                         .list_installed_plugins()
                         .ok()
-                        .map(|plugins| {
+                        .map_or_default(|plugins| {
                             plugins
                                 .iter()
                                 .map(|plugin| {
@@ -6388,7 +6384,6 @@ impl LiveCli {
                                 })
                                 .collect::<Vec<_>>()
                         })
-                        .unwrap_or_default()
                 });
                 let mut envelope = json!({
                     "kind": "plugin",

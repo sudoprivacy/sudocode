@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -51,6 +51,15 @@ function createRecord(file: string, value: unknown): void {
   const handle=openSync(file,'wx',0o600);
   try {writeFileSync(handle,JSON.stringify(value)+'\n');fsyncSync(handle);}
   finally {closeSync(handle);}
+  syncParent(file);
+}
+
+function removeRecord(file: string): void {
+  rmSync(file);
+  syncParent(file);
+}
+
+function syncParent(file: string): void {
   if(process.platform!=='win32'){
     const parent=openSync(path.dirname(file),'r');
     try {fsyncSync(parent);}finally {closeSync(parent);}
@@ -107,9 +116,14 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
     // Only an already completed public receipt may be replayed.
     return readJson(resultFile) as CodexAgentProfile;
   }
-  // This operation record is already reserved. Even a nested preflight refusal
-  // cannot permit the outer bridge to replay the whole multi-stage workflow.
+  // The Node operator's typed refusal attests that nothing was submitted, so the
+  // reservation is released and the same operation may run again. Any other
+  // failure may have issued a credential and keeps the reservation.
   const minted=await runEnrollmentCommand(grant.nexusArgv,claim).catch(error=>{
+    if(error instanceof CodexEnrollmentError && error.outcome==='not_submitted'){
+      removeRecord(operation);
+      throw error;
+    }
     throw new CodexEnrollmentError('unknown',String(error));
   }) as {
     version:number;actor:string;operationId:string;credentialDirectory:string;

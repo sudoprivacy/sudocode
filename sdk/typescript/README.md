@@ -78,8 +78,9 @@ Interactive means a `CLAUDE_CODE_ENTRYPOINT` of `cli`, `claude-vscode` or
 `claude-desktop`; print-mode, SDK, CI and hosted sessions run the entry without
 tools or an Agent, and their hook arms no waiter. The session's first start enrolls a
 `claude-<32 hex>` Agent through the same operator adapter, later starts reuse
-the original Agent and ACP session, and an uncertain enrollment is never
-replayed. Each session has its own wake spool; the hook reads the session from
+the original Agent and ACP session, an enrollment the operator refused (for
+example an unreachable Node) runs again at the next start, and an uncertain
+enrollment is never replayed. Each session has its own wake spool; the hook reads the session from
 Claude Code's hook input, so one hook command serves every session.
 
 ```json

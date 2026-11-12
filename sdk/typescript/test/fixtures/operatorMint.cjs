@@ -6,6 +6,10 @@ let input='';
 process.stdin.on('data',bytes=>{input+=bytes;});
 process.stdin.on('end',()=>{
   const claim=JSON.parse(input);
+  if(process.argv[3]==='outage'&&fs.existsSync(path.join(directory,'outage'))){
+    process.stdout.write(JSON.stringify({outcome:'not_submitted',detail:'MintAgent connect failed'}));
+    return;
+  }
   fs.appendFileSync(path.join(directory,'mint.jsonl'),JSON.stringify(claim)+'\n');
   if(process.argv[3]==='lost')process.exit(17);
   const credentialDirectory=path.join(directory,claim.actor);

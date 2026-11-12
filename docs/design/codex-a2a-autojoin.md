@@ -195,9 +195,12 @@ The original native project's `agentName` is never overwritten. No native
 project directory is added to the ACP session by default. Any delegated
 project access needs a separate explicit owner policy.
 
-Missing/invalid SDK policy is `not_submitted` before reservation. After the
-multi-stage operation is reserved, **every** failure is Unknown, including a
-nested operator refusal, session creation failure, crash or lost public reply.
+Missing/invalid SDK policy is `not_submitted` before reservation. A nested
+operator refusal is `not_submitted` too: the operator attests that it submitted
+nothing, so the reservation is released and the same actor/operation runs
+again once the node is reachable. Once the operator may have submitted,
+**every** failure is Unknown, including session creation failure, crash or lost
+public reply.
 Only a completed public receipt may replay the original profile; an incomplete
 operation requires explicit recovery using its original actor/op and saved
 session, never a new name, operation or automatic second session. The bridge

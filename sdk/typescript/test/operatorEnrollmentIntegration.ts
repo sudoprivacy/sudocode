@@ -92,6 +92,16 @@ async function main(){
     const invalid=claim();
     await assert.rejects(enrollCodexAgent(path.join(root,'absent-grant.json'),invalid),error=>(error as {outcome:string}).outcome==='not_submitted');
     assert.equal(mintRows().length,before+1);
+    // An unreachable Node submits nothing: the same operation runs again once it is back.
+    const outageGrant=path.join(root,'outage-grant.json');
+    fs.writeFileSync(outageGrant,JSON.stringify({...grant,nexusArgv:[...grant.nexusArgv,'outage']}));
+    const outage=claim();fs.writeFileSync(path.join(root,'outage'),'');
+    await assert.rejects(enrollCodexAgent(outageGrant,outage),error=>(error as {outcome:string}).outcome==='not_submitted');
+    assert.ok(!fs.existsSync(path.join(grant.stateDirectory,outage.actor,'operation.json')),'a refusal releases its reservation');
+    assert.equal(mintRows().length,before+1);
+    fs.rmSync(path.join(root,'outage'));
+    assert.equal((await enrollCodexAgent(outageGrant,outage)).actor,outage.actor);
+    assert.equal(mintRows().length,before+2,'the retried operation issues exactly once');
     // Old equal-cwd replies still refuse private contexts without the new proof.
     const badConfig={...config,stateDirectory:path.join(root,'legacy-bindings'),resolveAgent:async(input:CodexAgentClaim)=>{
       const profile=await enrollCodexAgent(grantFile,input);delete profile.workspaceBinding;return profile;
@@ -119,7 +129,7 @@ async function main(){
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
     assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
-    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry; protocol fixture only');
+    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry; protocol fixture only');
   } finally {await network.close();}
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

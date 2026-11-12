@@ -238,7 +238,31 @@ async function checkClaudeAutojoin(): Promise<void> {
     assert.deepEqual((await printClient.listTools()).tools, [], 'a print-mode session runs without an Agent');
   } finally { await printClient.close(); }
   assert.equal(claims().length, 2, 'a print-mode session enrolls nothing');
-  assert.ok(!fs.existsSync(path.join(state, `${scripted}.wake.jsonl`)) && !fs.existsSync(path.join(state, `${scripted}.mcp.json`)));
+  assert.ok(!fs.existsSync(path.join(state, `${scripted}.wake.jsonl`)));
+  // A session that starts while its Node is unreachable joins once it returns, without a restart.
+  const outaged = randomUUID();
+  fs.writeFileSync(path.join(issuer, 'outage'), '');
+  const outageTransport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
+    env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ID: outaged,
+      CLAUDE_PROJECT_DIR: directory } as Record<string, string>, stderr: 'pipe' });
+  let outageStderr = ''; outageTransport.stderr?.on('data', bytes => { outageStderr += String(bytes); });
+  const outageClient = new Client({ name: 'claude-outage', version: '1' });
+  try {
+    await outageClient.connect(outageTransport);
+    const refused = JSON.stringify(await outageClient.callTool({ name: 'scode_status', arguments: {} }));
+    assert.match(refused, /not_submitted/);
+    assert.match(refused, /Not attached to the agent network yet/);
+    assert.equal(claims().length, 2, 'an unreachable Node issues nothing');
+    fs.rmSync(path.join(issuer, 'outage'));
+    const spool = path.join(state, `${outaged}.wake.jsonl`);
+    const deadline = Date.now() + 10000;
+    while (!fs.existsSync(spool) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(fs.existsSync(spool), 'the session attaches in the background and receives its peer');
+    assert.equal(claims().length, 3, 'the retried operation issues exactly once');
+    assert.match(JSON.stringify(await outageClient.callTool({ name: 'scode_status', arguments: {} })), /fixture-/);
+  } catch (error) { throw new Error(`${String(error)}\n${outageStderr}`); }
+  finally { await outageClient.close(); }
+  assert.ok(!fs.readdirSync(state).some(file => file.endsWith('.mcp.json')), 'no derived session config is persisted');
   // The hook names its session through Claude Code's JSON input.
   const wake = (entrypoint: string) => new Promise<{ code: number | null; stderr: string }>(resolve => {
     const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'],

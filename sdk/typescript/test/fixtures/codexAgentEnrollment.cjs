@@ -6,6 +6,11 @@ let input='';
 process.stdin.on('data',chunk=>{input+=chunk;});
 process.stdin.on('end',()=>{
   const claim=JSON.parse(input);
+  // While `outage` exists the Node is unreachable: the adapter submits nothing.
+  if(fs.existsSync(path.join(root,'outage'))){
+    process.stdout.write(JSON.stringify({outcome:'not_submitted',detail:'MintAgent connect failed'})+'\n');
+    return;
+  }
   const file=path.join(root,claim.actor+'.profile');
   fs.writeFileSync(file,JSON.stringify({
     // An optional second argument selects the fixture scode scenario.

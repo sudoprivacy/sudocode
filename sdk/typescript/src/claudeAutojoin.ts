@@ -1,11 +1,11 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { boundProfile, claimBinding, identifier, provisionBinding, readBindings } from './codexBindings';
 import { CodexEnrollmentError } from './codexAutojoin';
 import { enroll } from './codexMcp';
-import { runScodeMcp, type ScodeMcpConfig } from './mcp';
+import { serveScodeMcp } from './mcp';
 import { registerCommandShutdown } from './lifecycle';
 
 /**
@@ -21,7 +21,7 @@ import { registerCommandShutdown } from './lifecycle';
 export interface ClaudeAutojoinConfig {
   version: 1;
   mode: 'claude-autojoin';
-  /** Private directory: bindings, per-session MCP configs and wake spools. */
+  /** Private directory: bindings and per-session wake spools. */
   stateDirectory: string;
   auditLog: string;
   /** The same operator enrollment adapter Codex attachments use. */
@@ -75,17 +75,13 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
   const sessionId = environment.CLAUDE_CODE_SESSION_ID ?? '';
   if (!identifier(sessionId)) throw new Error('--claude runs as a Claude Code MCP server; CLAUDE_CODE_SESSION_ID is missing');
   const workspace = environment.CLAUDE_PROJECT_DIR || process.cwd();
-  // Durable bindings keep their own directory; the session's generated MCP
-  // config and wake spool live beside it.
   const bindingDirectory = path.join(config.stateDirectory, 'bindings');
-  const bindings = readBindings(bindingDirectory);
-  const binding = claimBinding(bindingDirectory, bindings, { id: sessionId, cwd: workspace, frontend: 'claude' });
-  await provisionBinding(bindingDirectory, binding, workspace, claim => enroll(config.enrollmentArgv, claim),
-    error => error instanceof CodexEnrollmentError && error.outcome === 'not_submitted');
-  const fixed: ScodeMcpConfig = { ...boundProfile(binding), version: 1, auditLog: config.auditLog,
-    claudeChannel: { peerPolicy: config.peerPolicy, ...(config.peers ? { peers: config.peers } : {}),
-      wakeSpool: claudeWakeSpool(config, sessionId) } };
-  const fixedFile = path.join(config.stateDirectory, `${sessionId}.mcp.json`);
-  writeFileSync(fixedFile, JSON.stringify(fixed, null, 2) + '\n', { mode: 0o600 });
-  await runScodeMcp(fixedFile, lifecycle);
+  const binding = claimBinding(bindingDirectory, readBindings(bindingDirectory), { id: sessionId, cwd: workspace, frontend: 'claude' });
+  await serveScodeMcp({ auditLog: config.auditLog, claudeChannel: { peerPolicy: config.peerPolicy,
+    ...(config.peers ? { peers: config.peers } : {}), wakeSpool: claudeWakeSpool(config, sessionId) } }, async () => {
+    // A refusal keeps the binding pending, so the next attempt retries the same operation.
+    await provisionBinding(bindingDirectory, binding, workspace, claim => enroll(config.enrollmentArgv, claim),
+      error => error instanceof CodexEnrollmentError && error.outcome === 'not_submitted');
+    return { ...boundProfile(binding), version: 1, auditLog: config.auditLog };
+  }, lifecycle);
 }

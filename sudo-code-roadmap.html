@@ -1797,7 +1797,22 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       runs use separate groups. Linux deployment regressions run once in the
       unconditional release job rather than again in the interoperability job;
       Windows retains the original interoperability arguments. Unknown platforms
-      retain the full arguments. Cases, platforms and deadlines are unchanged.
+      retain the full arguments. PR #39 additionally makes six independent
+      validator regression modules conditional for complete, existing regular
+      product Python source/test changes. Both full product matrices remain;
+      each platform retains the real Make/Git/testmon smoke and complete source
+      export/check. Validator, dependency, workflow, configuration, mixed,
+      unknown, deleted, renamed, nonregular or unprovable inputs retain all
+      validator cases. Missing selector output also defaults to full regression.
+      Collection controls preserve all other case IDs: release checks collect
+      274 versus 91, and Windows interoperability 235 versus 52, with the same
+      183 independent validator cases deferred in each. These are collection
+      counts, not executed passes or measured runner savings. The initial
+      dispatcher/workflow change passed all seven applicable hosted checks;
+      its real local hook passed 161 cases with six platform skips, and the
+      186.3-second local controller includes complete source export/check.
+      No first eligible product-only hosted saving is claimed. Original product
+      platforms, assertions, deadlines and live acceptance remain unchanged.
       Main identity pushes may reuse the newest successful PR attempt only
       when both original Linux/Windows checkout-step logs identify commits whose
       complete Git trees match the actual main tree. Both original test
@@ -1824,6 +1839,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/26">PR #26</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/27">PR #27</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/39">validator regression scope PR #39</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/36">identity reuse PR #36</a>;
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43294467401">actual main-tree proof</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/f8e2862ef35cfe62e6d5d02365c5fe078ae273b5/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a>;

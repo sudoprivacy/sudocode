@@ -105,6 +105,12 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });
     const gate=process.env.SCODE_DIRECT_FIXTURE_LIST_GATE;
     while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
+    // While this file exists the Node refuses the session's credential, as one
+    // whose validity window has not opened yet on this host.
+    const refused=process.env.SCODE_DIRECT_FIXTURE_LIST_REFUSED;
+    if(refused&&existsSync(refused)){
+      return { content: 'list recipients at /agents: status: Unknown, message: "transport error"', isError: true };
+    }
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
   .onRequest(acp.methods.agent.session.close, () => ({}));

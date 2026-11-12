@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -54,6 +54,18 @@ function createRecord(file: string, value: unknown): void {
   syncParent(file);
 }
 
+/** Publish a record once; a resumed operation accepts the identical record it
+ * already published and refuses any other. */
+function settleRecord(file: string, value: unknown): void {
+  try {createRecord(file,value);}
+  catch(error){
+    if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;
+    if(!isDeepStrictEqual(readJson(file),JSON.parse(JSON.stringify(value)))){
+      throw new Error(`${path.basename(file)} differs from this operation; operator recovery required`);
+    }
+  }
+}
+
 function removeRecord(file: string): void {
   rmSync(file);
   syncParent(file);
@@ -95,6 +107,12 @@ function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; 
 /** Operator implementation of enrollmentArgv. Called only after an owner has
  * installed explicit policy and the native Node enrollment capability. It is
  * source/test preparation until installed; it never starts or installs a Node.
+ *
+ * One operation per actor, reserved before anything is issued. Every stage
+ * after the reservation replays its durable record, so running the same
+ * operation again resumes it: the Node operator replays a completed issuance
+ * from its receipt and never resubmits one it may have sent, and the one ACP
+ * session the operation created is loaded again, never replaced.
  */
 export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Promise<CodexAgentProfile> {
   let prepared: ReturnType<typeof grantFor>;
@@ -112,9 +130,7 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
     if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;
     const previous=readJson(operation) as typeof intent;
     if(!isDeepStrictEqual(previous,intent))throw new Error('Actor operation/grant differs; operator recovery required');
-    // No RPC/session retry, including after a crash before the first submission.
-    // Only an already completed public receipt may be replayed.
-    return readJson(resultFile) as CodexAgentProfile;
+    if(existsSync(resultFile))return readJson(resultFile) as CodexAgentProfile;
   }
   // The Node operator's typed refusal attests that nothing was submitted, so the
   // reservation is released and the same operation may run again. Any other
@@ -131,29 +147,46 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
   if(!minted || Object.keys(minted).sort().join(',')!=='actor,credentialDirectory,operationId,version'
       || minted.version!==1 || minted.actor!==claim.actor || minted.operationId!==claim.operationId
       || typeof minted.credentialDirectory!=='string' || !path.isAbsolute(minted.credentialDirectory)) {
-    throw new Error('Operator enrollment returned another operation or credential');
+    throw new CodexEnrollmentError('unknown','Operator enrollment returned another operation or credential');
   }
   const credential=readJson(path.join(minted.credentialDirectory,'credential.json')) as {agent?:string;version?:number};
-  if(credential.agent!==claim.actor || credential.version!==1)throw new Error('Minted credential is for another actor');
+  if(credential.agent!==claim.actor || credential.version!==1){
+    throw new CodexEnrollmentError('unknown','Minted credential is for another actor');
+  }
+  // The credential is issued. The remaining stages are local and replay their
+  // records, so any failure among them resumes the same operation.
+  try {return await completeEnrollment(grant,claim,intent.nativeCanonicalWorkspace,actorDirectory,resultFile);}
+  catch(error){
+    throw error instanceof CodexEnrollmentError ? error : new CodexEnrollmentError('resumable',String(error));
+  }
+}
+
+async function completeEnrollment(grant: OperatorGrant, claim: CodexAgentClaim, nativeCanonicalWorkspace: string,
+  actorDirectory: string, resultFile: string): Promise<CodexAgentProfile> {
   const workspace=path.join(actorDirectory,'workspace');
   const settings=path.join(workspace,'.nexus','sudocode');
   mkdirSync(settings,{recursive:true,mode:0o700});
-  createRecord(path.join(settings,'settings.json'),{agentName:claim.actor});
+  settleRecord(path.join(settings,'settings.json'),{agentName:claim.actor});
   const profile: ScodeAcpConfig={...grant.scode,workspace,
     protocolLog:path.join(actorDirectory,'acp.jsonl'),stderrLog:path.join(actorDirectory,'stderr.log')};
-  const connection=await connectScode(profile);
+  const sessionFile=path.join(actorDirectory,'session.json');
+  const saved=existsSync(sessionFile) ? readJson(sessionFile) as {sessionId:string;workspace:string} : undefined;
+  if(saved && (saved.workspace!==workspace || typeof saved.sessionId!=='string' || !saved.sessionId)){
+    throw new CodexEnrollmentError('unknown','Persisted ACP session belongs to another operation; operator recovery required');
+  }
+  const connection=await connectScode(saved ? {...profile,acpSessionId:saved.sessionId} : profile);
   try {
     // Persist the actual native SID before any subsequent validation/close.
-    createRecord(path.join(actorDirectory,'session.json'),{sessionId:connection.sessionId,workspace});
+    if(!saved)createRecord(sessionFile,{sessionId:connection.sessionId,workspace});
     const listed=await listScodeAgents(connection);
     requireScodeNodeIdentity(connection,listed,claim.actor);
     const configFile=path.join(actorDirectory,'profile.json');
-    createRecord(configFile,{...profile,acpSessionId:connection.sessionId});
+    settleRecord(configFile,{...profile,acpSessionId:connection.sessionId});
     await connection.close();
     const result: CodexAgentProfile={actor:claim.actor,configFile,workspaceBinding:{version:1,
       actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,
-      nativeCanonicalWorkspace:intent.nativeCanonicalWorkspace,acpCanonicalWorkspace:canonicalWorkspace(workspace)}};
-    createRecord(resultFile,result);
+      nativeCanonicalWorkspace,acpCanonicalWorkspace:canonicalWorkspace(workspace)}};
+    settleRecord(resultFile,result);
     return result;
   } finally {await connection.close();}
 }

@@ -198,13 +198,18 @@ project access needs a separate explicit owner policy.
 Missing/invalid SDK policy is `not_submitted` before reservation. A nested
 operator refusal is `not_submitted` too: the operator attests that it submitted
 nothing, so the reservation is released and the same actor/operation runs
-again once the node is reachable. Once the operator may have submitted,
-**every** failure is Unknown, including session creation failure, crash or lost
-public reply.
-Only a completed public receipt may replay the original profile; an incomplete
-operation requires explicit recovery using its original actor/op and saved
-session, never a new name, operation or automatic second session. The bridge
-does not auto-retry `recovery_required` bindings.
+again once the node is reachable. A Node issuance that may have been sent
+without a receipt (a crash or a lost reply) is Unknown and needs explicit
+recovery of its original actor/op; it is never resubmitted.
+
+Every stage after the reservation replays its durable record, so running the
+same operation again resumes it: the Node operator replays a completed issuance
+from its receipt, the workspace settings and profile are published once, and
+the one persisted ACP SID is loaded again, never replaced by a second session.
+A failure after issuance (the session cannot list agents yet, the scode child
+fails) is therefore `resumable`: the binding stays pending and the same
+operation runs again. The bridge does not auto-retry `recovery_required`
+bindings.
 
 `test/operatorEnrollmentIntegration.ts` covers actual subprocesses with protocol
 fixtures. `NEXUS_OPERATOR_BIN` plus its SHA/source in the common native fixture
@@ -241,10 +246,10 @@ durability on Windows or power-loss acceptance.
 
 | State | Meaning | Next action |
 |---|---|---|
-| pending | No issuance submitted, including a typed offline refusal | Retry the same actor/op after a bounded delay |
+| pending | No completed enrollment: nothing issued (including a typed offline refusal), or an issued operation that resumes | Run the same actor/op again after a bounded delay |
 | provisioning | Original operation saved; adapter may be in flight | No second operation |
 | ready | Exact existing profile selected | Load its ACP session; never create a replacement |
-| recovery_required | Issuance outcome or response is uncertain | Operator resolves the original actor/op; no automatic retry or remint |
+| recovery_required | A Node issuance may have been sent without a receipt, or an owner stopped mid-provisioning | Operator resolves the original actor/op; no automatic retry or remint |
 
 A restarted owner turns an interrupted provisioning record into
 `recovery_required`. A failed ready profile keeps its actor/profile and reports

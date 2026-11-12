@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { boundProfile, claimBinding, identifier, provisionBinding, readBindings } from './codexBindings';
-import { CodexEnrollmentError } from './codexAutojoin';
+import { boundProfile, claimBinding, identifier, provisionBinding, readBindings, settleInterruptedBindings } from './codexBindings';
+import { retryableEnrollment } from './codexAutojoin';
 import { enroll } from './codexMcp';
 import { serveScodeMcp } from './mcp';
 import { registerCommandShutdown } from './lifecycle';
@@ -76,12 +76,14 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
   if (!identifier(sessionId)) throw new Error('--claude runs as a Claude Code MCP server; CLAUDE_CODE_SESSION_ID is missing');
   const workspace = environment.CLAUDE_PROJECT_DIR || process.cwd();
   const bindingDirectory = path.join(config.stateDirectory, 'bindings');
-  const binding = claimBinding(bindingDirectory, readBindings(bindingDirectory), { id: sessionId, cwd: workspace, frontend: 'claude' });
+  const bindings = readBindings(bindingDirectory);
+  settleInterruptedBindings(bindingDirectory, bindings);
+  const binding = claimBinding(bindingDirectory, bindings, { id: sessionId, cwd: workspace, frontend: 'claude' });
   await serveScodeMcp({ auditLog: config.auditLog, claudeChannel: { peerPolicy: config.peerPolicy,
     ...(config.peers ? { peers: config.peers } : {}), wakeSpool: claudeWakeSpool(config, sessionId) } }, async () => {
-    // A refusal keeps the binding pending, so the next attempt retries the same operation.
+    // A retryable failure keeps the binding pending, so the next attempt drives the same operation.
     await provisionBinding(bindingDirectory, binding, workspace, claim => enroll(config.enrollmentArgv, claim),
-      error => error instanceof CodexEnrollmentError && error.outcome === 'not_submitted');
+      retryableEnrollment);
     return { ...boundProfile(binding), version: 1, auditLog: config.auditLog };
   }, lifecycle);
 }

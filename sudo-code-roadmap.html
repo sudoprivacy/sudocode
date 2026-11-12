@@ -1716,6 +1716,22 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
     </tr>
     <tr>
+      <td>Mosswork metadata initialization</td>
+      <td>Frontmatter uses the installed PyYAML compiled safe loader when
+      available, retaining the original Python safe loader otherwise. No parser
+      cache or dependency change. Controls cover YAML value types, aliases and
+      fresh results, malformed input, refusal of Python object tags and preserved
+      Markdown bodies. The five original tests remain; 490 bundled files and
+      11 bounded inputs match the committed baseline. The candidate passes the
+      full non-live suite and normal hook; Linux and Windows run the added
+      regressions in the existing interoperability job. Alternating parser-only
+      medians were 0.206 versus 0.0355 seconds, excluding file reads, process
+      startup and the rest of validation.</td>
+      <td>No: shared metadata/helper controls; no Sudo Code PTY credit.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/28">Mosswork PR #28</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/9eb422679baf47b719859aeaf5de53f6a3b8a21f/tests/unit/utils/test_frontmatter.py"><code>test_frontmatter.py</code></a></td>
+    </tr>
+    <tr>
       <td>Mosswork hosted CI selection</td>
       <td>Within the triggered release workflow, a complete committed diff may
       omit the three-platform ACP and two-platform Sudograph matrices only for

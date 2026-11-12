@@ -1758,6 +1758,31 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43179821767">scoped run</a></td>
     </tr>
     <tr>
+      <td>Mosswork validation-tool CI</td>
+      <td>A closed list of source checker/exporter modules and their existing
+      regressions keeps Linux release checks plus a Windows tool job instead of
+      the ACP/Sudograph runtime matrices. Dispatcher, workflow, worker, dependency,
+      mixed and unknown changes retain the full matrices. Missing or changed
+      selector/output wiring or Windows job recipes also retain full coverage.
+      Real Git and child-process controls cover refusals, source drift, first
+      failure, index isolation and preserved Git policy configuration. Windows
+      runs all existing tool validators and a complete source export/check;
+      receipts identify the actual platform, and the artifact uses the exact
+      source-manifest filename. Checker failures retain every original error and
+      nonzero status while reporting the failed directory and supported commands
+      to create and check a new export. The original failed snapshot stays intact.
+      PR #30 recorded three successful jobs, 169 summed runner seconds and
+      92 seconds from workflow creation to its last job. Its local validation
+      and hook recorded 171.6 seconds; first recorded validation through normal
+      merge took 300.1 seconds, including intervening work. These different clocks
+      are not additive and do not establish the overall one-tenth target.</td>
+      <td>No: independent validation tools; skipped matrices are not PTY passes.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/29">Mosswork PR #29</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/30">PR #30</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43207578368">actual Windows tool run</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/bc12c917cfddf0d207ee534c30d204bded2eef6e/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a></td>
+    </tr>
+    <tr>
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact

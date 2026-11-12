@@ -1704,14 +1704,35 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><code>make all</code> and <code>make precommit</code> check backend
       lint/format and frontend formatting before typechecking and tests.
       Formatting errors preserve the source and Git index; the mandatory output
-      directs the author to run <code>make format-all</code> and refresh staged
-      inputs or the validation snapshot. Real Make/Git/backend controls check
+      prints repair guidance only when a style check fails, directing the author
+      to run <code>make format-all</code> and refresh staged inputs or the
+      validation snapshot. Real Make/Git/backend controls check
       early refusal, manual repair, unchanged inputs and propagation of a real
       pytest failure. Full-suite and testmon recipes, assertions, worker defaults
       and deadlines are retained.</td>
       <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
-      <a href="https://github.com/sudoprivacy/mosswork/blob/c15d2ed0fdd58b893047c3f1558b05e11ecccb03/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
+      <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
+    </tr>
+    <tr>
+      <td>Mosswork hosted CI selection</td>
+      <td>Within the triggered release workflow, a complete committed diff may
+      omit the three-platform ACP and two-platform Sudograph matrices only for
+      explicitly listed documentation and validation inputs. Runtime, dependency,
+      mixed, unknown or unprovable inputs retain both matrices; release checks
+      always run. Real Git controls cover scope selection, missing history,
+      nonregular inputs and index isolation. Each runtime or identity matrix
+      cancels its remaining peers after a failure. Cases, platforms and deadlines
+      are unchanged. On 2026-11-12, two validation-only runs recorded 854 versus
+      61 summed runner seconds and 412 versus 58 seconds from workflow creation
+      to its last job. These observations exclude local acceptance and merge
+      waiting; they do not prove the whole end-to-end target.</td>
+      <td>No: CI scheduling controls; skipped matrices are not PTY passes.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/f8e2862ef35cfe62e6d5d02365c5fe078ae273b5/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43169007910">earlier run</a> /
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43179821767">scoped run</a></td>
     </tr>
     <tr>
       <td>Acceptance executor guards</td>

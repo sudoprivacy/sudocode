@@ -1159,7 +1159,7 @@ def native_guard_files():
         "e2e/local-acceptance/native_cache_acceptance.py": "171729bd1351c3d03f89678f29d87eadc3e45305da9e7c5c655ca880977f6d24",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
         "e2e/local-acceptance/parallel_acceptance.py": "5cb522ab539da4437b075555d711c26a572017dbad5ea8f255e4014dbb5a07a5",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "d0869fbeac4abdd0742d78052feafa5a80e8967ac752d9d985b4e8c97d02900a",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",

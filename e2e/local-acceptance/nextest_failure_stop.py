@@ -37,7 +37,36 @@ fn main() {
         return;
     }
     publish(root, "child.pid");
-    let mut child = Command::new(std::env::current_exe().unwrap()).arg(root).arg("leaf").spawn().unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.arg(root).arg("leaf");
+    #[cfg(unix)] {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().unwrap();
+    #[cfg(windows)] let job = unsafe {
+        use std::{ffi::c_void, os::windows::io::AsRawHandle};
+        #[link(name="kernel32")]
+        unsafe extern "system" {
+            fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> *mut c_void;
+            fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+            fn IsProcessInJob(process: *mut c_void, job: *mut c_void, result: *mut i32) -> i32;
+        }
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        assert!(!job.is_null());
+        assert_ne!(AssignProcessToJobObject(job, child.as_raw_handle()), 0);
+        let mut assigned = 0;
+        assert_ne!(IsProcessInJob(child.as_raw_handle(), job, &mut assigned), 0);
+        assert_ne!(assigned, 0);
+        fs::write(root.join("group-proof"), "windows-nested-job").unwrap();
+        job
+    };
+    #[cfg(unix)] unsafe {
+        unsafe extern "C" { fn getpgid(pid: i32) -> i32; fn getpgrp() -> i32; }
+        assert_eq!(getpgid(child.id() as i32), child.id() as i32);
+        assert_ne!(getpgid(child.id() as i32), getpgrp());
+        fs::write(root.join("group-proof"), "independent-unix-process-group").unwrap();
+    }
     let start = Instant::now();
     while !root.join("grandchild.pid").exists() {
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -45,6 +74,11 @@ fn main() {
     }
     println!("PTY_FAILURE_STOP_READY");
     assert!(child.wait().unwrap().success());
+    #[cfg(windows)] unsafe {
+        #[link(name="kernel32")]
+        unsafe extern "system" { fn CloseHandle(handle: *mut std::ffi::c_void) -> i32; }
+        assert_ne!(CloseHandle(job), 0);
+    }
 }
 ''', encoding="utf-8")
     (fixture / "tests/process.rs").write_text(r'''use std::{fs, path::PathBuf, thread, time::{Duration, Instant}};
@@ -98,9 +132,14 @@ fn original_failure() {
     binary = target / "debug" / ("compiler-object-consumer" + suffix)
     programs = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in [programs[0], binary]}
     options = profiles.nextest_options(output)
+    configured = options[options.index("--max-fail") + 1]
+    assert configured == ("1:immediate" if os.name == "nt" else "1:wait"), configured
     options[options.index("--test-threads") + 1] = "2"
     rows = []
-    for mode in ("wait", "immediate"):
+    # POSIX shell tools intentionally use separate process groups. Retain the
+    # original wait behavior there; a nextest process-group signal alone is
+    # insufficient to qualify their descendants' retirement.
+    for mode in (("wait", "immediate") if os.name == "nt" else ("wait",)):
         directory = output / mode
         directory.mkdir()
         row = {"mode": mode, "identities": [], "observer_error": None, "released_at": None}
@@ -122,6 +161,9 @@ fn original_failure() {
                         assert process.nice() == 0
                     row["identities"].append({"pid": process.pid, "birth": process.create_time(),
                                               "exe": str(expected), "priority": process.nice()})
+                row["process_group_proof"] = (directory / "group-proof").read_text()
+                assert row["process_group_proof"] == (
+                    "windows-nested-job" if os.name == "nt" else "independent-unix-process-group")
                 # The real ConPTY host also belongs to this private test tree.
                 if terminal:
                     allowed = target / "debug/deps/OpenConsole.exe"
@@ -172,7 +214,8 @@ fn original_failure() {
         assert row["finished_naturally"] == (mode == "wait"), row
         assert not row["remaining_processes"], row
         assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in programs.items())
-    assert rows[1]["failure_stop_seconds"] < rows[0]["failure_stop_seconds"], rows
+    if os.name == "nt":
+        assert rows[1]["failure_stop_seconds"] < rows[0]["failure_stop_seconds"], rows
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in inputs.items())
     result = {"status": "PASS", "rows": rows, "terminal": terminal,
               "inputs": {str(p): h for p, h in inputs.items()},

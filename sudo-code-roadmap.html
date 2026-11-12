@@ -1703,10 +1703,12 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. The shared nextest runner immediately terminates running tests
-      after the first failure, preserving the original failure and nonzero exit.
-      Its existing guard compares waiting and immediate cancellation with a real
-      PTY, child/grandchild processes and the pinned Windows OpenConsole host;
+      identity. On Windows the shared nextest runner immediately terminates running
+      test jobs after the first failure, preserving the original failure and nonzero exit.
+      Unix retains waiting cleanup for independent process groups.
+      Its existing guard compares both Windows modes with a real PTY,
+      child/grandchild processes, a nested job and the pinned OpenConsole host;
+      Unix runs the original waiting mode with an independent process group.
       original process identities must retire and aborted cases cannot pass.
       Successful runs keep all cases, workers, retries and deadlines.
       Workspace, resize and service dispatch verify the fixed nextest

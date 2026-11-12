@@ -148,15 +148,19 @@ def cohost_protoc():
 def nextest_options(output):
     """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
     configuration = output / 'nextest.toml'
-    configuration.write_text('[profile.default]\nretries = 0\nfail-fast = { max-fail = 1, terminate = "immediate" }\n')
+    termination = 'immediate' if os.name == 'nt' else 'wait'
+    configuration.write_text('[profile.default]\nretries = 0\n'
+                             f'fail-fast = {{ max-fail = 1, terminate = "{termination}" }}\n')
     workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
     if not 1 <= workers <= 4:
         raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
-    print('NATIVE_FAILURE_STOP: first failure terminates running tests; original failure output '
-          'and exit status are retained. Successful runs retain their complete selection, '
-          'worker count, retries and deadlines.', flush=True)
+    print('NATIVE_FAILURE_STOP: ' + ('Windows immediately terminates running test jobs; '
+          if termination == 'immediate' else
+          'Unix stops new tests and waits for independent process groups to clean up; ')
+          + 'original failure output and exit status are retained. Successful runs retain '
+          'their complete selection, worker count, retries and deadlines.', flush=True)
     return ['--config-file', str(configuration), '--profile', 'default', '--ignore-default-filter',
-            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:immediate', '--no-tests', 'fail']
+            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:' + termination, '--no-tests', 'fail']
 
 
 def docker_engine_probe_command(timeout):
@@ -1119,7 +1123,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/local-acceptance/nextest_failure_stop.py": "79e61b4d6eaae5b88905dd3d9505f2ee78de24b4335c50d27f3110102483e2ce",
+        "e2e/local-acceptance/nextest_failure_stop.py": "ba60a789d23aaecc868e33e0aabd557df1a3e11f5028c82cc669d502231b1bdf",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "33177b56c3fc2572d12cdd73ec8ca829c7768215738266547aac2c0c25df70f3",
@@ -1227,7 +1231,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '26a7152f44c112ec7b60554d3f638519558c60a12eb2bfa8b07499f8251006e3', 'native-context': '7eee4c4a21ba7b9553eb841ff5edb2015b61bd65ef9f1f34f282dcfd9714d36c'}
+    expected = {'native-release': 'e1bfca0902e71760d2ac63fdb769a1948b6faaae949e575406b8c80894c4af9a', 'native-context': '1cb8e58c233540ed81b4f01d18e7209635fed9b5622af84c2f1a799434cf1fa7'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

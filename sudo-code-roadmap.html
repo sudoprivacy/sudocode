@@ -1701,7 +1701,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Mosswork author validation</td>
-      <td><code>make all</code> and <code>make precommit</code> check backend
+      <td>For application, mixed and unknown inputs, <code>make all</code>
+      and <code>make precommit</code> check backend
       lint/format and frontend formatting before typechecking and tests.
       Formatting errors preserve the source and Git index; the mandatory output
       prints repair guidance only when a style check fails, directing the author
@@ -1715,7 +1716,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       Real pytest controls generate their own caches and cover known failures,
       new files, repaired cases and empty caches; no copied or fabricated
       dependency graph is used. Reordering may repeat module fixture setup,
-      so these controls do not prove a whole-cycle speedup. <code>make all</code> starts with the full non-live suite when verified
+      so these controls do not prove a whole-cycle speedup. Within the application
+      route, <code>make all</code> starts with the full non-live suite when verified
       history is unavailable. Ordinary maxfail assertion failures may preserve
       genuinely checkpointed per-test records while the original whole gate
       stays failed; failed and unexecuted cases remain required. Reuse requires
@@ -1733,6 +1735,24 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       explicit full run. No graph is copied or fabricated. Real default-250-case
       checkpoint controls preserve failed/untested cases; unrecorded short
       batches safely rerun. Historical and current passes remain separate.
+      Independently registered documentation/tool changes use their existing
+      validators through <code>make all</code> as well as the original hook.
+      Scope includes the entire unmerged branch, staged and unstaged edits
+      and untracked source. An application/dependency/mixed/unknown input,
+      unavailable accepted-main ancestor, clean checkout or source link
+      retains the original application command chain. Validator failures
+      remain failures; all raw source and the real index must stay unchanged.
+      Stat-only file rewrites neither refresh the index nor cause a false
+      application classification. Mandatory output identifies the complete
+      scope, source and receipt. Make regression cases run when their Make,
+      dispatcher or related test inputs change; independent tool repairs
+      retain their original checks. PR #38 recorded 139 passed/5 explicit
+      platform skips in 146.8s through actual Make and separately 139/5
+      in 138.1s through the original hook. Its complete local controller
+      took 330.9s, including export/check and both validations; earlier
+      development fields and the index red-to-green control remain recorded.
+      Seven applicable exact-head CI checks passed before normal merge.
+      These are scoped tool checks, not new full application or PTY passes.
       One measured Windows example: full 5388 passed/234 skipped
       in 1732.5s; unchanged-source reuse 0 passed/
       35 skipped in 62.8s. Counts are separate.
@@ -1745,6 +1765,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/32">PR #32</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/34">source-bound reuse PR #34</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/38">complete-worktree tool route PR #38</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
     </tr>
     <tr>

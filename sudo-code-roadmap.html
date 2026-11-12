@@ -1777,6 +1777,24 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       unconditional release job rather than again in the interoperability job;
       Windows retains the original interoperability arguments. Unknown platforms
       retain the full arguments. Cases, platforms and deadlines are unchanged.
+      Main identity pushes may reuse the newest successful PR attempt only
+      when both original Linux/Windows checkout-step logs identify commits whose
+      complete Git trees match the actual main tree. Both original test
+      commands must have completed successfully. PR and manual validation
+      retain the original full matrix. Failed, incomplete, partial, missing,
+      ambiguous or source-mismatched proof retains every original platform
+      command; an older green run cannot replace a newer failure. A bounded
+      read-only metadata job prints the decision and original source/job
+      references and publishes its actual proof. Reused platform jobs are
+      reported as skipped, not new passes. An earlier identical-tree main
+      push after PR #34 used 173 summed runner seconds. The accepted new
+      main run used 10.0 summed runner seconds, including the proof
+      job startup and artifact upload; its two already-tested platform jobs
+      were skipped before matrix expansion. These are separate observed
+      runs, not a controlled benchmark. This removes after-merge runner burden,
+      not time already spent reaching that PR merge. The original PR #35
+      full-log refusal and complete-matrix fallback remain recorded;
+      only PR #36 established the actual step-log reuse result.
       On 2026-11-12, two validation-only runs recorded 854 versus
       61 summed runner seconds and 412 versus 58 seconds from workflow creation
       to its last job. These observations exclude local acceptance and merge
@@ -1785,14 +1803,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/26">PR #26</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/27">PR #27</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/36">identity reuse PR #36</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43294467401">actual main-tree proof</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/f8e2862ef35cfe62e6d5d02365c5fe078ae273b5/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a>;
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43169007910">earlier run</a> /
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43179821767">scoped run</a></td>
     </tr>
     <tr>
       <td>Mosswork validation-tool CI</td>
-      <td>A closed list of source checker/exporter modules and their existing
-      regressions keeps Linux release checks plus a Windows tool job instead of
+      <td>A closed list of source checker/exporter and read-only identity
+      metadata modules with their existing regressions keeps Linux release
+      checks plus a Windows tool job instead of
       the ACP/Sudograph runtime matrices. Dispatcher, workflow, worker, dependency,
       mixed and unknown changes retain the full matrices. Missing or changed
       selector/output wiring or Windows job recipes also retain full coverage.
@@ -1800,7 +1821,14 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       failure, index isolation and preserved Git policy configuration. Windows
       runs all existing tool validators and a complete source export/check;
       receipts identify the actual platform, and the artifact uses the exact
-      source-manifest filename. Checker failures retain every original error and
+      source-manifest filename. Identity proof reads only the successful
+      original checkout step through the official step-log endpoint,
+      rejects terminal controls, and retains GitHub CLI output protection.
+      The initial dispatcher enrollment still runs all runtime matrices;
+      later closed-list metadata-only changes use the existing tool route.
+      Its normal local hook passed 113 cases with four explicit platform
+      skips; complete local validation and source export took 117.2 seconds.
+      Checker failures retain every original error and
       nonzero status while reporting the failed directory and supported commands
       to create and check a new export. The original failed snapshot stays intact.
       PR #30 recorded three successful jobs, 169 summed runner seconds and
@@ -1811,6 +1839,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>No: independent validation tools; skipped matrices are not PTY passes.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/29">Mosswork PR #29</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/30">PR #30</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/36">metadata repair PR #36</a>;
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43207578368">actual Windows tool run</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/bc12c917cfddf0d207ee534c30d204bded2eef6e/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a></td>
     </tr>

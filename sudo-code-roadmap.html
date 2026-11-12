@@ -1708,18 +1708,43 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       to run <code>make format-all</code> and refresh staged inputs or the
       validation snapshot. Real Make/Git/backend controls check
       early refusal, manual repair, unchanged inputs and propagation of a real
-      pytest failure. Full-suite and testmon recipes, assertions, worker defaults
-      and deadlines are retained. Shared pytest defaults run previously failed
-      cases and new test files first; successful runs retain all cases. The
+      pytest failure. Explicit <code>make test</code> and the original precommit
+      recipes, assertions, worker defaults and deadlines are retained. Shared pytest defaults run previously failed
+      cases and new test files first within the selected scope. The
       mandatory Make output states the ordering and first-failure cleanup.
       Real pytest controls generate their own caches and cover known failures,
       new files, repaired cases and empty caches; no copied or fabricated
       dependency graph is used. Reordering may repeat module fixture setup,
-      so these controls do not prove a whole-cycle speedup.</td>
+      so these controls do not prove a whole-cycle speedup. <code>make all</code> starts with the full non-live suite when verified
+      history is unavailable. Ordinary maxfail assertion failures may preserve
+      genuinely checkpointed per-test records while the original whole gate
+      stays failed; failed and unexecuted cases remain required. Reuse requires
+      the same worktree/environment, the
+      actual private SQLite dependency graph with matching content, and only
+      recognized Python changes. Non-Python/configuration changes, new/deleted
+      tests, missing/changed graphs, worker crashes, manual interruptions and
+      source/environment drift require a fresh full
+      run. Unknown source archives retain the original full command. The
+      required CLI prints full versus affected scope and the actual receipt.
+      Per-call tool tracing IDs do not invalidate otherwise identical tests;
+      identity, credentials and test configuration remain checked. A reuse-only
+      measurement refuses before starting an unplanned full suite.
+      Testmon can miss dynamic dependencies; use <code>make test</code> for an
+      explicit full run. No graph is copied or fabricated. Real default-250-case
+      checkpoint controls preserve failed/untested cases; unrecorded short
+      batches safely rerun. Historical and current passes remain separate.
+      One measured Windows example: full 5388 passed/234 skipped
+      in 1732.5s; unchanged-source reuse 0 passed/
+      35 skipped in 62.8s. Counts are separate.
+      This is a same-source reuse example, not a controlled changed-revision
+      comparison or proof of the whole-lifecycle one-tenth target. Failed
+      preparation, the first full run, original hook/frontend and CI costs
+      remain part of lifecycle accounting.</td>
       <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/32">PR #32</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/34">source-bound reuse PR #34</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
     </tr>
     <tr>

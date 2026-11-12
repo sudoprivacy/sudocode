@@ -235,7 +235,7 @@ async function checkClaudeAutojoin(): Promise<void> {
   const printClient = new Client({ name: 'claude-print', version: '1' });
   try {
     await printClient.connect(printTransport);
-    assert.deepEqual((await printClient.listTools()).tools, [], 'a print-mode session runs without an Agent');
+    assert.equal(printClient.getServerCapabilities()?.tools, undefined, 'a print-mode session runs without an Agent or tools');
   } finally { await printClient.close(); }
   assert.equal(claims().length, 2, 'a print-mode session enrolls nothing');
   assert.ok(!fs.existsSync(path.join(state, `${scripted}.wake.jsonl`)));

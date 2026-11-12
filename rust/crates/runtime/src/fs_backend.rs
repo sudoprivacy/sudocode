@@ -2374,6 +2374,7 @@ const LINK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs
 ///   the index would name a conversation nobody can follow;
 /// - a node that forwarded the write to its zone's leader shows the entry only once
 ///   its own replica applies it, so a stat right after can miss it.
+///
 /// Retries only while the entry is not visible yet, for at most `wait`.
 fn verify_link(
     alias: &str,

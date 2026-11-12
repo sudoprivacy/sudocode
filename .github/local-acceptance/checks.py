@@ -148,12 +148,15 @@ def cohost_protoc():
 def nextest_options(output):
     """Keep retry/filter/fail-fast behavior independent of ambient user settings."""
     configuration = output / 'nextest.toml'
-    configuration.write_text('[profile.default]\nretries = 0\nfail-fast = { max-fail = 1, terminate = "wait" }\n')
+    configuration.write_text('[profile.default]\nretries = 0\nfail-fast = { max-fail = 1, terminate = "immediate" }\n')
     workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
     if not 1 <= workers <= 4:
         raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
+    print('NATIVE_FAILURE_STOP: first failure terminates running tests; original failure output '
+          'and exit status are retained. Successful runs retain their complete selection, '
+          'worker count, retries and deadlines.', flush=True)
     return ['--config-file', str(configuration), '--profile', 'default', '--ignore-default-filter',
-            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:wait', '--no-tests', 'fail']
+            '--test-threads', str(workers), '--retries', '0', '--max-fail', '1:immediate', '--no-tests', 'fail']
 
 
 def docker_engine_probe_command(timeout):
@@ -1116,6 +1119,7 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/local-acceptance/nextest_failure_stop.py": "79e61b4d6eaae5b88905dd3d9505f2ee78de24b4335c50d27f3110102483e2ce",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "33177b56c3fc2572d12cdd73ec8ca829c7768215738266547aac2c0c25df70f3",
@@ -1139,7 +1143,7 @@ def native_guard_files():
         ".github/local-acceptance/native_guard.py": "18b1af6f7b49753d41f9b9551168d1d55d530d5843cb426e33f0d8ebd4d8a726",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
-        ".github/local-acceptance/nextest_guard.py": "d75834fbb3632c9d75ef6fba5355c63dded13e5c259c234b8ba5ada725fbbb84",
+        ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
         ".github/scripts/local_acceptance.py": "0c83a0040c05ed4836b8af84b799c3fd9c712f9ab98bce67f7b9aef8fda571d5",
         ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
@@ -1223,7 +1227,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'd19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9', 'native-context': '921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc'}
+    expected = {'native-release': '26a7152f44c112ec7b60554d3f638519558c60a12eb2bfa8b07499f8251006e3', 'native-context': '7eee4c4a21ba7b9553eb841ff5edb2015b61bd65ef9f1f34f282dcfd9714d36c'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

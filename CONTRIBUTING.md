@@ -688,6 +688,14 @@ protoc executable version still qualify the result. This avoids failing browser
 download redirects; the canonical artifact URL in the tool receipt stays stable.
 The Docker image provisions the same protected downloader. Tool preparation stays
 inside the invocation's total elapsed time; test selection and retries are unchanged.
+The shared runner uses `--max-fail 1:immediate`: the first failed test terminates
+other running tests and retains the original failure output and nonzero status.
+Aborted cases remain unsuccessful. Successful runs retain every selected case,
+worker count, retry setting and deadline. The required `NATIVE_FAILURE_STOP`
+response reports this behavior. The existing nextest guard compares both modes
+using a real PTY, its native child and grandchild, plus the pinned Windows
+OpenConsole host. It verifies process identities, original failure status and
+retirement after cancellation; these executor checks add no product coverage.
 On Windows/macOS the native guard also prepares the original protoc 3.20.2
 before its matrix and checks the real executable's version. The isolated cohost
 canary copies only that tool cache into its private HOME and runs offline;

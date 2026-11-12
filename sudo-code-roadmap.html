@@ -1703,7 +1703,13 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Workspace, resize and service dispatch verify the fixed nextest
+      identity. The shared nextest runner immediately terminates running tests
+      after the first failure, preserving the original failure and nonzero exit.
+      Its existing guard compares waiting and immediate cancellation with a real
+      PTY, child/grandchild processes and the pinned Windows OpenConsole host;
+      original process identities must retire and aborted cases cannot pass.
+      Successful runs keep all cases, workers, retries and deadlines.
+      Workspace, resize and service dispatch verify the fixed nextest
       archive and executable before compilation. Real proxy HTTP 504 and corrupt
       private archives must fail before any Cargo command; the verified cached
       native tool also runs offline. The original checksums, test cases, retries

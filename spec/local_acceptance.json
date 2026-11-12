@@ -287,6 +287,9 @@
       ],
       "ca1796cd977a9568cf914e5be21b446fba5b3799f2b287e6222fc387a28ef22f": [
         "01f7b04b7b1b001d2bbdf10c99d7726558062c43297b32f299ba9f1ef2f62105"
+      ],
+      "41520aa19a41a2f7694ad705002c5fcaf565e03a37c5412bfafccc0a75584c7a": [
+        "4b6020384092c0fd96d7ac9fc4b14bd0b6d9c8b37b2ebd26eeab7f9103975296"
       ]
     },
     "native-sdk": {
@@ -320,6 +323,9 @@
       ],
       "0c7bcfeecea68e2f1634d2bc35966ce3d75d25fe8fcdbf42c81c34efa6751f94": [
         "c92f36fcb5aa319e9306911065e860e05cb9b34ae6e0fb0b68ca991f87c2f3b9"
+      ],
+      "720eb4ac76060e9f284643b6e544c90175c2e6dfd9e8ba6931f7df97cdc6c82d": [
+        "ffb7d02b95775a79c96bf9176792a2ea75db86d0bcf7d4ef9f7dd6efb8b8c914"
       ]
     },
     "native-workspace": {
@@ -373,6 +379,12 @@
         "13db9efd01e539cb677871949556d54778de29c722c6921d898378478d944a76",
         "6f6cf4d4adb1c6d190211b1ebc063eee4b3da16787555640223ae388c5b3892d",
         "a0ac09f8e89843e90c6fe82a1cc2de93eca9a31501e57e7e30060d5d4ab58288"
+      ],
+      "fd20218aafe7480075208bda2797014894a392fb7fd9b1d4e84d1c7088c78b17": [
+        "13db9efd01e539cb677871949556d54778de29c722c6921d898378478d944a76",
+        "297c6bd782681553338718153d869121e473b06e6a942b7ff1ea82a4e3d9a5a6",
+        "6f6cf4d4adb1c6d190211b1ebc063eee4b3da16787555640223ae388c5b3892d",
+        "a0ac09f8e89843e90c6fe82a1cc2de93eca9a31501e57e7e30060d5d4ab58288"
       ]
     },
     "native-resize": {
@@ -416,6 +428,10 @@
       ],
       "83c63dfba3413e354d3f5a371795a3220ef1acb188d06081038867609f0340d7": [
         "dbdea82beed406dbdefd266503afbd8e0c3587db3a7334d69c3c9265623d11ba"
+      ],
+      "67e1e6256fc6290162a563f48ac83c709e0a10b5a6f051813f13388ab4584452": [
+        "83c63dfba3413e354d3f5a371795a3220ef1acb188d06081038867609f0340d7",
+        "dbdea82beed406dbdefd266503afbd8e0c3587db3a7334d69c3c9265623d11ba"
       ]
     },
     "native-release": {
@@ -447,6 +463,12 @@
       ],
       "d19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9": [
         "bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3",
+        "d2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63",
+        "e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca"
+      ],
+      "26a7152f44c112ec7b60554d3f638519558c60a12eb2bfa8b07499f8251006e3": [
+        "bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3",
+        "d19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9",
         "d2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63",
         "e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca"
       ]
@@ -489,6 +511,12 @@
         "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
       ],
       "44ab82e8f313785d110eabf2a7383812b3516b7c65d30a289caaaaeda866464a": [
+        "72e3f84c45fdee605a57d50508be1781eec5a7344a67407d61fb941846978505",
+        "e1cfa02a3480bd33e93fdb08093de50d4481023c6719c8f00bc5aba602abf0ba",
+        "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
+      ],
+      "aaabc080b8efb6986b01eda3b6d5be09035f24bf91541b08bbedd015071c3ca4": [
+        "44ab82e8f313785d110eabf2a7383812b3516b7c65d30a289caaaaeda866464a",
         "72e3f84c45fdee605a57d50508be1781eec5a7344a67407d61fb941846978505",
         "e1cfa02a3480bd33e93fdb08093de50d4481023c6719c8f00bc5aba602abf0ba",
         "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
@@ -535,6 +563,12 @@
         "24911e24c0b3ceb25ea437ecd0f4838f93dd39f18ac755f284efe33d70b8bc80",
         "2e023580a1097c66ba23325636184219cfc1c967f05cde8361ac5f01ca0e3ce9",
         "9afb3c252ce51d9b398a87a80c999c57398cb7e91ef4adeb79583533bc645a48"
+      ],
+      "31cce7f37c27b46a186e9775379883e5da68d91275231c705fe9c263cac7f076": [
+        "24911e24c0b3ceb25ea437ecd0f4838f93dd39f18ac755f284efe33d70b8bc80",
+        "2e023580a1097c66ba23325636184219cfc1c967f05cde8361ac5f01ca0e3ce9",
+        "9afb3c252ce51d9b398a87a80c999c57398cb7e91ef4adeb79583533bc645a48",
+        "d16e6bd43e14cf6b23c65392df3be7e580d23126b5664ce9db9abaf1b4847305"
       ]
     },
     "native-examples": {
@@ -553,6 +587,12 @@
         "0aecc8756ec9ebb580bb95ff557bdb25a56ed47994d63bd4153c72d848d0a66d",
         "9a7b50957d9f6d1fcb0cd2ee6dc9a6e133f787606449eceb7940e5b0c678ab20",
         "9be9adda18aa816f9275482157ab0f33a03921dd4b5412ea6a57c13f8366c432"
+      ],
+      "ba69a2d171a4a58ab0cb48c246dc6ff205d43f21dd4877a6d32b6cb46693542d": [
+        "0aecc8756ec9ebb580bb95ff557bdb25a56ed47994d63bd4153c72d848d0a66d",
+        "9a7b50957d9f6d1fcb0cd2ee6dc9a6e133f787606449eceb7940e5b0c678ab20",
+        "9be9adda18aa816f9275482157ab0f33a03921dd4b5412ea6a57c13f8366c432",
+        "f753118e14ded2f83db26dab5b5dbf0407d1f0cb041d3657015723dce7fc518c"
       ]
     },
     "guard-contract": {
@@ -563,11 +603,17 @@
     "rendering": {
       "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
         "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ],
+      "e05e10641c76cf175c8a5fd641b0965cbc300ab31f056fc20277bde5355ee395": [
+        "8d8efc73a61795e6f420beb3d2b4119f34419e959f67eeb15998e9cba2603ffb"
       ]
     },
     "browser": {
       "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
         "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ],
+      "e05e10641c76cf175c8a5fd641b0965cbc300ab31f056fc20277bde5355ee395": [
+        "8d8efc73a61795e6f420beb3d2b4119f34419e959f67eeb15998e9cba2603ffb"
       ]
     },
     "native-context": {
@@ -583,6 +629,12 @@
         "3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b",
         "66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9",
         "70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869"
+      ],
+      "7eee4c4a21ba7b9553eb841ff5edb2015b61bd65ef9f1f34f282dcfd9714d36c": [
+        "3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b",
+        "66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9",
+        "70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869",
+        "921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc"
       ]
     }
   },
@@ -602,6 +654,16 @@
       "0cbcc89d280b60aef0e38195e115dcb3a1a00b89a37738f379b6bf5063d3dbaa": [
         "94e3c5de81c05a5a6e75cb578951e5c899ee1bf3debb17ad7faaf3b2beb79d8b"
       ]
-    }
+    },
+    "preflight": {},
+    "native-sdk": {},
+    "native-examples": {},
+    "native-resize": {},
+    "rendering": {},
+    "browser": {},
+    "native-release": {},
+    "native-context": {},
+    "native-services": {},
+    "native-cohost": {}
   }
 }

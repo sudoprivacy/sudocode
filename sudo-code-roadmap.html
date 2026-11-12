@@ -1813,10 +1813,12 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td>Mosswork validation-tool CI</td>
       <td>A closed list of source checker/exporter and read-only identity
       metadata modules with their existing regressions keeps Linux release
-      checks plus a Windows tool job instead of
-      the ACP/Sudograph runtime matrices. Dispatcher, workflow, worker, dependency,
+      checks on both Linux and Windows instead of unrelated packaging tests
+      and the ACP/Sudograph runtime matrices. Each selected platform runs
+      the existing tool validators and one complete source export/check.
+      Linux shell/workflow syntax checks remain unconditional. Dispatcher, workflow, worker, dependency,
       mixed and unknown changes retain the full matrices. Missing or changed
-      selector/output wiring or Windows job recipes also retain full coverage.
+      selector/output wiring or either platform job recipe also retain full coverage.
       Real Git and child-process controls cover refusals, source drift, first
       failure, index isolation and preserved Git policy configuration. Windows
       runs all existing tool validators and a complete source export/check;
@@ -1828,7 +1830,12 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       later closed-list metadata-only changes use the existing tool route.
       Its normal local hook passed 113 cases with four explicit platform
       skips; complete local validation and source export took 117.2 seconds.
-      Checker failures retain every original error and
+      PR #37 qualifies this Linux routing change with 115 local hook passes,
+      four explicit Windows platform skips and all seven applicable hosted
+      checks. Its 93.9-second local controller includes the source export;
+      initial dispatcher/workflow changes retained the runtime matrices.
+      This is source and route qualification, not a measured first tool-only
+      Linux consumer saving. Checker failures retain every original error and
       nonzero status while reporting the failed directory and supported commands
       to create and check a new export. The original failed snapshot stays intact.
       PR #30 recorded three successful jobs, 169 summed runner seconds and
@@ -1840,6 +1847,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/29">Mosswork PR #29</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/30">PR #30</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/36">metadata repair PR #36</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/37">Linux tool route PR #37</a>;
       <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43207578368">actual Windows tool run</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/bc12c917cfddf0d207ee534c30d204bded2eef6e/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a></td>
     </tr>

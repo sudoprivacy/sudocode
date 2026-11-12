@@ -1709,10 +1709,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       validation snapshot. Real Make/Git/backend controls check
       early refusal, manual repair, unchanged inputs and propagation of a real
       pytest failure. Full-suite and testmon recipes, assertions, worker defaults
-      and deadlines are retained.</td>
+      and deadlines are retained. Shared pytest defaults run previously failed
+      cases and new test files first; successful runs retain all cases. The
+      mandatory Make output states the ordering and first-failure cleanup.
+      Real pytest controls generate their own caches and cover known failures,
+      new files, repaired cases and empty caches; no copied or fabricated
+      dependency graph is used. Reordering may repeat module fixture setup,
+      so these controls do not prove a whole-cycle speedup.</td>
       <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/32">PR #32</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
     </tr>
     <tr>

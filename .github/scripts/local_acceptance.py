@@ -486,7 +486,7 @@ except subprocess.TimeoutExpired:
         used = referenced_globals(symbols.lookup(name).get_namespace())
         pending.extend(used & definitions.keys() - consumers.keys())
     layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
-    reviewed = "18bd11d3296b29a9c0087de0e1f7e01c361761bade18e9b2bb3776b629532658"
+    reviewed = "32b51f2756d1ca52cec2f39f62ae50189878b2d31c44a7b8a4c3706c56251de6"
     if layout != reviewed:
         print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
             "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
@@ -515,10 +515,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
-        "89efe09a8254059f7bf10fda7d53d2accc6658abc1316a656c1c59b22855d32b",
-        "5994969a04ea543c7a96e0e3c0d69be4ffeac9d759452b5d2b14a9b2f6654047",
-        "d428d86b5fc3ffaa3bbb5606e3853420c0f81cafe58c91cd5ed865a3c3dba74e",
-        "5e07512c7277de8ebc37142a1055a6c59001aa2ef821e5d68379ba148356378f",
+        "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({

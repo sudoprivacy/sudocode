@@ -156,10 +156,14 @@ async function main(){
     // operation's session, workspace or records, nor issues anything.
     const profileOf=(actor: string)=>JSON.parse(fs.readFileSync(path.join(grant.stateDirectory,actor,'profile.json'),'utf8'));
     const policyGrant=path.join(root,'policy-grant.json');
-    fs.writeFileSync(policyGrant,JSON.stringify({...grant,scode:{...grant.scode,closeTimeoutMs:1900}}));
+    const currentExecutable=path.join(root,path.basename(process.execPath));
+    fs.copyFileSync(process.execPath,currentExecutable);
+    const currentPolicy={...grant.scode,scodeArgv:[currentExecutable,...grant.scode.scodeArgv.slice(1)],closeTimeoutMs:1900};
+    fs.writeFileSync(policyGrant,JSON.stringify({...grant,scode:currentPolicy}));
     const recordsBefore=['operation.json','result.json','session.json'].map(name=>fs.readFileSync(path.join(grant.stateDirectory,resumed.actor,name)));
     assert.deepEqual(await enrollCodexAgent(policyGrant,resumed),completed);
     assert.equal(profileOf(resumed.actor).closeTimeoutMs,1900,'a completed replay publishes the current launch policy');
+    assert.equal(profileOf(resumed.actor).scodeArgv[0],currentExecutable);
     assert.equal(profileOf(resumed.actor).acpSessionId,savedSession);
     assert.deepEqual(['operation.json','result.json','session.json'].map(name=>fs.readFileSync(path.join(grant.stateDirectory,resumed.actor,name))),recordsBefore);
     const refreshed=JSON.parse('['+execFileSync(process.execPath,[path.join(sdk,'dist/server.cjs'),'--refresh-codex-profiles','--config',grantFile],
@@ -195,6 +199,48 @@ async function main(){
       assert.throws(()=>network.connectionFor(gatedId),/authenticated Agent/,'a live ACP transport is not admitted before Node identity verification');
     }finally {fs.writeFileSync(gate,'release');await inFlight;}
     assert.equal(network.connectionFor(gatedId).sessionId,gatedSession);
+    // Ready bindings bypass enrollment. Refresh their profiles through the real
+    // operator CLI, then reconnect through those same bindings and verify which
+    // executable actually loads each original session and authenticates its actor.
+    await network.close();
+    const readyBindings=loaded.map(id=>{
+      const file=path.join(config.stateDirectory,id+'.json'),bytes=fs.readFileSync(file);
+      const binding=JSON.parse(bytes.toString('utf8'));
+      assert.equal(binding.state,'ready');
+      return {file,bytes,binding,records:['operation.json','result.json','session.json'].map(name=>({
+        file:path.join(grant.stateDirectory,binding.actor,name),
+        bytes:fs.readFileSync(path.join(grant.stateDirectory,binding.actor,name))}))};
+    });
+    const currentJournal=path.join(root,'current-acp.jsonl');
+    fs.writeFileSync(policyGrant,JSON.stringify({...grant,scode:{...currentPolicy,
+      env:{HYDRA_DIRECT_FIXTURE_JOURNAL:currentJournal}}}));
+    const mintsBeforeRefresh=mintRows().length;
+    const readyRefresh=JSON.parse('['+execFileSync(process.execPath,[path.join(sdk,'dist/server.cjs'),'--refresh-codex-profiles','--config',policyGrant],
+      {encoding:'utf8'}).trim().split('\n').join(',')+']') as {actor:string;outcome:string}[];
+    for(const {binding} of readyBindings)assert.equal(readyRefresh.find(row=>row.actor===binding.actor)?.outcome,'replaced');
+    assert.ok(!fs.existsSync(currentJournal),'refresh does not launch ACP');
+    let reenrollments=0;
+    network=await connectCodexAutojoin({...config,resolveAgent:async()=>{
+      reenrollments++;throw new Error('Ready binding must not invoke enrollment');
+    }});
+    assert.equal(reenrollments,0);
+    assert.equal(network.status().filter(row=>row.state==='connected').length,readyBindings.length);
+    for(const {file,bytes,binding,records} of readyBindings){
+      assert.equal(network.connectionFor(binding.threadId).sessionId,binding.acp.sessionId);
+      const sent=await sendScodeMessage(network.connectionFor(binding.threadId),{to:'fixture-peer',message:'refreshed original binding'});
+      assert.equal(JSON.parse(sent.content).routing.sender,binding.actor);
+      assert.equal(profileOf(binding.actor).closeTimeoutMs,1900);
+      assert.deepEqual(fs.readFileSync(file),bytes,'refresh and ready reconnect preserve the complete binding');
+      for(const record of records)assert.deepEqual(fs.readFileSync(record.file),record.bytes);
+    }
+    const currentProtocol=fs.readFileSync(currentJournal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+    assert.ok(currentProtocol.every(row=>fs.realpathSync.native(row.executable)===fs.realpathSync.native(currentExecutable)),
+      'the refreshed environment and copied executable are actually used');
+    assert.deepEqual(currentProtocol.filter(row=>row.method==='session/load').map(row=>row.sessionId).sort(),
+      readyBindings.map(row=>row.binding.acp.sessionId).sort());
+    assert.ok(!currentProtocol.some(row=>['session/new','session/prompt'].includes(row.method)));
+    assert.equal(mintRows().length,mintsBeforeRefresh,'ready reconnect never mints again');
+    assert.deepEqual(fs.readFileSync(projectConfig),original);
     const firstFile=path.join(config.stateDirectory,ids[0]+'.json');
     const binding=JSON.parse(fs.readFileSync(firstFile,'utf8'));binding.workspaceBinding.operationId=randomUUID();
     fs.writeFileSync(firstFile,JSON.stringify(binding));
@@ -202,7 +248,7 @@ async function main(){
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
     assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
-    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume, operation identity over operator policy, launch policy refresh; protocol fixture only');
+    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume, operation identity over operator policy, launch policy refresh, refreshed executable and ready binding reconnect; protocol fixture only');
   } finally {await network.close();}
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

@@ -12,7 +12,7 @@ const actor = scenario === 'operator'
   ? JSON.parse(readFileSync(path.join(process.cwd(),'.nexus/sudocode/settings.json'),'utf8')).agentName
   : process.env.SCODE_DIRECT_FIXTURE_ACTOR ?? 'bound-fixture-actor';
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
-const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
+const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, executable: process.execPath, ...entry })+'\n');
 let sessionId;
 let peerOwned = 0;
 let returnedInitialListFailure = false;

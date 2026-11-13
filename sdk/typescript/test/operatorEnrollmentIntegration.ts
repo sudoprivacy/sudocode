@@ -248,10 +248,13 @@ async function main(){
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
     assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
-    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume, operation identity over operator policy, launch policy refresh, refreshed executable and ready binding reconnect; protocol fixture only');
   } finally {await network.close();}
 }
-void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
+void main().finally(async()=>{
   for(const socket of server.clients)socket.close();await new Promise<void>(resolve=>server.close(()=>resolve()));
-  fs.rmSync(root,{recursive:true,force:true});
-});
+  // All owned children have closed. Allow finite filesystem cleanup retries for
+  // transient Windows ENOTEMPTY/EPERM; exhausting them still fails the journey.
+  await fs.promises.rm(root,{recursive:true,force:true,maxRetries:3,retryDelay:100});
+}).then(()=>{
+  console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume, operation identity over operator policy, launch policy refresh, refreshed executable and ready binding reconnect; protocol fixture only');
+}).catch(error=>{console.error(error);process.exitCode=1;});

@@ -1231,7 +1231,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'ddf6f97522d2c271cc42231d4920f0f1b088c5cce55c57be97a40c736634b559', 'native-context': '4f85ab6f0784604958575cb3c06e0083e2c7af513d6f81724e9134635d7b7311'}
+    expected = {'native-release': 'f2cb4379d92faea7683a78b8702253fbdb86f2c952159ed7bff4608f367dc2cb', 'native-context': 'b8b2f23a3bec2e4e74040fa769cdeb79614841c778f683b4b9e6fb1daef4d621'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1354,7 +1354,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "594155f083bb48afb0d936043019e02a639897dfc5c61b97162f4edf7cb2bb7c",
+        "Dockerfile.guard": "23c74b5e91932c62b4ac4b04732b1e63c0015edb7c8669d81a384ce68881b994",
         "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:

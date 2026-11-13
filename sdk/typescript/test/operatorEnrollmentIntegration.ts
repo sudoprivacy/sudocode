@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import type { CodexAgentClaim } from '../src/codexAutojoin';
 const sdk=path.resolve(__dirname,'../..');
-const {connectCodexAutojoin,enrollCodexAgent,sendScodeMessage}=require(path.join(sdk,'dist/index.cjs')) as typeof import('../src/index');
+const {connectCodexAutojoin,enrollCodexAgent,refreshCodexProfiles,sendScodeMessage}=require(path.join(sdk,'dist/index.cjs')) as typeof import('../src/index');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-operator-'));
 const workspace=path.join(root,'project');fs.mkdirSync(workspace);
 fs.mkdirSync(path.join(workspace,'.nexus/sudocode'),{recursive:true});
@@ -125,12 +125,56 @@ async function main(){
     const createdBefore=sessionsCreated();
     assert.equal(mintRows().length,before+3);
     fs.rmSync(refused);
-    const completed=await enrollCodexAgent(resumeGrant,resumed);
+    // The owner changed the scode launch policy meanwhile: the operation resumes
+    // under the policy in force now, because launch policy is not part of it.
+    const completed=await enrollCodexAgent(grantFile,resumed);
     assert.equal(JSON.parse(fs.readFileSync(completed.configFile,'utf8')).acpSessionId,savedSession,
       'the resumed operation keeps its one ACP session');
     assert.equal(sessionsCreated(),createdBefore,'resuming creates no second ACP session');
     assert.equal(mintRows().length,before+3,'resuming replays the receipt without another mint');
     assert.deepEqual(await enrollCodexAgent(resumeGrant,resumed),completed,'a completed operation replays its result');
+    // Nothing further is issued for a completed operation, so it replays under any
+    // operator record, a reservation from before operation identity included.
+    assert.deepEqual(await enrollCodexAgent(lostGrant,resumed),completed,'a completed operation outlives its Node operator command');
+    const reservation=path.join(grant.stateDirectory,resumed.actor,'operation.json');
+    const current=JSON.parse(fs.readFileSync(reservation,'utf8'));
+    fs.writeFileSync(reservation,JSON.stringify({claim:current.claim,grantSha256:'0'.repeat(64),
+      nativeCanonicalWorkspace:current.nativeCanonicalWorkspace}));
+    assert.deepEqual(await enrollCodexAgent(grantFile,resumed),completed,'a pre-identity completed reservation replays');
+    // An operation still in flight may have been submitted by the command that
+    // started it, and only that command may drive it on.
+    await assert.rejects(enrollCodexAgent(grantFile,lost),/another Node operator command/);
+    const lostReservation=path.join(grant.stateDirectory,lost.actor,'operation.json');
+    const lostRecord=JSON.parse(fs.readFileSync(lostReservation,'utf8'));
+    fs.writeFileSync(lostReservation,JSON.stringify({claim:lostRecord.claim,grantSha256:'0'.repeat(64),
+      nativeCanonicalWorkspace:lostRecord.nativeCanonicalWorkspace}));
+    await assert.rejects(enrollCodexAgent(lostGrant,lost),/another Node operator command/,'a pre-identity reservation in flight keeps its hash check');
+    await assert.rejects(enrollCodexAgent(grantFile,{...lost,operationId:randomUUID()}),/Another operation holds this actor/);
+    assert.equal(mintRows().length,before+3,'refused resumptions submit nothing');
+    // The launch policy reaches completed actors: a replay republishes it, and an
+    // explicit refresh republishes every enrolled actor; neither touches the
+    // operation's session, workspace or records, nor issues anything.
+    const profileOf=(actor: string)=>JSON.parse(fs.readFileSync(path.join(grant.stateDirectory,actor,'profile.json'),'utf8'));
+    const policyGrant=path.join(root,'policy-grant.json');
+    fs.writeFileSync(policyGrant,JSON.stringify({...grant,scode:{...grant.scode,closeTimeoutMs:1900}}));
+    const recordsBefore=['operation.json','result.json','session.json'].map(name=>fs.readFileSync(path.join(grant.stateDirectory,resumed.actor,name)));
+    assert.deepEqual(await enrollCodexAgent(policyGrant,resumed),completed);
+    assert.equal(profileOf(resumed.actor).closeTimeoutMs,1900,'a completed replay publishes the current launch policy');
+    assert.equal(profileOf(resumed.actor).acpSessionId,savedSession);
+    assert.deepEqual(['operation.json','result.json','session.json'].map(name=>fs.readFileSync(path.join(grant.stateDirectory,resumed.actor,name))),recordsBefore);
+    const refreshed=JSON.parse('['+execFileSync(process.execPath,[path.join(sdk,'dist/server.cjs'),'--refresh-codex-profiles','--config',grantFile],
+      {encoding:'utf8'}).trim().split('\n').join(',')+']') as {actor:string;outcome:string}[];
+    assert.equal(refreshed.find(row=>row.actor===resumed.actor)?.outcome,'replaced');
+    assert.equal(refreshed.find(row=>row.actor===lost.actor)?.outcome,'in_flight','an operation in flight picks the policy up when it resumes');
+    assert.ok(refreshed.every(row=>row.outcome!=='refused'),JSON.stringify(refreshed));
+    assert.equal(profileOf(resumed.actor).closeTimeoutMs,900);
+    assert.ok(refreshCodexProfiles(grantFile).every((row: {outcome:string})=>['unchanged','in_flight'].includes(row.outcome)),'a refresh is idempotent');
+    const tampered=path.join(grant.stateDirectory,outage.actor,'profile.json');const untouched=fs.readFileSync(tampered);
+    fs.writeFileSync(tampered,JSON.stringify({...profileOf(outage.actor),acpSessionId:randomUUID()}));
+    const refusal=(refreshCodexProfiles(grantFile) as {actor:string;outcome:string;detail?:string}[]).find(row=>row.actor===outage.actor);
+    assert.ok(refusal);assert.equal(refusal.outcome,'refused');assert.match(refusal.detail??'',/belongs to another operation/);
+    fs.writeFileSync(tampered,untouched);
+    assert.equal(mintRows().length,before+3,'refreshing issues nothing');
     // Old equal-cwd replies still refuse private contexts without the new proof.
     const badConfig={...config,stateDirectory:path.join(root,'legacy-bindings'),resolveAgent:async(input:CodexAgentClaim)=>{
       const profile=await enrollCodexAgent(grantFile,input);delete profile.workspaceBinding;return profile;
@@ -158,7 +202,7 @@ async function main(){
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
     assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
-    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume; protocol fixture only');
+    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume, operation identity over operator policy, launch policy refresh; protocol fixture only');
   } finally {await network.close();}
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

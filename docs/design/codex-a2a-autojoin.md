@@ -214,10 +214,22 @@ bindings.
 An operation is its claim and its workspace and, while it is in flight, the
 Node operator command (`nexusArgv`) that may issue for it. The scode launch
 policy in the operator record is not part of it. A completed operation replays
-its result under any operator record, since nothing further is issued for it. A
-resumed operation starts scode with the policy in force now and republishes its
-profile's launch fields; the profile's workspace, logs and ACP SID stay the
-operation's own. An operation in flight under another Node operator command is
+its result under any operator record, since nothing further is issued for it.
+
+An actor's `profile.json` is its launch configuration: a ready binding reads it
+at every connection and checks its ACP SID and workspace. Its launch fields
+(`scodeArgv`, `env`, `startupTimeoutMs`, `closeTimeoutMs`) follow the operator
+record, and its workspace, logs and ACP SID stay the operation's own. One
+operator-side writer publishes it, at completion, at every completed replay and
+on `--refresh-codex-profiles --config OPERATOR`, which republishes every
+completed actor's profile and reports one JSON row per actor (`published`,
+`unchanged`, `replaced`, `in_flight` or `refused`). A refresh writes profiles
+only and issues nothing; a ready binding uses the new policy from its next
+connection, and an operation in flight picks it up when it resumes. A profile
+whose SID, workspace or logs differ from the operation's records is refused for
+operator recovery.
+
+An operation in flight under another Node operator command is
 refused for operator recovery, because that command may have submitted it. A
 reservation that records `grantSha256` instead (the hash of the whole operator
 record) replays when completed and keeps that hash check while in flight.

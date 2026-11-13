@@ -736,8 +736,7 @@ fn identity_annotation(input: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|d| !d.is_empty())
-        .map(|d| format!(" {DIM}· {d}{RESET}"))
-        .unwrap_or_default()
+        .map_or_default(|d| format!(" {DIM}· {d}{RESET}"))
 }
 
 /// Split a `ToolResult.output` string into its JSON-payload prefix and any

@@ -1395,8 +1395,7 @@ where
         let usage_tracker = UsageTracker::from_session(&session);
         let workspace_root = session
             .workspace_root()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
+            .map_or_default(std::path::Path::to_path_buf);
         Self {
             session,
             api_client,
@@ -2306,8 +2305,7 @@ where
             pre_compact_discovered_tools: source
                 .compaction
                 .as_ref()
-                .map(|c| c.pre_compact_discovered_tools.clone())
-                .unwrap_or_default(),
+                .map_or_default(|c| c.pre_compact_discovered_tools.clone()),
         }
     }
 

@@ -1519,8 +1519,7 @@ pub fn configured_proxy_accounts(config: &engine_core::SudoCodeConfig) -> Vec<St
     config
         .auth_modes
         .get("proxy")
-        .map(|accounts| accounts.keys().cloned().collect())
-        .unwrap_or_default()
+        .map_or_default(|accounts| accounts.keys().cloned().collect())
 }
 
 /// Who a request for `model` from the current directory would be billed to.

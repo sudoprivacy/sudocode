@@ -945,8 +945,7 @@ mod tests {
     /// List available auth modes for a model alias, in lexicographic order.
     fn available_auth_modes<'a>(config: &'a SudoCodeConfig, alias: &str) -> Vec<&'a str> {
         resolve_model(config, alias)
-            .map(|m| m.providers.keys().map(String::as_str).collect())
-            .unwrap_or_default()
+            .map_or_default(|m| m.providers.keys().map(String::as_str).collect())
     }
 
     /// `cache_ttl_1h` has exactly one home — `sudocode.json` — and one route

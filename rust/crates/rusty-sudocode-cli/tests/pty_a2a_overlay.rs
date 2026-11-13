@@ -131,8 +131,7 @@ fn wait_for_receiver(env: &TestEnv) -> String {
                 if agent_dir.join("conversations").is_dir() {
                     return agent_dir
                         .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                        .map_or_default(|n| n.to_string_lossy().into_owned());
                 }
             }
         }

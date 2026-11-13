@@ -2153,10 +2153,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let todos = if task_panel.is_some() {
         Vec::new()
     } else {
-        todo_items
-            .lock()
-            .map(|items| items.clone())
-            .unwrap_or_default()
+        todo_items.lock().map_or_default(|items| items.clone())
     };
     // PendingSlot projects tools and queued messages in arrival order. It
     // never commits history: completed cards and flushed messages have their
@@ -2164,10 +2161,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_items = if task_panel.is_some() {
         Vec::new()
     } else {
-        pending
-            .lock()
-            .map(|items| items.clone())
-            .unwrap_or_default()
+        pending.lock().map_or_default(|items| items.clone())
     };
     let queued = pending_items
         .iter()
@@ -2200,19 +2194,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         StatusSlot::Empty => Arc::default(),
     };
     let heading = ansi_with_style(
-        question
-            .map(|q| {
-                let title = q.title.as_ref().map(|title| format!("[{title}]"));
-                if q.description.is_some() {
-                    format!(
-                        "{} · Ctrl+O view full text",
-                        title.as_deref().unwrap_or("Review document")
-                    )
-                } else {
-                    title.unwrap_or_default()
-                }
-            })
-            .unwrap_or_default(),
+        question.map_or_default(|q| {
+            let title = q.title.as_ref().map(|title| format!("[{title}]"));
+            if q.description.is_some() {
+                format!(
+                    "{} · Ctrl+O view full text",
+                    title.as_deref().unwrap_or("Review document")
+                )
+            } else {
+                title.unwrap_or_default()
+            }
+        }),
         question_style,
     );
     let mut controls = if let Some(panel) = task_panel.clone() {

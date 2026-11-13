@@ -452,8 +452,7 @@ impl ConfigMigration {
 fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
+        .map_or_default(|elapsed| elapsed.as_secs())
 }
 
 /// Advisory cross-process lock around a config file, released on drop.

@@ -1777,13 +1777,12 @@ impl Session {
         let prompt_history = object
             .get("prompt_history")
             .and_then(JsonValue::as_array)
-            .map(|entries| {
+            .map_or_default(|entries| {
                 entries
                     .iter()
                     .filter_map(SessionPromptEntry::from_json_opt)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let prompt_snapshot = object
             .get("prompt_snapshot")
             .map(SessionPromptSnapshot::from_json)
@@ -2948,12 +2947,11 @@ impl SessionCompaction {
         let pre_compact_discovered_tools = object
             .get("pre_compact_discovered_tools")
             .and_then(|v| v.as_array())
-            .map(|arr| {
+            .map_or_default(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         Ok(Self {
             count: required_u32(object, "count")?,
             removed_message_count: required_usize(object, "removed_message_count")?,
@@ -3310,8 +3308,7 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 fn current_time_millis() -> u64 {
     let wall_clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default();
+        .map_or_default(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
 
     let mut candidate = wall_clock;
     loop {

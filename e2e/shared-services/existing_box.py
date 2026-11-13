@@ -58,8 +58,13 @@ def wait_until(action, timeout=30):
 def nexus_proto_root():
     """Use the same resolved Nexus source as the workspace's typed client."""
     workspace = Path(__file__).resolve().parents[2] / 'rust'
+    # Only the host's graph. An offline resolve of every platform needs packages no
+    # build on this host fetched (Android-only crates, for one), so it fails on any
+    # runner whose registry cache holds just what its own builds downloaded.
+    host, = [line.split(': ', 1)[1] for line in subprocess.check_output(
+        ['rustc', '-vV'], cwd=workspace, text=True, timeout=30).splitlines() if line.startswith('host: ')]
     metadata = json.loads(subprocess.check_output(
-        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'],
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--filter-platform', host],
         cwd=workspace, text=True, encoding='utf-8', timeout=60))
     client, = [package for package in metadata['packages']
                if Path(package['manifest_path']).resolve()

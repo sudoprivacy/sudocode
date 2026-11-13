@@ -112,7 +112,8 @@ and an operator-authorized enrollment adapter. The shared `--enroll-codex`
 adapter requires a private owner-created grant and the Nexus
 `nexus-agent-enroll` client; it never installs a Node or supplies authority
 implicitly. `--init-codex-operator` prepares that private launch policy without
-issuing an identity. Protocol fixtures do not establish production enrollment
+issuing an identity, and `--refresh-codex-profiles` republishes it to every
+enrolled actor after it changes (a scode upgrade, a timeout). Protocol fixtures do not establish production enrollment
 or current-node compatibility.
 The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
 defines that remaining integration boundary and rollout gates.

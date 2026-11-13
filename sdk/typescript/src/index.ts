@@ -8,5 +8,5 @@ export * from './codexNativeQueue';
 export * from './codexAutojoin';
 export * from './codexMcp';
 export * from './codexSetup';
-export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
+export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles, type ProfileRefresh } from './codexEnrollment';
 export * from './lifecycle';

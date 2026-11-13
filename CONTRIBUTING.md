@@ -1584,24 +1584,29 @@ other PRs keep building with the release `main` has accepted. A change to
 the pin selects every local acceptance profile that compiles Rust, and the
 merge queue's workspace lint and daemon jobs.
 
-`.github/workflows/rust-toolchain-bump.yml` reads the stable channel
-every Monday and opens or updates the draft PR from
-`ci/rust-toolchain-bump`. It runs `scripts/bump_rust_toolchain.py`, which
-moves `rust-toolchain.toml`, the Dockerfile digests and the `checks.py`
-pins that hash them in one commit. The workflow's header lists the GitHub
-App it needs: a PR opened with the default `GITHUB_TOKEN` starts no CI.
-Because the images belong to the acceptance contract, a maintainer
-finishes the PR: fix what the new release reports, run `contract-update`
-(see [Acceptance contract changes](#acceptance-contract-changes)) and
-land it through the merge queue.
+The pin may trail stable by at most one minor release, about six to
+twelve weeks. `.github/workflows/rust-toolchain-bump.yml` compares it with
+the stable channel every Monday. When stable is newer it opens, or updates,
+one issue labelled `rust-toolchain` that names the release and the steps;
+when the pin is current again it closes that issue. Past the budget the
+issue is labelled `overdue` and the weekly run fails, which notifies the CI
+owners. No PR is ever blocked by it.
 
-To move the pin by hand, preview the change, write it, and continue as
-above; `--version 1.x.y` selects a specific release:
+A bump is a maintainer's change, because the images belong to the
+acceptance contract and a new release can need code fixes. On a branch
+from `main`:
 
 ```bash
-python3 scripts/bump_rust_toolchain.py --dry-run
-python3 scripts/bump_rust_toolchain.py
+python3 scripts/bump_rust_toolchain.py --status    # how far the pin trails stable
+python3 scripts/bump_rust_toolchain.py --dry-run   # preview the change
+python3 scripts/bump_rust_toolchain.py             # write it
 ```
+
+The script moves `rust-toolchain.toml`, the Dockerfile digests and the
+`checks.py` pins that hash them; `--version 1.x.y` selects a specific
+release. Fix what the new release reports, run `contract-update` (see
+[Acceptance contract changes](#acceptance-contract-changes)) and land the
+PR through the merge queue.
 
 ## Building
 

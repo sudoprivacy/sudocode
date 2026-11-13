@@ -19,6 +19,7 @@ stop the script rather than being refreshed along with the bump.
 
     python3 scripts/bump_rust_toolchain.py --dry-run   # show the planned diff
     python3 scripts/bump_rust_toolchain.py             # write it
+    python3 scripts/bump_rust_toolchain.py --status    # how far the pin trails stable
 """
 
 import argparse
@@ -53,6 +54,10 @@ INDEX_TYPES = ["application/vnd.oci.image.index.v1+json",
 MANIFEST_TYPES = ["application/vnd.oci.image.manifest.v1+json",
                   "application/vnd.docker.distribution.manifest.v2+json"]
 VERSION = re.compile(r"\d+\.\d+\.\d+")
+# How many stable minor releases the pin may trail before it is overdue. Rust
+# ships one every six weeks, so the pin is never more than about twelve weeks
+# behind before the CI owners are told it is overdue.
+ALLOWED_RELEASES_BEHIND = 1
 FROM_RUST = re.compile(r"^FROM rust:(?P<tag>\S+?)@sha256:(?P<digest>[0-9a-f]{64})(?P<rest>.*)$", re.M)
 
 
@@ -246,12 +251,26 @@ def main():
     parser.add_argument("--channel-url", default=CHANNEL_URL)
     parser.add_argument("--github-output", type=Path, help="append changed/previous/version for a workflow")
     parser.add_argument("--summary", type=Path, help="write a Markdown summary of the change")
+    parser.add_argument("--status", action="store_true",
+                        help="report how far the pin trails stable (current, available or overdue); writes nothing")
     args = parser.parse_args()
 
     def report(**values):
         if args.github_output:
             with args.github_output.open("a", encoding="utf-8") as stream:
                 stream.writelines(f"{key}={value}\n" for key, value in values.items())
+
+    if args.status:
+        pinned = pinned_channel((ROOT / TOOLCHAIN).read_text(encoding="utf-8"))
+        stable = latest_stable(args.channel_url)
+        (pin_major, pin_minor, _), (major, minor, _) = version_key(pinned), version_key(stable)
+        behind = max(0, minor - pin_minor) if major == pin_major else ALLOWED_RELEASES_BEHIND + 1
+        state = ("current" if version_key(stable) <= version_key(pinned)
+                 else "overdue" if behind > ALLOWED_RELEASES_BEHIND else "available")
+        print(f"Rust {pinned} is pinned; stable is {stable}: {state} ({behind} minor release(s) behind, "
+              f"{ALLOWED_RELEASES_BEHIND} allowed).")
+        report(pinned=pinned, stable=stable, behind=behind, allowed=ALLOWED_RELEASES_BEHIND, state=state)
+        return
 
     touched = [TOOLCHAIN, *IMAGES, CHECKS]
     if git("status", "--porcelain", "--", *touched).strip():

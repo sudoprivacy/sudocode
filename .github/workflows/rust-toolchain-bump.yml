@@ -1,122 +1,94 @@
-name: Rust toolchain bump
+name: Rust toolchain freshness
 
 # rust-toolchain.toml pins the one Rust release that CI, release builds and
 # the local acceptance images compile with, so a new stable release cannot
-# break an unrelated PR. This workflow brings each new release in as its own
-# PR: scripts/bump_rust_toolchain.py moves the pin, the acceptance image
-# digests and the contract pins that hash them, and the PR then runs the full
-# CI. See CONTRIBUTING.md#rust-toolchain.
+# break an unrelated PR. A new release reaches the pin through a maintainer:
+# every bump changes the protected acceptance contract and may need code
+# fixes, so it lands as an ordinary PR finished with `contract-update`. This
+# workflow makes sure that happens, every Monday:
 #
-# Required configuration, set once by an organization or repository admin:
-#   vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID
-#       Client ID of a GitHub App installed on this repository with
-#       Contents: read and write, and Pull requests: read and write.
-#   secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY
-#       A private key of that App.
-# A push or PR made with the default GITHUB_TOKEN starts no workflows, so a
-# bump opened that way would have no CI. Without the App this job fails.
+#   * the pin is current: the tracking issue, if open, is closed;
+#   * stable is newer: one tracking issue, labelled rust-toolchain, names the
+#     release and the steps (opened, or updated in place);
+#   * the pin trails stable by more than ALLOWED_RELEASES_BEHIND minor
+#     releases (scripts/bump_rust_toolchain.py): the issue is labelled
+#     overdue and this run fails, which notifies the CI owners.
+#
+# It never blocks a PR and needs no credential beyond the workflow token.
+# See CONTRIBUTING.md#rust-toolchain.
 
 on:
   schedule:
     - cron: '0 2 * * 1'  # Mondays 02:00 UTC (10:00 CST)
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Exact release to propose, such as 1.100.1 (empty = current stable)'
-        required: false
-        default: ''
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
-  group: rust-toolchain-bump
+  group: rust-toolchain-freshness
   cancel-in-progress: false
 
 jobs:
-  propose:
+  freshness:
     if: github.repository == 'sudoprivacy/sudocode'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      BRANCH: ci/rust-toolchain-bump
+    timeout-minutes: 10
     steps:
-      - name: Require the bump App
-        env:
-          CLIENT_ID: ${{ vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID }}
-          HAS_KEY: ${{ secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY != '' }}
-        run: |
-          if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != true ]; then
-            echo "::error::Set vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID and secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY, described at the top of .github/workflows/rust-toolchain-bump.yml"
-            exit 1
-          fi
-      - uses: actions/create-github-app-token@v3
-        id: app
-        with:
-          client-id: ${{ vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-      - name: Find the open bump PR
-        id: pr
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: |
-          number=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base main --state open \
-            --json number --jq '.[0].number // empty')
-          echo "number=$number" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-        with:
-          # Continue an open PR's branch so commits added to it are kept.
-          ref: ${{ steps.pr.outputs.number && env.BRANCH || 'main' }}
-          token: ${{ steps.app.outputs.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Move the pin to the target release
-        id: bump
+      - name: Compare the pin with stable Rust
+        id: status
+        run: python scripts/bump_rust_toolchain.py --status --github-output "$GITHUB_OUTPUT"
+      - name: Open, update or close the tracking issue
         env:
-          VERSION: ${{ inputs.version }}
-        run: >-
-          python scripts/bump_rust_toolchain.py ${VERSION:+--version "$VERSION"}
-          --github-output "$GITHUB_OUTPUT" --summary "$RUNNER_TEMP/rust-toolchain-bump.md"
-      - name: Report a release whose images are not published yet
-        if: steps.bump.outputs.pending
-        env:
-          PENDING: ${{ steps.bump.outputs.pending }}
-        run: echo "::notice::Rust $PENDING is stable, but its Docker Hub images are not complete yet; the next run proposes it."
-      - name: Commit, then open or update the PR
-        if: steps.bump.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          APP_SLUG: ${{ steps.app.outputs.app-slug }}
-          NUMBER: ${{ steps.pr.outputs.number }}
-          VERSION: ${{ steps.bump.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.status.outputs.pinned }}
+          STABLE: ${{ steps.status.outputs.stable }}
+          BEHIND: ${{ steps.status.outputs.behind }}
+          ALLOWED: ${{ steps.status.outputs.allowed }}
+          STATE: ${{ steps.status.outputs.state }}
         run: |
           set -euo pipefail
-          bot="${APP_SLUG}[bot]"
-          git config user.name "$bot"
-          git config user.email "$(gh api "/users/$bot" --jq .id)+$bot@users.noreply.github.com"
-          title="ci(toolchain): bump Rust to $VERSION"
-          git add rust-toolchain.toml .github/local-acceptance/Dockerfile .github/local-acceptance/Dockerfile.guard \
-            .github/local-acceptance/checks.py
-          git commit -q -m "$title"
-          body="$RUNNER_TEMP/rust-toolchain-bump.md"
-          cat >> "$body" <<'EOF'
+          gh label create rust-toolchain --color 0E8A16 \
+            --description 'The pinned Rust toolchain trails stable' 2>/dev/null || true
+          gh label create overdue --color B60205 \
+            --description 'Past its staleness budget' 2>/dev/null || true
+          number=$(gh issue list --label rust-toolchain --state open --json number --jq '.[0].number // empty')
 
-          The acceptance images are part of the protected acceptance contract, so a maintainer finishes this PR:
-
-          1. Check out this branch and fix whatever the new release reports, such as new lints.
-          2. Run `contract-update` as described in CONTRIBUTING.md#acceptance-contract-changes. It runs and signs the full local acceptance.
-          3. Mark the PR ready and land it through the merge queue.
-
-          Opened by `.github/workflows/rust-toolchain-bump.yml`.
-          EOF
-          if [ -n "$NUMBER" ]; then
-            git push origin "HEAD:refs/heads/$BRANCH"
-            gh pr edit "$NUMBER" --title "$title" --body-file "$body"
-          else
-            # No open PR uses the branch, so a stale copy is replaced.
-            git push --force origin "HEAD:refs/heads/$BRANCH"
-            gh pr create --draft --base main --head "$BRANCH" --title "$title" --body-file "$body"
+          if [ "$STATE" = current ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Rust $PINNED is pinned and is the current stable release."
+            fi
+            exit 0
           fi
+
+          body="$RUNNER_TEMP/rust-toolchain-issue.md"
+          cat > "$body" <<EOF
+          Rust $STABLE is the current stable release; \`rust-toolchain.toml\` pins $PINNED, $BEHIND minor release(s) behind. The pin may trail stable by $ALLOWED; past that this issue is marked overdue.
+
+          To bump (a maintainer, see CONTRIBUTING.md#rust-toolchain):
+
+          1. On a branch from \`main\`, run \`python3 scripts/bump_rust_toolchain.py\`. It moves the pin, the acceptance image digests and the contract pins that hash them.
+          2. Fix what the new release reports, such as new lints, on the same branch.
+          3. Run \`contract-update\` (CONTRIBUTING.md#acceptance-contract-changes); it runs and signs the full local acceptance.
+          4. Land the PR. The next weekly run closes this issue.
+
+          Maintained by \`.github/workflows/rust-toolchain-bump.yml\`.
+          EOF
+          title="Bump the pinned Rust toolchain from $PINNED to $STABLE"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --title "$title" --body-file "$body"
+          else
+            url=$(gh issue create --title "$title" --body-file "$body" --label rust-toolchain)
+            number=${url##*/}
+          fi
+          if [ "$STATE" = overdue ]; then
+            gh issue edit "$number" --add-label overdue
+            echo "::error::Rust $PINNED trails stable $STABLE by $BEHIND minor releases ($ALLOWED allowed); see issue #$number."
+            exit 1
+          fi
+          echo "::notice::Rust $STABLE is available; the pin is $PINNED. Tracking issue #$number."

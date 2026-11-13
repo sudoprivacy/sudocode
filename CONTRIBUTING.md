@@ -996,9 +996,16 @@ acceptance, and a branch behind main merges without rerunning its profiles, so a
 clean merge of main costs nothing extra. Conflict resolutions and PR changes
 replaced by main's version still count. Carrying requires the same native host,
 unchanged profile commands and matching original logs; `preflight` always runs.
-The receipt records each origin head with its signed envelope, and the verifier
-re-checks that envelope, its ancestry, the change set and the copied command
-records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+The receipt records each origin head with the SHA-256 of its signed envelope
+(receipt version 2). The note and each local output store every referenced
+envelope's exact bytes once, so an origin that several carries share appears
+once and nested carries do not inflate the note. The verifier resolves each
+reference, refusing a missing or differing envelope, and re-checks that envelope,
+its ancestry, the change set and the copied command records. It does the same for
+each origin's own carries, at most 32 origins deep. Version 1 receipts embed their
+carried envelopes and verify the same way; carrying from one stores it once by
+reference. A profile whose earlier envelopes would exceed 1 MB of the note runs
+again. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
 For a contract update, the managed child keeps the candidate command recipe and
 protected signing authority separate. Carry admission, checkpoints, resume and
 publication use the same protected authority; an earlier unmerged candidate
@@ -1431,7 +1438,11 @@ Each profile owns a private server and stops it on success or failure. A retaine
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned
 servers. Client-side compilation keeps rustc under the original priority observer.
-Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+Compilers stay BelowNormal/nice while actual tests stay Normal. Each command
+record signs how many distinct compiler children ran at each priority, by
+compiler name. A profile's cache session (tool, server, statistics, priorities
+and tool commands) is recorded once, on its first cached command; the others
+name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY

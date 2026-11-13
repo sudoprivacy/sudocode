@@ -395,7 +395,9 @@ def main():
     ignored_disabled_test_sources = []
     # The workflow changes real compiler/daemon commands; this selector does
     # not. Its own edits retain preflight and the complete contract guard.
-    queue_inputs = {".github/workflows/rust-ci.yml"}
+    # The toolchain pin and its installer change the compiler of every job.
+    queue_inputs = {".github/workflows/rust-ci.yml", "rust-toolchain.toml",
+                    ".github/actions/rust-toolchain/action.yml"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":

@@ -1,0 +1,122 @@
+name: Rust toolchain bump
+
+# rust-toolchain.toml pins the one Rust release that CI, release builds and
+# the local acceptance images compile with, so a new stable release cannot
+# break an unrelated PR. This workflow brings each new release in as its own
+# PR: scripts/bump_rust_toolchain.py moves the pin, the acceptance image
+# digests and the contract pins that hash them, and the PR then runs the full
+# CI. See CONTRIBUTING.md#rust-toolchain.
+#
+# Required configuration, set once by an organization or repository admin:
+#   vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID
+#       Client ID of a GitHub App installed on this repository with
+#       Contents: read and write, and Pull requests: read and write.
+#   secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY
+#       A private key of that App.
+# A push or PR made with the default GITHUB_TOKEN starts no workflows, so a
+# bump opened that way would have no CI. Without the App this job fails.
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Mondays 02:00 UTC (10:00 CST)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact release to propose, such as 1.100.1 (empty = current stable)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-toolchain-bump
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: github.repository == 'sudoprivacy/sudocode'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BRANCH: ci/rust-toolchain-bump
+    steps:
+      - name: Require the bump App
+        env:
+          CLIENT_ID: ${{ vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != true ]; then
+            echo "::error::Set vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID and secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY, described at the top of .github/workflows/rust-toolchain-bump.yml"
+            exit 1
+          fi
+      - uses: actions/create-github-app-token@v3
+        id: app
+        with:
+          client-id: ${{ vars.RUST_TOOLCHAIN_BUMP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RUST_TOOLCHAIN_BUMP_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Find the open bump PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          number=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base main --state open \
+            --json number --jq '.[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          # Continue an open PR's branch so commits added to it are kept.
+          ref: ${{ steps.pr.outputs.number && env.BRANCH || 'main' }}
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Move the pin to the target release
+        id: bump
+        env:
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python scripts/bump_rust_toolchain.py ${VERSION:+--version "$VERSION"}
+          --github-output "$GITHUB_OUTPUT" --summary "$RUNNER_TEMP/rust-toolchain-bump.md"
+      - name: Report a release whose images are not published yet
+        if: steps.bump.outputs.pending
+        env:
+          PENDING: ${{ steps.bump.outputs.pending }}
+        run: echo "::notice::Rust $PENDING is stable, but its Docker Hub images are not complete yet; the next run proposes it."
+      - name: Commit, then open or update the PR
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          bot="${APP_SLUG}[bot]"
+          git config user.name "$bot"
+          git config user.email "$(gh api "/users/$bot" --jq .id)+$bot@users.noreply.github.com"
+          title="ci(toolchain): bump Rust to $VERSION"
+          git add rust-toolchain.toml .github/local-acceptance/Dockerfile .github/local-acceptance/Dockerfile.guard \
+            .github/local-acceptance/checks.py
+          git commit -q -m "$title"
+          body="$RUNNER_TEMP/rust-toolchain-bump.md"
+          cat >> "$body" <<'EOF'
+
+          The acceptance images are part of the protected acceptance contract, so a maintainer finishes this PR:
+
+          1. Check out this branch and fix whatever the new release reports, such as new lints.
+          2. Run `contract-update` as described in CONTRIBUTING.md#acceptance-contract-changes. It runs and signs the full local acceptance.
+          3. Mark the PR ready and land it through the merge queue.
+
+          Opened by `.github/workflows/rust-toolchain-bump.yml`.
+          EOF
+          if [ -n "$NUMBER" ]; then
+            git push origin "HEAD:refs/heads/$BRANCH"
+            gh pr edit "$NUMBER" --title "$title" --body-file "$body"
+          else
+            # No open PR uses the branch, so a stale copy is replaced.
+            git push --force origin "HEAD:refs/heads/$BRANCH"
+            gh pr create --draft --base main --head "$BRANCH" --title "$title" --body-file "$body"
+          fi

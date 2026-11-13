@@ -79,9 +79,14 @@ jobs:
           ref: ${{ needs.proof.outputs.policy_ref }}
           path: .trusted-acceptance
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain
         if: matrix.family == 'native'
         with:
+          # The candidate's own pin decides what its Cargo commands resolve.
+          # A branch created before the pin uses the protected one.
+          toolchain-file: |
+            candidate/rust-toolchain.toml
+            .trusted-acceptance/rust-toolchain.toml
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
         with:

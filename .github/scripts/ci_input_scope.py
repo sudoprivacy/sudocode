@@ -29,6 +29,7 @@ def git(*args):
 REVIEWED_VERIFIER_LAYOUTS = {
     "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
+    "352ee3b249fb1e16aac60de13f8bfa442668eedd7a4b41c9981d4415d037b3d7",
 }
 
 
@@ -395,7 +396,9 @@ def main():
     ignored_disabled_test_sources = []
     # The workflow changes real compiler/daemon commands; this selector does
     # not. Its own edits retain preflight and the complete contract guard.
-    queue_inputs = {".github/workflows/rust-ci.yml"}
+    # The toolchain pin and its installer change the compiler of every job.
+    queue_inputs = {".github/workflows/rust-ci.yml", "rust-toolchain.toml",
+                    ".github/actions/rust-toolchain/action.yml"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":

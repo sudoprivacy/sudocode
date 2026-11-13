@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -66,6 +66,48 @@ function settleRecord(file: string, value: unknown): void {
   }
 }
 
+/** Publish an actor's scode profile. Its workspace, logs and ACP session belong to
+ * the operation and must match a profile already published; its launch policy
+ * follows the operator record, so a resumed operation replaces a stale one. */
+function settleProfile(file: string, value: ScodeAcpConfig & {acpSessionId: string}): 'published'|'unchanged'|'replaced' {
+  try {createRecord(file,value);return 'published';}
+  catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
+  const previous=readJson(file) as Partial<typeof value>;
+  const owned=(profile: Partial<typeof value>)=>[profile.workspace,profile.protocolLog,profile.stderrLog,profile.acpSessionId];
+  if(!isDeepStrictEqual(owned(previous),owned(value))){
+    throw new Error('profile.json belongs to another operation; operator recovery required');
+  }
+  if(isDeepStrictEqual(previous,JSON.parse(JSON.stringify(value))))return 'unchanged';
+  const staged=`${file}.${process.pid}.tmp`;
+  createRecord(staged,value);
+  renameSync(staged,file);
+  syncParent(file);
+  return 'replaced';
+}
+
+/** The scode profile an actor launches with: the operation's own workspace, logs
+ * and ACP session, under the operator record's launch policy in force now.
+ * Ready bindings read it at every connection, so publishing it is how a launch
+ * policy change reaches an enrolled actor. */
+function actorProfile(grant: OperatorGrant, actorDirectory: string): ScodeAcpConfig {
+  const workspace=path.join(actorDirectory,'workspace');
+  return {...grant.scode,workspace,
+    protocolLog:path.join(actorDirectory,'acp.jsonl'),stderrLog:path.join(actorDirectory,'stderr.log')};
+}
+
+/** Republish a completed actor's profile under the current launch policy. Its ACP
+ * session comes from the operation's own session record. */
+function refreshCompletedProfile(grant: OperatorGrant, actorDirectory: string, result: CodexAgentProfile): 'published'|'unchanged'|'replaced' {
+  const configFile=path.join(actorDirectory,'profile.json');
+  if(result.configFile!==configFile)throw new Error('Completed operation names a profile outside its actor directory; operator recovery required');
+  const saved=readJson(path.join(actorDirectory,'session.json')) as {sessionId?:unknown;workspace?:unknown};
+  const profile=actorProfile(grant,actorDirectory);
+  if(typeof saved.sessionId!=='string' || !saved.sessionId || saved.workspace!==profile.workspace){
+    throw new Error('Completed operation lacks its ACP session record; operator recovery required');
+  }
+  return settleProfile(configFile,{...profile,acpSessionId:saved.sessionId});
+}
+
 function removeRecord(file: string): void {
   rmSync(file);
   syncParent(file);
@@ -92,6 +134,46 @@ function validateGrant(grant: OperatorGrant): void {
       || [grant.scode.startupTimeoutMs,grant.scode.closeTimeoutMs].some(value=>value!==undefined && (!Number.isFinite(value)||value<=0))) {
     throw new Error('Invalid explicit Codex enrollment grant');
   }
+}
+
+/** What one operation is, as its reservation records it.
+ *
+ * A replay must be the same operation: the same claim, for the same workspace. While
+ * it is in flight it must also be driven by the same Node operator command, the one
+ * thing that can issue a credential for it. The scode launch policy is not part of
+ * it: a completed operation's credential and session do not depend on it, and a
+ * resumed one starts scode with the policy in force now — so upgrading scode or
+ * tuning its timeouts in the operator record strands no operation.
+ */
+interface OperationRecord {
+  version: 2;
+  claim: CodexAgentClaim;
+  nativeCanonicalWorkspace: string;
+  nexusArgv: string[];
+}
+
+/** A reservation written before {@link OperationRecord}: it pinned the whole
+ * operator record by hash, so the issuer is only recognisable by that hash. */
+interface LegacyOperationRecord {
+  claim: CodexAgentClaim;
+  grantSha256: string;
+  nativeCanonicalWorkspace: string;
+}
+
+/** Why an existing reservation cannot be resumed by this call, or undefined when
+ * it can. A completed operation is resumable under any operator record: nothing
+ * further is issued for it. */
+function resumeRefusal(previous: OperationRecord|LegacyOperationRecord, intent: OperationRecord,
+  grantSha256: string, completed: boolean): string|undefined {
+  if(!isDeepStrictEqual(previous.claim,intent.claim) || previous.nativeCanonicalWorkspace!==intent.nativeCanonicalWorkspace){
+    return 'Another operation holds this actor; operator recovery required';
+  }
+  if(completed)return undefined;
+  const sameIssuer='version' in previous && previous.version===2
+    ? isDeepStrictEqual(previous.nexusArgv,intent.nexusArgv)
+    : (previous as LegacyOperationRecord).grantSha256===grantSha256;
+  return sameIssuer ? undefined
+    : 'This operation was started by another Node operator command and may have been submitted; operator recovery required';
 }
 
 function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; grantSha256: string} {
@@ -124,13 +206,19 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
   mkdirSync(actorDirectory,{recursive:true,mode:0o700});
   const operation=path.join(actorDirectory,'operation.json');
   const resultFile=path.join(actorDirectory,'result.json');
-  const intent={claim,grantSha256,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace)};
+  const intent: OperationRecord={version:2,claim,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace),
+    nexusArgv:grant.nexusArgv};
   try {createRecord(operation,intent);}
   catch(error){
     if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;
-    const previous=readJson(operation) as typeof intent;
-    if(!isDeepStrictEqual(previous,intent))throw new Error('Actor operation/grant differs; operator recovery required');
-    if(existsSync(resultFile))return readJson(resultFile) as CodexAgentProfile;
+    const completed=existsSync(resultFile);
+    const refusal=resumeRefusal(readJson(operation) as OperationRecord|LegacyOperationRecord,intent,grantSha256,completed);
+    if(refusal)throw new Error(refusal);
+    if(completed){
+      const result=readJson(resultFile) as CodexAgentProfile;
+      refreshCompletedProfile(grant,actorDirectory,result);
+      return result;
+    }
   }
   // The Node operator's typed refusal attests that nothing was submitted, so the
   // reservation is released and the same operation may run again. Any other
@@ -163,12 +251,11 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
 
 async function completeEnrollment(grant: OperatorGrant, claim: CodexAgentClaim, nativeCanonicalWorkspace: string,
   actorDirectory: string, resultFile: string): Promise<CodexAgentProfile> {
+  const profile=actorProfile(grant,actorDirectory);
   const workspace=path.join(actorDirectory,'workspace');
   const settings=path.join(workspace,'.nexus','sudocode');
   mkdirSync(settings,{recursive:true,mode:0o700});
   settleRecord(path.join(settings,'settings.json'),{agentName:claim.actor});
-  const profile: ScodeAcpConfig={...grant.scode,workspace,
-    protocolLog:path.join(actorDirectory,'acp.jsonl'),stderrLog:path.join(actorDirectory,'stderr.log')};
   const sessionFile=path.join(actorDirectory,'session.json');
   const saved=existsSync(sessionFile) ? readJson(sessionFile) as {sessionId:string;workspace:string} : undefined;
   if(saved && (saved.workspace!==workspace || typeof saved.sessionId!=='string' || !saved.sessionId)){
@@ -181,7 +268,7 @@ async function completeEnrollment(grant: OperatorGrant, claim: CodexAgentClaim, 
     const listed=await listScodeAgents(connection);
     requireScodeNodeIdentity(connection,listed,claim.actor);
     const configFile=path.join(actorDirectory,'profile.json');
-    settleRecord(configFile,{...profile,acpSessionId:connection.sessionId});
+    settleProfile(configFile,{...profile,acpSessionId:connection.sessionId});
     await connection.close();
     const result: CodexAgentProfile={actor:claim.actor,configFile,workspaceBinding:{version:1,
       actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,
@@ -189,6 +276,33 @@ async function completeEnrollment(grant: OperatorGrant, claim: CodexAgentClaim, 
     settleRecord(resultFile,result);
     return result;
   } finally {await connection.close();}
+}
+
+export interface ProfileRefresh {actor: string; outcome: 'published'|'unchanged'|'replaced'|'in_flight'|'refused'; detail?: string}
+
+/** Republish every completed actor's profile under the operator record's current
+ * launch policy, so a scode upgrade or a timeout change reaches actors that are
+ * already enrolled. It writes profiles only: no operation, result, session or
+ * credential record changes, nothing is issued, and an operation still in flight
+ * picks the policy up when it resumes. Ready bindings use a refreshed profile
+ * from their next connection. */
+export function refreshCodexProfiles(file: string): ProfileRefresh[] {
+  const grant=JSON.parse(recordBytes(file).toString('utf8')) as OperatorGrant;
+  validateGrant(grant);
+  if(!existsSync(grant.stateDirectory))return [];
+  return readdirSync(grant.stateDirectory,{withFileTypes:true})
+    .filter(entry=>entry.isDirectory() && /^(?:codex|claude)-[0-9a-f]{32}$/.test(entry.name))
+    .map(entry=>entry.name).sort()
+    .map((actor): ProfileRefresh=>{
+      const actorDirectory=path.join(grant.stateDirectory,actor);
+      const resultFile=path.join(actorDirectory,'result.json');
+      if(!existsSync(resultFile))return {actor,outcome:'in_flight'};
+      try {
+        const result=readJson(resultFile) as CodexAgentProfile;
+        if(result.actor!==actor)throw new Error('Completed result names another actor; operator recovery required');
+        return {actor,outcome:refreshCompletedProfile(grant,actorDirectory,result)};
+      } catch(error){return {actor,outcome:'refused',detail:String(error)};}
+    });
 }
 
 /** Public wire entry: all untyped post-attempt failures remain Unknown. */

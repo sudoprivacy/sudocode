@@ -1,5 +1,5 @@
 FROM node:22-bookworm-slim AS node
-FROM rust:1.99-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -10,6 +10,11 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
       python3 python3-psutil git curl ca-certificates pkg-config libssl-dev \
       protobuf-compiler zstd unzip \
  && rm -rf /var/lib/apt/lists/*
+# rust-toolchain.toml names these; without them every container's first
+# Cargo call in a checkout downloads them, and fails without network.
+RUN nice -n 10 rustup component add clippy rustfmt \
+ && cargo clippy --version \
+ && rustfmt --version
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 COPY e2e/terminal-resize/package*.json /opt/terminal-observer/

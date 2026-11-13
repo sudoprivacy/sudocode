@@ -1057,9 +1057,11 @@ def run(output):
     assert "Local acceptance failed (9)" in failure, failure
     environment.pop("FAIL_SCOPE_PROFILE")
     print("PASS: an actual normal-input change still reruns and fails its required profile", flush=True)
-    observed = [priority for row in commands for priority in row.get("compiler_priorities", {}).values()]
+    # Each row signs {compiler name: {priority: distinct children}}.
+    observed = [(priority, count) for row in commands for counts in row.get("compiler_priorities", {}).values()
+                for priority, count in counts.items()]
     expected_priority = 16384 if os.name == "nt" else 10
-    assert observed and all(priority == expected_priority for priority in observed), observed
+    assert observed and all(priority == str(expected_priority) and count > 0 for priority, count in observed), observed
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,
               "actual_development_feature_case_passed": True,

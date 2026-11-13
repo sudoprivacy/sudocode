@@ -176,8 +176,9 @@ fn nested_cargo_and_explicit_target() {
         assert sum(sessions[1]["stats"]["stats"]["cache_hits"]["counts"].values()) > 0, sessions
         assert all(session["stats"]["max_cache_size"] == 2 * 1024**3 and session["priorities"]
                    for session in sessions), sessions
-        assert all(row["priority"] == (16384 if os.name == "nt" else 10)
-                   for session in sessions for row in session["priorities"]), sessions
+        # A session signs {compiler name: {priority: distinct children}}.
+        assert all(set(counts) == {str(16384 if os.name == "nt" else 10)} and all(count > 0 for count in counts.values())
+                   for session in sessions for counts in session["priorities"].values()), sessions
         for session in sessions:
             import psutil
 
@@ -224,7 +225,10 @@ fn nested_cargo_and_explicit_target() {
             helper.ROOT = SOURCE
         staged.prepare_native_checks(["native-examples"], project, snapshot, helper.run_command)
         original = staged.run("native-examples", project, snapshot / "native-examples", "HEAD", helper.run_command)
-        assert len(original) == 1 and original[0]["compiler_cache"]["stats"]["max_cache_size"] == 2 * 1024**3
+        recorded = original[0]["compiler_cache"] if len(original) == 1 else {}
+        assert recorded.get("session", {}).get("stats", {}).get("max_cache_size") == 2 * 1024**3, original
+        assert recorded["session_sha256"] == hashlib.sha256(json.dumps(
+            recorded["session"], sort_keys=True, separators=(",", ":")).encode()).hexdigest(), recorded
         example = rust / "target/debug/examples" / ("cache.exe" if os.name == "nt" else "cache")
         assert command("dispatcher-example", [str(example)], rust).strip() == "REAL_DISPATCHER_EXAMPLE"
         os.environ["RUSTC_WRAPPER"] = ""

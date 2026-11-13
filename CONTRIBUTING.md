@@ -24,6 +24,7 @@ your first contribution.
 - [Experimental features — standing rule](#experimental-features--standing-rule)
 - [Project Layout](#project-layout)
 - [Prerequisites](#prerequisites)
+- [Rust toolchain](#rust-toolchain)
 - [Building](#building)
 - [Required checks](#required-checks)
 - [Company model routing in CI](#company-model-routing-in-ci)
@@ -1566,11 +1567,11 @@ All `cargo` commands in this guide assume your working directory is
 
 ## Prerequisites
 
-- **Rust (stable)** — install via [rustup](https://rustup.rs). The
-  workspace pins `edition = "2021"` and tracks the current stable
-  toolchain used by CI.
-- **`rustfmt`** and **`clippy`** components (installed by default
-  with `rustup`; otherwise `rustup component add rustfmt clippy`).
+- **Rust** — install via [rustup](https://rustup.rs). The repository's
+  `rust-toolchain.toml` names the release CI uses; rustup installs it,
+  with `rustfmt` and `clippy`, the first time you run `cargo` in the
+  checkout. See [Rust toolchain](#rust-toolchain). The workspace uses
+  `edition = "2021"`.
 - A POSIX-like shell for the helper scripts under `scripts/` and
   `rust/scripts/`.
 - (Optional) `python3` if you plan to run
@@ -1578,6 +1579,45 @@ All `cargo` commands in this guide assume your working directory is
 
 Credentials are only needed when invoking a live model; the build,
 tests, and lints run without them.
+
+## Rust toolchain
+
+`rust-toolchain.toml` pins one exact Rust release with `clippy` and
+`rustfmt`. Local builds, every CI job and both local acceptance images
+compile with it. CI installs it through `.github/actions/rust-toolchain`,
+which also makes it the rustup default, so checks that build fixtures
+outside the checkout use the same compiler. The acceptance Dockerfiles
+pin `rust` base images of that release by digest.
+
+A new stable release can add lints and change Cargo's build layout or
+tool behaviour. With the pin, each release first runs on its own PR, and
+other PRs keep building with the release `main` has accepted. A change to
+the pin selects every local acceptance profile that compiles Rust, and the
+merge queue's workspace lint and daemon jobs.
+
+The pin may trail stable by at most one minor release, about six to
+twelve weeks. `.github/workflows/rust-toolchain-bump.yml` compares it with
+the stable channel every Monday. When stable is newer it opens, or updates,
+one issue labelled `rust-toolchain` that names the release and the steps;
+when the pin is current again it closes that issue. Past the budget the
+issue is labelled `overdue` and the weekly run fails, which notifies the CI
+owners. No PR is ever blocked by it.
+
+A bump is a maintainer's change, because the images belong to the
+acceptance contract and a new release can need code fixes. On a branch
+from `main`:
+
+```bash
+python3 scripts/bump_rust_toolchain.py --status    # how far the pin trails stable
+python3 scripts/bump_rust_toolchain.py --dry-run   # preview the change
+python3 scripts/bump_rust_toolchain.py             # write it
+```
+
+The script moves `rust-toolchain.toml`, the Dockerfile digests and the
+`checks.py` pins that hash them; `--version 1.x.y` selects a specific
+release. Fix what the new release reports, run `contract-update` (see
+[Acceptance contract changes](#acceptance-contract-changes)) and land the
+PR through the merge queue.
 
 ## Building
 

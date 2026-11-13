@@ -1305,6 +1305,21 @@ unfinished work remain explicit; the one-tenth goal is not met. The audit retain
 all 27 source observations and the earlier five-history snapshot. These code PRs
 merged before the latest worker/scheduling rollouts, whose prospective effect must
 be measured separately.</p>
+<p><strong>Keep local attempts in the delivery clock (2026-11-13).</strong>
+The November 6?12 observation window now includes 115 merged PRs with indexed
+local/hosted evidence. First observed local-or-CI start to merge averages at
+least 250.287 minutes (median 61.935); 31 Rust/build PRs average at least 644.426
+minutes. The 58 PRs with observed actual failures average at least 77.601 minutes
+to their first failure (median 17.757). Original signed profiles, available
+command logs, prior revisions, failed attempts and partial checkpoints are
+retained; overlapping clocks are not summed. Missing unpublished/manual/other-host
+work remains unknown. This larger mixed cohort is not a controlled before/after
+comparison and does not establish the one-tenth target. A separate read-only
+189-terminal-attempt sample has explicit original lock-wait fields: aggregate
+queued-agent time overlaps across worklines and cannot be claimed as runner CPU
+or removable elapsed time. Recent CLI samples still spent 23?28 minutes waiting
+inside individual local validations. The current workline's unsuccessful and
+stopped local preparation remains additional recorded cost.</p>
 <p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
 Modern receipts still validate both recorded fingerprint maps against their
 attested original source. Verification skips an overwritten whole-policy hash
@@ -1710,7 +1725,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       validation snapshot. Real Make/Git/backend controls check
       early refusal, manual repair, unchanged inputs and propagation of a real
       pytest failure. Explicit <code>make test</code> and the original precommit
-      recipes, assertions, worker defaults and deadlines are retained. Shared pytest defaults run previously failed
+      recipes, assertions and deadlines are retained. Default test workers are two; explicit overrides remain available. Shared pytest defaults run previously failed
       cases and new test files first within the selected scope. The
       mandatory Make output states the ordering and first-failure cleanup.
       Real pytest controls generate their own caches and cover known failures,
@@ -1728,6 +1743,26 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       source/environment drift require a fresh full
       run. Unknown source archives retain the original full command. The
       required CLI prints full versus affected scope and the actual receipt.
+      Full Make validation and the original commit hook now share the same
+      real worktree-private graph through the actual Git shell. A fresh matching
+      completion is required; an empty successful shell cannot stand in for tests.
+      Non-live affected runs use testmon's marker intersection, retaining new
+      live-test obligations for the commit hook. Native Git's repeated leading
+      PATH prefix and the installed Windows mingw64/ucrt64 directories are
+      normalized; other Git policy and test inputs remain checked. An empty
+      Windows Make launch value uses the installed Git default only in that
+      process. Final-source original Make passed 5478 cases with
+      239 skips in 1853.1s; the separate original hook
+      recorded 0 passed/35 actual live skips and
+      the TypeScript/Vite/PWA build in 158.1s, with the same graph,
+      raw source, packages and test inputs. Counts are per phase, not additive.
+      Thirty-seven related controls, real Linux old-source failure/corrected
+      flows, and digest-verified Git 2.56 Windows flows qualify the entry fixes.
+      Initial Linux and Windows CI failures, the original environment refusal,
+      and earlier failed/stopped development fields remain recorded. Nine
+      applicable final-head CI checks passed before normal PR #40 merge.
+      This is validation reuse, not product/PTY coverage or a whole-cycle
+      one-tenth result.
       Per-call tool tracing IDs do not invalidate otherwise identical tests;
       identity, credentials and test configuration remain checked. A reuse-only
       measurement refuses before starting an unplanned full suite.
@@ -1766,6 +1801,7 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <a href="https://github.com/sudoprivacy/mosswork/pull/32">PR #32</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/34">source-bound reuse PR #34</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/38">complete-worktree tool route PR #38</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/40">shared Make/hook history PR #40</a>;
       <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
     </tr>
     <tr>

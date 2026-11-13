@@ -1870,7 +1870,19 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       On 2026-11-12, two validation-only runs recorded 854 versus
       61 summed runner seconds and 412 versus 58 seconds from workflow creation
       to its last job. These observations exclude local acceptance and merge
-      waiting; they do not prove the whole end-to-end target.</td>
+      waiting; they do not prove the whole end-to-end target.
+      <p>The selected Windows Git/Make validator cohort now runs with two pytest
+      workers. Other connector scopes retain their existing pool. All module
+      lists, platform coverage, assertions and deadlines are unchanged. Actual
+      old/new Bash plans match in three condition branches; the local actual
+      step passed 235 cases with 6 explicit skips, followed by the original
+      tools-profile hook. PR #43 passed all seven applicable exact-head CI
+      checks before normal merge. The original hosted connector/validator/API/
+      export step took 317 seconds; the revised run took 369 seconds.
+      These are separate observed step clocks, excluding setup and queues;
+      they are not a controlled whole-lifecycle comparison or a new full-app
+      acceptance. See <a href="https://github.com/sudoprivacy/mosswork/pull/43">Windows validator execution PR #43</a>.</p>
+</td>
       <td>No: CI scheduling controls; skipped matrices are not PTY passes.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/26">PR #26</a>;

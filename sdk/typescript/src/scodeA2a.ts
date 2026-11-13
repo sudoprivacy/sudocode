@@ -53,8 +53,6 @@ export function scodeNativeA2aAudit(result: ScodeA2aResult): Record<string, unkn
  * Directory entries establish neither identity nor whether a peer is online.
  */
 export function requireScodeNodeIdentity(connection: ScodeConnection, result: ScodeA2aResult, actor?: string): Record<string, unknown> {
-  // A failed listing proves nothing about identity; report why it failed.
-  if(result.isError)throw new Error(`agent_list failed: ${result.content}`);
   const audit=scodeNativeA2aAudit(result);
   if(directCapability(connection)?.hostAudit!==1 || !audit || audit.version!==1
       || audit.tool!=='agent_list' || typeof audit.actor!=='string' || !audit.actor
@@ -63,7 +61,7 @@ export function requireScodeNodeIdentity(connection: ScodeConnection, result: Sc
   }
   // An authenticated operation failure does not mean the actor or SID changed.
   // Preserve the original result; no write-outcome or retry-safety claim follows.
-  if (result.isError) throw new Error(`Owned Node identity query failed: ${result.content}`, { cause: result });
+  if (result.isError) throw new Error(`Owned Node identity query failed: agent_list failed: ${result.content}`, { cause: result });
   return audit;
 }
 

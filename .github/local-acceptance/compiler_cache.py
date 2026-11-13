@@ -109,7 +109,7 @@ class Session:
         self.tool, self.directory, self.execute_command = tool, Path(directory), execute
         self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / VERSION)
         self.environment, self.server = None, None
-        self.tool_commands, self.records, self.priorities = [], [], []
+        self.tool_commands, self.records, self.priorities = [], [], {}
         self.server_history = []
         self.storage_lock = None
         self.disabled = False
@@ -293,8 +293,10 @@ class Session:
                 self.records.append((json.loads(receipt.read_text(encoding="utf-8")), Path(log), list(map(str, command))))
             raise
         self.records.append((result, Path(log), list(map(str, command))))
-        self.priorities.extend({"identity": name, "priority": priority}
-                               for name, priority in result.get("compiler_priorities", {}).items())
+        for name, counts in result.get("compiler_priorities", {}).items():
+            session = self.priorities.setdefault(name, {})
+            for priority, count in counts.items():
+                session[priority] = session.get(priority, 0) + count
         return result
 
     def stop_server(self):
@@ -311,11 +313,15 @@ class Session:
         owner = self.cache / ".server-owner.json"
         if owner.exists() and json.loads(owner.read_text(encoding="utf-8"))["owner"] == self.environment["SCODE_COMPILER_CACHE_OWNER"]:
             owner.unlink()
-        for result, log, requested in self.records:
-            result["compiler_cache"] = {"version": VERSION, "tool": self.tool, "server": self.server,
-                                        "requested_command": requested, "stats": stats,
-                                        "server_history": self.server_history,
-                                        "compiler_priorities": self.priorities, "tool_commands": self.tool_commands}
+        # Every cached command shares this session. Record it once, on the
+        # first command, and bind each command to it by SHA-256.
+        session = {"version": VERSION, "tool": self.tool, "server": self.server, "stats": stats,
+                   "server_history": self.server_history, "compiler_priorities": self.priorities,
+                   "tool_commands": self.tool_commands}
+        identity = digest(json.dumps(session, sort_keys=True, separators=(",", ":")).encode())
+        for index, (result, log, requested) in enumerate(self.records):
+            result["compiler_cache"] = {"requested_command": requested, "session_sha256": identity,
+                                        **({"session": session} if index == 0 else {})}
             log.with_suffix(".command.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     def close(self):

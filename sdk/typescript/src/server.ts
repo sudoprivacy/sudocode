@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
 import { shutdownCommand } from './lifecycle';
-import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
+import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
 import { waitForClaudeWake } from './claudeWake';
 import { claudeWakeSpool, joinsAgentNetwork, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
-    'enroll-codex': {type:'boolean'},
+    'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
     'claude-wake': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
@@ -74,6 +74,7 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
+      + 'scode-acp-bridge --refresh-codex-profiles --config OWNER_GRANT  (republish enrolled actors\' profiles under the current launch policy)\n'
       + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
       + 'Uses the shared scode ACP/MCP implementation; no Hydra application, tmux or Nexus daemon is started.');
     return;
@@ -106,6 +107,13 @@ async function main(): Promise<void> {
     return;
   }
   if(values['nexus-operator']||values['scode-argv']||values['scode-env'])throw new Error('Operator initializer fields require --init-codex-operator');
+  if(values['refresh-codex-profiles']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','refresh-codex-profiles'].includes(key)))throw new Error('--refresh-codex-profiles takes only --config');
+    const refreshed=refreshCodexProfiles(values.config);
+    for(const row of refreshed)console.log(JSON.stringify(row));
+    if(refreshed.some(row=>row.outcome==='refused'))process.exitCode=1;
+    return;
+  }
   if(values['enroll-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
     await runCodexEnrollment(values.config);return;

@@ -24,6 +24,7 @@ your first contribution.
 - [Experimental features — standing rule](#experimental-features--standing-rule)
 - [Project Layout](#project-layout)
 - [Prerequisites](#prerequisites)
+- [Rust toolchain](#rust-toolchain)
 - [Building](#building)
 - [Required checks](#required-checks)
 - [Company model routing in CI](#company-model-routing-in-ci)
@@ -995,9 +996,16 @@ acceptance, and a branch behind main merges without rerunning its profiles, so a
 clean merge of main costs nothing extra. Conflict resolutions and PR changes
 replaced by main's version still count. Carrying requires the same native host,
 unchanged profile commands and matching original logs; `preflight` always runs.
-The receipt records each origin head with its signed envelope, and the verifier
-re-checks that envelope, its ancestry, the change set and the copied command
-records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+The receipt records each origin head with the SHA-256 of its signed envelope
+(receipt version 2). The note and each local output store every referenced
+envelope's exact bytes once, so an origin that several carries share appears
+once and nested carries do not inflate the note. The verifier resolves each
+reference, refusing a missing or differing envelope, and re-checks that envelope,
+its ancestry, the change set and the copied command records. It does the same for
+each origin's own carries, at most 32 origins deep. Version 1 receipts embed their
+carried envelopes and verify the same way; carrying from one stores it once by
+reference. A profile whose earlier envelopes would exceed 1 MB of the note runs
+again. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
 For a contract update, the managed child keeps the candidate command recipe and
 protected signing authority separate. Carry admission, checkpoints, resume and
 publication use the same protected authority; an earlier unmerged candidate
@@ -1430,7 +1438,11 @@ Each profile owns a private server and stops it on success or failure. A retaine
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned
 servers. Client-side compilation keeps rustc under the original priority observer.
-Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+Compilers stay BelowNormal/nice while actual tests stay Normal. Each command
+record signs how many distinct compiler children ran at each priority, by
+compiler name. A profile's cache session (tool, server, statistics, priorities
+and tool commands) is recorded once, on its first cached command; the others
+name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
@@ -1555,11 +1567,11 @@ All `cargo` commands in this guide assume your working directory is
 
 ## Prerequisites
 
-- **Rust (stable)** — install via [rustup](https://rustup.rs). The
-  workspace pins `edition = "2021"` and tracks the current stable
-  toolchain used by CI.
-- **`rustfmt`** and **`clippy`** components (installed by default
-  with `rustup`; otherwise `rustup component add rustfmt clippy`).
+- **Rust** — install via [rustup](https://rustup.rs). The repository's
+  `rust-toolchain.toml` names the release CI uses; rustup installs it,
+  with `rustfmt` and `clippy`, the first time you run `cargo` in the
+  checkout. See [Rust toolchain](#rust-toolchain). The workspace uses
+  `edition = "2021"`.
 - A POSIX-like shell for the helper scripts under `scripts/` and
   `rust/scripts/`.
 - (Optional) `python3` if you plan to run
@@ -1567,6 +1579,45 @@ All `cargo` commands in this guide assume your working directory is
 
 Credentials are only needed when invoking a live model; the build,
 tests, and lints run without them.
+
+## Rust toolchain
+
+`rust-toolchain.toml` pins one exact Rust release with `clippy` and
+`rustfmt`. Local builds, every CI job and both local acceptance images
+compile with it. CI installs it through `.github/actions/rust-toolchain`,
+which also makes it the rustup default, so checks that build fixtures
+outside the checkout use the same compiler. The acceptance Dockerfiles
+pin `rust` base images of that release by digest.
+
+A new stable release can add lints and change Cargo's build layout or
+tool behaviour. With the pin, each release first runs on its own PR, and
+other PRs keep building with the release `main` has accepted. A change to
+the pin selects every local acceptance profile that compiles Rust, and the
+merge queue's workspace lint and daemon jobs.
+
+The pin may trail stable by at most one minor release, about six to
+twelve weeks. `.github/workflows/rust-toolchain-bump.yml` compares it with
+the stable channel every Monday. When stable is newer it opens, or updates,
+one issue labelled `rust-toolchain` that names the release and the steps;
+when the pin is current again it closes that issue. Past the budget the
+issue is labelled `overdue` and the weekly run fails, which notifies the CI
+owners. No PR is ever blocked by it.
+
+A bump is a maintainer's change, because the images belong to the
+acceptance contract and a new release can need code fixes. On a branch
+from `main`:
+
+```bash
+python3 scripts/bump_rust_toolchain.py --status    # how far the pin trails stable
+python3 scripts/bump_rust_toolchain.py --dry-run   # preview the change
+python3 scripts/bump_rust_toolchain.py             # write it
+```
+
+The script moves `rust-toolchain.toml`, the Dockerfile digests and the
+`checks.py` pins that hash them; `--version 1.x.y` selects a specific
+release. Fix what the new release reports, run `contract-update` (see
+[Acceptance contract changes](#acceptance-contract-changes)) and land the
+PR through the merge queue.
 
 ## Building
 

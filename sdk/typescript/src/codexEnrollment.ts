@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -66,6 +66,24 @@ function settleRecord(file: string, value: unknown): void {
   }
 }
 
+/** Publish an actor's scode profile. Its workspace, logs and ACP session belong to
+ * the operation and must match a profile already published; its launch policy
+ * follows the operator record, so a resumed operation replaces a stale one. */
+function settleProfile(file: string, value: ScodeAcpConfig & {acpSessionId: string}): void {
+  try {createRecord(file,value);return;}
+  catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
+  const previous=readJson(file) as Partial<typeof value>;
+  const owned=(profile: Partial<typeof value>)=>[profile.workspace,profile.protocolLog,profile.stderrLog,profile.acpSessionId];
+  if(!isDeepStrictEqual(owned(previous),owned(value))){
+    throw new Error('profile.json belongs to another operation; operator recovery required');
+  }
+  if(isDeepStrictEqual(previous,JSON.parse(JSON.stringify(value))))return;
+  const staged=`${file}.${process.pid}.tmp`;
+  createRecord(staged,value);
+  renameSync(staged,file);
+  syncParent(file);
+}
+
 function removeRecord(file: string): void {
   rmSync(file);
   syncParent(file);
@@ -92,6 +110,46 @@ function validateGrant(grant: OperatorGrant): void {
       || [grant.scode.startupTimeoutMs,grant.scode.closeTimeoutMs].some(value=>value!==undefined && (!Number.isFinite(value)||value<=0))) {
     throw new Error('Invalid explicit Codex enrollment grant');
   }
+}
+
+/** What one operation is, as its reservation records it.
+ *
+ * A replay must be the same operation: the same claim, for the same workspace. While
+ * it is in flight it must also be driven by the same Node operator command, the one
+ * thing that can issue a credential for it. The scode launch policy is not part of
+ * it: a completed operation's credential and session do not depend on it, and a
+ * resumed one starts scode with the policy in force now — so upgrading scode or
+ * tuning its timeouts in the operator record strands no operation.
+ */
+interface OperationRecord {
+  version: 2;
+  claim: CodexAgentClaim;
+  nativeCanonicalWorkspace: string;
+  nexusArgv: string[];
+}
+
+/** A reservation written before {@link OperationRecord}: it pinned the whole
+ * operator record by hash, so the issuer is only recognisable by that hash. */
+interface LegacyOperationRecord {
+  claim: CodexAgentClaim;
+  grantSha256: string;
+  nativeCanonicalWorkspace: string;
+}
+
+/** Why an existing reservation cannot be resumed by this call, or undefined when
+ * it can. A completed operation is resumable under any operator record: nothing
+ * further is issued for it. */
+function resumeRefusal(previous: OperationRecord|LegacyOperationRecord, intent: OperationRecord,
+  grantSha256: string, completed: boolean): string|undefined {
+  if(!isDeepStrictEqual(previous.claim,intent.claim) || previous.nativeCanonicalWorkspace!==intent.nativeCanonicalWorkspace){
+    return 'Another operation holds this actor; operator recovery required';
+  }
+  if(completed)return undefined;
+  const sameIssuer='version' in previous && previous.version===2
+    ? isDeepStrictEqual(previous.nexusArgv,intent.nexusArgv)
+    : (previous as LegacyOperationRecord).grantSha256===grantSha256;
+  return sameIssuer ? undefined
+    : 'This operation was started by another Node operator command and may have been submitted; operator recovery required';
 }
 
 function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; grantSha256: string} {
@@ -124,13 +182,15 @@ export async function enrollCodexAgent(file: string, claim: CodexAgentClaim): Pr
   mkdirSync(actorDirectory,{recursive:true,mode:0o700});
   const operation=path.join(actorDirectory,'operation.json');
   const resultFile=path.join(actorDirectory,'result.json');
-  const intent={claim,grantSha256,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace)};
+  const intent: OperationRecord={version:2,claim,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace),
+    nexusArgv:grant.nexusArgv};
   try {createRecord(operation,intent);}
   catch(error){
     if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;
-    const previous=readJson(operation) as typeof intent;
-    if(!isDeepStrictEqual(previous,intent))throw new Error('Actor operation/grant differs; operator recovery required');
-    if(existsSync(resultFile))return readJson(resultFile) as CodexAgentProfile;
+    const completed=existsSync(resultFile);
+    const refusal=resumeRefusal(readJson(operation) as OperationRecord|LegacyOperationRecord,intent,grantSha256,completed);
+    if(refusal)throw new Error(refusal);
+    if(completed)return readJson(resultFile) as CodexAgentProfile;
   }
   // The Node operator's typed refusal attests that nothing was submitted, so the
   // reservation is released and the same operation may run again. Any other
@@ -181,7 +241,7 @@ async function completeEnrollment(grant: OperatorGrant, claim: CodexAgentClaim, 
     const listed=await listScodeAgents(connection);
     requireScodeNodeIdentity(connection,listed,claim.actor);
     const configFile=path.join(actorDirectory,'profile.json');
-    settleRecord(configFile,{...profile,acpSessionId:connection.sessionId});
+    settleProfile(configFile,{...profile,acpSessionId:connection.sessionId});
     await connection.close();
     const result: CodexAgentProfile={actor:claim.actor,configFile,workspaceBinding:{version:1,
       actor:claim.actor,operationId:claim.operationId,threadId:claim.threadId,

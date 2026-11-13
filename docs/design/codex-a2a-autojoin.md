@@ -211,6 +211,17 @@ fails) is therefore `resumable`: the binding stays pending and the same
 operation runs again. The bridge does not auto-retry `recovery_required`
 bindings.
 
+An operation is its claim and its workspace and, while it is in flight, the
+Node operator command (`nexusArgv`) that may issue for it. The scode launch
+policy in the operator record is not part of it. A completed operation replays
+its result under any operator record, since nothing further is issued for it. A
+resumed operation starts scode with the policy in force now and republishes its
+profile's launch fields; the profile's workspace, logs and ACP SID stay the
+operation's own. An operation in flight under another Node operator command is
+refused for operator recovery, because that command may have submitted it. A
+reservation that records `grantSha256` instead (the hash of the whole operator
+record) replays when completed and keeps that hash check while in flight.
+
 `test/operatorEnrollmentIntegration.ts` covers actual subprocesses with protocol
 fixtures. `NEXUS_OPERATOR_BIN` plus its SHA/source in the common native fixture
 selects `test/nativeEnrollment.cjs`, which exercises the operator client against

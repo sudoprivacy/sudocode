@@ -995,9 +995,16 @@ acceptance, and a branch behind main merges without rerunning its profiles, so a
 clean merge of main costs nothing extra. Conflict resolutions and PR changes
 replaced by main's version still count. Carrying requires the same native host,
 unchanged profile commands and matching original logs; `preflight` always runs.
-The receipt records each origin head with its signed envelope, and the verifier
-re-checks that envelope, its ancestry, the change set and the copied command
-records. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
+The receipt records each origin head with the SHA-256 of its signed envelope
+(receipt version 2). The note and each local output store every referenced
+envelope's exact bytes once, so an origin that several carries share appears
+once and nested carries do not inflate the note. The verifier resolves each
+reference, refusing a missing or differing envelope, and re-checks that envelope,
+its ancestry, the change set and the copied command records. It does the same for
+each origin's own carries, at most 32 origins deep. Version 1 receipts embed their
+carried envelopes and verify the same way; carrying from one stores it once by
+reference. A profile whose earlier envelopes would exceed 1 MB of the note runs
+again. The runner prints `CARRIED_PROFILES` and why a profile was not carried.
 For a contract update, the managed child keeps the candidate command recipe and
 protected signing authority separate. Carry admission, checkpoints, resume and
 publication use the same protected authority; an earlier unmerged candidate

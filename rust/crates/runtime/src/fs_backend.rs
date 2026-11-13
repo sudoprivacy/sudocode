@@ -2363,6 +2363,61 @@ impl NexusVfsFsBackend {
     }
 }
 
+/// How long an idempotent write keeps trying through failures that leave its outcome
+/// open. Long enough to ride out a leader restart or a network blip between nodes
+/// (observed: about 20 s), short enough that a caller still hears about an outage.
+const IDEMPOTENT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Apply an idempotent write whose failure can leave its outcome open.
+///
+/// A write sent without an answer may have landed, and one refused before it applied
+/// can simply be sent again; [`nexus_vfs_client::MutationOutcome`] says which. So an
+/// open outcome is first settled by reading the state back (`landed`): the write is
+/// there, or it is sent again with backoff, for at most `budget`. An error that
+/// carries no open outcome is a definite answer and returns at once.
+///
+/// Only for writes whose repetition is harmless — a directory, a link to a fixed
+/// target. An append or a message send must never come through here: a second copy
+/// is a duplicate, not a no-op.
+fn apply_idempotent<T>(
+    what: &str,
+    budget: std::time::Duration,
+    mut apply: impl FnMut() -> io::Result<T>,
+    mut landed: impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
+    use nexus_vfs_client::MutationOutcome;
+    let deadline = std::time::Instant::now() + budget;
+    let mut delay = std::time::Duration::from_millis(100);
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let Err(error) = apply() else {
+            return Ok(());
+        };
+        let Some(outcome) = MutationOutcome::of(&error) else {
+            return Err(error);
+        };
+        // A failed read-back is no answer either: the write is sent again.
+        if outcome == MutationOutcome::Unknown && landed().unwrap_or(false) {
+            return Ok(());
+        }
+        if std::time::Instant::now() + delay > deadline {
+            let state = match outcome {
+                MutationOutcome::Unknown => "its outcome is still unknown",
+                MutationOutcome::NotCommitted => "the node applied none of them",
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{what}: {attempts} attempt(s) over {budget:?} failed and {state}: {error}"
+                ),
+            ));
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(2));
+    }
+}
+
 /// How long a link written through a zone leader may take to become visible on this
 /// node before the replica is reported as lagging.
 const LINK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -2598,7 +2653,12 @@ impl FsBackend for NexusVfsFsBackend {
         if let Some(parent) = std::path::Path::new(alias).parent() {
             self.create_dir_all(&parent.to_string_lossy())?;
         }
-        self.client.ensure_link(alias, target, &self.auth_token)?;
+        apply_idempotent(
+            alias,
+            IDEMPOTENT_WRITE_BUDGET,
+            || self.client.ensure_link(alias, target, &self.auth_token),
+            || Ok(self.remote_stat(alias)?.link_target.as_deref() == Some(target.as_str())),
+        )?;
         verify_link(alias, target, LINK_VISIBILITY_WAIT, || {
             self.remote_stat(alias)
         })
@@ -2649,7 +2709,12 @@ impl FsBackend for NexusVfsFsBackend {
         for component in path.split('/').filter(|c| !c.is_empty()) {
             prefix.push('/');
             prefix.push_str(component);
-            self.client.ensure_dir(&prefix, &self.auth_token)?;
+            apply_idempotent(
+                &prefix,
+                IDEMPOTENT_WRITE_BUDGET,
+                || self.client.ensure_dir(&prefix, &self.auth_token),
+                || Ok(self.remote_stat(&prefix)?.is_directory),
+            )?;
         }
         Ok(())
     }
@@ -2714,6 +2779,102 @@ impl FsBackend for NexusVfsFsBackend {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// An idempotent write settles an open outcome: by reading it back when it may
+    /// have landed, by sending it again when it did not, and never past a definite
+    /// refusal.
+    #[test]
+    fn an_idempotent_write_settles_an_open_outcome() {
+        use nexus_vfs_client::MutationOutcome::{NotCommitted, Unknown};
+        use std::cell::Cell;
+        use std::time::Duration;
+        let open = |outcome: nexus_vfs_client::MutationOutcome| {
+            outcome.error(io::ErrorKind::Other, "connection lost")
+        };
+        let budget = Duration::from_secs(5);
+
+        // Sent, no answer, and it is there: no second write.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Ok(true),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 1);
+
+        // Sent, no answer, not there: sent again, and the second one answers.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(Unknown))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // Refused with nothing applied: sent again without a read-back.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(NotCommitted))
+                } else {
+                    Ok(())
+                }
+            },
+            || panic!("nothing was applied, so there is nothing to read back"),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // A definite answer returns at once, untouched.
+        let sent = Cell::new(0);
+        let denied = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            || Ok(true),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (sent.get(), denied.kind()),
+            (1, io::ErrorKind::PermissionDenied)
+        );
+
+        // An outcome that stays open is reported as such once the budget is spent.
+        let lost = apply_idempotent(
+            "/a",
+            Duration::from_millis(250),
+            || Err::<(), _>(open(Unknown)),
+            || Ok(false),
+        )
+        .unwrap_err();
+        let message = lost.to_string();
+        assert!(
+            message.contains("its outcome is still unknown"),
+            "{message}"
+        );
+        assert!(message.contains("attempt(s)"), "{message}");
+    }
 
     fn link_stat(target: Option<&str>) -> nexus_vfs_client::VfsStat {
         nexus_vfs_client::VfsStat {

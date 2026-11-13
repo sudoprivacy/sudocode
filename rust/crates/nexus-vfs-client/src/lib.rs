@@ -560,7 +560,7 @@ impl NexusVfsClient {
                                 }
                                 VfsOp::EnsureEntry { request, resp } => {
                                     let r = client.setattr(deadlined(*request, OP_DEADLINE)).await;
-                                    let _ = resp.send(grpc_result(r, |r| {
+                                    let _ = resp.send(mutation_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
@@ -957,8 +957,19 @@ impl NexusVfsClient {
                 request: Box::new(request),
                 resp,
             })
-            .map_err(|_| broken_pipe())?;
-        await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
+            // The worker never took the request, so nothing was sent.
+            .map_err(|_| {
+                mutation_failure(
+                    io::ErrorKind::BrokenPipe,
+                    MutationOutcome::NotCommitted,
+                    "vfs worker gone before the request was handed over",
+                )
+            })?;
+        // Past the handoff the request may be on the wire: a missing reply says
+        // nothing about whether the node applied it.
+        wait_for_reply(&rx, OP_DEADLINE + HANDOFF_GRACE).map_err(|error| {
+            mutation_failure(error.kind(), MutationOutcome::Unknown, error.to_string())
+        })?
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the
@@ -1099,17 +1110,124 @@ where
     }
 }
 
-/// Preserve missing-entry and admission errors from the VFS response envelope.
+/// What a failed mutation left behind, when that is known.
+///
+/// A replicated write has three outcomes, not two: applied, refused with nothing
+/// applied, or sent with no answer. The node names the last two on the wire, and a
+/// transport that loses the answer to a request it sent knows only that the write
+/// may have landed. A caller repeating an idempotent write acts on the difference:
+/// it retries [`Self::NotCommitted`] as is, and reads [`Self::Unknown`] back first.
+/// An error without one is a definite answer from the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationOutcome {
+    /// Nothing was applied, so a retry is safe.
+    NotCommitted,
+    /// Sent without an answer: it may have committed.
+    Unknown,
+}
+
+impl MutationOutcome {
+    /// The outcome a mutation's error carries, if the failure leaves one open.
+    #[must_use]
+    pub fn of(error: &io::Error) -> Option<Self> {
+        error
+            .get_ref()?
+            .downcast_ref::<MutationFailure>()
+            .map(|failure| failure.outcome)
+    }
+
+    /// An error that carries this outcome — what [`Self::of`] reads back.
+    #[must_use]
+    pub fn error(self, kind: io::ErrorKind, message: impl Into<String>) -> io::Error {
+        io::Error::new(
+            kind,
+            MutationFailure {
+                outcome: self,
+                message: message.into(),
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+struct MutationFailure {
+    outcome: MutationOutcome,
+    message: String,
+}
+
+impl std::fmt::Display for MutationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for MutationFailure {}
+
+fn mutation_failure(
+    kind: io::ErrorKind,
+    outcome: MutationOutcome,
+    message: impl Into<String>,
+) -> io::Error {
+    outcome.error(kind, message)
+}
+
+/// [`grpc_result`] for a mutation. A status the transport produced, not the node,
+/// can follow a request that was already sent — a connection lost mid-call, a
+/// deadline, a keep-alive timeout — so the write may have landed.
+fn mutation_result<T, R, F>(
+    result: Result<tonic::Response<T>, tonic::Status>,
+    f: F,
+) -> io::Result<R>
+where
+    F: FnOnce(T) -> io::Result<R>,
+{
+    match result {
+        Err(status)
+            if matches!(
+                status.code(),
+                tonic::Code::Unavailable
+                    | tonic::Code::Unknown
+                    | tonic::Code::Cancelled
+                    | tonic::Code::DeadlineExceeded
+            ) =>
+        {
+            let kind = if status.code() == tonic::Code::DeadlineExceeded {
+                io::ErrorKind::TimedOut
+            } else {
+                io::ErrorKind::Other
+            };
+            Err(mutation_failure(
+                kind,
+                MutationOutcome::Unknown,
+                status.to_string(),
+            ))
+        }
+        result => grpc_result(result, f),
+    }
+}
+
+/// Preserve missing-entry, admission and write-outcome errors from the VFS
+/// response envelope.
 fn vfs_err(payload: &[u8]) -> io::Error {
-    /// `FileNotFound` on the node's error enum (`transport/src/grpc.rs`).
+    // The node's error enum, `RpcErrorCode` in nexus-vfs `transport/src/grpc.rs`.
     const FILE_NOT_FOUND: i64 = -32007;
     const PERMISSION_ERROR: i64 = -32003;
     const ACCESS_DENIED: i64 = -32018;
+    const OUTCOME_UNKNOWN: i64 = -32020;
+    const NOT_COMMITTED: i64 = -32021;
 
     let text = String::from_utf8_lossy(payload).into_owned();
     let code = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("code").and_then(serde_json::Value::as_i64));
+    let outcome = match code {
+        Some(OUTCOME_UNKNOWN) => Some(MutationOutcome::Unknown),
+        Some(NOT_COMMITTED) => Some(MutationOutcome::NotCommitted),
+        _ => None,
+    };
+    if let Some(outcome) = outcome {
+        return mutation_failure(io::ErrorKind::Other, outcome, text);
+    }
     let kind = match code {
         Some(FILE_NOT_FOUND) => io::ErrorKind::NotFound,
         Some(PERMISSION_ERROR | ACCESS_DENIED) => io::ErrorKind::PermissionDenied,
@@ -1254,6 +1372,36 @@ fn wait_for_reply<T>(resp_rx: &mpsc::Receiver<T>, budget: Duration) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The node's write-outcome codes survive into the error, typed, and an
+    /// ordinary refusal carries none.
+    #[test]
+    fn a_mutation_error_says_what_it_left_behind() {
+        let envelope = |code: i64| format!(r#"{{"code":{code},"message":"m"}}"#).into_bytes();
+        assert_eq!(
+            MutationOutcome::of(&vfs_err(&envelope(-32020))),
+            Some(MutationOutcome::Unknown)
+        );
+        assert_eq!(
+            MutationOutcome::of(&vfs_err(&envelope(-32021))),
+            Some(MutationOutcome::NotCommitted)
+        );
+        let missing = vfs_err(&envelope(-32007));
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert_eq!(MutationOutcome::of(&missing), None);
+
+        let lost: Result<tonic::Response<()>, _> = Err(tonic::Status::unavailable("reset"));
+        let lost = mutation_result(lost, |()| Ok(())).unwrap_err();
+        assert_eq!(MutationOutcome::of(&lost), Some(MutationOutcome::Unknown));
+        let late: Result<tonic::Response<()>, _> = Err(tonic::Status::deadline_exceeded("late"));
+        let late = mutation_result(late, |()| Ok(())).unwrap_err();
+        assert_eq!(late.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(MutationOutcome::of(&late), Some(MutationOutcome::Unknown));
+        let refused: Result<tonic::Response<()>, _> = Err(tonic::Status::permission_denied("no"));
+        let refused = mutation_result(refused, |()| Ok(())).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(MutationOutcome::of(&refused), None);
+    }
 
     #[test]
     fn times_out_rather_than_parking_forever() {

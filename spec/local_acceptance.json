@@ -45,7 +45,8 @@
         ".github/local-acceptance/compiler_cache.py",
         "rust/**",
         "e2e/**",
-        "spec/**"
+        "spec/**",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "e2e/local-acceptance/**",
@@ -80,7 +81,8 @@
         "rust/crates/scode-test-support/**",
         "e2e/terminal-resize/**",
         "rust/Cargo.lock",
-        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs"
+        "rust/crates/rusty-sudocode-cli/tests/pty_streaming_code.rs",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "e2e/terminal-resize/benchmark.py",
@@ -107,7 +109,8 @@
         "e2e/terminal-resize/performance.cjs",
         "e2e/terminal-resize/resources.cjs",
         "e2e/terminal-resize/package.json",
-        "e2e/terminal-resize/package-lock.json"
+        "e2e/terminal-resize/package-lock.json",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "**/README.md"
@@ -132,7 +135,8 @@
         "e2e/terminal-resize/host.cjs",
         "e2e/terminal-resize/package-lock.json",
         "e2e/terminal-resize/package.json",
-        "e2e/terminal-resize/resources.cjs"
+        "e2e/terminal-resize/resources.cjs",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "**/README.md"
@@ -145,7 +149,8 @@
         ".github/scripts/release_artifact_acceptance.py",
         ".github/actions/release-artifact/**",
         ".github/workflows/release.yml",
-        "e2e/startup/**"
+        "e2e/startup/**",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "**/README.md"
@@ -173,7 +178,8 @@
         "rust/crates/engine-events/src/lib.rs",
         "rust/crates/engine-host/src/session_engine.rs",
         "rust/crates/engine-acp/src/acp_sdk_server.rs",
-        "rust/crates/engine-acp/src/session_driver.rs"
+        "rust/crates/engine-acp/src/session_driver.rs",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "**/README.md"
@@ -188,7 +194,8 @@
         "rust/crates/*/build.rs",
         "rust/crates/*/src/**",
         "rust/vendor/**",
-        "e2e/shared-services/**"
+        "e2e/shared-services/**",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "**/README.md"
@@ -204,7 +211,8 @@
         "rust/crates/engine-acp/**",
         "rust/crates/engine-host/**",
         "rust/crates/runtime/**",
-        "rust/crates/api/**"
+        "rust/crates/api/**",
+        "rust-toolchain.toml"
       ],
       "exclude": [
         "rust/crates/*/tests/**",

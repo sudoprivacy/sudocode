@@ -1,0 +1,7 @@
+# The one Rust release every CI job, release build and acceptance image uses.
+# scripts/bump_rust_toolchain.py moves it (and the Docker images that must
+# match) to a new stable release; see CONTRIBUTING.md#rust-toolchain.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

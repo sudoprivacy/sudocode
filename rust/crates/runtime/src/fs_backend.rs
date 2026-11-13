@@ -2371,10 +2371,18 @@ const IDEMPOTENT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_s
 /// Apply an idempotent write whose failure can leave its outcome open.
 ///
 /// A write sent without an answer may have landed, and one refused before it applied
-/// can simply be sent again; [`nexus_vfs_client::MutationOutcome`] says which. So an
-/// open outcome is first settled by reading the state back (`landed`): the write is
-/// there, or it is sent again with backoff, for at most `budget`. An error that
-/// carries no open outcome is a definite answer and returns at once.
+/// did not; [`nexus_vfs_client::MutationOutcome`] says which. Either open outcome is
+/// settled by reading the state back (`landed`, which reports a missing entry as
+/// `Ok(false)`): the write is there, or it is sent again with backoff, for at most
+/// `budget`. An error that carries no open outcome is a definite answer and returns
+/// at once.
+///
+/// The read-back also asks whether the node still answers, and it retries only
+/// while it does. The open outcomes worth riding out come from behind a live node:
+/// its zone leader restarting, a blip between the two. A read-back that cannot
+/// reach the node says the failure is local — the node is down or unreachable, or
+/// this client's worker is gone — so the caller hears that at once, not after the
+/// budget.
 ///
 /// Only for writes whose repetition is harmless — a directory, a link to a fixed
 /// target. An append or a message send must never come through here: a second copy
@@ -2397,9 +2405,15 @@ fn apply_idempotent<T>(
         let Some(outcome) = MutationOutcome::of(&error) else {
             return Err(error);
         };
-        // A failed read-back is no answer either: the write is sent again.
-        if outcome == MutationOutcome::Unknown && landed().unwrap_or(false) {
-            return Ok(());
+        match landed() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(unreachable) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{what}: the node did not answer a read-back ({unreachable}): {error}"),
+                ))
+            }
         }
         if std::time::Instant::now() + delay > deadline {
             let state = match outcome {
@@ -2657,7 +2671,11 @@ impl FsBackend for NexusVfsFsBackend {
             alias,
             IDEMPOTENT_WRITE_BUDGET,
             || self.client.ensure_link(alias, target, &self.auth_token),
-            || Ok(self.remote_stat(alias)?.link_target.as_deref() == Some(target.as_str())),
+            || match self.remote_stat(alias) {
+                Ok(found) => Ok(found.link_target.as_deref() == Some(target.as_str())),
+                Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(unreachable) => Err(unreachable),
+            },
         )?;
         verify_link(alias, target, LINK_VISIBILITY_WAIT, || {
             self.remote_stat(alias)
@@ -2713,7 +2731,11 @@ impl FsBackend for NexusVfsFsBackend {
                 &prefix,
                 IDEMPOTENT_WRITE_BUDGET,
                 || self.client.ensure_dir(&prefix, &self.auth_token),
-                || Ok(self.remote_stat(&prefix)?.is_directory),
+                || match self.remote_stat(&prefix) {
+                    Ok(found) => Ok(found.is_directory),
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(unreachable) => Err(unreachable),
+                },
             )?;
         }
         Ok(())
@@ -2825,7 +2847,7 @@ mod tests {
         .unwrap();
         assert_eq!(sent.get(), 2);
 
-        // Refused with nothing applied: sent again without a read-back.
+        // Refused with nothing applied: the read-back finds nothing, so it is sent again.
         let sent = Cell::new(0);
         apply_idempotent(
             "/a",
@@ -2838,7 +2860,7 @@ mod tests {
                     Ok(())
                 }
             },
-            || panic!("nothing was applied, so there is nothing to read back"),
+            || Ok(false),
         )
         .unwrap();
         assert_eq!(sent.get(), 2);
@@ -2858,6 +2880,24 @@ mod tests {
         assert_eq!(
             (sent.get(), denied.kind()),
             (1, io::ErrorKind::PermissionDenied)
+        );
+
+        // A node that cannot answer the read-back is down: no further attempt.
+        let sent = Cell::new(0);
+        let down = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Err(io::Error::from(io::ErrorKind::ConnectionRefused)),
+        )
+        .unwrap_err();
+        assert_eq!(sent.get(), 1);
+        assert!(
+            down.to_string().contains("did not answer a read-back"),
+            "{down}"
         );
 
         // An outcome that stays open is reported as such once the budget is spent.

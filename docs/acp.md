@@ -472,6 +472,30 @@ error. Disconnects or unsupported hosts do not establish that an Agent is
 offline. Counts and foreground state are observations of independently moving
 work, not a grant of human control; use the pause/fence protocol for takeover.
 
+The `agent_list` tool also exposes `runtime` on observed instance rows and
+`runtime_discovery` on its result. Several rows can have the same Agent name
+or SID. Only the current running instance is excluded, using its registry
+scope and registration incarnation. SID and operating-system PID are
+diagnostic fields; neither is an instance identity or an authorization grant.
+
+Each observation separates `presence` (`online` or `unknown`) from
+`availability` (`fresh`, `stale`, `unsupported`, or `unavailable`). Only fresh
+facts include an `update`; stale work is never rendered as idle. Heartbeats
+can confirm attendance while the foreground and counts remain unknown.
+`activeOnly` retains positively online peer instances and active workers;
+`unknown_instances` and unavailable scopes retain incomplete coverage even
+when that filter returns no rows. An incomplete empty result does not prove
+that every Agent is offline.
+
+Standalone hosts expose weak engine readers through a process-owned local
+directory. Its private filesystem entries contain routing and read-only
+connection material, never mutable activity or session output. Native
+ownership release retires a crashed process's route. A selected Nexus node
+uses its existing authenticated client and scoped registry instead, with no
+disk-namespace fallback. Cohosted engines bind the same facts reader directly
+to their existing managed registry instance. All three paths consume the
+engine lifecycle and task registry used by `_sudocode/session/status`.
+
 ### Closing a peer session
 
 When the last session for an agent closes, the server stops and joins that
@@ -1176,19 +1200,22 @@ creates a journal. Use that exact reference with subsequent operations:
   execution or remove unknown execution facts.
 - `purge {sessionId,cwd,storageRef,cleanupId}` requires no active prompt. Its ACK
   is `{disposition:"purged",cleanupId,storageRef}` after writing a minimal deleted
-  binding. It retires cached results and fences all late writes. It does not
-  remove the transcript, child manifests, project files or original full logs.
-  Native session deletion additionally removes its transcript and offloaded
-  tool results after committing the same tombstone.
+  binding. It retires cached results and fences all late protocol writes and
+  ACKs. Native storage automatically releases idle Session, completion and
+  response handles, drains already admitted I/O, and reclaims owned transcripts,
+  backups, response captures and offloaded tool results. OS process exit is not
+  required. Independent project files, Agent data and mailboxes remain intact.
 
 Transcript saves, compaction, journal writes, ACKs and deletion use the
 [same commit and context ownership contract](#durable-direct-sub-agent-completions-extension-v1).
-Purge checks other native transcript writers and completion context owners. It
-reports `session_writer_busy` while another writer is alive, including CLI
-instances that have no completion extension. Native writer presence is an OS
-lock; a crashed writer's free locator does not assert liveness. The committed
-SID tombstone fences subsequent transcript and journal writes. Context lock
-files retain stable paths for exclusion.
+Purge publishes the irreversible SID tombstone under the native commit barrier.
+Actual native locks prove I/O retirement before reclamation; a PID lookup or
+lease expiry is insufficient. Idle runtimes observe the same durable tombstone
+without waiting for new input. Late callbacks cannot recreate owned files.
+Older clients that retain their locks can defer reclamation until those handles
+close. Context lock files retain stable paths for exclusion, and the minimal
+deleted binding remains permanent. Hosted storage retains its capability refusal
+until equivalent storage ownership and drain are qualified.
 A temporary storage error retains the bounded exit snapshot for
 retry; a process loss before that snapshot was saved becomes
 `execution_unconfirmed`, even if its child later exits. Uncertain process creation

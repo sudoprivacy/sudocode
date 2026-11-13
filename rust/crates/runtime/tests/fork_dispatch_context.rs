@@ -91,23 +91,11 @@ fn assistant_only_history_is_not_inside_fork_child() {
     // Assistant messages don't count — the boilerplate lives in a
     // user-role message inside a fork child's session.
     let ctx = ToolDispatchContext {
-        parent_assistant_message: None,
-        tool_results_dir: None,
-        progress_sink: None,
-        background_tasks: None,
-        parent_reasoning_effort: None,
-        parent_thinking_enabled: false,
-        parent_routing_session_id: None,
-        parent_requires_model_mount: false,
-        subagent_sink: None,
-        tool_use_id: None,
-        external_a2a: None,
-        parent_permission_mode: None,
-        permission_sink: None,
         parent_session_messages: vec![
             assistant_text("hi"),
             assistant_text(&format!("<{FORK_BOILERPLATE_TAG}> ignore me")),
         ],
+        ..Default::default()
     };
     assert!(!ctx.is_inside_fork_child());
 }
@@ -115,23 +103,11 @@ fn assistant_only_history_is_not_inside_fork_child() {
 #[test]
 fn user_without_boilerplate_is_not_inside_fork_child() {
     let ctx = ToolDispatchContext {
-        parent_assistant_message: None,
-        tool_results_dir: None,
-        progress_sink: None,
-        background_tasks: None,
-        parent_reasoning_effort: None,
-        parent_thinking_enabled: false,
-        parent_routing_session_id: None,
-        parent_requires_model_mount: false,
-        subagent_sink: None,
-        tool_use_id: None,
-        external_a2a: None,
-        parent_permission_mode: None,
-        permission_sink: None,
         parent_session_messages: vec![
             user_text("please spawn a fork subagent"),
             assistant_text("Sure."),
         ],
+        ..Default::default()
     };
     assert!(!ctx.is_inside_fork_child());
 }
@@ -142,20 +118,8 @@ fn user_with_boilerplate_tag_is_inside_fork_child() {
         "<{FORK_BOILERPLATE_TAG}>\nRULES...\n</{FORK_BOILERPLATE_TAG}>\nYour directive: read a.txt"
     );
     let ctx = ToolDispatchContext {
-        parent_assistant_message: None,
-        tool_results_dir: None,
-        progress_sink: None,
-        background_tasks: None,
-        parent_reasoning_effort: None,
-        parent_thinking_enabled: false,
-        parent_routing_session_id: None,
-        parent_requires_model_mount: false,
-        subagent_sink: None,
-        tool_use_id: None,
-        external_a2a: None,
-        parent_permission_mode: None,
-        permission_sink: None,
         parent_session_messages: vec![user_text(&seeded_directive)],
+        ..Default::default()
     };
     assert!(ctx.is_inside_fork_child());
 }
@@ -168,19 +132,6 @@ fn boilerplate_in_any_prior_user_message_is_detected() {
     // survives across turns.
     let boilerplate_message = user_text(&format!("<{FORK_BOILERPLATE_TAG}> stub"));
     let ctx = ToolDispatchContext {
-        parent_assistant_message: None,
-        tool_results_dir: None,
-        progress_sink: None,
-        background_tasks: None,
-        parent_reasoning_effort: None,
-        parent_thinking_enabled: false,
-        parent_routing_session_id: None,
-        parent_requires_model_mount: false,
-        subagent_sink: None,
-        tool_use_id: None,
-        external_a2a: None,
-        parent_permission_mode: None,
-        permission_sink: None,
         parent_session_messages: vec![
             boilerplate_message,
             assistant_text("did stuff"),
@@ -188,6 +139,7 @@ fn boilerplate_in_any_prior_user_message_is_detected() {
             assistant_text("more stuff"),
             user_text("keep going"),
         ],
+        ..Default::default()
     };
     assert!(ctx.is_inside_fork_child());
 }
@@ -203,19 +155,7 @@ fn parent_assistant_message_is_preserved_verbatim() {
     let parent = assistant_tool_use("tu_abc", "Agent", r#"{"description":"child"}"#);
     let ctx = ToolDispatchContext {
         parent_assistant_message: Some(parent.clone()),
-        tool_results_dir: None,
-        progress_sink: None,
-        background_tasks: None,
-        parent_reasoning_effort: None,
-        parent_thinking_enabled: false,
-        parent_routing_session_id: None,
-        parent_requires_model_mount: false,
-        subagent_sink: None,
-        tool_use_id: None,
-        external_a2a: None,
-        parent_permission_mode: None,
-        permission_sink: None,
-        parent_session_messages: vec![],
+        ..Default::default()
     };
     assert_eq!(ctx.parent_assistant_message.as_ref(), Some(&parent));
 }

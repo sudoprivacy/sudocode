@@ -2278,8 +2278,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(crate::cli::format::todo::panel(&todos, 10)),
-                summary: ansi(crate::cli::format::todo::panel(&todos, 0)),
+                full: ansi(crate::cli::format::todo::panel(&todos, 10, w)),
+                summary: ansi(crate::cli::format::todo::panel(&todos, 0, w)),
             },
             Slot {
                 minimum_full_rows: 0,

@@ -230,6 +230,50 @@ reduction applies. Workflow edits, mixed Rust or harness inputs and moves into
 or out of product source retain their original checks. This deliberately
 removes general product smoke coverage from selector-only queue revisions;
 no selected journey, assertion or deadline is shortened.
+Author-scheduling edits can also omit unchanged daemon journeys. This requires
+regular committed runner files with the same mode and identical module code
+outside `host_acceptance_lease` and `perform_check` bodies and the plain
+`profile_reservations(ordered, pending)` declaration. The required policy and
+every non-guard reachable execution fingerprint must still match. Companion
+edits are limited to dispatcher changes with those same non-guard fingerprints,
+the host-lease enforcement fixture and documentation. Changed command runners,
+imports, globals, runner declarations,
+product code, workflows, unknown inputs or execution fingerprints retain the
+original daemon scope. `acceptance_scheduling_scope` in the mandatory CI JSON
+reports the proof or fallback reason. Real Git PR/push/queue controls, preflight
+and the full native/Docker contract guard remain required. This removes general
+product smoke coverage for proven author-scheduling-only revisions; every
+selected journey keeps its cases, assertions and deadlines. These infrastructure
+controls add no product coverage. Observed job costs are not measured savings.
+Verifier-body-only edits can also omit the two generic queue daemon jobs.
+The committed runner must keep its mode, declarations, module context and all
+code outside the nine reported verifier/fingerprint bodies. Process execution
+and the selector/dependency consumers must not observe those bodies, dynamic
+namespaces or the managed runner code frame. The existing exact self-frame
+capture remains bound for managed refresh. Imports, every declaration and complete
+queue-consumer bodies must also match the reviewed source layout. This gate runs
+before importing comparison-base code; equal but unknown module constructors,
+default-value factories or decorators keep both daemon jobs. A changed layout
+selects full checks automatically; it requires no personal review or waiver.
+Only Python compilation CRLF normalization is applied to layout text.
+Non-guard profiles are compared
+with the comparison base's fingerprint implementation. The queue uses its
+protected base; PRs use the target merge base, and push records name their prior
+branch commit. The required JSON identifies that source commit and its kind;
+final acceptance continues through the protected gate. An edited candidate
+algorithm cannot bless a changed command. Companion paths are limited to
+those metadata enforcement fixtures and protected pins. New declarations,
+function signatures, command effects, policy, signer, workflow, product and
+unknown mixed inputs keep the original daemon checks. The mandatory CI JSON
+prints `acceptance_metadata_scope` with its proof or conservative fallback.
+Preflight and the complete native/Docker contract guard still run. This removes
+general daemon smoke coverage for qualifying verifier-body changes; selected
+journeys keep every case, assertion and deadline. Real private Git PR/push/queue
+controls retain the original 66 scheduling events and 28 bounded metadata events.
+Three old-behavior mutation controls and six actual helper-launched children
+prove that eager module/default/decorator observers can change command
+environments, and that unknown layouts refuse before executing the callback.
+They add no product coverage. Observed previous job times are not measured savings.
 Fixed VFS cache helper, composite action and publisher changes select the
 co-host/search checks without rerunning the independent CLI A2A, cross-node
 and sender-identity journeys. Product Rust and A2A/shared harness changes
@@ -333,11 +377,12 @@ the earliest recorded start time keep their existing requirements. The required
 command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
-`host-lease.json`, its active profile and the queue position. Each fresh profile
-rejoins the FIFO after the previous profile completes, so existing waiters run
-before this invocation's next profile. A running profile keeps the lease through
-its execution and checkpoint. Waiters start in arrival order when that profile
-releases the host, including an abrupt exit; each holds a ticket under
+`host-lease.json`, its active profile and the queue position. Adjacent fresh
+workspace and compile-only examples share one reservation, with a separate
+checkpoint for each. Other fresh profiles rejoin the FIFO, so existing waiters
+run before this invocation's next reservation. A running reservation keeps the
+lease through its execution and checkpoints. Waiters start in arrival order
+when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
 Concurrent suites on one machine contend for CPU, memory and temporary paths,
@@ -355,7 +400,8 @@ The native author guard and complementary native jobs run the same real-process
 inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
-profile's wait under `host_lease_acquisitions`; the signed receipt format is unchanged.
+reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
+profiles and count their common wait once. The signed receipt format is unchanged.
 
 A fresh `guard-contract` also validates its protected input pins, selection
 digest, release recipe and native fixture inventory before joining the host queue. The required
@@ -642,6 +688,16 @@ protoc executable version still qualify the result. This avoids failing browser
 download redirects; the canonical artifact URL in the tool receipt stays stable.
 The Docker image provisions the same protected downloader. Tool preparation stays
 inside the invocation's total elapsed time; test selection and retries are unchanged.
+Windows uses `--max-fail 1:immediate`: the first failed test terminates
+other running test jobs and retains the original failure output and nonzero status.
+Unix retains `1:wait` so tools in independent process groups can finish cleanup.
+Aborted cases remain unsuccessful. Successful runs retain every selected case,
+worker count, retry setting and deadline. The required `NATIVE_FAILURE_STOP`
+response reports this behavior. The existing nextest guard compares both modes
+using a real PTY, its native child and grandchild, plus the pinned Windows
+OpenConsole host and nested jobs; Unix checks an independent process group under
+its original waiting mode. It verifies process identities, original failure status and
+retirement after cancellation; these executor checks add no product coverage.
 On Windows/macOS the native guard also prepares the original protoc 3.20.2
 before its matrix and checks the real executable's version. The isolated cohost
 canary copies only that tool cache into its private HOME and runs offline;
@@ -656,8 +712,9 @@ CPUs. Hosted runners from four CPUs also use eight for the measured, qualified
 resume-test source fingerprint; macOS also qualifies from three CPUs after its
 matched full-suite comparison. Old/unknown source retains four. Smaller/unknown hosts,
 older ungrouped sources, isolated targets and other profiles retain four. `SCODE_ACCEPTANCE_TEST_THREADS=1..4` lowers the
-pool explicitly. Compiler jobs stay at one locally, with only compiler workers
-at BelowNormal priority; test processes stay Normal. Before author workspace
+pool explicitly. Local Cargo commands compile with half the logical CPUs, at most one
+job per 3 GiB of memory (`SCODE_ACCEPTANCE_BUILD_JOBS` lowers it), with only compiler workers
+at BelowNormal priority; test processes stay Normal. Hosted runners use every CPU. Before author workspace
 execution and a plan preview for the current host, the mandatory
 `LOCAL_ACCEPTANCE_CONCURRENCY` output reports the current invocation's compiler
 jobs and requested test cap. An explicit cap of one also prints the shell
@@ -785,6 +842,19 @@ sources retain their existing selection without adding a duplicate example
 build. The public plan prints `EXAMPLE_BUILD_SCOPE` for this decision. An actual
 native guard proves normal linking, no implicit example execution and refusal
 of a deliberately broken example. These checks add no product PTY coverage.
+On the author's machine, a fresh `native-workspace` and its immediately
+following fresh `native-examples` share one existing FIFO reservation. Their
+order, commands, separate signed results and original command fingerprints
+remain unchanged. Workspace success is checkpointed before examples begin;
+an example failure preserves it for verified resume. All other fresh profiles
+rejoin the FIFO, and reused profiles need no reservation. The mandatory
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups;
+acquisition timing lists both profiles and counts their common wait once.
+This removes an additional queue admission, not the example build. Hosted
+complementary profiles and all native cases remain unchanged. Real private
+Git/SSH/process controls verify the shared acquisition, the existing waiter's
+subsequent turn, failure propagation and full/partial reuse without replaying
+completed work. Population time savings remain unmeasured.
 Changes confined to ordinary individual CLI test files can omit the separate
 example build on both the author and complementary hosts. README and Markdown
 files under `docs/` may accompany them. The selector reads committed Git blobs;
@@ -1185,6 +1255,13 @@ journey coverage.
 CLI A2A and cohost journeys use independent fresh-node jobs after the same pin
 preflight. Each selected job must pass; an unselected job must be skipped.
 Their original shell commands, features, cases and fault assertions remain.
+The managed scode and remote-context journeys run once on the queue tree:
+CLI A2A's `run.sh` owns them when selected; independently selected cohost changes
+run the same script in the cohost job. Missing selection fails before the daemon
+starts. The integrated gate still requires each selected job to pass. Real
+workflow-shell controls retain cohost-only execution and child failure propagation
+and refuse both an omitted journey and duplicate dispatch. This removes a repeated
+invocation and retains each original journey, assertion and deadline.
 An isolated matched GitHub comparison with identical source and full cache hits
 took 825 seconds sequentially and 506 seconds in parallel. Total runner time
 was 825 versus 837 seconds. This one run demonstrates a shorter daemon path,
@@ -1253,6 +1330,41 @@ required profiles or revoked signers still reject the old plan. Real Git/SSH/HTT
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
 
+Compiler-budget or command-completion waiting changes can preserve an older signed execution plan and its
+completed native profiles. The verifier derives this proof from both committed
+sources: only the known serial/adaptive compiler-budget calculations and matching
+native forwarding forms, or the exact 150 ms sleep/completion-notification forms,
+may differ. The command supervisor waits for actual process exit instead of
+sleeping the full interval after a short command finishes. Running commands keep
+the same compiler-priority scan interval; tests stay Normal. Original signed fingerprints must first
+match their original source. All remaining selected commands, assertions, test
+pools, retries, deadlines, environment, Docker images, workflow and current
+host responsibilities stay bound. Unknown changes refuse reuse. The required
+proof also binds reviewed module initialization and the actual command/selector
+consumer functions after resource normalization. Equal unknown callbacks or
+helper bodies can observe a changed executor and therefore refuse automatically.
+Complete normalized helper-program layouts also bind outer callers, including
+`main` and the check producer; only the literal reviewed-source set is removed
+from its own checksum. Unknown callers keep all current checks.
+`LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED` reports both layouts and the supported
+original-author route; it does not request a personal review or waiver. The required
+interfaces print `LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE` and
+`LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE`; a refusal prints
+`LOCAL_ACCEPTANCE_PLAN_RECOVERY`, including that blindly renewing the same-head
+plan is unsupported. Old plans, signatures, logs and the first timing record are
+preserved. This proof executes no product tests and cannot complete missing
+profiles or complementary-host jobs. Real private Git/SSH/CLI controls exercise
+original execution, plan/full verification, resume without repeated commands,
+and eighteen independent refusals. Real short-lived children retain exact output,
+normal priority and failure propagation under both wait forms. Three real
+Git/native paired observer controls require changed child environments to refuse
+reuse at module initialization, a command consumer and an outer producer, while
+the prior proof mutant exposes the unsafe acceptance. All fixture Git/runtime
+and proof children use the existing isolated command environment, including
+when outer hooks export Git repository/index selectors. They add
+no product journey coverage. Measured individual command costs do not establish
+a whole-lifecycle speedup.
+
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and
 editing diagnostics, not only removing checks or lowering thresholds. The purpose
@@ -1308,6 +1420,52 @@ environment hash. Required output prints `CI_CACHE_LAYOUT` and `CI_CACHE_BINDING
 Real Cargo/native-process acceptance checks both layouts, dependency reuse,
 fresh candidate execution and refusal of a conflicting target. It adds no product
 journey coverage; real hosted restores establish remote cache hits and timings.
+Native Rust profiles also use checksum-pinned sccache 0.19.0 with a local
+2 GiB compiler-object cache. Cargo outputs remain in their original target;
+the object cache never supplies a previous test result or a source-freshness
+attestation. Original Cargo arguments and environment settings, including target
+inheritance in nested Cargo and compile-time environment reads, are retained.
+Explicit caller wrappers and sccache settings remain authoritative.
+Each profile owns a private server and stops it on success or failure. A retained
+ownership record prevents reuse of storage after an interrupted parent while
+its server is still alive; the tool's 10-minute idle timeout bounds orphaned
+servers. Client-side compilation keeps rustc under the original priority observer.
+Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+storage uses the original Cargo command immediately, without another wait.
+The early workspace-lint handoff keeps its existing exact command recipe.
+`compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
+processes with independent outputs, changed features/compile-time environment,
+an original failing source, repaired source and explicit-wrapper controls. It
+runs inside the existing native-cache guard. Cache code changes additionally
+select the actual native workspace on author and complementary hosts. These
+checks add no product coverage credit. Hosted object persistence and whole-PR
+savings are not established by the private fixture's cache-hit counts.
+The guard image fetches the fixture's exact shared Cargo manifest and lockfile
+while building. A network-disabled Cargo fetch verifies those dependencies
+before either full matrix starts; missing offline inputs fail at preparation.
+The same image provisions the pinned compiler tool and rejects corrupted archive
+and executable bytes before retaining the intact tool. Both tools are rechecked
+with networking disabled before the matrices; isolated homes copy verified public
+tool bytes, never compiler objects or lease claims.
+The guard image declares the executor's `SCODE_ACCEPTANCE_BUILD_JOBS=1` cap
+explicitly and checks it at entry. Its existing two-CPU, 2 GiB and 256-PID limits
+remain unchanged. The compiled canary also checks the effective Cargo job count
+against an explicit executor cap. A plain Cargo environment default alone does
+not constrain the executor's automatic host-sized budget.
+Protected profile modules and their compiler-cache companion are materialized
+from the same frozen Git policy. A candidate's working-tree companion is never
+an execution source. The original cache tests also exercise this managed loader.
+Scheduling plans and completed receipts share the existing exact recipe approval
+lookup in protected policy, including the source-without-test-groups condition.
+Original signatures, source/tree/base, author/platform responsibility, required
+checks, native workflow and dispatcher checks remain mandatory. This preserves
+an authentic plan when only an explicitly approved equivalent recipe advances;
+it records no completed check. `LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE`
+reports the exact accepted profile set. Actual Git/SSH/HTTP/finalizer controls
+retain original notes, logs and process counts; undeclared, malformed and
+cross-profile approvals still refuse. Cache migration approves only the prior
+native recipes whose unchanged core commands were source-verified. The changed
+guard remains fresh and cache implementation changes select the real workspace.
 Queue maintenance retains current runs and cancels obsolete merge groups only
 when both their Git ref and live queue membership are gone. See the
 [CI workload audit](docs/ci-workload-audit-20261029.md) for measurements and limits.

@@ -23,7 +23,6 @@ fn wait_for_repl(child: &mut pty_expect::PtySession) {
 
 struct Mirror {
     base: String,
-    release: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -38,10 +37,8 @@ impl Mirror {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}/release/latest", listener.local_addr().unwrap());
-        let release = Arc::new(AtomicBool::new(is_released));
         let stopped = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
-        let thread_release = Arc::clone(&release);
         let thread_stop = Arc::clone(&stopped);
         let thread_requests = Arc::clone(&requests);
         let thread = std::thread::spawn(move || {
@@ -64,8 +61,7 @@ impl Mirror {
                 }
                 let path = request.split_whitespace().nth(1).unwrap();
                 thread_requests.fetch_add(1, Ordering::SeqCst);
-                while !thread_release.load(Ordering::SeqCst) && !thread_stop.load(Ordering::SeqCst)
-                {
+                while !is_released && !thread_stop.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 let body = if path == "/release/latest/version.txt" {
@@ -86,7 +82,6 @@ impl Mirror {
         });
         Self {
             base,
-            release,
             stopped,
             requests,
             thread: Some(thread),
@@ -325,7 +320,7 @@ impl Drop for Mirror {
 }
 
 #[test]
-fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
+fn startup_remains_interactive_while_release_metadata_is_withheld() {
     for mode in ["off", "queue"] {
         let env = common::TestEnv::new("release-startup");
         let mirror = Mirror::new("v999.0.0", false);
@@ -337,6 +332,15 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
         ];
         let startup_started = Instant::now();
         let mut child = env.spawn_with_env(&[], &options);
+        let request_deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+        while mirror.requests.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < request_deadline,
+                "startup did not request release metadata: mode={mode}\n{}",
+                child.render(screen_contents)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let startup_output = child.expect("❯").unwrap_or_else(|error| {
             panic!(
                 "terminal startup: {error}\n{}",
@@ -344,17 +348,45 @@ fn startup_is_available_before_network_reply_and_next_launch_uses_cache() {
             )
         });
         let prompt_observed_after = startup_started.elapsed();
-        // Keep both parent observation time and child timings on failure:
-        // a delayed reader can outlast the metadata request's own deadline.
-        // The server withholds its reply until the real terminal is usable.
-        // A synchronous startup check would block this workflow.
-        mirror.release.store(true, Ordering::SeqCst);
+        // Keep the mirror blocked for this entire session. A delayed PTY
+        // reader can outlast the metadata request's timeout, so this journey
+        // must not also require that request to have populated the cache.
+        child.send("/help\r").unwrap();
+        child.expect("Quit the REPL").unwrap_or_else(|error| {
+            panic!(
+                "interactive help: {error}; mode={mode}; prompt_observed_after={prompt_observed_after:?}\nstartup output:\n{startup_output}\n{}",
+                child.render(screen_contents)
+            )
+        });
+        child.expect("❯").unwrap();
+        child.send("/exit\r").unwrap();
+        assert_eq!(child.expect_eof().unwrap(), 0);
+        assert_eq!(mirror.requests.load(Ordering::SeqCst), 1);
+        assert!(
+            !env.config_home().join("cache/release.json").exists(),
+            "withheld metadata must not produce a release cache"
+        );
+    }
+}
+
+#[test]
+fn successful_startup_check_is_cached_for_next_launch() {
+    for mode in ["off", "queue"] {
+        let env = common::TestEnv::new("release-startup-cache");
+        let mirror = Mirror::new("v999.0.0", true);
+        let options = [
+            ("SCODE_MIRROR", mirror.base.as_str()),
+            ("SCODE_CHECK_UPDATES", "1"),
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+        ];
+        let mut child = env.spawn_with_env(&[], &options);
+        wait_for_repl(&mut child);
         let cache = env.config_home().join("cache/release.json");
         let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
         while !cache.exists() {
             assert!(
                 Instant::now() < deadline,
-                "metadata cache was not written: mode={mode}; requests={}; prompt_observed_after={prompt_observed_after:?}\nstartup output:\n{startup_output}\n{}",
+                "metadata cache was not written: mode={mode}; requests={}\n{}",
                 mirror.requests.load(Ordering::SeqCst),
                 child.render(screen_contents)
             );

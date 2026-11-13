@@ -223,7 +223,23 @@ pub struct CompletionJournal {
     instance: String,
     task_protocol: std::sync::atomic::AtomicBool,
     writer: Arc<crate::session_writer::SessionWriter>,
-    _context_owner: Arc<dyn crate::fs_backend::FsLock>,
+    context_owner: Mutex<Option<Arc<dyn crate::fs_backend::FsLock>>>,
+}
+
+impl crate::session_cleanup::StorageHandles for CompletionJournal {
+    fn try_retire(&self) -> bool {
+        self.writer.retire();
+        // Every journal publication and ACK holds state through its actual
+        // atomic write. Retain its OS owner lock until those writes finish.
+        let Ok(_state) = self.state.try_lock() else {
+            return false;
+        };
+        let Ok(mut owner) = self.context_owner.try_lock() else {
+            return false;
+        };
+        drop(owner.take());
+        true
+    }
 }
 
 impl CompletionJournal {
@@ -306,7 +322,7 @@ impl CompletionJournal {
             instance: uuid::Uuid::new_v4().to_string(),
             task_protocol: std::sync::atomic::AtomicBool::new(false),
             writer,
-            _context_owner: context_owner,
+            context_owner: Mutex::new(Some(context_owner)),
         });
         // Opening a new writer means the previous process no longer owns this
         // journal. Its interrupted turn cannot publish, but must not prevent a
@@ -327,6 +343,7 @@ impl CompletionJournal {
             }
             Ok(())
         })?;
+        crate::session_cleanup::watch(Arc::clone(&journal.fs), &journal.transcript, &journal)?;
         Ok(journal)
     }
 

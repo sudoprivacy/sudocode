@@ -58,16 +58,39 @@ function readConfig(file: string): ScodeMcpConfig {
   return config;
 }
 
+/** What serving needs before it is attached: where to audit and how peers are delivered. */
+export interface ScodeMcpFrame {
+  auditLog: string;
+  claudeChannel?: ClaudeChannelConfig;
+}
+
+const ATTACH_RETRY_MAX_MS = 60_000;
+
 /** One MCP stdio server owns one existing native session and its full CLI. */
 export async function runScodeMcp(file: string, lifecycle: {
   registerShutdown?: typeof registerCommandShutdown;
 } = {}): Promise<void> {
   const config = readConfig(file);
-  const audit = (entry: Record<string, unknown>) => appendFileSync(config.auditLog,
+  await serveScodeMcp({ auditLog: config.auditLog, claudeChannel: config.claudeChannel }, async () => config, lifecycle);
+}
+
+/**
+ * Serve MCP at once and attach to the agent network in the background, with
+ * bounded backoff, the way a Codex owner keeps refreshing its threads: a session
+ * that starts while its Node or enrollment authority is unreachable joins once
+ * they return. Tool calls refuse as not_submitted while attachment is unavailable.
+ * Once a profile is resolved, reconnection retains that exact session and waits for
+ * joined child cleanup. In-flight Unknown commands are never replayed.
+ */
+export async function serveScodeMcp(frame: ScodeMcpFrame, resolve: () => Promise<ScodeMcpConfig>, lifecycle: {
+  registerShutdown?: typeof registerCommandShutdown;
+} = {}): Promise<void> {
+  const audit = (entry: Record<string, unknown>) => appendFileSync(frame.auditLog,
     JSON.stringify({ at: new Date().toISOString(), provenance: 'external-command', ...entry })+'\n', { mode: 0o600 });
   // Check the audit destination before spawning an owner or submitting a command.
-  audit({ phase: 'starting', sessionId: config.acpSessionId });
-  const channel = config.claudeChannel;
+  audit({ phase: 'starting' });
+  const channel = frame.claudeChannel;
+  let config: ScodeMcpConfig | undefined;
   const server = new McpServer({ name: 'nexus-scode', version: '1.0.0' }, channel ? {
     capabilities: { experimental: { 'claude/channel': {} } }, instructions: CLAUDE_CHANNEL_INSTRUCTIONS,
   } : undefined);
@@ -78,7 +101,7 @@ export async function runScodeMcp(file: string, lifecycle: {
   let ownerLease: ReceiverOwnerLease | undefined;
   let cleanupUnknown: unknown;
   let ownerError: string | undefined;
-  let transportReady = false;
+  let initialized = false;
   let observed: { updates: unknown[]; bytes: number; truncated: boolean } | undefined;
   // The Node stamps `from` only on a verified namespace; set once that is checked.
   let verified = false;
@@ -90,9 +113,9 @@ export async function runScodeMcp(file: string, lifecycle: {
     // scode states provenance per message; the bridge's own Node check is the
     // fallback for a scode that predates it.
     const senderVerified = typeof authenticated === 'boolean' ? authenticated : verified;
-    if (!channel || message.sessionId !== config.acpSessionId
+    if (!channel || message.sessionId !== config?.acpSessionId
         || (channel.peerPolicy === 'allowlist' && !channel.peers!.includes(from))) return;
-    if (!transportReady || (channel.peerPolicy === 'node-namespace' && !verified)) {
+    if (!initialized || !scode || (channel.peerPolicy === 'node-namespace' && !verified)) {
       if (early.length < 64) early.push(message); return;
     }
     audit({ phase: 'peer_message', sessionId: message.sessionId, from, verified: senderVerified,
@@ -134,6 +157,19 @@ export async function runScodeMcp(file: string, lifecycle: {
     // Only this already-bound session may reconnect. A command submitted on a
     // dead connection is never replayed; the callback's durable inbox survives.
     ownerTask = (async () => {
+      let attachRetryMs = 1000;
+      while (!abort.signal.aborted && !config) {
+        try { config = await resolve(); }
+        catch (error) {
+          ownerError = String(error);
+          audit({ phase: 'attach_error', error: ownerError });
+          await delay(attachRetryMs, undefined, { signal: abort.signal }).catch(error => {
+            if (!abort.signal.aborted) throw error;
+          });
+          attachRetryMs = Math.min(ATTACH_RETRY_MAX_MS, attachRetryMs * 2);
+        }
+      }
+      if (abort.signal.aborted || !config) return;
       if (config.receiverOwner) {
         ownerLease = await acquireReceiverOwner(config.receiverOwner, config.acpSessionId!, abort.signal);
         audit({ phase: 'receiver_owner_bound', identity: config.receiverOwner, monitorPid: ownerLease.monitorPid });
@@ -166,7 +202,7 @@ export async function runScodeMcp(file: string, lifecycle: {
             }
             // MCP delivery is an event, not a prompt result. This notification alone
             // does not claim to wake an idle Codex frontend; its callback owner does.
-            if (transportReady) void server.server.notification({ method: 'notifications/scode/session_update', params: { notification } })
+            if (initialized) void server.server.notification({ method: 'notifications/scode/session_update', params: { notification } })
               .catch(error => process.stderr.write(`scode notification: ${String(error)}\n`));
           });
           if (channel?.peerPolicy === 'node-namespace') {
@@ -178,7 +214,7 @@ export async function runScodeMcp(file: string, lifecycle: {
           audit({ phase: 'connected', sessionId: candidate.sessionId, pid: candidate.pid });
           scode = candidate;
           ownerError = undefined;
-          if (transportReady) for (const message of early.splice(0)) toChannel(message);
+          if (initialized) for (const message of early.splice(0)) toChannel(message);
           const exit = await candidate.exited;
           scode = undefined;
           ownerError = `scode exited ${exit.code}/${exit.signal}`;
@@ -220,8 +256,9 @@ export async function runScodeMcp(file: string, lifecycle: {
     if (abort.signal.aborted) return;
     let promptActive = false;
     registerScodeMcpTools(server, () => {
-      if (!scode || scode.closed) throw new ScodeA2aError('Owned ACP session is reconnecting or unavailable', 'not_submitted');
-      return { connection: scode, auditLog: config.auditLog };
+      if (!scode || scode.closed) throw new ScodeA2aError(
+        `Not attached to the agent network yet (${ownerError ?? 'attaching'}); original session recovery continues in the background`, 'not_submitted');
+      return { connection: scode, auditLog: frame.auditLog };
     }, async (connection, text) => {
       if (promptActive) return { isError: true, content: [{ type: 'text' as const, text: 'busy: a foreground prompt is already running' }] };
       promptActive = true;
@@ -239,12 +276,15 @@ export async function runScodeMcp(file: string, lifecycle: {
         return { isError: true, content: [{ type: 'text' as const,
           text: `${String(error)}; inspect actual tool receipts before retrying a task with side effects` }] };
       } finally { promptActive = false; observed = undefined; }
-    }, () => ({ pid: scode?.pid, acpSessionId: config.acpSessionId, closed: !scode || scode.closed,
-      error: ownerError, notifications: 'recovering-same-session', automaticCommandRetry: false }));
+    }, () => ({ pid: scode?.pid, acpSessionId: config?.acpSessionId, closed: !scode || scode.closed,
+      ...(!config ? { outcome: 'not_submitted', error: `Not attached to the agent network yet (${ownerError ?? 'attaching'})` }
+        : { error: ownerError }), notifications: 'recovering-same-session', automaticCommandRetry: false }));
     server.server.onclose = onEof;
+    server.server.oninitialized = () => {
+      initialized = true;
+      for (const message of early.splice(0)) toChannel(message);
+    };
     await server.connect(new StdioServerTransport());
-    transportReady = true;
-    for (const message of early.splice(0)) toChannel(message);
     await finished;
   } finally {
     let cleanupComplete = false;

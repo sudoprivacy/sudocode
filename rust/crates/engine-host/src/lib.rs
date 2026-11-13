@@ -72,6 +72,7 @@ pub mod runtime_build;
 /// act on, so both hosts drive the engine through a kernel rather than one
 /// reaching the host disk directly.
 pub mod local_kernel;
+mod local_runtime;
 
 /// The `/context` figures: what the next request carries, by category, read
 /// from the live runtime so the report cannot disagree with the wire.

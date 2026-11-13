@@ -151,7 +151,7 @@ def run_case(output, order):
         current = json.loads(next(line.split("=", 1)[1] for line in lines
                                   if line.startswith("LOCAL_ACCEPTANCE_CONCURRENCY=")))
         assert current["source"] == "current invocation environment"
-        assert current["compiler_jobs_per_cargo"] == 1 and current["requested_test_worker_cap"] == cap
+        assert current["compiler_jobs_setting"] == "SCODE_ACCEPTANCE_BUILD_JOBS" and current["requested_test_worker_cap"] == cap
         assert (b"runs native test cases serially" in preview.stdout) == (cap == "1")
         preview_plans.append(json.loads(next(line.split("=", 1)[1] for line in lines
                                             if line.startswith("ACCEPTANCE_PLAN="))))
@@ -439,7 +439,67 @@ def run_case(output, order):
             assert len(started_workers) == 2
             metadata_controls.append({"case": label, "policy": metadata, "accepted": True,
                                       "original_notes_and_processes_reused": True})
+        # The completion verifier already honors protected exact recipe pairs.
+        # Scheduling must share that decision without accepting a plan as a
+        # test result or changing its original signatures/source responsibility.
         checks_path = ".github/local-acceptance/checks.py"
+        original_checks = (trusted / checks_path).read_text()
+        equivalent_checks = original_checks.replace('root/"native-child.py"', 'root.joinpath("native-child.py")')
+        assert equivalent_checks != original_checks
+        equivalent = protected_commit(checks_path, equivalent_checks, "Equivalent native child path construction", metadata)
+        old_hash = helper.reachable_profile_commands_hashes(base, ["native-workspace"])["native-workspace"]
+        new_hash = helper.reachable_profile_commands_hashes(equivalent, ["native-workspace"])["native-workspace"]
+        assert old_hash != new_hash
+        equivalent_policy = json.loads(git("show", equivalent + ":" + policy_path))
+        for label, declaration in [
+            ("unapproved recipe pair", {}),
+            ("wrong predecessor", {"native-workspace": {new_hash: ["0" * 64]}}),
+            ("wrong current recipe", {"native-workspace": {"0" * 64: [old_hash]}}),
+            ("approval for another profile", {"native-services": {new_hash: [old_hash]}}),
+            ("malformed predecessor list", {"native-workspace": {new_hash: old_hash}}),
+            ("malformed approval table", []),
+        ]:
+            git("--git-dir", str(origin), "update-ref", "refs/heads/main", equivalent, cwd=output)
+            candidate = protected_commit(policy_path, json.dumps({**equivalent_policy,
+                "equivalent_profile_commands": declaration}), "Reject " + label, equivalent)
+            try:
+                helper.verify_execution_plan(envelope, head, candidate, candidate)
+            except RuntimeError as error:
+                metadata_controls.append({"case": label, "policy": candidate, "accepted": False, "reason": str(error)})
+            else:
+                raise AssertionError("Old plan accepted " + label)
+        approved_policy = {**equivalent_policy,
+                           "equivalent_profile_commands": {"native-workspace": {new_hash: [old_hash]}}}
+        git("--git-dir", str(origin), "update-ref", "refs/heads/main", equivalent, cwd=output)
+        approved = protected_commit(policy_path, json.dumps(approved_policy), "Approve the exact equivalent pair", equivalent)
+        legacy_path = output / "old-plan-verifier.py"
+        legacy_source = (trusted / ".github/scripts/local_acceptance.py").read_text()
+        anchor = "approved = approved_equivalent_profiles(before, current, protected, changed, head)"
+        assert legacy_source.count(anchor) == 1
+        legacy_path.write_text(legacy_source.replace(anchor, "approved = {}"), encoding="utf-8")
+        legacy = load("parallel_old_plan_verifier", legacy_path)
+        legacy.ROOT = work
+        assert legacy.compatible_profile_commands(json.loads(base64.b64decode(completed["payload"])),
+                                                  approved, ["native-workspace"])
+        try:
+            legacy.verify_execution_plan(envelope, head, approved, approved)
+        except RuntimeError:
+            metadata_controls.append({"case": "old plan verifier rejects pair accepted by completion matching",
+                                      "accepted": False, "negative_control": True})
+        else:
+            raise AssertionError("Old-plan negative control did not reproduce the inconsistency")
+        helper.verify_execution_plan(envelope, head, approved, approved)
+        helper.verify_envelope(completed, head, approved, approved)
+        publisher_run["head_sha"] = approved
+        publish({"workflow_run": source_run}, 940)
+        assert statuses[-1]["state"] == "success"
+        assert notes_before == (helper.canonical(helper.read_note(head)), helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        metadata_controls.append({"case": "protected exact pair shared by plan/completion/finalizer",
+                                  "accepted": True, "old_and_new_recipes": [old_hash, new_hash],
+                                  "original_notes_logs_and_processes_reused": True})
+        metadata = approved
         helper_path = ".github/scripts/local_acceptance.py"
         executor = (trusted / helper_path).read_text()
         signature = next(line for line in executor.splitlines() if line.startswith("def run_command("))

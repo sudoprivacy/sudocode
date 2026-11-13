@@ -3,7 +3,7 @@
 //! the authority for deletion and client lifetime.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -16,8 +16,21 @@ struct Cleanup {
     transcript: PathBuf,
 }
 
+/// Revoke local storage admission and release handles only after real I/O
+/// drains. A live OS process is allowed to retain this retired object.
+pub(crate) trait StorageHandles: Send + Sync {
+    fn try_retire(&self) -> bool;
+}
+
+struct WatchedHandles {
+    fs: Arc<dyn FsBackend>,
+    transcript: PathBuf,
+    handles: Weak<dyn StorageHandles>,
+}
+
 enum Work {
     Reclaim(Cleanup),
+    Watch(WatchedHandles),
     Discover {
         fs: Arc<dyn FsBackend>,
         root: PathBuf,
@@ -26,6 +39,25 @@ enum Work {
 }
 
 static WORKER: Mutex<Option<mpsc::Sender<Work>>> = Mutex::new(None);
+
+/// The durable binding is the decision; this weak registration only arranges
+/// for idle clients to observe it without waiting for their next user input.
+pub(crate) fn watch<T: StorageHandles + 'static>(
+    fs: Arc<dyn FsBackend>,
+    transcript: &Path,
+    handles: &Arc<T>,
+) -> Result<(), String> {
+    if !fs.fenced_locks() {
+        return Ok(());
+    }
+    let transcript = absolute_transcript(fs.as_ref(), transcript)?;
+    let handles: Arc<dyn StorageHandles> = handles.clone();
+    enqueue(Work::Watch(WatchedHandles {
+        fs,
+        transcript,
+        handles: Arc::downgrade(&handles),
+    }))
+}
 
 #[derive(Serialize, Deserialize)]
 struct Reference {
@@ -176,8 +208,9 @@ fn enqueue(work: Work) -> Result<(), String> {
 
 fn run(receiver: &mpsc::Receiver<Work>) {
     let mut pending = BTreeMap::new();
+    let mut watched = Vec::new();
     loop {
-        let outcome = if pending.is_empty() {
+        let outcome = if pending.is_empty() && watched.is_empty() {
             receiver
                 .recv()
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
@@ -185,13 +218,41 @@ fn run(receiver: &mpsc::Receiver<Work>) {
             receiver.recv_timeout(Duration::from_secs(1))
         };
         match outcome {
+            Ok(Work::Watch(job)) => watched.push(job),
             Ok(job) => insert(&mut pending, job),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
         for job in receiver.try_iter().take(255) {
-            insert(&mut pending, job);
+            match job {
+                Work::Watch(job) => watched.push(job),
+                job => insert(&mut pending, job),
+            }
         }
+        watched.retain(|job| {
+            match crate::subagent_completion::deleted_storage(job.fs.as_ref(), &job.transcript) {
+                Ok(true) => {
+                    if job.handles.upgrade().is_some_and(|handles| !handles.try_retire()) {
+                        return true;
+                    }
+                    // An object may have closed between deletion and this poll.
+                    // Keep the intent moving even if its deleter already stopped;
+                    // native exclusion still verifies its destructors have drained.
+                    insert(&mut pending, Work::Reclaim(Cleanup {
+                        fs: Arc::clone(&job.fs),
+                        transcript: crate::session_backup::owner(&job.transcript),
+                    }));
+                    false
+                }
+                // A scheduling hint only. Do not extend ordinary handle
+                // lifetime by upgrading a strong Arc during every idle poll.
+                Ok(false) => job.handles.strong_count() != 0,
+                Err(error) => {
+                    tracing::warn!(%error, "Session handle retirement retained an unreadable binding");
+                    true
+                }
+            }
+        });
         pending.retain(|_, job| {
             match crate::subagent_completion::reclaim_deleted(job.fs.as_ref(), &job.transcript) {
                 Ok(done) => !done,
@@ -206,6 +267,7 @@ fn run(receiver: &mpsc::Receiver<Work>) {
 
 fn insert(pending: &mut BTreeMap<(usize, PathBuf), Cleanup>, work: Work) {
     let job = match work {
+        Work::Watch(_) => unreachable!("handle watches are owned by the cleanup loop"),
         Work::Reclaim(job) => job,
         Work::Discover {
             fs,

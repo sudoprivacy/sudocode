@@ -100,6 +100,37 @@ async function main(){
     const invalid=claim();
     await assert.rejects(enrollCodexAgent(path.join(root,'absent-grant.json'),invalid),error=>(error as {outcome:string}).outcome==='not_submitted');
     assert.equal(mintRows().length,before+1);
+    // An unreachable Node submits nothing: the same operation runs again once it is back.
+    const outageGrant=path.join(root,'outage-grant.json');
+    fs.writeFileSync(outageGrant,JSON.stringify({...grant,nexusArgv:[...grant.nexusArgv,'outage']}));
+    const outage=claim();fs.writeFileSync(path.join(root,'outage'),'');
+    await assert.rejects(enrollCodexAgent(outageGrant,outage),error=>(error as {outcome:string}).outcome==='not_submitted');
+    assert.ok(!fs.existsSync(path.join(grant.stateDirectory,outage.actor,'operation.json')),'a refusal releases its reservation');
+    assert.equal(mintRows().length,before+1);
+    fs.rmSync(path.join(root,'outage'));
+    assert.equal((await enrollCodexAgent(outageGrant,outage)).actor,outage.actor);
+    assert.equal(mintRows().length,before+2,'the retried operation issues exactly once');
+    // A failure after issuance resumes the same operation from its records: the
+    // receipt replays without another mint and the one ACP session is loaded again.
+    const refused=path.join(root,'list-refused');
+    const resumeGrant=path.join(root,'resume-grant.json');
+    fs.writeFileSync(resumeGrant,JSON.stringify({...grant,scode:{...grant.scode,
+      env:{...grant.scode.env,SCODE_DIRECT_FIXTURE_LIST_REFUSED:refused}}}));
+    const resumed=claim();fs.writeFileSync(refused,'');
+    await assert.rejects(enrollCodexAgent(resumeGrant,resumed),
+      error=>(error as {outcome:string}).outcome==='resumable' && /agent_list failed: .*transport error/.test(String(error)));
+    const savedSession=JSON.parse(fs.readFileSync(path.join(grant.stateDirectory,resumed.actor,'session.json'),'utf8')).sessionId;
+    const sessionsCreated=()=>fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line))
+      .filter(row=>row.method==='session/new').length;
+    const createdBefore=sessionsCreated();
+    assert.equal(mintRows().length,before+3);
+    fs.rmSync(refused);
+    const completed=await enrollCodexAgent(resumeGrant,resumed);
+    assert.equal(JSON.parse(fs.readFileSync(completed.configFile,'utf8')).acpSessionId,savedSession,
+      'the resumed operation keeps its one ACP session');
+    assert.equal(sessionsCreated(),createdBefore,'resuming creates no second ACP session');
+    assert.equal(mintRows().length,before+3,'resuming replays the receipt without another mint');
+    assert.deepEqual(await enrollCodexAgent(resumeGrant,resumed),completed,'a completed operation replays its result');
     // Old equal-cwd replies still refuse private contexts without the new proof.
     const badConfig={...config,stateDirectory:path.join(root,'legacy-bindings'),resolveAgent:async(input:CodexAgentClaim)=>{
       const profile=await enrollCodexAgent(grantFile,input);delete profile.workspaceBinding;return profile;
@@ -127,7 +158,7 @@ async function main(){
     const protocol=fs.readFileSync(journal,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.ok(!protocol.some(row=>row.method==='session/prompt'),'no inference translation');
     assert.ok(!calls.some(method=>['thread/start','thread/resume'].includes(method)));
-    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry; protocol fixture only');
+    console.log('Operator enrollment process integration PASS: distinct same-project actors, private ACP bindings, original SID resume, Unknown/no retry, refusal retry, post-issuance resume; protocol fixture only');
   } finally {await network.close();}
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

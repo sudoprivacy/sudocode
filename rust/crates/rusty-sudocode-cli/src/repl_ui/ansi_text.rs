@@ -38,6 +38,9 @@ mod tests {
 
     #[test]
     fn rich_text_preserves_bold_and_dim_and_resets_both() {
+        // iocraft's own crossterm leaves colors out when `NO_COLOR` is set, as
+        // it is for the commands a scode session runs; only color depends on it.
+        let colored = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
         for intensity in ["1;2", "2;1"] {
             for reset in ["22", "0"] {
                 let text = StyledText::from_ansi_with_style(
@@ -81,7 +84,11 @@ mod tests {
                 ] {
                     let start = rendered.text.rfind(label).unwrap();
                     for (style, _) in rendered.spans(start..start + label.len()) {
-                        assert_eq!(style.foreground_color, Some(TerminalColor::DarkGrey));
+                        assert_eq!(
+                            style.foreground_color,
+                            colored.then_some(TerminalColor::DarkGrey),
+                            "{label}"
+                        );
                         assert_eq!(style.attributes.has(Attribute::Bold), bold, "{label}");
                         assert_eq!(style.attributes.has(Attribute::Dim), dim, "{label}");
                     }
@@ -185,7 +192,7 @@ mod tests {
             status: runtime::TodoStatus::Completed,
             active_form: "Finishing parser".into(),
         }];
-        let panel = crate::cli::format::todo::panel(&todos, 40);
+        let panel = crate::cli::format::todo::panel(&todos, 40, 100);
         let canvas =
             element! { AnsiText(content: format!("{panel}\nPlainSample")) }.render(Some(100));
         let mut wire = Vec::new();

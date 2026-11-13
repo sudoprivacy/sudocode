@@ -6,7 +6,7 @@ import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scod
 import type { ScodeReceiveHealth } from './scodeReceiveHealth';
 import type { CodexDeliveryStatus } from './codexInbox';
 import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
-  writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
+  settleInterruptedBindings, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
@@ -20,8 +20,17 @@ export interface CodexAgentProfile {
 }
 
 /** Only the authorized adapter can attest that no issuance was submitted. */
+/** An enrollment that returned no profile. `not_submitted`: nothing was issued.
+ * `resumable`: the credential was issued and the operator resumes the same
+ * operation from its durable records. `unknown`: an issuance may have been sent
+ * without a receipt; only operator recovery resolves it. */
 export class CodexEnrollmentError extends Error {
-  constructor(readonly outcome: 'not_submitted' | 'unknown', detail: string) {super(detail);}
+  constructor(readonly outcome: 'not_submitted' | 'resumable' | 'unknown', detail: string) {super(detail);}
+}
+
+/** The same operation may run again: nothing was issued, or the operator resumes it. */
+export function retryableEnrollment(error: unknown): boolean {
+  return error instanceof CodexEnrollmentError && error.outcome !== 'unknown';
 }
 
 export interface CodexRootInventory {
@@ -105,12 +114,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   let inventoryError: string | undefined;
   const report = (error: unknown) => { try { config.onError?.(error); } catch { /* Observer only. */ } };
   const save = (binding: Binding, create = false) => writeBinding(config.stateDirectory, binding, create);
-  for (const binding of bindings.values()) {
-    if (binding.state === 'provisioning') {
-      binding.state = 'recovery_required';
-      await save(binding);
-    }
-  }
+  await settleInterruptedBindings(config.stateDirectory, bindings);
   const stopOwner = async (owner: Owner) => {
     const results = await Promise.allSettled([owner.callback?.close(), owner.connection?.close()]);
     const failed = results.find(result => result.status === 'rejected');
@@ -126,7 +130,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         await provisionBinding(config.stateDirectory, binding, thread.cwd, claim => {
           if (closed) throw new CodexEnrollmentError('not_submitted', 'Owner closed before enrollment submission');
           return config.resolveAgent(claim);
-        }, error => error instanceof CodexEnrollmentError && error.outcome === 'not_submitted');
+        }, retryableEnrollment);
       } catch (error) {
         if (binding.state === 'pending') owner.retryAt = performance.now() + 2000;
         throw error;

@@ -21,11 +21,13 @@ def prepare():
     output.mkdir(parents=True, exist_ok=True)
     checks.nextest_binary(output)
     protoc = checks.cohost_protoc() if 'native-cohost' in names else None
+    compiler = checks.prepare_compiler_cache(output)[1] if any(name in checks.compiler_cache_profiles() for name in names) else None
     receipt = {
         'checks': names,
         'credential_scope': 'trusted tool preparation only; native executor refuses tokens',
         'nextest': json.loads((output / 'nextest-source.json').read_text()),
         'protoc': str(protoc) if protoc is not None else None,
+        'compiler_cache': compiler,
     }
     (output / 'receipt.json').write_text(json.dumps(receipt, indent=2))
     print('TRUSTED_TOOL_PREPARATION=' + json.dumps(receipt), flush=True)

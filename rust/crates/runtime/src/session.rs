@@ -676,8 +676,9 @@ impl Session {
     }
 
     /// Adopt this runtime's transcript writer before accepting input. Native
-    /// ownership prevents deletion while the runtime is idle; activation also
-    /// migrates legacy storage without publishing a stale in-memory snapshot.
+    /// ownership protects admitted I/O until it drains; idle handles can retire
+    /// after deletion. Activation also migrates legacy storage without publishing
+    /// a stale in-memory snapshot.
     pub fn activate_persistence(&mut self) -> Result<(), SessionError> {
         let Some(persistence) = &self.persistence else {
             return Ok(());

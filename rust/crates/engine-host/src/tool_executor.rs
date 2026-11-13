@@ -49,6 +49,7 @@ pub(crate) struct GetMcpPromptRequest {
 }
 
 pub struct CliToolExecutor {
+    runtime_observation: Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -108,6 +109,7 @@ impl CliToolExecutor {
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
+            runtime_observation: None,
             allowed_tools,
             tool_registry,
             mcp_state,
@@ -122,6 +124,13 @@ impl CliToolExecutor {
     /// session that sets none delivers to the workspace inbox.
     pub fn set_mailbox(&mut self, mailbox: Arc<runtime::mailbox::Mailbox>) {
         self.mailbox = Some(mailbox);
+    }
+
+    pub fn set_runtime_observation(
+        &mut self,
+        host: Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
+    ) {
+        self.runtime_observation = host;
     }
 
     pub fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -399,7 +408,8 @@ impl ToolExecutor for CliToolExecutor {
             let mcp_state = self.mcp_state.clone();
             let mailbox = self.mailbox.clone();
             let abort_signal = self.abort_signal.clone();
-            let ctx = ctx.clone();
+            let mut ctx = ctx.clone();
+            ctx.runtime_observation = self.runtime_observation.clone();
             let workspace = WorkspaceRootHandoff::capture();
             let work_operation = operation.clone();
             tokio::task::spawn_blocking(move || {

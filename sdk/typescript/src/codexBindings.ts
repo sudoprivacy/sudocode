@@ -200,12 +200,23 @@ export async function claimBinding(directory: string, bindings: Map<string, Code
   return binding;
 }
 
-/** Bring a binding to `ready` through its original operation. A refusal the
- * authority attests was never submitted stays pending; any other failure is
+/** A binding loaded as `provisioning` belongs to an owner that stopped mid
+ * enrollment; its outcome is unknown to this owner, so it needs recovery. */
+export async function settleInterruptedBindings(directory: string, bindings: Map<string, CodexBinding>): Promise<void> {
+  for (const binding of bindings.values()) {
+    if (binding.state !== 'provisioning') continue;
+    binding.state = 'recovery_required';
+    await writeBinding(directory, binding);
+  }
+}
+
+/** Bring a binding to `ready` through its original operation. A failure the
+ * authority calls retryable (nothing issued, or a resumable issued operation)
+ * stays pending for the same operation; any other failure is
  * recovery_required, so an uncertain issuance is never replayed or reminted. */
 export async function provisionBinding(directory: string, binding: CodexBinding, cwd: string,
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<ProvisionedAgent>,
-  notSubmitted: (error: unknown) => boolean): Promise<void> {
+  retryable: (error: unknown) => boolean): Promise<void> {
   assertWorkspace(binding, cwd);
   if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
   if (binding.state !== 'pending') return;
@@ -220,7 +231,7 @@ export async function provisionBinding(directory: string, binding: CodexBinding,
     binding.state = 'ready';
     await writeBinding(directory, binding);
   } catch (error) {
-    binding.state = notSubmitted(error) ? 'pending' : 'recovery_required';
+    binding.state = retryable(error) ? 'pending' : 'recovery_required';
     try { await writeBinding(directory, binding); }
     catch (persistenceError) {
       throw new AggregateError([error, persistenceError], 'Enrollment outcome and recovery-state persistence both failed', { cause: error });

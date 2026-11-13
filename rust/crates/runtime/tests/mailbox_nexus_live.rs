@@ -1778,6 +1778,7 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         }
     }
 
+    use runtime::runtime_status::ForegroundState::{Idle, Running};
     use serde_json::{json, Value};
     let operator = Arc::new(model_operator());
     let agent = format!("shared-sid-probe-{}", fresh());
@@ -1795,23 +1796,6 @@ fn live_cohost_shared_sid_concurrent_contexts() {
     request["resume_session_id"] = json!(sid);
     let root = std::env::temp_dir().join(format!("scode-cohost-shared-{}", fresh()));
     std::fs::create_dir_all(&root).unwrap();
-    let prompt = |label: &str| {
-        let path = root.join(format!("{label}.json"));
-        std::fs::write(
-            &path,
-            json!({
-                "document":format!("{label}_MODEL_DONE"),
-                "start_ready":root.join(format!("{label}.ready")),
-                "start_release":root.join(format!("{label}.release")),
-                "release":root.join(format!("{label}.release")),"delay_ms":0
-            })
-            .to_string(),
-        )
-        .unwrap();
-        json!({"sessionId":sid,"prompt":[{"type":"text","text":format!(
-            "{label}_CONTEXT_PROMPT PARITY_SCENARIO:prose_preview PROSE_CONTROL:{}", json!({"path":path})
-        )}]})
-    };
     let wait_ready = |label: &str| {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !root.join(format!("{label}.ready")).exists() {
@@ -1823,30 +1807,41 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         }
     };
     std::fs::write(root.join("SEED.release"), "release").unwrap();
-    let seed = first_controller.request("session/prompt", prompt("SEED"));
+    let seed = first_controller.request(
+        "session/prompt",
+        shared_sid_model_prompt(&root, sid, "SEED"),
+    );
     assert_eq!(seed["result"]["stopReason"], "end_turn", "{seed}");
     let (second, second_controller) = thread::scope(|scope| {
         let _release = Release(vec![root.join("A.release"), root.join("B.release")]);
-        let first_prompt = prompt("A");
+        let first_prompt = shared_sid_model_prompt(&root, sid, "A");
         let a = scope.spawn(|| first_controller.request("session/prompt", first_prompt));
         wait_ready("A");
         let second = rpc("managed_agent.start_session_v1", &request);
         let second_controller = Arc::new(Controller::attach(&operator, &second, ""));
         assert_eq!(second["durable_session_id"], sid);
         assert_ne!(first["session_id"], second["session_id"]);
-        let second_prompt = prompt("B");
+        let second_prompt = shared_sid_model_prompt(&root, sid, "B");
         let controller = Arc::clone(&second_controller);
         let b = scope.spawn(move || controller.request("session/prompt", second_prompt));
         wait_ready("B");
+        let concurrent =
+            wait_cohost_runtime_pair(&operator, &agent, sid, &first, &second, [Running; 2]);
+        assert_ne!(concurrent[0].instance, concurrent[1].instance);
         std::fs::write(root.join("B.release"), "release").unwrap();
         let response = b.join().unwrap();
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         assert!(!root.join("A.release").exists());
+        let independent =
+            wait_cohost_runtime_pair(&operator, &agent, sid, &first, &second, [Running, Idle]);
+        assert_eq!(independent[0].instance, concurrent[0].instance);
+        assert_eq!(independent[1].instance, concurrent[1].instance);
         std::fs::write(root.join("A.release"), "release").unwrap();
         let response = a.join().unwrap();
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         (second, second_controller)
     });
+    wait_cohost_runtime_pair(&operator, &agent, sid, &first, &second, [Idle; 2]);
     assert_shared_sid_workspace_effects(
         &operator,
         [(&first_controller, "A"), (second_controller.as_ref(), "B")],
@@ -3887,5 +3882,162 @@ fn sample_reader_position(
                 thread::sleep(Duration::from_millis(20));
             }
         })
+    }
+}
+
+/// Observe actual managed-engine sources without parsing their transcript or
+/// treating a registry compatibility state as an engine fact.
+fn wait_cohost_runtime_pair(
+    operator: &NexusVfsClient,
+    agent: &str,
+    sid: &str,
+    first: &serde_json::Value,
+    second: &serde_json::Value,
+    states: [runtime::runtime_status::ForegroundState; 2],
+) -> Vec<runtime::runtime_status::RuntimeObservation> {
+    use runtime::runtime_status::{
+        ForegroundState, RuntimeAvailability, RuntimeInventory, RuntimePresence,
+    };
+    let expected = [
+        (&first["session_id"], states[0]),
+        (&second["session_id"], states[1]),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let response = cohost_rpc(
+            operator,
+            "agent_runtime_list_v1",
+            &serde_json::json!({"zone_id":"root"}),
+        )
+        .expect("actual runtime inventory RPC");
+        let inventory: RuntimeInventory =
+            serde_json::from_value(response["result"].clone()).expect("typed runtime inventory");
+        assert!(inventory.scope.complete);
+        assert_eq!(inventory.scope.zone_id, "root");
+        let rows: Vec<_> = expected
+            .iter()
+            .filter_map(|(pid, foreground)| {
+                inventory
+                    .instances
+                    .iter()
+                    .find(|row| {
+                        row.instance.pid == pid.as_str().unwrap()
+                            && row.agent_id == agent
+                            && row.presence == RuntimePresence::Online
+                            && row.availability == RuntimeAvailability::Fresh
+                            && row.update.as_ref().is_some_and(|facts| {
+                                facts.identity.session_id.as_deref() == Some(sid)
+                                    && facts.status.foreground == *foreground
+                            })
+                    })
+                    .cloned()
+            })
+            .collect();
+        if rows.len() == expected.len()
+            && rows.iter().zip(expected).all(|(row, (_, foreground))| {
+                let descriptor = cohost_rpc(
+                    operator,
+                    "agent_get",
+                    &serde_json::json!({
+                        "pid":row.instance.pid,
+                        "incarnation":row.instance.incarnation,
+                    }),
+                )
+                .expect("actual compatibility registry RPC");
+                let expected_state = match foreground {
+                    ForegroundState::Idle => "READY",
+                    ForegroundState::Running => "BUSY",
+                    ForegroundState::AwaitingInput(_) => "AWAITING_INPUT",
+                };
+                descriptor["result"]["state"] == expected_state
+            })
+        {
+            return rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "managed engine observation did not match {expected:?}: {inventory:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn shared_sid_model_prompt(root: &std::path::Path, sid: &str, label: &str) -> serde_json::Value {
+    let path = root.join(format!("{label}.json"));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "document":format!("{label}_MODEL_DONE"),
+            "start_ready":root.join(format!("{label}.ready")),
+            "start_release":root.join(format!("{label}.release")),
+            "release":root.join(format!("{label}.release")),"delay_ms":0
+        })
+        .to_string(),
+    )
+    .unwrap();
+    serde_json::json!({"sessionId":sid,"prompt":[{"type":"text","text":format!(
+        "{label}_CONTEXT_PROMPT PARITY_SCENARIO:prose_preview PROSE_CONTROL:{}", serde_json::json!({"path":path})
+    )}]})
+}
+
+/// A short Call deadline includes lazy mTLS/HTTP2 admission and a warm channel.
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_runtime_call_deadline_covers_transport_admission() {
+    use runtime::runtime_status::RuntimeInventory;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
+    for is_connected in [false, true] {
+        let transport = paused_transport::PausedTransport::new(&endpoint).unwrap();
+        let client = dial(&transport.endpoint());
+        if is_connected {
+            client
+                .call("agent_runtime_list_v1", b"{}", "")
+                .expect("establish the real authenticated channel");
+        }
+        transport.set_paused(true);
+        let (result, elapsed) = thread::scope(|scope| {
+            let query = scope.spawn(|| {
+                let started = Instant::now();
+                let result = client.call_with_deadline(
+                    "agent_runtime_list_v1",
+                    b"{}",
+                    "",
+                    Duration::from_secs(1),
+                );
+                (result, started.elapsed())
+            });
+            assert!(
+                transport.wait_for_blocked(Duration::from_secs(10)),
+                "the test must hold actual transport bytes"
+            );
+            query.join().expect("deadline query")
+        });
+        // Release the owned fault before assertions and exercise this same
+        // client again. The transport and daemon remain real throughout.
+        transport.set_paused(false);
+        let error = result.expect_err("silent transport must respect the Call deadline");
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            !message.contains("vfs worker sent no reply"),
+            "transport admission outlived the RPC deadline: {error}"
+        );
+        assert!(
+            message.contains("deadline") || message.contains("timeout"),
+            "wrong failure for connected={is_connected}: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "Call exceeded its deadline and handoff allowance: {elapsed:?}"
+        );
+        let bytes = client
+            .call_with_deadline("agent_runtime_list_v1", b"{}", "", Duration::from_secs(10))
+            .expect("the same client recovers after the owned transport resumes");
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let inventory: RuntimeInventory =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        assert_eq!(inventory.version, 1);
+        assert!(inventory.scope.complete);
+        println!("RUNTIME CALL DEADLINE OK: connected={is_connected} elapsed={elapsed:?}");
     }
 }

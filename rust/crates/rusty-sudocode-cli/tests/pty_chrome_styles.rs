@@ -38,7 +38,9 @@ const CHOICE_PALETTES: [(&str, bool, &str, &str, &str, &str); 3] = [
     ("15;0", true, "Default", "Default", "Default", "Default"),
 ];
 
-fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String, bool, bool)> {
+type SurfaceAttributes = (String, String, bool, bool);
+
+fn surface_attributes_many(sess: &PtySession, needles: &[&str]) -> Option<Vec<SurfaceAttributes>> {
     sess.render(|screen| {
         // Search logical text across wrapping, but retain physical coordinates
         // for the cell assertion. rows() alone misses a needle split by a
@@ -63,17 +65,26 @@ fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String
                 text.push(' ');
             }
         }
-        let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
-        let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
-        let cell = screen.raw().cell(*row, *col)?;
-        Some((
-            format!("{:?}", cell.fgcolor()),
-            format!("{:?}", cell.bgcolor()),
-            cell.bold(),
-            cell.dim(),
-        ))
+        needles
+            .iter()
+            .map(|needle| {
+                let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
+                let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
+                let cell = screen.raw().cell(*row, *col)?;
+                Some((
+                    format!("{:?}", cell.fgcolor()),
+                    format!("{:?}", cell.bgcolor()),
+                    cell.bold(),
+                    cell.dim(),
+                ))
+            })
+            .collect()
     })
+}
+
+fn surface_attributes(sess: &PtySession, needle: &str) -> Option<SurfaceAttributes> {
+    surface_attributes_many(sess, &[needle])?.pop()
 }
 
 fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
@@ -115,6 +126,36 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
         assert!(
             Instant::now() < deadline,
             "{needle:?}: expected {expected:?}, got {actual:?}; screen:\n{}",
+            sess.render(|screen| screen.raw().contents())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn expect_resumed_metadata(sess: &PtySession, muted: &str) -> [String; 3] {
+    let expected_color = terminal_palette::expected_color(muted);
+    // Use the existing duration-label observer's deadline and polling interval.
+    // All dependent accents must come from its same complete terminal snapshot;
+    // separate render reads can interleave with a clear/paint after resize.
+    let deadline = Instant::now() + common::at_least(Duration::from_secs(30));
+    loop {
+        let actual = surface_attributes_many(
+            sess,
+            &["+1m14s Σ1m14s", "[claude", "ctx ", "chrome-style-branch"],
+        );
+        if let Some(styles) = actual
+            .as_ref()
+            .filter(|styles| styles[0].0 == expected_color && !styles[0].2 && !styles[0].3)
+        {
+            return [
+                styles[1].0.clone(),
+                styles[2].0.clone(),
+                styles[3].0.clone(),
+            ];
+        }
+        assert!(
+            Instant::now() < deadline,
+            "resumed duration and metadata accents did not share a complete frame: {actual:?}; screen:\n{}",
             sess.render(|screen| screen.raw().contents())
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -488,8 +529,11 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
-    expect_style(&sess, "✓", ("Idx(2)", false, false));
-    expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
+    // Icons take the tool card status colors: finished is a finished card's
+    // green, in progress a running card's amber, open a queued card's gray.
+    expect_style(&sess, "✓", ("Rgb(166, 227, 161)", false, false));
+    expect_style(&sess, "■", (DARK_AMBER, false, false));
+    expect_style(&sess, "□", (DARK_SECONDARY, false, false));
     expect_style(&sess, "Checking styles", ("Default", true, false));
     expect_style(&sess, "Finished parser", ("Default", false, true));
     expect_style(&sess, "Review output", ("Default", false, false));
@@ -516,7 +560,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     };
     let env = TestEnv::new("info-shared-green");
     let store = env.workspace_root().join("todos.json");
-    std::fs::write(&store, r#"[{"content":"Check info colors","status":"in_progress","activeForm":"Checking info colors"}]"#).unwrap();
+    std::fs::write(&store, r#"[{"content":"Ship info colors","status":"completed","activeForm":"Shipping info colors"},{"content":"Check info colors","status":"in_progress","activeForm":"Checking info colors"}]"#).unwrap();
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
         &[
@@ -532,9 +576,10 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line_cleared(&sess, env.timeout(), "info input ready");
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
-    expect_style(&sess, "1 todos", ("Default", true, false));
-    // Information icons keep their semantic green; activity uses neutral text.
-    expect_style(&sess, "■", (green, false, false));
+    expect_style(&sess, "2 todos", ("Default", true, false));
+    // A finished todo shares the finished tool card's green; activity uses
+    // neutral text.
+    expect_style(&sess, "✓", (green, false, false));
     let marker = common::turn_status_marker(&sess);
     let prompt = env.prompt(
         "What is 17 times 23? Work it out, then give the number.",
@@ -941,12 +986,9 @@ fn resumed_status_scopes_semantic_accents_and_cache_colors() {
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
-                for label in ["turn 1", "+1m14s Σ1m14s"] {
-                    expect_style(&sess, label, (muted, false, false));
-                }
-                let model_color = attributes(&sess, "[claude").unwrap().0;
-                let usage_color = attributes(&sess, "ctx ").unwrap().0;
-                let branch_color = attributes(&sess, "chrome-style-branch").unwrap().0;
+                expect_style(&sess, "turn 1", (muted, false, false));
+                let [model_color, usage_color, branch_color] =
+                    expect_resumed_metadata(&sess, muted);
                 for color in [&model_color, &usage_color, &branch_color] {
                     assert_ne!(
                         color, muted,

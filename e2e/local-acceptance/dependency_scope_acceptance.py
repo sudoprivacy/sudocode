@@ -1,6 +1,7 @@
 """Exercise development-only build selection through real Git, Cargo and CLI."""
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -178,12 +179,358 @@ def workflow_scope(output, environment):
         assert (result.returncode == 0) == succeeds, (values, result.stdout, result.stderr)
         records.append({"script": name, "values": values, "exit_code": result.returncode,
                         "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+    managed_name = "Managed scode against the public nexusd-cluster"
+    assert [line for line in step(managed_name) if line.startswith("        if:")] == [condition]
+    assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(managed_name)
+    cli_entry = (SOURCE / "e2e/nexus-a2a/run.sh").read_text(encoding="utf-8")
+    assert cli_entry.rstrip().endswith('authon_stop\nbash ./run-managed-subprocess.sh\n\necho "E2E OK"')
+    managed = script(managed_name)
+    (output / "managed.sh").write_text(managed, encoding="utf-8")
+    work = output / "managed-workflow"
+    entry = work / "e2e/nexus-a2a/run-managed-subprocess.sh"
+    entry.parent.mkdir(parents=True)
+    entry.write_text('#!/usr/bin/env bash\nset -eu\nprintf "managed\\n" >> "$MANAGED_CALLS"\nexit "$MANAGED_EXIT"\n',
+                     encoding="utf-8")
+    entry.chmod(0o755)
+    managed_records = []
+    for index, (selected, exit_code, calls, succeeds) in enumerate([
+            ("true", 0, 0, True), ("false", 0, 1, True), ("false", 19, 1, False),
+            ("", 0, 0, False), ("unknown", 0, 0, False)]):
+        called = output / f"managed-{index}.calls"
+        result = subprocess.run([bash, "-c", managed], cwd=work, capture_output=True,
+            env={**environment, "A2A_REQUIRED": selected, "MANAGED_EXIT": str(exit_code),
+                 "MANAGED_CALLS": called.as_posix()})
+        log = output / f"managed-{index}.log"
+        log.write_bytes(result.stdout + result.stderr)
+        actual = len(called.read_text().splitlines()) if called.exists() else 0
+        assert actual == calls and (result.returncode == 0) == succeeds, (selected, actual, result.returncode)
+        managed_records.append({"a2a_required": selected, "managed_calls": actual,
+                                "exit_code": result.returncode,
+                                "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+    (output / "managed-result.json").write_text(json.dumps(managed_records, indent=2) + "\n")
     (output / "result.json").write_text(json.dumps(records, indent=2) + "\n")
-    return {"actual_workflow_guard_cases": len(records), "cohost_steps_bound_to_selector": True,
+    return {"actual_workflow_guard_cases": len(records), "managed_dispatch_cases": len(managed_records),
+            "managed_required_once_with_independent_cohost_coverage": True, "cohost_steps_bound_to_selector": True,
             "CLI_and_cohost_steps_bound_to_independent_selectors": True,
             "CLI_and_cohost_jobs_have_no_mutual_dependency": True,
             "three_platform_lint_required_once_on_queue": True,
             "main_preflight_removed_and_independent_cache_publishers_retained": True}
+
+
+def scheduling_scope(output, environment, *, metadata_only=False):
+    """Run the actual selector on committed scheduling edits and conservative controls."""
+    output.mkdir()
+    repository = output / "repository"
+    repository.mkdir()
+    records, commands = [], []
+
+    def git(*args, data=None, overrides=None):
+        argv = ["git", *map(str, args)]
+        result = subprocess.run(argv, cwd=repository, input=data, capture_output=True,
+                                env={**environment, **(overrides or {})})
+        index = len(commands)
+        (output / f"git-{index:03}.stdout").write_bytes(result.stdout)
+        (output / f"git-{index:03}.stderr").write_bytes(result.stderr)
+        commands.append({"argv": argv, "exit_code": result.returncode})
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        return result.stdout.decode().strip()
+
+    def write(name, contents):
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    runner = ".github/scripts/local_acceptance.py"
+    profiles = ".github/local-acceptance/checks.py"
+    names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+             "e2e/local-acceptance/resource_scheduling_acceptance.py",
+             "e2e/local-acceptance/host_lease_acceptance.py"]
+    sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Scheduling Scope E2E")
+    git("config", "user.email", "scheduling-scope@example.invalid")
+    configuration = subprocess.run(["git", "config", "--get", "localAcceptance.vsdevcmd"],
+        cwd=SOURCE, env=environment, capture_output=True, text=True).stdout.strip()
+    if configuration:
+        git("config", "localAcceptance.vsdevcmd", configuration)
+    for name, contents in sources.items():
+        write(name, contents)
+    git("add", ".")
+    git("commit", "-m", "Original committed scheduling scope inputs")
+    base = git("rev-parse", "HEAD")
+
+    def insert_body(source, name, statement="pass"):
+        node = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == name)
+        lines = source.splitlines(keepends=True)
+        lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
+        return "".join(lines)
+
+    def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None, overrides=None):
+        for event_name in events or ["pull_request", "push", "merge_group"]:
+            if event_name == "pull_request":
+                event = {"pull_request": {"base": {"sha": first}, "head": {"sha": head}}}
+            elif event_name == "push":
+                event = {"before": first, "after": head}
+            else:
+                event = {"merge_group": {"base_sha": first, "head_sha": head}}
+            prefix = output / f"{label}-{event_name}"
+            event_path, github_output = prefix.with_suffix(".event.json"), prefix.with_suffix(".output")
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            github_output.touch()
+            argv = [sys.executable, str(SOURCE / ".github/scripts/ci_input_scope.py")]
+            result = subprocess.run(argv, cwd=repository, env={**environment, **(overrides or {}),
+                "GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_OUTPUT": str(github_output)}, capture_output=True)
+            prefix.with_suffix(".stdout").write_bytes(result.stdout)
+            prefix.with_suffix(".stderr").write_bytes(result.stderr)
+            assert result.returncode == 0, result.stderr.decode(errors="replace")
+            actual = json.loads(result.stdout)
+            assert actual["daemon_required"] == str(not expected).lower(), (label, actual)
+            assert actual["a2a_required"] == actual["cohost_required"] == actual["daemon_required"], (label, actual)
+            if kind == "scheduling":
+                assert actual["live_required"] == actual["clippy_required"] == str(rust).lower(), (label, actual)
+                if expected:
+                    assert actual["acceptance_scheduling_scope"]["decision"] == "unchanged_queue_executors", actual
+                    assert actual["acceptance_scheduling_scope"]["contract_guard_required"] is True, actual
+            else:
+                assert actual["live_required"] == str(rust).lower(), (label, actual)
+                assert actual["clippy_required"] == str(rust if clippy is None else clippy).lower(), (label, actual)
+                if expected:
+                    assert actual["acceptance_metadata_scope"]["decision"] == "unchanged_queue_executors", actual
+                    assert actual["acceptance_metadata_scope"]["fingerprint_source"] == "comparison_base", actual
+                    assert actual["acceptance_metadata_scope"]["comparison_base"] == first, actual
+                    assert actual["acceptance_metadata_scope"]["comparison_base_kind"] == {
+                        "merge_group": "protected_merge_queue_base", "pull_request": "target_merge_base",
+                        "push": "push_previous_commit"}[event_name], actual
+                    assert actual["acceptance_metadata_scope"]["contract_guard_required"] is True, actual
+                    assert actual["acceptance_metadata_scope"]["generic_queue_daemon_smoke_omitted"] is True, actual
+            assert actual["benchmark_required"] == actual["container_required"] == "true", actual
+            records.append({"case": label, "event": event_name, "base": first, "head": head,
+                            "expected_scheduling_only": expected, "actual": actual,
+                            "stdout_sha256": hashlib.sha256(result.stdout).hexdigest()})
+
+    pure = insert_body(sources[runner], "host_acceptance_lease")
+    changed_fixture = sources[names[-1]] + "\n# Private enforcement-fixture input.\n"
+    changed_pins = sources[profiles]
+    for name, contents in [(runner, pure), (names[-1], changed_fixture)]:
+        changed_pins, count = re.subn(r'("' + re.escape(name) + r'": ")[0-9a-f]{64}(")',
+            lambda match: match[1] + hashlib.sha256(contents.encode()).hexdigest() + match[2], changed_pins)
+        assert count == 1, name
+    missing = sources[runner].splitlines(keepends=True)
+    declaration = next(node for node in ast.parse(sources[runner]).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "host_acceptance_lease")
+    first_line = min([declaration.lineno, *[node.lineno for node in declaration.decorator_list]])
+    del missing[first_line - 1:declaration.end_lineno]
+    cases = [
+        ("lease-body", {runner: pure}, True),
+        ("check-body", {runner: insert_body(sources[runner], "perform_check")}, True),
+        ("reservation-body", {runner: insert_body(sources[runner], "profile_reservations")}, True),
+        ("fixture-and-pins", {runner: pure, profiles: changed_pins, names[-1]: changed_fixture}, True),
+        ("command-body", {runner: insert_body(sources[runner], "run_command")}, False),
+        ("selection-body", {runner: insert_body(sources[runner], "selected")}, False),
+        ("module-global", {runner: pure + "\nSCHEDULING_SCOPE_CONTROL = True\n"}, False),
+        ("changed-signature", {runner: sources[runner].replace(
+            "def host_acceptance_lease(attempt, head):", "def host_acceptance_lease(attempt, head=None):")}, False),
+        ("changed-decorator", {runner: sources[runner].replace(
+            "@contextlib.contextmanager\ndef host_acceptance_lease", "@((lambda function: function))\ndef host_acceptance_lease")}, False),
+        ("reservation-default", {runner: sources[runner].replace(
+            "def profile_reservations(ordered, pending):", "def profile_reservations(ordered, pending=None):")}, False),
+        ("reservation-annotation", {runner: sources[runner].replace(
+            "def profile_reservations(ordered, pending):", "def profile_reservations(ordered: int, pending):")}, False),
+        ("missing-scheduling-function", {runner: "".join(missing)}, False),
+        ("duplicate-definition", {runner: pure + "\ndef host_acceptance_lease(attempt, head):\n    pass\n"}, False),
+        ("unknown-mixed-input", {runner: pure, ".github/unrecognized.py": "# Conservative mixed input\n"}, False),
+        ("mixed-product-source", {runner: pure, "rust/crates/runtime/src/scheduling_scope.rs": "// Product input\n"}, False),
+        ("changed-profile-execution", {runner: pure, profiles: insert_body(sources[profiles], "run")}, False),
+        ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
+    ]
+    if not metadata_only:
+        for label, edits, expected in cases:
+            git("switch", "--detach", base)
+            for name, contents in edits.items():
+                write(name, contents)
+            git("add", ".")
+            git("commit", "-m", "Scope control " + label)
+            observe(label, base, git("rev-parse", "HEAD"), expected, rust=label == "mixed-product-source")
+        for label, declaration in [
+            ("external-reference", "def external_control():\n    return profile_reservations\n"),
+            ("external-namespace", 'def external_control():\n    return globals().get("profile_" + "reservations")\n'),
+            ("external-exec", 'def external_control(current_runner, namespace):\n'
+                              '    exec(compile(current_runner, namespace["__file__"], "exec"), namespace)\n'),
+        ]:
+            git("switch", "--detach", base)
+            write(runner, sources[runner] + "\n" + declaration)
+            git("add", ".")
+            git("commit", "-m", "Unchanged external observer " + label)
+            before = git("rev-parse", "HEAD")
+            write(runner, pure + "\n" + declaration)
+            git("add", ".")
+            git("commit", "-m", "Scheduling edit with existing external observer " + label)
+            observe(label, before, git("rev-parse", "HEAD"), False)
+        git("switch", "--detach", base)
+        # Commit mode-only trees through private indexes; no OS symlink privilege
+        # or mutation of a caller's worktree/index is needed.
+        for mode in ["100755", "120000"]:
+            index = output / (mode + ".index")
+            values = {"GIT_INDEX_FILE": str(index)}
+            git("read-tree", base, overrides=values)
+            blob = git("rev-parse", base + ":" + runner)
+            git("update-index", "--cacheinfo", f"{mode},{blob},{runner}", overrides=values)
+            tree = git("write-tree", overrides=values)
+            head = git("commit-tree", tree, "-p", base, "-m", "Committed mode boundary " + mode)
+            observe("mode-" + mode, base, head, False)
+    metadata_functions = ["commands_hash", "profile_commands_hashes", "reachable_profile_commands_hashes",
+                          "resource_executor_identity", "resource_equivalent_profiles", "compatible_native_dispatcher",
+                          "compatible_profile_commands", "verify_execution_plan", "verify_envelope"]
+    metadata_source = insert_body(sources[runner], "verify_envelope")
+    companion = "e2e/local-acceptance/resource_scheduling_acceptance.py"
+    changed_companion = sources[companion] + "\n# Private metadata enforcement input.\n"
+    metadata_pins = sources[profiles]
+    for name, contents in [(runner, metadata_source), (companion, changed_companion)]:
+        metadata_pins, count = re.subn(r'("' + re.escape(name) + r'": ")[0-9a-f]{64}(")',
+            lambda match: match[1] + hashlib.sha256(contents.encode()).hexdigest() + match[2], metadata_pins)
+        assert count == 1, name
+    declaration = next(node for node in ast.parse(sources[runner]).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "verify_envelope")
+    missing = sources[runner].splitlines(keepends=True)
+    del missing[declaration.lineno - 1:declaration.end_lineno]
+    forged = insert_body(sources[runner], "reachable_profile_commands_hashes",
+                         "return {name: 'forged-fingerprint' for name in names}")
+    all_bodies = sources[runner]
+    for name in metadata_functions:
+        all_bodies = insert_body(all_bodies, name)
+    metadata_cases = [("single-verifier", {runner: metadata_source}, True),
+                      ("all-verifier-bodies", {runner: all_bodies}, True)]
+    metadata_cases += [
+        ("fixture-and-pins", {runner: metadata_source, profiles: metadata_pins, companion: changed_companion}, True),
+        ("process-executor", {runner: insert_body(metadata_source, "run_command")}, False),
+        ("selector-function", {runner: insert_body(metadata_source, "selected")}, False),
+        ("module-global", {runner: metadata_source + "\nMETADATA_SCOPE_STATE = True\n"}, False),
+        ("signature", {runner: metadata_source.replace("completed_only=False):", "completed_only=True):")}, False),
+        ("decorator", {runner: metadata_source.replace("\ndef verify_envelope(", "\n@((lambda function: function))\ndef verify_envelope(")}, False),
+        ("missing-function", {runner: "".join(missing)}, False),
+        ("duplicate-function", {runner: metadata_source + "\ndef verify_envelope(*args):\n    return None\n"}, False),
+        ("new-helper", {runner: metadata_source + "\ndef unknown_metadata_helper():\n    pass\n"}, False),
+        ("forged-fingerprint-and-command", {runner: forged, profiles: insert_body(sources[profiles], "run")}, False),
+        ("profile-command", {runner: metadata_source, profiles: insert_body(sources[profiles], "run")}, False),
+        ("policy", {runner: metadata_source, "spec/local_acceptance.json": json.dumps({"version": 1, "repository": "changed", "checks": {}})}, False),
+        ("signers", {runner: metadata_source, "spec/local_acceptance_signers.json": '{"version":1,"signers":{}}'}, False),
+        ("unknown-input", {runner: metadata_source, ".github/unknown-metadata.py": "# Unknown input\n"}, False),
+        ("product", {runner: metadata_source, "rust/crates/runtime/src/metadata_scope.rs": "// Product input\n"}, False),
+        ("workflow", {runner: metadata_source, ".github/workflows/rust-ci.yml": "# Changed workflow\n"}, False),
+    ]
+    for label, edits, expected in metadata_cases:
+        git("switch", "--detach", base)
+        for name, contents in edits.items():
+            write(name, contents)
+        git("add", ".")
+        git("commit", "-m", "Verifier metadata scope " + label)
+        observe("metadata-" + label, base, git("rev-parse", "HEAD"), expected,
+                kind="metadata", rust=label == "product", clippy=label in {"product", "workflow"},
+                events=None if label in {"single-verifier", "forged-fingerprint-and-command"} else ["merge_group"])
+    for label, body in [("static-observer", "return verify_envelope"),
+                        ("dynamic-observer", 'return globals().get("verify_" + "envelope")'),
+                        ("frame-observer", "return RUNNER_CODE")]:
+        git("switch", "--detach", base)
+        observer = sources[runner] + "\ndef metadata_observer():\n    " + body + "\n"
+        observer = insert_body(observer, "run_command", "metadata_observer()")
+        write(runner, observer)
+        git("add", ".")
+        git("commit", "-m", "Existing queue observer " + label)
+        before = git("rev-parse", "HEAD")
+        write(runner, insert_body(observer, "verify_envelope"))
+        git("add", ".")
+        git("commit", "-m", "Metadata edit observed by queue consumer " + label)
+        observe("metadata-" + label, before, git("rev-parse", "HEAD"), False, kind="metadata", events=["merge_group"])
+    # Import-time observers can affect actual command environments even when
+    # run_command itself and all metadata declarations compare equal.
+    def verifier_value(source, value):
+        node = next(item for item in ast.parse(source).body
+                    if isinstance(item, ast.FunctionDef) and item.name == "verify_envelope")
+        lines = source.splitlines(keepends=True)
+        return "".join(lines[:node.body[0].lineno - 1]) + "    return " + repr(value) + "\n" + "".join(lines[node.end_lineno:])
+
+    observer_body = (
+        '    value = verify_envelope(None, None, None, None)\n'
+        '    os.environ["SCODE_METADATA_CANARY"] = value\n'
+        '    marker = os.environ.get("SCODE_METADATA_IMPORT_MARKER")\n'
+        '    if marker:\n'
+        '        Path(marker).write_text(value)\n')
+    observers = {
+        "module-call": "def metadata_import_observer():\n" + observer_body + "\nmetadata_import_observer()\n",
+        "default-call": "def metadata_default_observer():\n" + observer_body + "    return value\n\n"
+                        "def metadata_unused(value=metadata_default_observer()):\n    return value\n",
+        "decorator-call": "def metadata_decorator_observer(function):\n" + observer_body + "    return function\n\n"
+                          "@metadata_decorator_observer\ndef metadata_unused():\n    return None\n",
+    }
+    imports = []
+    mutant_dir = output / "old-behavior-mutant"
+    mutant_dir.mkdir()
+    selector_source = (SOURCE / ".github/scripts/ci_input_scope.py").read_text(encoding="utf-8")
+    assert selector_source.count("if current[3] not in REVIEWED_VERIFIER_LAYOUTS:") == 1
+    mutant = selector_source.replace("if current[3] not in REVIEWED_VERIFIER_LAYOUTS:", "if False:", 1)
+    (mutant_dir / "ci_input_scope.py").write_text(mutant, encoding="utf-8")
+    (mutant_dir / "local_acceptance.py").write_text(sources[runner], encoding="utf-8")
+    for label, observer in observers.items():
+        git("switch", "--detach", base)
+        before_source = verifier_value(sources[runner], "before")
+        at = before_source.index('if __name__ == "__main__":')
+        before_source = before_source[:at] + observer + "\n" + before_source[at:]
+        write(runner, before_source)
+        git("add", ".")
+        git("commit", "-m", "Existing eager observer " + label)
+        first = git("rev-parse", "HEAD")
+        write(runner, verifier_value(before_source, "after"))
+        git("add", ".")
+        git("commit", "-m", "Verifier body observed at import " + label)
+        head = git("rev-parse", "HEAD")
+        marker = output / (label + ".unexpected-import")
+        observe("metadata-import-" + label, first, head, False, kind="metadata", events=["merge_group"],
+                overrides={"SCODE_METADATA_IMPORT_MARKER": str(marker)})
+        assert not marker.exists(), "Scope proof imported an unreviewed comparison-base constructor"
+        event = output / (label + ".mutant-event.json")
+        event.write_text(json.dumps({"merge_group": {"base_sha": first, "head_sha": head}}))
+        github_output = output / (label + ".mutant-output")
+        github_output.touch()
+        argv = [sys.executable, str(mutant_dir / "ci_input_scope.py")]
+        result = subprocess.run(argv, cwd=repository, env={**environment,
+            "GITHUB_EVENT_NAME": "merge_group", "GITHUB_EVENT_PATH": str(event),
+            "GITHUB_OUTPUT": str(github_output), "SCODE_METADATA_IMPORT_MARKER": str(marker)}, capture_output=True)
+        (output / (label + ".mutant.stdout")).write_bytes(result.stdout)
+        (output / (label + ".mutant.stderr")).write_bytes(result.stderr)
+        assert result.returncode == 0, result.stderr
+        old = json.loads(result.stdout)
+        assert old["daemon_required"] == "false", "Old-behavior control must expose the unsafe omission"
+        assert marker.read_text() == "before", "Old proof must actually execute the comparison-base constructor"
+        values = {}
+        for state, ref in [("before", first), ("after", head)]:
+            helper_path = output / (label + "-" + state + "-runner.py")
+            helper_path.write_text(git("show", f"{ref}:{runner}"), encoding="utf-8")
+            log = output / (label + "-" + state + "-native.log")
+            loader = ('import importlib.util,sys\nfrom pathlib import Path\n'
+                'spec=importlib.util.spec_from_file_location("private_observer",sys.argv[1])\n'
+                'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);m.ROOT=Path(sys.argv[2])\n'
+                'm.run_command([sys.executable,"-c",sys.argv[4]],m.ROOT,Path(sys.argv[3]))\n')
+            child = subprocess.run([sys.executable, "-c", loader, str(helper_path), str(repository), str(log),
+                'import os;print(os.environ["SCODE_METADATA_CANARY"])'],
+                cwd=repository, env={key: value for key, value in environment.items()
+                                     if key != "SCODE_METADATA_IMPORT_MARKER"}, capture_output=True)
+            (output / (label + "-" + state + ".stdout")).write_bytes(child.stdout)
+            (output / (label + "-" + state + ".stderr")).write_bytes(child.stderr)
+            assert child.returncode == 0, child.stderr
+            values[state] = log.read_text().strip()
+        assert values == {"before": "before", "after": "after"}, values
+        imports.append({"case": label, "base": first, "head": head, "new_scope_refused_without_import": True,
+                        "old_behavior_mutant_unsafe_skip": True, "actual_native_child_values": values})
+    assert not git("status", "--porcelain"), "Private source/index changed after mode-only controls"
+    result = {"status": "PASS", "cases": records, "git_commands": commands,
+              "targeted_metadata_only": metadata_only,
+              "actual_import_observer_controls": imports,
+              "scope": "Actual Git commits and original PR/push/queue selector CLI. No Cargo, daemon, provider or product coverage."}
+    (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"PASS: {len(records)} real Git/event scheduling/verifier scope and conservative execution/mode boundaries", flush=True)
+    return result
 
 
 def run(output):
@@ -290,6 +637,8 @@ def run(output):
 
     original_cohost = cohost()
     workflow = workflow_scope(output / "workflow-scope", environment)
+    scheduling = scheduling_scope(output / "scheduling-scope", environment)
+    assert scheduling["targeted_metadata_only"] is False, "Required fixture must execute all original scheduling controls"
     development = application + '[dev-dependencies]\nscope-helper={path="../helper"}\n'
     write("rust/crates/rusty-sudocode-cli/Cargo.toml", development)
     write("rust/crates/rusty-sudocode-cli/tests/development.rs", '#[test] fn native_case() { assert_eq!(scope_helper::value(), 99); }\n')
@@ -730,6 +1079,7 @@ def run(output):
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,
               "workflow_scope": workflow,
+              "scheduling_scope": scheduling,
               "compiler_priority": expected_priority,
               "scope": "Actual Git/public planner and Cargo/native canaries. No product runtime, provider or performance coverage claimed."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")

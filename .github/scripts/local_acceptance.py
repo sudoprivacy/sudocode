@@ -139,6 +139,16 @@ def commands_hash(ref):
                           **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
+def referenced_globals(table):
+    """Use Python's scope rules, including nested/comprehension scopes."""
+    result, pending = set(), [table]
+    while pending:
+        current = pending.pop()
+        result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
+        pending.extend(current.get_children())
+    return result
+
+
 def profile_ast_value(value):
     """Serialize semantic AST fields independently of Python's dump formatting."""
     if isinstance(value, ast.AST):
@@ -203,10 +213,10 @@ def profile_commands_hashes(ref, names):
     return result
 
 
-def reachable_profile_commands_hashes(ref, names):
+def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha(executor_source(ref).encode())
+    executor = sha((executor_source(ref) if executor_identity is None else executor_identity).encode())
     image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
     result = {}
     # Reflection can find a function without a static Name reference. Retain
@@ -328,6 +338,277 @@ def committed_test_groups(head):
         return True
 
 
+def resource_executor_identity(ref):
+    """Normalize only known compiler budgets and command-completion waits."""
+    import symtable
+
+    path = ".github/scripts/local_acceptance.py"
+    row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+    if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+        raise ValueError("Compiler resource identity requires a regular committed executor")
+    source = tracked(ref, path).decode("utf-8")
+    tree = ast.parse(source)
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    reserved = {"os", "psutil", "time", "subprocess", "max", "min", "str", "int", "RuntimeError"}
+    if any(node.name in reserved for node in functions):
+        raise ValueError("Compiler budget helper is shadowed by a module function")
+    if len({node.name for node in functions}) != len(functions):
+        raise ValueError("Duplicate executor function binding")
+    # New declarations must have no unknown import-time effects. The existing
+    # stdlib contextmanager wraps a function without running its body.
+    decorator = profile_ast_value(ast.parse("contextlib.contextmanager", mode="eval").body)
+    for function in functions:
+        if (any(profile_ast_value(node) != decorator for node in function.decorator_list)
+                or function.returns or getattr(function, "type_params", [])
+                or any(arg.annotation for arg in [*function.args.posonlyargs, *function.args.args,
+                    *function.args.kwonlyargs, *[arg for arg in [function.args.vararg, function.args.kwarg] if arg]])):
+            raise ValueError("Unknown executor import-time declaration")
+        for default in [*function.args.defaults, *function.args.kw_defaults]:
+            if default is not None and not isinstance(default, ast.Name):
+                ast.literal_eval(default)
+    contexts = [node for node in tree.body if not isinstance(node, ast.FunctionDef)]
+    for statement in contexts:
+        if any(isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store)
+               for node in ast.walk(statement)):
+            raise ValueError("Compiler budget namespace has a module assignment")
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(statement, ast.Import) and alias.name in {"os", "time", "subprocess"}
+                        and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown import")
+    imports = [node for node in contexts if isinstance(node, ast.Import)
+               and any(alias.name == "os" and alias.asname is None for alias in node.names)]
+    if len(imports) != 1 or any(isinstance(node, ast.Name) and node.id == "os" and isinstance(node.ctx, ast.Store)
+                                for statement in contexts for node in ast.walk(statement)):
+        raise ValueError("Unknown operating-system import binding")
+    function = copy.deepcopy(next(node for node in functions if node.name == "run_command"))
+    for node in ast.walk(function):
+        if ((isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store))
+                or (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in reserved)
+                or (isinstance(node, (ast.Global, ast.Nonlocal)) and set(node.names) & reserved)):
+            raise ValueError("Compiler budget namespace has a local assignment")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(node, ast.Import) and alias.name == "psutil" and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown local import")
+    updates = [node for node in function.body
+               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and profile_ast_value(node.value.func) == profile_ast_value(ast.parse("environment.update", mode="eval").body)
+               and len(node.value.args) == 1 and isinstance(node.value.args[0], ast.Dict)
+               and any(isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS" for key in node.value.args[0].keys)]
+    if len(updates) != 1:
+        raise ValueError("Unknown compiler environment declaration")
+    statement = updates[0]
+    settings = statement.value.args[0]
+    index = next(index for index, key in enumerate(settings.keys)
+                 if isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS")
+    selected = settings.values[index]
+    if selected.lineno != selected.end_lineno:
+        raise ValueError("Unknown multiline compiler environment field")
+    lines = source.splitlines(keepends=True)[function.lineno - 1:function.end_lineno]
+    line = selected.lineno - function.lineno
+    lines[line] = lines[line][:selected.col_offset] + '"1"' + lines[line][selected.end_col_offset:]
+    budget_form = "serial"
+    if profile_ast_value(selected) == profile_ast_value(ast.parse("str(jobs)", mode="eval").body):
+        budget_form = "adaptive"
+        budget = ast.parse('''
+jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+if cap is not None:
+    if not cap.isdigit() or int(cap) < 1:
+        raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+    jobs = min(jobs, int(cap))
+''').body
+        at = function.body.index(statement)
+        if at < 3 or profile_ast_value(function.body[at - 3:at]) != profile_ast_value(budget):
+            raise ValueError("Unknown compiler budget calculation or effects")
+        del lines[function.body[at - 3].lineno - function.lineno:function.body[at - 1].end_lineno - function.lineno + 1]
+        del function.body[at - 3:at]
+        settings.values[index] = ast.Constant(value="1")
+    elif not isinstance(selected, ast.Constant) or selected.value != "1":
+        raise ValueError("Unknown serial compiler budget")
+    if any(isinstance(node, ast.Name) and node.id in {"jobs", "cap"} for node in ast.walk(function)):
+        raise ValueError("Compiler budget is observed outside its environment field")
+    text = "".join(lines)
+    budget_comment = """    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+"""
+    if text.count(budget_comment) > 1:
+        raise ValueError("Duplicate compiler budget explanation")
+    text = text.replace(budget_comment, "", 1)
+    poll = ast.parse("process.poll() is None", mode="eval").body
+    loops = [node for node in ast.walk(function)
+             if isinstance(node, ast.While) and profile_ast_value(node.test) == profile_ast_value(poll)]
+    if len(loops) != 1 or len(loops[0].body) != 2:
+        raise ValueError("Unknown command-completion supervision loop")
+    sleep = ast.parse("time.sleep(0.15)").body[0]
+    notify = ast.parse("""try:
+    process.wait(timeout=0.15)
+except subprocess.TimeoutExpired:
+    pass
+""").body[0]
+    wait = loops[0].body[-1]
+    wait_form = "sleep"
+    if profile_ast_value(wait) == profile_ast_value(notify):
+        wait_form = "completion"
+        original = "\n".join(source.splitlines()[wait.lineno - 1:wait.end_lineno])
+        if text.count(original) != 1:
+            raise ValueError("Unknown command-completion wait source")
+        text = text.replace(original, "                time.sleep(0.15)", 1)
+        loops[0].body[-1] = sleep
+    elif profile_ast_value(wait) != profile_ast_value(sleep):
+        raise ValueError("Unknown command-completion wait or effects")
+    # Equal unknown callbacks can observe a changed executor without changing
+    # their own source. Bind reviewed eager context AND command consumers after
+    # normalizing the two supported resource differences; never import it.
+    symbols = symtable.symtable(source, path, "exec")
+    definitions = {node.name: node for node in functions}
+    consumers, pending = {}, ["run_command", "selected", "opt_in_test_target_changes", "production_build_paths"]
+    while pending:
+        name = pending.pop()
+        if name in consumers:
+            continue
+        consumers[name] = profile_ast_value(function if name == "run_command" else definitions[name])
+        used = referenced_globals(symbols.lookup(name).get_namespace())
+        pending.extend(used & definitions.keys() - consumers.keys())
+    layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
+    reviewed = "18bd11d3296b29a9c0087de0e1f7e01c361761bade18e9b2bb3776b629532658"
+    if layout != reviewed:
+        print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
+            "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
+            "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command. Unknown layouts grant no reuse or waiver.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed eager context or command consumer layout; full current checks remain required")
+    # Callers such as main/perform_check can observe the executor too. Keep
+    # complete reviewed program layouts, not only the command's callees. Erase
+    # only this literal allowlist from its own checksum to avoid a hash cycle.
+    program = copy.deepcopy(tree)
+    for index, node in enumerate(program.body):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_command":
+            program.body[index] = function
+        if isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+            declarations = [item for item in node.body if isinstance(item, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                                    for target in item.targets)]
+            if len(declarations) > 1:
+                raise ValueError("Duplicate reviewed source declaration")
+            for declaration in declarations:
+                values = ast.literal_eval(declaration.value)
+                if not isinstance(values, set) or not values or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in values):
+                    raise ValueError("Unknown reviewed source declaration")
+                declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
+    source_layout = sha(canonical(profile_ast_value(program)))
+    reviewed_sources = {
+        "89efe09a8254059f7bf10fda7d53d2accc6658abc1316a656c1c59b22855d32b",
+        "5994969a04ea543c7a96e0e3c0d69be4ffeac9d759452b5d2b14a9b2f6654047",
+        "d428d86b5fc3ffaa3bbb5606e3853420c0f81cafe58c91cd5ed865a3c3dba74e",
+        "5e07512c7277de8ebc37142a1055a6c59001aa2ef821e5d68379ba148356378f",
+    }
+    if source_layout not in reviewed_sources:
+        print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
+            "ref": ref, "observed_source_layout": source_layout, "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command; unreviewed callers grant no reuse.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed complete executor program; full current checks remain required")
+    return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                                                "executor": profile_ast_value(function), "executor_text": text}).decode()
+
+
+def resource_equivalent_profiles(before, after, names):
+    """Prove resource-only differences, without accepting a supplied hash pair."""
+    allowed = {"preflight", "native-workspace", "native-examples", "native-release",
+               "native-context", "native-services", "native-cohost"}
+    names = [name for name in names if name in allowed]
+    if not names:
+        return set()
+    try:
+        before = value("rev-parse", f"{before}^{{commit}}")
+        after = value("rev-parse", f"{after}^{{commit}}")
+        old_budget, old_executor = resource_executor_identity(before)
+        new_budget, new_executor = resource_executor_identity(after)
+        if old_budget == new_budget:
+            return set()
+        previous = reachable_profile_commands_hashes(before, names, executor_identity=old_executor)
+        current = reachable_profile_commands_hashes(after, names, executor_identity=new_executor)
+        return {name for name in names if previous[name] == current[name]}
+    except (ValueError, TypeError, KeyError, StopIteration, SyntaxError, RuntimeError, subprocess.CalledProcessError):
+        return set()
+
+
+def compatible_native_dispatcher(before, after):
+    """Retain exact dispatcher identity, allowing only its two known budget forms."""
+    path = ".github/local-acceptance/cross_platform.py"
+
+    def source(ref):
+        row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+        if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+            raise ValueError("Native dispatcher must be a regular committed file")
+        return row[0], tracked(ref, path)
+
+    try:
+        old, current = source(before), source(after)
+        if old == current:
+            return True
+        if old[0] != current[0]:
+            return False
+        forms = [ast.parse(text).body[0] for text in ['''
+def execute(command, cwd, log, env=None):
+    jobs = (os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
+    return helper.run_command(command, cwd, log, {**(env or {}), "CARGO_BUILD_JOBS": str(jobs)})
+''', '''
+def execute(command, cwd, log, env=None):
+    hosted = {"CARGO_BUILD_JOBS": str(os.cpu_count() or 1)} if os.environ.get("GITHUB_ACTIONS") == "true" else {}
+    return helper.run_command(command, cwd, log, {**(env or {}), **hosted})
+''']]
+
+        def identity(contents):
+            tree = ast.parse(contents.decode("utf-8"))
+            functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "execute"]
+            if len(functions) != 1 or profile_ast_value(functions[0]) not in [profile_ast_value(form) for form in forms]:
+                raise ValueError("Unknown native dispatch or environment effects")
+            function = functions[0]
+            form = [profile_ast_value(item) for item in forms].index(profile_ast_value(function))
+            # A changed dispatcher must actually switch known budget forms.
+            # All bytes outside that function, including comments, stay bound.
+            lines = contents.decode("utf-8").splitlines(keepends=True)
+            outside = "".join(lines[:function.lineno - 1] + lines[function.end_lineno:])
+            return form, outside
+
+        previous, updated = identity(old[1]), identity(current[1])
+        return previous[0] != updated[0] and previous[1] == updated[1]
+    except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
+        return False
+
+
+def approved_equivalent_profiles(before, current, policy_ref, names, head):
+    """Share protected exact recipe approvals between scheduling and completion."""
+    policy = load_policy(policy_ref)
+    equivalents = policy.get("equivalent_profile_commands", {})
+    ungrouped = policy.get("equivalent_profile_commands_without_test_groups", {})
+    accepted = {}
+    for name in names:
+        approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
+        predecessors = approved.get(current[name], []) if isinstance(approved, dict) else []
+        if isinstance(predecessors, list) and before[name] in predecessors:
+            accepted[name] = "declared"
+            continue
+        conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
+        predecessors = conditional.get(current[name], []) if isinstance(conditional, dict) else []
+        if (isinstance(predecessors, list) and before[name] in predecessors
+                and not committed_test_groups(head)):
+            accepted[name] = "without_test_groups"
+    return accepted
+
+
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
     try:
@@ -363,19 +644,21 @@ def compatible_profile_commands(receipt, policy_ref, required):
                 return False
         expected = (original_reachable if previous == policy_ref
                     else reachable_profile_commands_hashes(policy_ref, required))
-        equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
-        ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
+        differences = [name for name in required if original_reachable[name] != expected[name]]
+        resources = resource_equivalent_profiles(previous, policy_ref, differences)
+        if resources:
+            print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
+                "original_policy": previous, "current_policy": value("rev-parse", policy_ref),
+                "profiles": sorted(resources), "proof": "only_known_compiler_budget_or_completion_wait_forms",
+                "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
+            }).decode(), flush=True)
+        approved = approved_equivalent_profiles(original_reachable, expected, policy_ref, differences, receipt["head"])
         for name in required:
-            if original_reachable[name] == expected[name]:
+            if original_reachable[name] == expected[name] or name in resources:
                 continue
-            approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
-            predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
-            if not isinstance(predecessors, list) or original_reachable[name] not in predecessors:
-                conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
-                predecessors = conditional.get(expected[name], []) if isinstance(conditional, dict) else []
-                if (not isinstance(predecessors, list) or original_reachable[name] not in predecessors
-                        or committed_test_groups(receipt["head"])):
-                    return False
+            if name not in approved:
+                return False
+            if approved[name] == "without_test_groups":
                 print(f"Preserving exact-head {name} evidence for a committed source without test groups; "
                       "the exact protected recipe pair applies only to unchanged original target selection. "
                       "Grouped or unknown sources still need fresh validation.", flush=True)
@@ -802,9 +1085,12 @@ def report_plan(plan, current_environment=False):
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
-        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+        rule = "half the logical CPUs, at most one per 3 GiB of memory"
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": rule,
+                       "compiler_jobs_setting": "SCODE_ACCEPTANCE_BUILD_JOBS",
                        "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
-        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+        lines.append(f"Author-native Cargo compilation uses {rule} per command (SCODE_ACCEPTANCE_BUILD_JOBS "
+                     "lowers it) at BelowNormal priority. Native test processes use "
                      + ("the protected profile default." if cap is None else
                         f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
         try:
@@ -816,7 +1102,7 @@ def report_plan(plan, current_environment=False):
                      else "unset SCODE_ACCEPTANCE_TEST_THREADS")
             lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
                          f"To use the protected test-pool default, run `{clear}` before retrying this command. "
-                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
+                         "Cargo compilation keeps its independent job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -999,7 +1285,18 @@ def run_command(command, cwd, log, env=None):
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
-    environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
+    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+    jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+    if cap is not None:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+        jobs = min(jobs, int(cap))
+    environment.update({"CARGO_BUILD_JOBS": str(jobs), "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
     # Neither ambient credentials, SDK discovery nor per-command overrides may
@@ -1033,7 +1330,10 @@ def run_command(command, cwd, log, env=None):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                time.sleep(0.15)
+                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass
         except BaseException:
             # Interrupting owned validation must not orphan compiler children.
             for child in psutil.Process(process.pid).children(recursive=True)[::-1]:
@@ -1124,14 +1424,41 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if not names or receipt.get("plan") != plan:
         raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
     if contract_hash(planned_policy) != contract_hash(protected):
-        dispatcher = ".github/local-acceptance/cross_platform.py"
-        if (tracked(planned_policy, dispatcher) != tracked(protected, dispatcher)
-                or reachable_profile_commands_hashes(planned_policy, names)
-                   != reachable_profile_commands_hashes(protected, names)):
+        before = reachable_profile_commands_hashes(planned_policy, names)
+        current = reachable_profile_commands_hashes(protected, names)
+        changed = [name for name in names if before[name] != current[name]]
+        resources = resource_equivalent_profiles(planned_policy, protected, changed)
+        approved = approved_equivalent_profiles(before, current, protected, changed, head)
+        dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
+        if set(changed) - resources - approved.keys() or not dispatcher_matches:
+            print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
+                "version": 1, "run_on": "original author native host", "head": head,
+                "original_policy": planned_policy, "current_policy": protected,
+                "changed_profiles": sorted(set(changed) - resources - approved.keys()),
+                "native_dispatcher_changed": not dispatcher_matches,
+                "same_head_start_pr_renewal_supported": False,
+                "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
+                        "use the supported fresh-source plan route when required. Do not overwrite or re-sign the old plan.",
+            }).decode(), file=sys.stderr, flush=True)
             raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
                                "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        if approved:
+            print("LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(approved),
+                "conditional_profiles": sorted(name for name, kind in approved.items() if kind == "without_test_groups"),
+                "original_plan_and_signatures_unchanged": True, "checks_executed_by_this_proof": False,
+                "full_acceptance_still_required": True,
+            }).decode(), flush=True)
+        if resources or tracked(planned_policy, ".github/local-acceptance/cross_platform.py") != tracked(protected, ".github/local-acceptance/cross_platform.py"):
+            print("LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(resources), "dispatcher": "unchanged_or_known_compiler_budget_forms",
+                "original_plan_and_signatures_unchanged": True, "full_acceptance_still_required": True,
+            }).decode(), flush=True)
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
-              "author/native responsibility, selected commands and native workflow/dispatcher verified unchanged.", flush=True)
+              "author/native responsibility, selected command effects and native workflow verified; "
+              "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
     return receipt
 
 
@@ -1718,13 +2045,14 @@ def verify_inherited_host_lease(claim, directory):
 
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
-    """Run one fresh profile at a time on this host, in arrival order.
+    """Run one fresh reservation at a time on this host, in arrival order.
 
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Each fresh profile rejoins the FIFO, so already waiting work
-    can run before this invocation's next profile. Processes
+    a memory kill. A complete workspace and its immediately following compile-only
+    examples can share one reservation. All other fresh work rejoins the FIFO,
+    so already waiting work runs before this invocation's next reservation. Processes
     started under the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
@@ -1757,7 +2085,8 @@ def host_acceptance_lease(attempt, head):
                     current = "an unrecorded process"
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
-                      "this invocation rejoins the FIFO between fresh profiles; each profile stays exclusive.", flush=True)
+                      "this invocation rejoins the FIFO between fresh reservations; "
+                      "only a workspace and its following compile-only examples may share one.", flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -1766,11 +2095,16 @@ def host_acceptance_lease(attempt, head):
         attempt.setdefault("host_lease_acquisitions", []).append({
             "profile": attempt.get("active_profile"), "wait_seconds": waited, "acquired_at": acquired,
         })
+        members = attempt.get("reservation_profiles", [])
+        if len(members) > 1:
+            attempt["host_lease_acquisitions"][-1]["profiles"] = list(members)
         import psutil
         record = {"version": 1, "active": True, "pid": os.getpid(),
                   "process_created_at": psutil.Process().create_time(),
                   "lease_id": secrets.token_hex(32), "head": head, "root": str(ROOT),
                   "acquired_at": acquired, "profile": attempt.get("active_profile")}
+        if len(members) > 1:
+            record["profiles"] = list(members)
         write_host_lease_record(descriptor, record)
         holder.write_bytes(canonical(record))
         print(f"Acquired this host's local acceptance lease after {waited:.3f}s; "
@@ -1839,9 +2173,37 @@ def scheduled_checks(needed):
     return ordered
 
 
-def perform_check(args, attempt):
+def profile_reservations(ordered, pending):
+    """Share only adjacent fresh workspace/example work; keep order and logical receipts."""
+    ordered, pending = list(ordered), set(pending)
+    reservations, index = [], 0
+    while index < len(ordered):
+        pair = ordered[index:index + 2]
+        if pair == ["native-workspace", "native-examples"] and set(pair) <= pending:
+            reservations.append(pair)
+            index += 2
+        else:
+            reservations.append([ordered[index]])
+            index += 1
+    return reservations
+
+
+def materialize_profile_module(policy_ref, output):
+    """Load protected profile code and its pinned companion from Git objects."""
     import importlib.util
 
+    profiles = output / "protected_profiles.py"
+    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
+    companion = ".github/local-acceptance/compiler_cache.py"
+    if git("ls-tree", "--name-only", policy_ref, "--", companion).stdout.strip():
+        (output / "compiler_cache.py").write_bytes(tracked(policy_ref, companion))
+    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def perform_check(args, attempt):
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
@@ -1876,11 +2238,7 @@ def perform_check(args, attempt):
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
-    profiles = output / "protected_profiles.py"
-    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
-    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = materialize_profile_module(policy_ref, output)
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
@@ -1951,6 +2309,7 @@ def perform_check(args, attempt):
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
+    reservations = profile_reservations(serialized, pending)
     prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
     lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
                         and serialized.index("guard-contract") < serialized.index("native-workspace"))
@@ -1961,7 +2320,8 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "one_fresh_profile_then_fifo_requeue",
+        "reservation": "adjacent_fresh_workspace_and_compile_only_examples_share_one;_others_requeue",
+        "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:
         if "preflight" in needed:
@@ -1980,17 +2340,23 @@ def perform_check(args, attempt):
                 module.run.prepared_workspace = prepare_lint(ROOT, output, base, run_command)
             print("NATIVE_LINT_PREPARATION: lint passed; workspace acceptance remains incomplete. "
                   "Rejoining the existing host FIFO before the contract matrix.", flush=True)
-        for name in serialized:
-            fresh = name in pending
-            attempt["active_profile"] = name
+        for members in reservations:
+            fresh = members[0] in pending
+            attempt["active_profile"] = members[0]
+            attempt["reservation_profiles"] = members
             lease = host_acceptance_lease(attempt, head) if fresh else contextlib.nullcontext()
-            with lease:
-                if fresh and not prepared:
-                    prepare = getattr(module, "prepare_native_checks", None)
-                    if prepare:
-                        module.run.prepared_native = prepare(pending, ROOT, output, run_command)
-                    prepared = True
-                perform_profile(name)
+            try:
+                with lease:
+                    for name in members:
+                        attempt["active_profile"] = name
+                        if name in pending and not prepared:
+                            prepare = getattr(module, "prepare_native_checks", None)
+                            if prepare:
+                                module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                            prepared = True
+                        perform_profile(name)
+            finally:
+                attempt.pop("reservation_profiles", None)
         attempt.pop("active_profile", None)
         clean(head)
     except BaseException:

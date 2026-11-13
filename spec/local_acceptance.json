@@ -42,6 +42,7 @@
     },
     "native-workspace": {
       "include": [
+        ".github/local-acceptance/compiler_cache.py",
         "rust/**",
         "e2e/**",
         "spec/**"
@@ -286,6 +287,9 @@
       ],
       "ca1796cd977a9568cf914e5be21b446fba5b3799f2b287e6222fc387a28ef22f": [
         "01f7b04b7b1b001d2bbdf10c99d7726558062c43297b32f299ba9f1ef2f62105"
+      ],
+      "02544082be74515d1724aa0d34746ead21d9acac7d22f0dcb4501ec3fc5f9006": [
+        "4b6020384092c0fd96d7ac9fc4b14bd0b6d9c8b37b2ebd26eeab7f9103975296"
       ]
     },
     "native-sdk": {
@@ -319,6 +323,9 @@
       ],
       "0c7bcfeecea68e2f1634d2bc35966ce3d75d25fe8fcdbf42c81c34efa6751f94": [
         "c92f36fcb5aa319e9306911065e860e05cb9b34ae6e0fb0b68ca991f87c2f3b9"
+      ],
+      "6db83ebaad7faead10f207cc1eb66631de034d0806a79e8e1d2b994f9707b184": [
+        "ffb7d02b95775a79c96bf9176792a2ea75db86d0bcf7d4ef9f7dd6efb8b8c914"
       ]
     },
     "native-workspace": {
@@ -362,6 +369,22 @@
       "0b66e493ecd64230b97ecc9249b2ec3dbc998b85b8e00824cb6ac31f4825fb25": [
         "cb5be559beed742e98f00b371274e6385d02c8c3f5388328c2999032c17975f7",
         "3baea622107fac9d023c689a4cf54dbf160e74800ffa747d1362ed07232eb733"
+      ],
+      "016326f2d793fb3da2ef822e26b18c6b8c9dcec85df76cd2df2fba4656bcf8ce": [
+        "13db9efd01e539cb677871949556d54778de29c722c6921d898378478d944a76",
+        "6f6cf4d4adb1c6d190211b1ebc063eee4b3da16787555640223ae388c5b3892d",
+        "a0ac09f8e89843e90c6fe82a1cc2de93eca9a31501e57e7e30060d5d4ab58288"
+      ],
+      "297c6bd782681553338718153d869121e473b06e6a942b7ff1ea82a4e3d9a5a6": [
+        "13db9efd01e539cb677871949556d54778de29c722c6921d898378478d944a76",
+        "6f6cf4d4adb1c6d190211b1ebc063eee4b3da16787555640223ae388c5b3892d",
+        "a0ac09f8e89843e90c6fe82a1cc2de93eca9a31501e57e7e30060d5d4ab58288"
+      ],
+      "4f236af3f99345644de1da5a2636938fe9b4395ecd70ebb9209f4b9d038d103a": [
+        "13db9efd01e539cb677871949556d54778de29c722c6921d898378478d944a76",
+        "297c6bd782681553338718153d869121e473b06e6a942b7ff1ea82a4e3d9a5a6",
+        "6f6cf4d4adb1c6d190211b1ebc063eee4b3da16787555640223ae388c5b3892d",
+        "a0ac09f8e89843e90c6fe82a1cc2de93eca9a31501e57e7e30060d5d4ab58288"
       ]
     },
     "native-resize": {
@@ -399,6 +422,16 @@
       ],
       "281034b64d0e4f18fc3feb06a6157a8a0b44fd05076be45d08a835bac11acc1b": [
         "3b55127a7032a9caab580140cea189536be5a1157fadca17005f5a7636afee21"
+      ],
+      "a758be83698940dcdd2975b91efc0e36d4fc78325a79d98c6866af3d9c2a4c40": [
+        "dbdea82beed406dbdefd266503afbd8e0c3587db3a7334d69c3c9265623d11ba"
+      ],
+      "83c63dfba3413e354d3f5a371795a3220ef1acb188d06081038867609f0340d7": [
+        "dbdea82beed406dbdefd266503afbd8e0c3587db3a7334d69c3c9265623d11ba"
+      ],
+      "3c2e68d9e8fd5e4f4dffe5bc6b522aa28d35a393e357a0b33b3ed8b3605af28c": [
+        "83c63dfba3413e354d3f5a371795a3220ef1acb188d06081038867609f0340d7",
+        "dbdea82beed406dbdefd266503afbd8e0c3587db3a7334d69c3c9265623d11ba"
       ]
     },
     "native-release": {
@@ -422,6 +455,22 @@
       ],
       "c7029fba0a1c2dbe6b15be2e5adce8579f813d5ac6af31eae52eb323cf25f24a": [
         "847856bfa61e6933cb6a4b2eae76fc076b417e27803913eea7a699a13cefa6f2"
+      ],
+      "2715609a41caaaf76f910978fbb592eec5d52d78e5f82ba806c70e17d16a80db": [
+        "bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3",
+        "d2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63",
+        "e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca"
+      ],
+      "d19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9": [
+        "bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3",
+        "d2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63",
+        "e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca"
+      ],
+      "e1bfca0902e71760d2ac63fdb769a1948b6faaae949e575406b8c80894c4af9a": [
+        "bd3f57a4eebed9c30f8f13749d3ec0db2b0c138f94d98b90ab508debf25dbfd3",
+        "d19f30dd91757fa49d76cc8c49ca81c04961ca223394744c573d5dbf6d98d9d9",
+        "d2c5126a84ea3a0443b2cf614aefc1594b88a2b031a9d33373f4b38a461daf63",
+        "e1e4abe1816801e18ee01ae1847717ff2194daab988bc4154f7a732d0bef26ca"
       ]
     },
     "native-services": {
@@ -455,6 +504,22 @@
       ],
       "b837d5a9609a0d9e5883390ea830da5d09b646cdbbe4fdeb049ff0e63f285243": [
         "1f05dad1715f4c94af106781085821eb04a77f506176db85b24547fce424c1d2"
+      ],
+      "d56b4eed9a7dd7eeeb8162e0660d2baec370a01d712051dd0b5f6b45c7304d2f": [
+        "72e3f84c45fdee605a57d50508be1781eec5a7344a67407d61fb941846978505",
+        "e1cfa02a3480bd33e93fdb08093de50d4481023c6719c8f00bc5aba602abf0ba",
+        "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
+      ],
+      "44ab82e8f313785d110eabf2a7383812b3516b7c65d30a289caaaaeda866464a": [
+        "72e3f84c45fdee605a57d50508be1781eec5a7344a67407d61fb941846978505",
+        "e1cfa02a3480bd33e93fdb08093de50d4481023c6719c8f00bc5aba602abf0ba",
+        "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
+      ],
+      "3e01571367b2a1ae09bff8848548fffe141593116fb43a4a8516e8eea122a234": [
+        "44ab82e8f313785d110eabf2a7383812b3516b7c65d30a289caaaaeda866464a",
+        "72e3f84c45fdee605a57d50508be1781eec5a7344a67407d61fb941846978505",
+        "e1cfa02a3480bd33e93fdb08093de50d4481023c6719c8f00bc5aba602abf0ba",
+        "f5d0a2af7ff63c207ab8332ae404aaf10d3a43ef1ac9e994a8c5917cf00e394c"
       ]
     },
     "native-cohost": {
@@ -488,6 +553,22 @@
       ],
       "7f8d9433c970c98751f39464eaed131ac6562dbf16dbfa0d725e99e92f146f1b": [
         "09b36d642a3a9dc1a78961f01550dfe7c629712b679cdb054037aeec7fb18005"
+      ],
+      "d154f8959decabe4df5bc2918c646f414d62059ba03d60d68fd1c936034c07fb": [
+        "24911e24c0b3ceb25ea437ecd0f4838f93dd39f18ac755f284efe33d70b8bc80",
+        "2e023580a1097c66ba23325636184219cfc1c967f05cde8361ac5f01ca0e3ce9",
+        "9afb3c252ce51d9b398a87a80c999c57398cb7e91ef4adeb79583533bc645a48"
+      ],
+      "d16e6bd43e14cf6b23c65392df3be7e580d23126b5664ce9db9abaf1b4847305": [
+        "24911e24c0b3ceb25ea437ecd0f4838f93dd39f18ac755f284efe33d70b8bc80",
+        "2e023580a1097c66ba23325636184219cfc1c967f05cde8361ac5f01ca0e3ce9",
+        "9afb3c252ce51d9b398a87a80c999c57398cb7e91ef4adeb79583533bc645a48"
+      ],
+      "e80f581a45014e06c135d891e0691ebe5db9be601cbf5907dc396fc22152bb60": [
+        "24911e24c0b3ceb25ea437ecd0f4838f93dd39f18ac755f284efe33d70b8bc80",
+        "2e023580a1097c66ba23325636184219cfc1c967f05cde8361ac5f01ca0e3ce9",
+        "9afb3c252ce51d9b398a87a80c999c57398cb7e91ef4adeb79583533bc645a48",
+        "d16e6bd43e14cf6b23c65392df3be7e580d23126b5664ce9db9abaf1b4847305"
       ]
     },
     "native-examples": {
@@ -496,6 +577,22 @@
       ],
       "ac5ec2c8e188123db8c0a749b5b63cf2b5e5e543aa0254f56349bdff98d74771": [
         "6f233329e44a12aa6fb5421c6d31f64333e8adb8abc1adfe3830bdaac21f1cd7"
+      ],
+      "4a5e6d37975c26f9feb4c863d2b893cf8ed92d386b3074a836aa379821d3e2df": [
+        "0aecc8756ec9ebb580bb95ff557bdb25a56ed47994d63bd4153c72d848d0a66d",
+        "9a7b50957d9f6d1fcb0cd2ee6dc9a6e133f787606449eceb7940e5b0c678ab20",
+        "9be9adda18aa816f9275482157ab0f33a03921dd4b5412ea6a57c13f8366c432"
+      ],
+      "f753118e14ded2f83db26dab5b5dbf0407d1f0cb041d3657015723dce7fc518c": [
+        "0aecc8756ec9ebb580bb95ff557bdb25a56ed47994d63bd4153c72d848d0a66d",
+        "9a7b50957d9f6d1fcb0cd2ee6dc9a6e133f787606449eceb7940e5b0c678ab20",
+        "9be9adda18aa816f9275482157ab0f33a03921dd4b5412ea6a57c13f8366c432"
+      ],
+      "4600bc7c92af2202541d61194116b07af48151a7f4ec97b9c94584c013207237": [
+        "0aecc8756ec9ebb580bb95ff557bdb25a56ed47994d63bd4153c72d848d0a66d",
+        "9a7b50957d9f6d1fcb0cd2ee6dc9a6e133f787606449eceb7940e5b0c678ab20",
+        "9be9adda18aa816f9275482157ab0f33a03921dd4b5412ea6a57c13f8366c432",
+        "f753118e14ded2f83db26dab5b5dbf0407d1f0cb041d3657015723dce7fc518c"
       ]
     },
     "guard-contract": {
@@ -506,16 +603,38 @@
     "rendering": {
       "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
         "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ],
+      "d5d0f935543d83e4897fc8f89e55212e968420108d056d86869d1b5e03aee41a": [
+        "8d8efc73a61795e6f420beb3d2b4119f34419e959f67eeb15998e9cba2603ffb"
       ]
     },
     "browser": {
       "2469e6f7ebba2bd0d25ea82f5c35f4753439971d830e54dcdd984125fcfc0d94": [
         "63decb1ae7d9b7e5493dfb36db3c0ae10c8759b3076b8a186ebdb8c6348fba09"
+      ],
+      "d5d0f935543d83e4897fc8f89e55212e968420108d056d86869d1b5e03aee41a": [
+        "8d8efc73a61795e6f420beb3d2b4119f34419e959f67eeb15998e9cba2603ffb"
       ]
     },
     "native-context": {
       "cbb31f23fd408e95f6b464cf99eae1c3b63841fed02d168e0892902a739e4318": [
         "6a12ad6eb7527f66385e3fb9eb556a4f66227c1fceb023fe57e14ed35c6fe95b"
+      ],
+      "c696d58f770eb0af90a3aa3850072d591e19ec29296f5ac7f069caeb148ef45a": [
+        "3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b",
+        "66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9",
+        "70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869"
+      ],
+      "921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc": [
+        "3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b",
+        "66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9",
+        "70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869"
+      ],
+      "1cb8e58c233540ed81b4f01d18e7209635fed9b5622af84c2f1a799434cf1fa7": [
+        "3db0f2c95f88e0f5b4c81a4da72aa5d922ad9b8f4cad27e4bc48f03a8dcce97b",
+        "66ecb740b0f6077db7d20d0d2a2e23767066e81fca82a54971fb1ba290c15bb9",
+        "70190239ad62442cfaa24e6d9065edb13a6f624c8a516d5bb4cab0570c736869",
+        "921dee385ac5f2b1605e5120cfedcc05bbb28cbfc115d655d3e6849dce8217cc"
       ]
     }
   },
@@ -535,6 +654,16 @@
       "0cbcc89d280b60aef0e38195e115dcb3a1a00b89a37738f379b6bf5063d3dbaa": [
         "94e3c5de81c05a5a6e75cb578951e5c899ee1bf3debb17ad7faaf3b2beb79d8b"
       ]
-    }
+    },
+    "preflight": {},
+    "native-sdk": {},
+    "native-examples": {},
+    "native-resize": {},
+    "rendering": {},
+    "browser": {},
+    "native-release": {},
+    "native-context": {},
+    "native-services": {},
+    "native-cohost": {}
   }
 }

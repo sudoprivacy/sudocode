@@ -1430,7 +1430,11 @@ Each profile owns a private server and stops it on success or failure. A retaine
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned
 servers. Client-side compilation keeps rustc under the original priority observer.
-Compilers stay BelowNormal/nice while actual tests stay Normal. Busy disk-cache
+Compilers stay BelowNormal/nice while actual tests stay Normal. Each command
+record signs how many distinct compiler children ran at each priority, by
+compiler name. A profile's cache session (tool, server, statistics, priorities
+and tool commands) is recorded once, on its first cached command; the others
+name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY

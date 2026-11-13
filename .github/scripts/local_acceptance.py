@@ -1307,7 +1307,7 @@ def run_command(command, cwd, log, env=None):
                    if key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     command = [shutil.which(str(command[0])) or str(command[0]), *map(str, command[1:])]
     started = time.monotonic()
-    priorities = {}
+    observed = {}
     log.parent.mkdir(parents=True, exist_ok=True)
     print("+ " + shlex.join(map(str, command)), flush=True)
     with log.open("wb") as stream:
@@ -1325,7 +1325,7 @@ def run_command(command, cwd, log, env=None):
                             if (name in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
                                     or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
                                 child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
-                                priorities[f"{child.pid}:{name}"] = child.nice()
+                                observed[child.pid, name] = child.nice()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -1344,6 +1344,12 @@ def run_command(command, cwd, log, env=None):
             process.terminate()
             process.wait()
             raise
+    # Sign how many distinct compiler children ran at each priority, by name.
+    # The summary stays bounded however many children a build spawns.
+    priorities = {}
+    for (_pid, name), priority in observed.items():
+        counts = priorities.setdefault(name, {})
+        counts[str(priority)] = counts.get(str(priority), 0) + 1
     result = {"command": list(map(str, command)), "exit_code": process.returncode,
               "elapsed_seconds": round(time.monotonic() - started, 3),
               "log_sha256": sha(log.read_bytes()), "compiler_priorities": priorities}

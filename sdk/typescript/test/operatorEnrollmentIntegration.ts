@@ -227,7 +227,7 @@ async function main(){
     assert.equal(network.status().filter(row=>row.state==='connected').length,readyBindings.length);
     for(const {file,bytes,binding,records} of readyBindings){
       assert.equal(network.connectionFor(binding.threadId).sessionId,binding.acp.sessionId);
-      const sent=await sendScodeMessage(network.connectionFor(binding.threadId),{to:'fixture-peer',message:'refreshed original binding'});
+      const sent=await sendScodeMessage(network.connectionFor(binding.threadId),{to:'fixture-peer',summary:'refreshed original actor',message:'refreshed original binding'});
       assert.equal(JSON.parse(sent.content).routing.sender,binding.actor);
       assert.equal(profileOf(binding.actor).closeTimeoutMs,1900);
       assert.deepEqual(fs.readFileSync(file),bytes,'refresh and ready reconnect preserve the complete binding');

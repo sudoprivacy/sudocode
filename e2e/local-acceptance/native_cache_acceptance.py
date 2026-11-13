@@ -77,12 +77,19 @@ fn main() {
         text = (SOURCE / ".github/workflows" / workflow).read_text(encoding="utf-8")
         assert text.count("workspaces: ${{ steps.cache_layout.outputs.workspaces }}") == count
     target = Path(layouts[0]["target"])
-    helper.run_command(["cargo", "build", "--locked", "--target-dir", str(target)], producer, output / "producer-build.log")
+    helper.run_command(["cargo", "build", "--locked", "--message-format=json", "--target-dir", str(target)],
+                       producer, output / "producer-build.log")
     extension = ".exe" if os.name == "nt" else ""
     binary = target / "debug" / ("layout-canary" + extension)
     helper.run_command([str(binary)], producer, output / "producer-run.log",
                        {"EXPECTED_SHARED_TARGET": str(target), "EXPECTED_SOURCE": str(producer)})
-    shared = next((target / "debug/deps").glob("liblayout_shared-*.rlib"))
+    # Cargo names the dependency's rlib in its JSON messages; the build-dir
+    # layout that holds it is not a stable interface.
+    messages = [json.loads(line) for line in (output / "producer-build.log").read_text(encoding="utf-8").splitlines()
+                if line.startswith("{")]
+    shared = next(Path(name) for message in messages
+                  if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "layout_shared"
+                  for name in message["filenames"] if name.endswith(".rlib"))
     before = (hashlib.sha256(shared.read_bytes()).hexdigest(), shared.stat().st_mtime_ns)
     # The production cache discards workspace outputs. Keep the dependency but
     # remove the producer's executable/fingerprint before relocating the source.

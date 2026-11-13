@@ -172,7 +172,8 @@ def run(output):
                      extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"})
     assert "Restored VFS compiler context differs" in refused.read_text()
     debug = source / ".ci-cache/target/debug"
-    outputs = [debug / "libnexus_search_plugin.so"] + [path for path in (debug / "deps").glob("user_runtime-*")
+    # The test executable sits wherever this Cargo's build-dir layout puts it.
+    outputs = [debug / "libnexus_search_plugin.so"] + [path for path in debug.rglob("user_runtime-*")
                                                      if path.is_file() and path.suffix == ""]
     assert len(outputs) == 2, outputs
     before = {str(path.relative_to(source)): (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)

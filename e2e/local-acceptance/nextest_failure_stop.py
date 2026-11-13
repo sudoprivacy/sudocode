@@ -124,10 +124,15 @@ fn original_failure() {
     else:
         terminal = None
     helper.run_command(["cargo", "test", "--manifest-path", str(fixture / "Cargo.toml"),
-                        "--locked", "--offline", "--no-run"], fixture, output / "build.log", environment)
+                        "--locked", "--offline", "--no-run", "--message-format=json"], fixture, output / "build.log", environment)
     suffix = ".exe" if os.name == "nt" else ""
-    programs = [p for p in (target / "debug/deps").glob("process-*")
-                if p.is_file() and (p.suffix == ".exe" if suffix else p.suffix == "")]
+    # Cargo names each test executable in its JSON messages; the build-dir
+    # layout that holds it is not a stable interface.
+    messages = [json.loads(line) for line in (output / "build.log").read_text(encoding="utf-8").splitlines()
+                if line.startswith("{")]
+    programs = [Path(message["executable"]) for message in messages
+                if message.get("reason") == "compiler-artifact" and message["target"]["kind"] == ["test"]
+                and message["target"]["name"] == "process"]
     assert len(programs) == 1, programs
     binary = target / "debug" / ("compiler-object-consumer" + suffix)
     programs = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in [programs[0], binary]}

@@ -194,7 +194,8 @@ Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
 the visual and performance journeys. The shared installer provisions native
-sidecars beside the dev-profile test drivers and reports their exact hashes;
+sidecars in the dev-profile target's `debug/deps`, which nextest puts on the
+test drivers' library search path, and reports their exact hashes;
 the explicit system-host diagnostic retains its legacy compatibility findings.
 See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
 architecture details.

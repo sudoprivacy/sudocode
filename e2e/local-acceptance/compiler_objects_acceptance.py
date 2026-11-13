@@ -76,10 +76,17 @@ fn normal_priority() {
 #[test]
 fn real_pty_and_driver_layout() {
     normal_priority();
-    let exe = std::env::current_exe().unwrap();
-    assert_eq!(exe.parent().unwrap().file_name().unwrap(), "deps");
-    #[cfg(windows)] for sidecar in ["conpty.dll", "OpenConsole.exe"] {
-        assert!(exe.parent().unwrap().join(sidecar).is_file());
+    let target = Path::new(env!("CARGO_TARGET_DIR")).canonicalize().unwrap();
+    assert!(std::env::current_exe().unwrap().canonicalize().unwrap().starts_with(&target));
+    // nextest puts the target's legacy `debug/deps` on the library search path,
+    // which is where the terminal installer places the pinned ConPTY drivers.
+    #[cfg(windows)] {
+        let drivers = target.join("debug").join("deps");
+        let search = std::env::var_os("PATH").unwrap();
+        assert!(std::env::split_paths(&search).any(|dir| dir.canonicalize().ok().as_ref() == Some(&drivers)));
+        for sidecar in ["conpty.dll", "OpenConsole.exe"] {
+            assert!(drivers.join(sidecar).is_file());
+        }
     }
     let bin = env!("CARGO_BIN_EXE_compiler-object-consumer");
     let mut session = pty_expect::PtySession::spawn(bin, &[]).unwrap();

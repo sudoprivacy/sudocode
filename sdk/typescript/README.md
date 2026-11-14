@@ -33,6 +33,8 @@ the lock is released after the owned receiver and monitor close successfully.
 The monitor requests synchronization and limited query access, never termination
 rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
 used from the OS installation, with no Python/psutil or native Node addon needed.
+The helper imports the Utility module from that PowerShell installation and
+qualifies its compiler and JSON commands, including under MCP's reduced environment.
 If PowerShell exits before its synchronous compiler-bootstrap completion
 marker, descendant cleanup remains UNKNOWN and the receiver lock is retained.
 If initial qualification also failed, the cleanup error retains that original

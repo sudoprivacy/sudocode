@@ -65,9 +65,10 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
       [key, process.env[key]?.slice(0, 2048) ?? null])) };
   let lastPhase = 'spawn_requested';
   let commandLookup: { found: boolean; elapsedMs: number } | undefined;
+  let utilityImportedMs: number | undefined;
   const phases: { phase: string; elapsedMs: number }[] = [];
   const diagnostic = () => `ownerMonitor=${JSON.stringify({ pid: child.pid ?? null,
-    lastPhase, elapsedMs: Math.round(performance.now() - startedAt), phases, stderr, launchContext, commandLookup })}`;
+    lastPhase, elapsedMs: Math.round(performance.now() - startedAt), phases, stderr, launchContext, commandLookup, utilityImportedMs })}`;
   let finish!: (result: ReceiverOwnerEnd) => void;
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };
@@ -111,6 +112,10 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
         const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
         if (!line) continue;
         const value = JSON.parse(line);
+        if (value.diagnostic === 'bootstrap_utility_imported') {
+          utilityImportedMs ??= Math.round(performance.now() - startedAt);
+          continue;
+        }
         // Keep this separate from the original qualification milestones. A
         // returned command lookup neither completes bootstrap nor proves exit.
         if (value.diagnostic === 'bootstrap_command_lookup_returned' && typeof value.found === 'boolean') {

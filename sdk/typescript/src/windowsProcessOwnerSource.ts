@@ -8,17 +8,20 @@ $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::WriteLine('{"phase":"bootstrap_started"}')
 [Console]::Out.Flush()
-# Resolve the same cmdlet before its unchanged invocation, so the original
-# startup deadline can distinguish command discovery from compiler startup.
-# This may warm discovery caches; reaching this marker is not qualification.
-$bootstrapCommand = $ExecutionContext.InvokeCommand.GetCommand('Add-Type', [System.Management.Automation.CommandTypes]::Cmdlet)
+# The MCP launcher may omit PSModulePath. Import the OS-installed module by
+# its absolute manifest path instead of discovering it through ambient paths.
+Microsoft.PowerShell.Core\Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
+[Console]::WriteLine('{"diagnostic":"bootstrap_utility_imported"}')
+[Console]::Out.Flush()
+# These diagnostics do not complete compiler bootstrap or qualify an owner.
+$bootstrapCommand = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Add-Type', [System.Management.Automation.CommandTypes]::Cmdlet)
 if ($null -eq $bootstrapCommand) {
     [Console]::WriteLine('{"diagnostic":"bootstrap_command_lookup_returned","found":false}')
 } else {
     [Console]::WriteLine('{"diagnostic":"bootstrap_command_lookup_returned","found":true}')
 }
 [Console]::Out.Flush()
-Add-Type -TypeDefinition @'
+Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -84,13 +87,13 @@ public sealed class ScodeProcessOwner : IDisposable {
 $selected = $null
 $receiver = $null
 try {
-    $request = [Console]::In.ReadLine() | ConvertFrom-Json
+    $request = [Console]::In.ReadLine() | Microsoft.PowerShell.Utility\ConvertFrom-Json
     [Console]::WriteLine('{"phase":"request_received"}')
     $selected = [ScodeProcessOwner]::new([int]$request.pid)
     [Console]::WriteLine('{"phase":"owner_opened"}')
     $identity = @{platform='win32'; pid=$selected.Pid; createdFiletime100ns=$selected.CreatedFiletime100ns; exe=$selected.Exe}
     if ($request.mode -eq 'capture') {
-        [Console]::WriteLine((@{phase='captured'; identity=$identity} | ConvertTo-Json -Compress))
+        [Console]::WriteLine((@{phase='captured'; identity=$identity} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
     } elseif ($request.mode -eq 'watch') {
         if ($selected.CreatedFiletime100ns -cne $request.createdFiletime100ns -or $selected.Exe -cne $request.exe) {
             throw 'Selected process identity differs; do not adopt a replacement PID'
@@ -98,12 +101,12 @@ try {
         $receiver = [ScodeProcessOwner]::new([int]$request.receiverPid)
         [Console]::WriteLine('{"phase":"receiver_opened"}')
         $selected.RequireAlive()
-        [Console]::WriteLine((@{phase='ready'; identity=$identity} | ConvertTo-Json -Compress))
+        [Console]::WriteLine((@{phase='ready'; identity=$identity} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
         $reason = $selected.Wait($receiver)
-        [Console]::WriteLine((@{phase='ended'; reason=$reason} | ConvertTo-Json -Compress))
+        [Console]::WriteLine((@{phase='ended'; reason=$reason} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
     } else { throw 'Unknown owner adapter operation' }
 } catch {
-    [Console]::WriteLine((@{phase='error'; error=$_.Exception.Message} | ConvertTo-Json -Compress))
+    [Console]::WriteLine((@{phase='error'; error=$_.Exception.Message} | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
     exit 1
 } finally {
     if ($null -ne $receiver) { $receiver.Dispose() }

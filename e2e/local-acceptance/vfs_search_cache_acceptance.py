@@ -106,6 +106,8 @@ def run(output):
     command("git", "config", "user.name", "VFS cache fixture", cwd=source)
     command("git", "config", "user.email", "cache@example.invalid", cwd=source)
     write(".gitignore", "/.ci-cache/\n")
+    # The driver's own toolchain pin, as nexus-vfs carries it; prepare() requires it to match.
+    write("rust-toolchain.toml", f'[toolchain]\nchannel = "{cache.DRIVER_TOOLCHAIN}"\n')
     write("Cargo.toml", '[workspace]\nmembers=["rust/*"]\nresolver="2"\n[profile.dev]\nopt-level=1\n'
           '[profile.dev.package."*"]\nopt-level=2\n')
     write("rust/plugin/Cargo.toml", '[package]\nname="nexus-search-plugin"\nversion="0.0.0"\nedition="2021"\n'

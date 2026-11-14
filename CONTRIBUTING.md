@@ -194,7 +194,8 @@ Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
 Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
 the visual and performance journeys. The shared installer provisions native
-sidecars beside the dev-profile test drivers and reports their exact hashes;
+sidecars in the dev-profile target's `debug/deps`, which nextest puts on the
+test drivers' library search path, and reports their exact hashes;
 the explicit system-host diagnostic retains its legacy compatibility findings.
 See [the terminal host contract](e2e/terminal-resize/README.md) for scope and
 architecture details.
@@ -1434,20 +1435,28 @@ the object cache never supplies a previous test result or a source-freshness
 attestation. Original Cargo arguments and environment settings, including target
 inheritance in nested Cargo and compile-time environment reads, are retained.
 Explicit caller wrappers and sccache settings remain authoritative.
+Cargo reaches sccache through a small rustc wrapper that each session compiles
+from `compiler_cache.py`. Cargo moves a unit's arguments into one argument file
+when they do not fit on a command line, which Cargo 1.100's per-dependency
+`-L` paths make common for the largest crates on Windows. sccache 0.19 would
+expand that file onto one command line again (mozilla/sccache#2787), so the
+wrapper gives such units to rustc with the file, uncached, and records how many
+in the session's `argument_file_units`.
 Each profile owns a private server and stops it on success or failure. A retained
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned
 servers. Client-side compilation keeps rustc under the original priority observer.
 Compilers stay BelowNormal/nice while actual tests stay Normal. Each command
 record signs how many distinct compiler children ran at each priority, by
-compiler name. A profile's cache session (tool, server, statistics, priorities
-and tool commands) is recorded once, on its first cached command; the others
+compiler name. A profile's cache session (tool, wrapper, server, statistics,
+priorities and tool commands) is recorded once, on its first cached command; the others
 name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
 processes with independent outputs, changed features/compile-time environment,
-an original failing source, repaired source and explicit-wrapper controls. It
+an original failing source, repaired source, explicit-wrapper controls, and a
+build and lint where Cargo passes every unit's arguments in a file. It
 runs inside the existing native-cache guard. Cache code changes additionally
 select the actual native workspace on author and complementary hosts. These
 checks add no product coverage credit. Hosted object persistence and whole-PR

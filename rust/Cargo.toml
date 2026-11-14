@@ -52,7 +52,6 @@ nexus-raft = { package = "raft", git = "https://github.com/nexi-lab/nexus-vfs", 
 
 agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
-agent-client-protocol-tokio = "0.11"
 axum = { version = "0.8", features = ["ws"] }
 pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", rev = "85d3cfc96fdd8e68579a11a63c5dc53cf11edc1b" }
 serde_json = "1"

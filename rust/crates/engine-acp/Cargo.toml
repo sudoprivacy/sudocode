@@ -27,7 +27,6 @@ engine-host = { path = "../engine-host" }
 engine-core = { path = "../engine-core" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
-agent-client-protocol-tokio = { workspace = true }
 axum = { workspace = true, optional = true }
 a2a = { workspace = true, optional = true }
 managed-agent = { workspace = true, optional = true }

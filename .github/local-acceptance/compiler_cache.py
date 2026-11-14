@@ -26,6 +26,114 @@ ARCHIVES = {
     ("darwin", "aarch64"): ("aarch64-apple-darwin", "tar.gz", "a35a0b7d622618774bc1bb8102d72562dfb21e619f88b153b370d7f89bc286af"),
 }
 
+# Cargo's rustc wrapper during a session. Session.start compiles it with the
+# host's rustc and builds in the verified sccache path.
+WRAPPER_SOURCE = r"""//! Cargo's RUSTC_WRAPPER for the local compiler-object cache.
+//!
+//! Cargo passes `<compiler> <arguments>`, or `<compiler> @<file>` once the
+//! operating system refused the arguments inline. sccache 0.17 and later reads
+//! that file and starts rustc with every argument inline again, which Windows
+//! refuses past 32,767 characters (mozilla/sccache#2787). Arguments that do not
+//! fit inline therefore reach the compiler in a file, uncached; every other
+//! unit goes through sccache.
+use std::env::{args_os, current_exe};
+use std::ffi::{OsStr, OsString};
+use std::io;
+use std::path::PathBuf;
+use std::process::{exit, Command, ExitStatus};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The sccache executable this session verified.
+const CACHE: &str = include_str!("cache-tool");
+
+fn main() {
+    let mut arguments: Vec<OsString> = args_os().skip(1).collect();
+    if arguments.is_empty() {
+        fail("Cargo passes the compiler as the first argument");
+    }
+    let compiler = arguments.remove(0);
+    if arguments.iter().any(|argument| argument.as_encoded_bytes().starts_with(b"@")) {
+        record("cargo");
+        finish(&compiler, Command::new(&compiler).args(&arguments).status());
+    }
+    match Command::new(CACHE).arg(&compiler).args(&arguments).status() {
+        Err(error) if too_long(&error) => direct(&compiler, &arguments, &error),
+        result => finish(CACHE.as_ref(), result),
+    }
+}
+
+/// ERROR_FILENAME_EXCED_RANGE on Windows and E2BIG elsewhere, the errors on
+/// which Cargo retries with an argument file.
+fn too_long(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(if cfg!(windows) { 206 } else { 7 })
+}
+
+/// Start the compiler as Cargo would: programs inline, arguments in a file.
+fn direct(compiler: &OsStr, arguments: &[OsString], error: &io::Error) -> ! {
+    let programs = arguments
+        .iter()
+        .take_while(|argument| !argument.as_encoded_bytes().starts_with(b"-"))
+        .count();
+    let mut contents = String::new();
+    for argument in &arguments[programs..] {
+        match argument.to_str() {
+            Some(text) if !text.contains('\n') => {
+                contents.push_str(text);
+                contents.push('\n');
+            }
+            _ => fail(&format!("cannot start {CACHE}: {error}; an argument has no argument-file form")),
+        }
+    }
+    let file = directory().join(format!("{}.args", unique()));
+    if let Err(write) = std::fs::write(&file, contents) {
+        fail(&format!("cannot write {}: {write}", file.display()));
+    }
+    record("wrapper");
+    let mut reference = OsString::from("@");
+    reference.push(&file);
+    let result = Command::new(compiler)
+        .args(&arguments[..programs])
+        .arg(reference)
+        .status();
+    let _ = std::fs::remove_file(&file);
+    finish(compiler, result)
+}
+
+/// The session counts the units that went to the compiler in a file.
+fn record(reason: &str) {
+    let path = directory().join(format!("{}.{reason}", unique()));
+    if let Err(error) = std::fs::write(&path, b"") {
+        fail(&format!("cannot record {}: {error}", path.display()));
+    }
+}
+
+fn directory() -> PathBuf {
+    match current_exe() {
+        Ok(executable) => executable.with_file_name("argument-files"),
+        Err(error) => fail(&format!("cannot locate this wrapper: {error}")),
+    }
+}
+
+fn unique() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn finish(program: &OsStr, result: io::Result<ExitStatus>) -> ! {
+    match result {
+        Ok(status) => exit(status.code().unwrap_or(101)),
+        Err(error) => fail(&format!("cannot start {}: {error}", program.to_string_lossy())),
+    }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("compiler-cache rustc wrapper: {message}");
+    exit(101)
+}
+"""
+
 
 def digest(contents):
     return hashlib.sha256(contents).hexdigest()
@@ -108,7 +216,7 @@ class Session:
     def __init__(self, tool, directory, execute, cache=None):
         self.tool, self.directory, self.execute_command = tool, Path(directory), execute
         self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / VERSION)
-        self.environment, self.server = None, None
+        self.environment, self.server, self.wrapper = None, None, None
         self.tool_commands, self.records, self.priorities = [], [], {}
         self.server_history = []
         self.storage_lock = None
@@ -251,6 +359,7 @@ class Session:
         if not self.acquire_storage():
             return False
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        wrapper = self.build_wrapper()
         configuration = self.directory / "local-cache.toml"
         configuration.write_text('[cache.disk]\ndir = ' + json.dumps(str(self.cache.resolve())) + '\nsize = 2147483648\n', encoding="utf-8")
         with socket.socket() as reservation:
@@ -260,7 +369,7 @@ class Session:
                             "SCCACHE_CACHED_CONF": str((self.directory / "cached-config").resolve()),
                             "SCCACHE_CACHE_SIZE": "2G", "SCCACHE_DIRECT": "false",
                             "SCCACHE_SERVER_PORT": str(port), "SCCACHE_IDLE_TIMEOUT": "600",
-                            "SCCACHE_CLIENT_SIDE": "1",
+                            "SCCACHE_CLIENT_SIDE": "1", "RUSTC_WRAPPER": wrapper,
                             "SCODE_COMPILER_CACHE_OWNER": uuid.uuid4().hex}
         if self.tool_command("version", "--version").strip() != "sccache " + VERSION:
             raise RuntimeError("Unexpected pinned compiler-cache version")
@@ -272,6 +381,29 @@ class Session:
         if stats["max_cache_size"] != 2 * 1024**3:
             raise RuntimeError("Compiler-cache disk limit differs from the declared 2 GiB")
         return True
+
+    def build_wrapper(self):
+        """Compile Cargo's rustc wrapper around this session's verified sccache."""
+        source = self.directory / "wrapper"
+        source.mkdir(mode=0o700)
+        (source / "main.rs").write_bytes(WRAPPER_SOURCE.encode("utf-8"))
+        (source / "cache-tool").write_bytes(self.tool["executable"].encode("utf-8"))
+        (self.directory / "argument-files").mkdir(mode=0o700)
+        executable = self.directory / ("rustc-wrapper" + (".exe" if os.name == "nt" else ""))
+        receipt = self.execute_command(["rustc", "--edition=2021", "-C", "opt-level=1", "--crate-name", "rustc_wrapper",
+                                        str(source / "main.rs"), "-o", str(executable)],
+                                       self.directory, self.directory / "wrapper-build.log")
+        self.wrapper = {"source_sha256": digest(WRAPPER_SOURCE.encode("utf-8")), "executable": str(executable.resolve()),
+                        "executable_sha256": digest(executable.read_bytes()), "build": receipt}
+        return self.wrapper["executable"]
+
+    def argument_file_units(self):
+        """Units the wrapper gave the compiler in an argument file: Cargo's, or its own."""
+        units = {"cargo": 0, "wrapper": 0}
+        for path in (self.directory / "argument-files").iterdir():
+            if path.suffix[1:] in units:
+                units[path.suffix[1:]] += 1
+        return units
 
     def execute(self, command, cwd, log, env=None):
         frontend = compiler_frontend(command)
@@ -285,8 +417,7 @@ class Session:
             print("COMPILER_CACHE: owned server exited; preserving original Cargo for remaining commands.", flush=True)
             return self.execute_command(command, cwd, log, env)
         try:
-            result = self.execute_command(command, cwd, log,
-                                          {**(env or {}), **self.environment, "RUSTC_WRAPPER": self.tool["executable"]})
+            result = self.execute_command(command, cwd, log, {**(env or {}), **self.environment})
         except RuntimeError:
             receipt = Path(log).with_suffix(".command.json")
             if receipt.is_file():
@@ -313,9 +444,12 @@ class Session:
         owner = self.cache / ".server-owner.json"
         if owner.exists() and json.loads(owner.read_text(encoding="utf-8"))["owner"] == self.environment["SCODE_COMPILER_CACHE_OWNER"]:
             owner.unlink()
+        if self.wrapper is not None:
+            self.wrapper["argument_file_units"] = self.argument_file_units()
+            print("COMPILER_CACHE_ARGUMENT_FILES=" + json.dumps(self.wrapper["argument_file_units"]), flush=True)
         # Every cached command shares this session. Record it once, on the
         # first command, and bind each command to it by SHA-256.
-        session = {"version": VERSION, "tool": self.tool, "server": self.server, "stats": stats,
+        session = {"version": VERSION, "tool": self.tool, "wrapper": self.wrapper, "server": self.server, "stats": stats,
                    "server_history": self.server_history, "compiler_priorities": self.priorities,
                    "tool_commands": self.tool_commands}
         identity = digest(json.dumps(session, sort_keys=True, separators=(",", ":")).encode())

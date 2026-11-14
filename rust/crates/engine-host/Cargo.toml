@@ -22,11 +22,6 @@ runtime = { path = "../runtime" }
 # The MCP engine state merges plugin-advertised MCP servers (`PluginLoadOutcome`)
 # and exposes the discovered tools as `RuntimeToolDefinition`s.
 plugins = { path = "../plugins" }
-# The managed-agent DI seam (`SpawnTask` + `SpawnHandle`) that
-# `SudoCodeSpawnAdapter` implements so nexus can host an agent loop in-process.
-# No subprocess-host (that is the raw-ACP path, not the in-process co-host) —
-# see the workspace manifest for the pin and why it is one pin.
-managed-agent = { workspace = true }
 tools = { path = "../tools" }
 # The standalone session's own kernel (`local_kernel`): a CLI session's file
 # tools reach a VFS, like the co-hosted agent's do, so neither host has hooks or
@@ -75,6 +70,9 @@ tempfile = "3"
 # `cohost_mock_llm` stands the co-host up against a scripted model, so the
 # co-host has a CI gate that needs no API key and no network beyond loopback.
 mock-anthropic-service = { path = "../mock-anthropic-service" }
+# The co-host tests resume a seeded session through `managed_agent::SpawnOptions`.
+# The adapter that implements the seam lives in `engine-acp`.
+managed-agent = { workspace = true }
 
 [lints]
 workspace = true

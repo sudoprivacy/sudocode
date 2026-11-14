@@ -19,6 +19,9 @@ publish.workspace = true
 # If you are tempted to add anything else to this crate — don't. Each function
 # here is the smallest safe wrapper around one OS call; policy belongs in a
 # crate the lint still covers.
+#
+# The empty table records that choice for Cargo's `missing_lints_inheritance`.
+[lints]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

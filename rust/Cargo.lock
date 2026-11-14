@@ -71,21 +71,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-client-protocol-tokio"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e1572b219f22c4b3be0f20f934c8b6f1d1457126ce72923c4f6608f96153b65"
-dependencies = [
- "agent-client-protocol",
- "futures",
- "serde",
- "serde_json",
- "shell-words",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1537,7 +1522,6 @@ dependencies = [
  "a2a",
  "agent-client-protocol",
  "agent-client-protocol-schema",
- "agent-client-protocol-tokio",
  "async-trait",
  "axum",
  "backends",
@@ -4432,9 +4416,6 @@ name = "runtime"
 version = "0.2.42"
 dependencies = [
  "a2a",
- "agent-client-protocol",
- "agent-client-protocol-schema",
- "agent-client-protocol-tokio",
  "async-trait",
  "axum",
  "backends",
@@ -4478,7 +4459,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "uuid",
- "walkdir",
 ]
 
 [[package]]

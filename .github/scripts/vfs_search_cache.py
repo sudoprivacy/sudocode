@@ -16,6 +16,14 @@ CASE = "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes"
 # The previous producer used these same compiler commands and environment.
 # Only its exact current-pin key is eligible for the one-time format migration.
 LEGACY_RECIPE = "168f452f188184f9b2e655184aa3faf3208e9e9bf915a9670918ca016382e879"
+# The Rust release the pinned nexus-vfs revision builds with: its own
+# rust-toolchain.toml. The driver is that repository's code, so it builds with
+# that repository's compiler, not with this repository's pin; a toolchain bump
+# here then changes nothing about how it builds. Fixed here because the cache key
+# is computed before the checkout exists; prepare() refuses a checkout whose
+# rust-toolchain.toml names another release, so bumping the lockfile revision
+# moves this with it.
+DRIVER_TOOLCHAIN = "1.99.0"
 
 
 def pin(root):
@@ -31,12 +39,40 @@ def capture(*args, cwd):
     return subprocess.check_output(args, cwd=cwd)
 
 
+def driver_rustc(root):
+    """`rustc -vV` of the driver's own toolchain, installing it once if this host lacks it.
+
+    Callers parse this command's output, so the installer's progress is kept out
+    of it and reported only if the install fails.
+    """
+    query = ["rustup", "run", DRIVER_TOOLCHAIN, "rustc", "-vV"]
+    found = subprocess.run(query, cwd=root, capture_output=True)
+    if found.returncode == 0:
+        return found.stdout.decode()
+    install = subprocess.run(["rustup", "toolchain", "install", DRIVER_TOOLCHAIN, "--profile", "minimal",
+                              "--no-self-update"], cwd=root, capture_output=True)
+    if install.returncode:
+        raise RuntimeError(f"cannot install the VFS driver's Rust {DRIVER_TOOLCHAIN}: "
+                           + (install.stderr or install.stdout).decode(errors="replace")[-2000:])
+    return capture(*query, cwd=root).decode()
+
+
+def require_driver_toolchain(source):
+    """The checkout must pin the release DRIVER_TOOLCHAIN names."""
+    text = (source / "rust-toolchain.toml").read_text(encoding="utf-8")
+    channel = re.search(r'(?m)^\s*channel\s*=\s*"([^"]+)"', text)
+    if not channel or channel.group(1) != DRIVER_TOOLCHAIN:
+        raise RuntimeError(f"the VFS driver pins Rust {channel.group(1) if channel else '(none)'}, but "
+                           f"DRIVER_TOOLCHAIN is {DRIVER_TOOLCHAIN}; update it together with the lockfile revision")
+
+
 def environment(source):
     """Keep external fixture artifacts separate from the candidate's build graph."""
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("CARGO_PKG_") and key not in {"CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_MANIFEST_LINKS"}}
     env.update(CARGO_HOME=str(source / ".ci-cache/cargo"),
-               CARGO_TARGET_DIR=str(source / ".ci-cache/target"), CARGO_INCREMENTAL="0")
+               CARGO_TARGET_DIR=str(source / ".ci-cache/target"), CARGO_INCREMENTAL="0",
+               RUSTUP_TOOLCHAIN=DRIVER_TOOLCHAIN)
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--locked", "--no-deps", "--format-version=1",
         "--manifest-path", str(source / "Cargo.toml"),
@@ -75,7 +111,8 @@ def compiler_inputs(root):
     names = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
              "CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "LDFLAGS", "RUSTUP_TOOLCHAIN", "ImageOS", "ImageVersion"}
     inputs = {"pin": pin(root), "root": str(source), "recipe": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "rustc": capture("rustc", "-vV", cwd=root).decode(),
+              # The driver builds with the toolchain its own revision pins.
+              "rustc": driver_rustc(root),
               "environment": {key: value for key, value in os.environ.items()
                               if key in names or key.startswith(prefixes)},
               "cargo_configs": {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -200,6 +237,7 @@ def prepare(root):
         if current != revision:
             update_pin(source, current, revision)
         count = verify(source, revision)
+        require_driver_toolchain(source)
         if identity.is_symlink():
             raise RuntimeError("VFS compiler-input identity must be a regular file")
         identity.parent.mkdir(parents=True, exist_ok=True)
@@ -245,6 +283,10 @@ def run(root, output, test=False):
         start = time.monotonic()
         path = output / f"{index:02d}.log"
         print("VFS normal Cargo command: " + " ".join(command), flush=True)
+        # env carries RUSTUP_TOOLCHAIN=DRIVER_TOOLCHAIN: this repository's pin must
+        # not build another repository's pinned source. Rust 1.100 moved test
+        # executables out of target/<profile>/deps, and the driver's search-plugin
+        # test helper expects them there.
         with path.open("wb") as stream:
             result = subprocess.run(command, cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT)
         row = {"command": command, "exit_code": result.returncode, "seconds": round(time.monotonic() - start, 3),

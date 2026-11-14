@@ -76,10 +76,17 @@ fn normal_priority() {
 #[test]
 fn real_pty_and_driver_layout() {
     normal_priority();
-    let exe = std::env::current_exe().unwrap();
-    assert_eq!(exe.parent().unwrap().file_name().unwrap(), "deps");
-    #[cfg(windows)] for sidecar in ["conpty.dll", "OpenConsole.exe"] {
-        assert!(exe.parent().unwrap().join(sidecar).is_file());
+    let target = Path::new(env!("CARGO_TARGET_DIR")).canonicalize().unwrap();
+    assert!(std::env::current_exe().unwrap().canonicalize().unwrap().starts_with(&target));
+    // nextest puts the target's legacy `debug/deps` on the library search path,
+    // which is where the terminal installer places the pinned ConPTY drivers.
+    #[cfg(windows)] {
+        let drivers = target.join("debug").join("deps");
+        let search = std::env::var_os("PATH").unwrap();
+        assert!(std::env::split_paths(&search).any(|dir| dir.canonicalize().ok().as_ref() == Some(&drivers)));
+        for sidecar in ["conpty.dll", "OpenConsole.exe"] {
+            assert!(drivers.join(sidecar).is_file());
+        }
     }
     let bin = env!("CARGO_BIN_EXE_compiler-object-consumer");
     let mut session = pty_expect::PtySession::spawn(bin, &[]).unwrap();
@@ -155,6 +162,24 @@ fn nested_cargo_and_explicit_target() {
                 command(f"nextest-{index}", [nextest, "nextest", "run", "--offline", "--locked", "--no-tests=fail"],
                         workspace, env, active.execute)
                 if index == 1:
+                    # Cargo passes arguments that do not fit inline as one
+                    # argument file; force that for every unit. The wrapper gives
+                    # rustc and clippy-driver the file unexpanded, outside the cache.
+                    def cached(label):
+                        stats = json.loads(active.tool_command(label, "--show-stats", "--stats-format", "json"))["stats"]
+                        return sum(sum(stats[key]["counts"].values()) for key in ("cache_hits", "cache_misses"))
+                    before = cached("argument-file-before")
+                    forced = {**env, "__CARGO_TEST_FORCE_ARGFILE": "1"}
+                    command("argument-file-retirement",
+                            ["cargo", "clean", "--package", "memchr", "--target-dir", str(target)], workspace)
+                    command("argument-file-build", build, workspace, forced, active.execute)
+                    assert command("argument-file-binary", [str(binary)], workspace).strip() == "SOURCE1:alpha:false"
+                    built = active.argument_file_units()
+                    command("argument-file-lint", ["cargo", "clippy", "--offline", "--locked", "--all-targets"],
+                            workspace, forced, active.execute)
+                    units = active.argument_file_units()
+                    assert built["cargo"] > 0 and units["cargo"] > built["cargo"] and units["wrapper"] == 0, units
+                    assert cached("argument-file-after") == before, "argument-file units reached the cache"
                     with cache.session(tool, output / "busy-cache", helper.run_command, output / "objects") as busy:
                         command("busy-cache-original", build, workspace, env, busy.execute)
                     assert busy.disabled and busy.server is None and not busy.tool_commands

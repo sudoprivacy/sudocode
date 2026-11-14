@@ -11,3 +11,4 @@ export * from './codexSetup';
 export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles, type ProfileRefresh } from './codexEnrollment';
 export * from './lifecycle';
 export * from './receiverOwner';
+export { CLAUDE_WAKE_HOOK_TIMEOUT_SECONDS } from './claudeWake';

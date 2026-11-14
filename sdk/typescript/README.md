@@ -102,14 +102,18 @@ the hook for `SessionStart` and `Stop` with `asyncRewake`, so it is re-armed at
 the end of every turn:
 
 ```json
-{ "type": "command", "asyncRewake": true,
+{ "type": "command", "asyncRewake": true, "timeout": 86400,
   "command": "node /abs/server.cjs --claude-wake --config /abs/private/claude.json" }
 ```
 
 The waiter exits 2 with the pending `<channel …>` frames on stderr, which wakes
-the session; one waiter runs per spool, a cursor keeps delivered peers from
-repeating, and a peer that arrives while none is armed waits for the next. This
-is Claude Code's counterpart of the `turn/start` a Codex attachment uses.
+the session. Claude Code ends an `asyncRewake` hook at its `timeout` (600 s
+when unset), so the entry sets 86400 and the waiter returns on its own a minute
+earlier. The waiter armed last waits and an older one returns, so the session is
+covered for a day after its latest turn. Each delivered range of the spool is
+claimed exactly once, so a peer is never handed over twice; one that arrives
+while no waiter is armed waits for the next. This is Claude Code's counterpart
+of the `turn/start` a Codex attachment uses.
 
 ### Every Claude Code session as its own Agent
 

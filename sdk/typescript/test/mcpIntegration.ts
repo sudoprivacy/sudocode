@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
 const root = path.resolve(__dirname, '../..');
-const { connectScode, sendScodeMessage, scodeNativeA2aAudit } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectScode, sendScodeMessage, scodeNativeA2aAudit, CLAUDE_WAKE_HOOK_TIMEOUT_SECONDS } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scode-acp-mcp-'));
 const fixture = path.join(root, 'test/fixtures/scode-direct-a2a-agent.mjs');
 const journal = (file: string) => fs.existsSync(file)
@@ -243,11 +243,20 @@ async function checkWake(): Promise<void> {
   let notifications = 0;
   client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'), params: z.any() }),
     () => { notifications += 1; });
-  const wake = () => new Promise<{ code: number | null; stderr: string }>(resolve => {
+  const waiters: Array<ReturnType<typeof spawn>> = [];
+  const arm = () => {
     const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['ignore', 'ignore', 'pipe'] });
+    waiters.push(child);
     let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
-    child.on('exit', code => resolve({ code, stderr }));
-  });
+    return { child, exited: new Promise<{ code: number | null; stderr: string }>(resolve =>
+      child.on('exit', code => resolve({ code, stderr }))) };
+  };
+  const wake = () => arm().exited;
+  const peer = (text: string) => fs.appendFileSync(spool, JSON.stringify({ at: new Date().toISOString(),
+    from: 'fixture-peer', verified: true, text: `<mailbox-message from="fixture-peer">${text}</mailbox-message>` }) + '\n');
+  const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const within = <T>(promise: Promise<T>, ms: number, failure: string) => Promise.race([promise,
+    pause(ms).then(() => { throw new assert.AssertionError({ message: failure }); })]);
   try {
     await client.connect(transport);
     const deadline = Date.now() + 5000;
@@ -262,20 +271,55 @@ async function checkWake(): Promise<void> {
     const first = await wake();
     assert.equal(first.code, 2, 'pending peers wake Claude');
     assert.match(first.stderr, /^<channel source="nexus_scode" from="fixture-peer" verified="false" kind="message" summary="greeting">\n<mailbox-message from="/);
-    // Delivered entries are not repeated; a second waiter holds the slot until the next peer.
-    const armed = wake();
-    await new Promise(resolve => setTimeout(resolve, 300));
-    const duplicate = await wake();
-    assert.equal(duplicate.code, 0, 'one waiter per spool');
-    fs.appendFileSync(spool, JSON.stringify({ at: new Date().toISOString(), from: 'fixture-peer', verified: true,
-      text: '<mailbox-message from="fixture-peer">later</mailbox-message>' }) + '\n');
-    const later = await armed;
+    // The waiter armed by the latest turn covers the session; an earlier one returns without delivering.
+    const earlier = wake();
+    await pause(300);
+    const newest = wake();
+    const superseded = await within(earlier, 3000, 'a newer waiter takes over');
+    assert.equal(superseded.code, 0, 'a newer waiter takes over');
+    assert.equal(superseded.stderr, '');
+    peer('later');
+    const later = await newest;
     assert.equal(later.code, 2);
-    assert.doesNotMatch(later.stderr, /greeting/, 'the cursor skips delivered peers');
+    assert.doesNotMatch(later.stderr, /greeting/, 'delivered peers are not repeated');
     assert.match(later.stderr, /verified="true">\n<mailbox-message from="fixture-peer">later/);
+    // Claude Code ends a waiter at its hook timeout: the next waiter delivers what arrived meanwhile.
+    const ended = arm();
+    await pause(300);
+    ended.child.kill('SIGKILL');
+    await ended.exited;
+    peer('while-unarmed');
+    const next = await wake();
+    assert.equal(next.code, 2);
+    assert.match(next.stderr, /while-unarmed/);
+    assert.doesNotMatch(next.stderr, /later/);
+    // Waiters overlapping in a handover hand each peer over exactly once.
+    for (let round = 0; round < 5; round += 1) {
+      peer(`overlap-${round}`);
+      const overlapping = [arm(), arm(), arm()];
+      const results: Array<{ code: number | null; stderr: string }> = [];
+      for (const waiter of overlapping) void waiter.exited.then(result => results.push(result));
+      const deadline = Date.now() + 5000;
+      while (!results.some(result => result.code === 2) && Date.now() < deadline) await pause(20);
+      await pause(1200);
+      // A waiter that lost the overlap keeps waiting for the next peer; release it.
+      if (results.length < overlapping.length) peer(`release-${round}`);
+      const all = await Promise.all(overlapping.map(waiter => waiter.exited));
+      const delivered = all.map(result => result.stderr).join('');
+      assert.equal(delivered.match(new RegExp(`overlap-${round}<`, 'g'))?.length, 1, `round ${round}: one delivery`);
+      assert.ok((delivered.match(new RegExp(`release-${round}<`, 'g'))?.length ?? 0) <= 1);
+      assert.ok(all.every(result => result.code === 0 || result.code === 2), JSON.stringify(all));
+    }
+    // The documented hook entry carries the timeout the waiter plans around.
+    assert.match(fs.readFileSync(path.join(root, 'README.md'), 'utf8'),
+      new RegExp(`"asyncRewake": true, "timeout": ${CLAUDE_WAKE_HOOK_TIMEOUT_SECONDS},`));
     assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
     assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message' && row.delivery === 'wake').length, 1);
-  } finally { await client.close(); }
+  } finally {
+    // A failed check must not leave a waiter polling the fixture spool.
+    for (const child of waiters) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await client.close();
+  }
 }
 
 /** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,

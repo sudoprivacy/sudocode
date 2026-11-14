@@ -1,6 +1,7 @@
 // Real Windows handles and public MCP entry; no simulated wait functions.
 const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const {spawn,fork}=require('node:child_process'),{once}=require('node:events'),{setTimeout:delay}=require('node:timers/promises');
+const {spawn,fork,execFile}=require('node:child_process'),{once}=require('node:events'),{setTimeout:delay}=require('node:timers/promises');
+const {promisify}=require('node:util');
 const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
 const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
 const {StdioServerTransport}=require('@modelcontextprotocol/sdk/server/stdio.js');
@@ -17,6 +18,48 @@ function originalProcess(){
   const closed=once(child,'close');
   let closing;
   return {child,close(){return closing??=(async()=>{child.stdin.end();await deadline(closed);})();}};
+}
+async function retainPackagedFailure(directory,transport,owner,stderr,error){
+  // Run only after an original assertion fails, before its existing cleanup.
+  // This current process snapshot is diagnostic, never custody/exit proof.
+  const reportedMonitorPids=[...stderr.matchAll(/ownerMonitor=\{"pid":(\d+)/g)].map(match=>Number(match[1]));
+  const rootPids=[...new Set([process.pid,transport.pid,owner.child.pid,...reportedMonitorPids].filter(Number.isInteger))];
+  const report={observedAt:new Date().toISOString(),error:String(error),rootPids,stderr,
+    parentEnvironment:Object.fromEntries(['TEMP','TMP','PSModulePath','SystemRoot'].map(key=>[key,process.env[key]??null])),
+    files:{}};
+  for(const name of ['fixture.jsonl','audit.jsonl']){
+    try{
+      const file=path.join(directory,name),size=fs.statSync(file).size,fd=fs.openSync(file,'r');
+      try{
+        const bytes=Buffer.alloc(Math.min(size,65536));fs.readSync(fd,bytes,0,bytes.length,Math.max(0,size-bytes.length));
+        report.files[name]={bytes:size,truncated:size>bytes.length,tail:bytes.toString('utf8')};
+      }finally{fs.closeSync(fd);}
+    }catch(cause){report.files[name]={error:String(cause)};}
+  }
+  try{
+    const script=`$ErrorActionPreference='Stop'
+$selected=[System.Collections.Generic.HashSet[uint32]]::new()
+@(${rootPids.join(',')}) | ForEach-Object { [void]$selected.Add([uint32]$_) }
+$rows=@(Get-CimInstance Win32_Process)
+do {
+  $changed=$false
+  foreach($row in $rows) {
+    if($selected.Contains([uint32]$row.ParentProcessId)) {
+      if($selected.Add([uint32]$row.ProcessId)) { $changed=$true }
+    }
+  }
+} while($changed)
+@($rows | Where-Object { $selected.Contains([uint32]$_.ProcessId) } |
+  Select-Object ProcessId,ParentProcessId,CreationDate,Name,ExecutablePath,KernelModeTime,UserModeTime) |
+  ConvertTo-Json -Compress`;
+    const {stdout}=await promisify(execFile)(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),
+      ['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+      {windowsHide:true,timeout:5000,maxBuffer:1024*1024,encoding:'utf8'});
+    report.processSnapshot=JSON.parse(stdout);
+  }catch(cause){report.processSnapshotError=String(cause);}
+  fs.writeFileSync(path.join(directory,'packaged-owner-failure.json'),JSON.stringify(report,null,2)+'\n');
+  // The managed CI retains this command log even when the temp directory is lost.
+  console.error('PACKAGED_OWNER_FAILURE_DIAGNOSTIC='+JSON.stringify(report));
 }
 async function main(){
   if(process.platform!=='win32'){console.log('SKIP Windows handle adapter on non-Windows; shared MCP tests remain required');return;}
@@ -72,6 +115,10 @@ async function main(){
       assert.equal(audit.filter(row=>row.phase==='receiver_owner_bound').length,1);
       assert.equal(audit.find(row=>row.phase==='receiver_owner_ended')?.reason,'owner_exited');
       console.log('PASS packaged MCP: one config/SID/guard; real owner exit closes receiver');
+    }catch(error){
+      try{await retainPackagedFailure(directory,transport,owner,stderr,error);}
+      catch(cause){console.error('Packaged owner diagnostic failed: '+String(cause));}
+      throw error;
     }finally{await client.close();await owner.close();}
 
     // Full packaged MCP + real Windows compiler-bootstrap failure. A regular

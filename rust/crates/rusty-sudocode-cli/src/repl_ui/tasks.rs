@@ -81,9 +81,7 @@ impl TaskSummary {
             String::new()
         };
         let full = format!("{full}{suffix}");
-        let metadata = completed_turn
-            .map(|turn| format!(" · turn {turn} finished"))
-            .unwrap_or_default();
+        let metadata = completed_turn.map_or_default(|turn| format!(" · turn {turn} finished"));
         let logo = self
             .animates_status()
             .then(|| crate::render::activity::spinner_frame(frame));

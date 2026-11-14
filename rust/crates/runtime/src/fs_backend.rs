@@ -2363,6 +2363,131 @@ impl NexusVfsFsBackend {
     }
 }
 
+/// How long an idempotent write keeps trying through failures that leave its outcome
+/// open. Long enough to ride out a leader restart or a network blip between nodes
+/// (observed: about 20 s), short enough that a caller still hears about an outage.
+const IDEMPOTENT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Apply an idempotent write whose failure can leave its outcome open.
+///
+/// A write sent without an answer may have landed, and one refused before it applied
+/// did not; [`nexus_vfs_client::MutationOutcome`] says which. Either open outcome is
+/// settled by reading the state back (`landed`, which reports a missing entry as
+/// `Ok(false)`): the write is there, or it is sent again with backoff, for at most
+/// `budget`. An error that carries no open outcome is a definite answer and returns
+/// at once.
+///
+/// The read-back also asks whether the node still answers, and it retries only
+/// while it does. The open outcomes worth riding out come from behind a live node:
+/// its zone leader restarting, a blip between the two. A read-back that cannot
+/// reach the node says the failure is local — the node is down or unreachable, or
+/// this client's worker is gone — so the caller hears that at once, not after the
+/// budget.
+///
+/// Only for writes whose repetition is harmless — a directory, a link to a fixed
+/// target. An append or a message send must never come through here: a second copy
+/// is a duplicate, not a no-op.
+fn apply_idempotent<T>(
+    what: &str,
+    budget: std::time::Duration,
+    mut apply: impl FnMut() -> io::Result<T>,
+    mut landed: impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
+    use nexus_vfs_client::MutationOutcome;
+    let deadline = std::time::Instant::now() + budget;
+    let mut delay = std::time::Duration::from_millis(100);
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let Err(error) = apply() else {
+            return Ok(());
+        };
+        let Some(outcome) = MutationOutcome::of(&error) else {
+            return Err(error);
+        };
+        match landed() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(unreachable) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{what}: the node did not answer a read-back ({unreachable}): {error}"),
+                ))
+            }
+        }
+        if std::time::Instant::now() + delay > deadline {
+            let state = match outcome {
+                MutationOutcome::Unknown => "its outcome is still unknown",
+                MutationOutcome::NotCommitted => "the node applied none of them",
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{what}: {attempts} attempt(s) over {budget:?} failed and {state}: {error}"
+                ),
+            ));
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(2));
+    }
+}
+
+/// How long a link written through a zone leader may take to become visible on this
+/// node before the replica is reported as lagging.
+const LINK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read a link back after `Setattr`. Two different things can stand between the
+/// write and a usable link, and only one of them is permanent:
+/// - a daemon that predates the wire field drops the target silently (an unknown
+///   proto field is ignored by design), so the entry exists as a link to NOWHERE and
+///   the index would name a conversation nobody can follow;
+/// - a node that forwarded the write to its zone's leader shows the entry only once
+///   its own replica applies it, so a stat right after can miss it.
+///
+/// Retries only while the entry is not visible yet, for at most `wait`.
+fn verify_link(
+    alias: &str,
+    target: &str,
+    wait: std::time::Duration,
+    mut stat: impl FnMut() -> io::Result<nexus_vfs_client::VfsStat>,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut delay = std::time::Duration::from_millis(50);
+    loop {
+        match stat() {
+            Ok(found) => {
+                return match found.link_target {
+                    Some(got) if got == target => Ok(()),
+                    Some(got) => Err(io::Error::other(format!(
+                        "{alias}: link target came back as {got:?}, expected {target:?}"
+                    ))),
+                    None => Err(io::Error::other(format!(
+                        "{alias}: the daemon stored the link without a target — it is older \
+                         than the `Setattr` link_target field, so the index would name a \
+                         conversation nobody can follow"
+                    ))),
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "{alias}: the node accepted the link but still does not show it \
+                             after {wait:?}: this node's replica of the zone is behind its \
+                             leader (replica lag), so the conversation is indexed only once \
+                             it catches up"
+                        ),
+                    ));
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl FsBackend for NexusVfsFsBackend {
     fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
         let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
@@ -2540,26 +2665,21 @@ impl FsBackend for NexusVfsFsBackend {
         let alias = &self.authorize_target(alias, ResourceAccessKind::Write)?;
         let target = &self.authorize_target(target, ResourceAccessKind::Write)?;
         if let Some(parent) = std::path::Path::new(alias).parent() {
-            let _ = self.create_dir_all(&parent.to_string_lossy());
+            self.create_dir_all(&parent.to_string_lossy())?;
         }
-        self.client.ensure_link(alias, target, &self.auth_token)?;
-        // Read the target back, because a daemon that predates the wire field ignores
-        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
-        // the chat-list index would list a peer whose conversation cannot be found.
-        // An unknown proto field is dropped silently by design, so the only way to know
-        // it landed is to ask. One stat, on a provisioning path that runs once per
-        // conversation.
-        match self.read_link(alias) {
-            Ok(got) if got == *target => Ok(()),
-            Ok(got) => Err(io::Error::other(format!(
-                "{alias}: link target came back as {got:?}, expected {target:?}"
-            ))),
-            Err(e) => Err(io::Error::other(format!(
-                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
-                 is older than the `Setattr` link_target field, so the index would name \
-                 a conversation nobody can follow"
-            ))),
-        }
+        apply_idempotent(
+            alias,
+            IDEMPOTENT_WRITE_BUDGET,
+            || self.client.ensure_link(alias, target, &self.auth_token),
+            || match self.remote_stat(alias) {
+                Ok(found) => Ok(found.link_target.as_deref() == Some(target.as_str())),
+                Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(unreachable) => Err(unreachable),
+            },
+        )?;
+        verify_link(alias, target, LINK_VISIBILITY_WAIT, || {
+            self.remote_stat(alias)
+        })
     }
 
     /// Follow a link planted by [`Self::link`] — the target out of its metadata.
@@ -2607,7 +2727,16 @@ impl FsBackend for NexusVfsFsBackend {
         for component in path.split('/').filter(|c| !c.is_empty()) {
             prefix.push('/');
             prefix.push_str(component);
-            self.client.ensure_dir(&prefix, &self.auth_token)?;
+            apply_idempotent(
+                &prefix,
+                IDEMPOTENT_WRITE_BUDGET,
+                || self.client.ensure_dir(&prefix, &self.auth_token),
+                || match self.remote_stat(&prefix) {
+                    Ok(found) => Ok(found.is_directory),
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(unreachable) => Err(unreachable),
+                },
+            )?;
         }
         Ok(())
     }
@@ -2672,6 +2801,203 @@ impl FsBackend for NexusVfsFsBackend {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// An idempotent write settles an open outcome: by reading it back when it may
+    /// have landed, by sending it again when it did not, and never past a definite
+    /// refusal.
+    #[test]
+    fn an_idempotent_write_settles_an_open_outcome() {
+        use nexus_vfs_client::MutationOutcome::{NotCommitted, Unknown};
+        use std::cell::Cell;
+        use std::time::Duration;
+        let open = |outcome: nexus_vfs_client::MutationOutcome| {
+            outcome.error(io::ErrorKind::Other, "connection lost")
+        };
+        let budget = Duration::from_secs(5);
+
+        // Sent, no answer, and it is there: no second write.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Ok(true),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 1);
+
+        // Sent, no answer, not there: sent again, and the second one answers.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(Unknown))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // Refused with nothing applied: the read-back finds nothing, so it is sent again.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(NotCommitted))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // A definite answer returns at once, untouched.
+        let sent = Cell::new(0);
+        let denied = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            || Ok(true),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (sent.get(), denied.kind()),
+            (1, io::ErrorKind::PermissionDenied)
+        );
+
+        // A node that cannot answer the read-back is down: no further attempt.
+        let sent = Cell::new(0);
+        let down = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Err(io::Error::from(io::ErrorKind::ConnectionRefused)),
+        )
+        .unwrap_err();
+        assert_eq!(sent.get(), 1);
+        assert!(
+            down.to_string().contains("did not answer a read-back"),
+            "{down}"
+        );
+
+        // An outcome that stays open is reported as such once the budget is spent.
+        let lost = apply_idempotent(
+            "/a",
+            Duration::from_millis(250),
+            || Err::<(), _>(open(Unknown)),
+            || Ok(false),
+        )
+        .unwrap_err();
+        let message = lost.to_string();
+        assert!(
+            message.contains("its outcome is still unknown"),
+            "{message}"
+        );
+        assert!(message.contains("attempt(s)"), "{message}");
+    }
+
+    fn link_stat(target: Option<&str>) -> nexus_vfs_client::VfsStat {
+        nexus_vfs_client::VfsStat {
+            size: 0,
+            is_directory: false,
+            entry_type: 6,
+            zone_id: "sharedzone".into(),
+            modified_at_ms: None,
+            link_target: target.map(str::to_owned),
+        }
+    }
+
+    fn not_found() -> io::Error {
+        io::Error::new(io::ErrorKind::NotFound, ": not found")
+    }
+
+    /// A link the local replica has not applied yet appears without an error.
+    #[test]
+    fn a_link_that_appears_after_replica_lag_is_accepted() {
+        let mut calls = 0;
+        verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_secs(2),
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(not_found())
+                } else {
+                    Ok(link_stat(Some("/conversations/c")))
+                }
+            },
+        )
+        .expect("a link that becomes visible is accepted");
+        assert_eq!(calls, 3);
+    }
+
+    /// A link that never becomes visible is replica lag, never an old daemon.
+    #[test]
+    fn a_link_that_stays_invisible_reports_replica_lag() {
+        let error = verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_millis(120),
+            || Err(not_found()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("replica lag"), "{error}");
+        assert!(!error.to_string().contains("older than"), "{error}");
+    }
+
+    /// Only an entry stored without its target means the daemon dropped the field.
+    #[test]
+    fn a_link_stored_without_target_reports_an_old_daemon() {
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(None))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("older than the `Setattr` link_target field"),
+            "{error}"
+        );
+        let wrong = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(Some("/u")))
+        })
+        .unwrap_err();
+        assert!(wrong.to_string().contains("came back as"), "{wrong}");
+    }
+
+    /// Any other stat failure is returned as is, without waiting.
+    #[test]
+    fn a_failed_stat_is_returned_unchanged() {
+        let started = std::time::Instant::now();
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(5), || {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     fn temp_path(label: &str) -> String {
         let nanos = SystemTime::now()

@@ -3028,8 +3028,7 @@ fn write_envelope(
 fn generate_request_id(prefix: &str, target: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
+        .map_or_default(|d| d.as_secs());
     let target_slug = sanitize_recipient(target);
     format!("{prefix}_{target_slug}_{ts:x}")
 }
@@ -7613,8 +7612,7 @@ impl ApiClient for ProviderRuntimeClient {
         let route = self
             .chain
             .first()
-            .map(|entry| format!("{}|{}", entry.client.route_identity(), entry.model))
-            .unwrap_or_default();
+            .map_or_default(|entry| format!("{}|{}", entry.client.route_identity(), entry.model));
         format!(
             "{}|{}|{:?}|{}",
             route,
@@ -8101,7 +8099,7 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
         })
-        .map(|message| {
+        .map_or_default(|message| {
             message
                 .blocks
                 .iter()
@@ -8112,7 +8110,6 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
                 .collect::<Vec<_>>()
                 .join("")
         })
-        .unwrap_or_default()
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -8508,7 +8505,7 @@ fn slugify_agent_name(description: &str) -> String {
 }
 
 fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
-    let trimmed = subagent_type.map(str::trim).unwrap_or_default();
+    let trimmed = subagent_type.map_or_default(str::trim);
     if trimmed.is_empty() {
         return String::from("general-purpose");
     }
@@ -14328,12 +14325,11 @@ printf 'pwsh:%s' "$1"
     fn required_names(spec: &super::ToolSpec) -> Vec<String> {
         spec.input_schema["required"]
             .as_array()
-            .map(|a| {
+            .map_or_default(|a| {
                 a.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     #[test]

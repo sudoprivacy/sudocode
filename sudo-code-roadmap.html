@@ -1716,85 +1716,14 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Mosswork author validation</td>
-      <td>For application, mixed and unknown inputs, <code>make all</code>
-      and <code>make precommit</code> check backend
-      lint/format and frontend formatting before typechecking and tests.
-      Formatting errors preserve the source and Git index; the mandatory output
-      prints repair guidance only when a style check fails, directing the author
-      to run <code>make format-all</code> and refresh staged inputs or the
-      validation snapshot. Real Make/Git/backend controls check
-      early refusal, manual repair, unchanged inputs and propagation of a real
-      pytest failure. Explicit <code>make test</code> and the original precommit
-      recipes, assertions and deadlines are retained. Default test workers are two; explicit overrides remain available. Shared pytest defaults run previously failed
-      cases and new test files first within the selected scope. The
-      mandatory Make output states the ordering and first-failure cleanup.
-      Real pytest controls generate their own caches and cover known failures,
-      new files, repaired cases and empty caches; no copied or fabricated
-      dependency graph is used. Reordering may repeat module fixture setup,
-      so these controls do not prove a whole-cycle speedup. Within the application
-      route, <code>make all</code> starts with the full non-live suite when verified
-      history is unavailable. Ordinary maxfail assertion failures may preserve
-      genuinely checkpointed per-test records while the original whole gate
-      stays failed; failed and unexecuted cases remain required. Reuse requires
-      the same worktree/environment, the
-      actual private SQLite dependency graph with matching content, and only
-      recognized Python changes. Non-Python/configuration changes, new/deleted
-      tests, missing/changed graphs, worker crashes, manual interruptions and
-      source/environment drift require a fresh full
-      run. Unknown source archives retain the original full command. The
-      required CLI prints full versus affected scope and the actual receipt.
-      Full Make validation and the original commit hook now share the same
-      real worktree-private graph through the actual Git shell. A fresh matching
-      completion is required; an empty successful shell cannot stand in for tests.
-      Non-live affected runs use testmon's marker intersection, retaining new
-      live-test obligations for the commit hook. Native Git's repeated leading
-      PATH prefix and the installed Windows mingw64/ucrt64 directories are
-      normalized; other Git policy and test inputs remain checked. An empty
-      Windows Make launch value uses the installed Git default only in that
-      process. Final-source original Make passed 5478 cases with
-      239 skips in 1853.1s; the separate original hook
-      recorded 0 passed/35 actual live skips and
-      the TypeScript/Vite/PWA build in 158.1s, with the same graph,
-      raw source, packages and test inputs. Counts are per phase, not additive.
-      Thirty-seven related controls, real Linux old-source failure/corrected
-      flows, and digest-verified Git 2.56 Windows flows qualify the entry fixes.
-      Initial Linux and Windows CI failures, the original environment refusal,
-      and earlier failed/stopped development fields remain recorded. Nine
-      applicable final-head CI checks passed before normal PR #40 merge.
-      This is validation reuse, not product/PTY coverage or a whole-cycle
-      one-tenth result.
-      Per-call tool tracing IDs do not invalidate otherwise identical tests;
-      identity, credentials and test configuration remain checked. A reuse-only
-      measurement refuses before starting an unplanned full suite.
-      Testmon can miss dynamic dependencies; use <code>make test</code> for an
-      explicit full run. No graph is copied or fabricated. Real default-250-case
-      checkpoint controls preserve failed/untested cases; unrecorded short
-      batches safely rerun. Historical and current passes remain separate.
-      Independently registered documentation/tool changes use their existing
-      validators through <code>make all</code> as well as the original hook.
-      Scope includes the entire unmerged branch, staged and unstaged edits
-      and untracked source. An application/dependency/mixed/unknown input,
-      unavailable accepted-main ancestor, clean checkout or source link
-      retains the original application command chain. Validator failures
-      remain failures; all raw source and the real index must stay unchanged.
-      Stat-only file rewrites neither refresh the index nor cause a false
-      application classification. Mandatory output identifies the complete
-      scope, source and receipt. Make regression cases run when their Make,
-      dispatcher or related test inputs change; independent tool repairs
-      retain their original checks. PR #38 recorded 139 passed/5 explicit
-      platform skips in 146.8s through actual Make and separately 139/5
-      in 138.1s through the original hook. Its complete local controller
-      took 330.9s, including export/check and both validations; earlier
-      development fields and the index red-to-green control remain recorded.
-      Seven applicable exact-head CI checks passed before normal merge.
-      These are scoped tool checks, not new full application or PTY passes.
-      One measured Windows example: full 5388 passed/234 skipped
-      in 1732.5s; unchanged-source reuse 0 passed/
-      35 skipped in 62.8s. Counts are separate.
-      This is a same-source reuse example, not a controlled changed-revision
-      comparison or proof of the whole-lifecycle one-tenth target. Failed
-      preparation, the first full run, original hook/frontend and CI costs
-      remain part of lifecycle accounting.</td>
+      <td>
+<p><strong>Current TypeScript errors stop before expensive tests.</strong> Both full Make/application precommit and the frontend-only gate run <code>tsc -b --force</code> after format checks and before their test suites. Every original test and the production build remains required. Only the two declared TypeScript build-info outputs are compiler cache; changes to other installed code still refuse, and changed cache forces fresh checks. A real private compiler control showed ordinary build mode returning success for newly invalid source with an older timestamp; the forced check rejected the same bytes. Only private fixture timestamps changed. Real Make/Git/npm controls prove type refusal precedes tests, preserves source/index and invalidates old success. Node version/path metadata uses one equivalent process query per guard; the type check invokes the verified Node and owned installed compiler directly, with no implicit global/NPX compiler fallback. Original30s Windows timeout remains recorded and all assertions/deadlines are retained.</p><p>Normal <a href="https://github.com/sudoprivacy/mosswork/pull/51">PR #51</a> passed the real current-project forced type check, original tool Make (207 passed/6 skipped), separate original hook (196 passed/6 skipped), complete source checks and all five applicable hosted execution jobs. Actual checkout/step logs verify both Linux and Windows validators and both Dashboard journeys; three ACP and two packaged-interop jobs are outside this closed four-file validator-only diff. This exercises the existing narrow route without a new application coverage reduction. Successful-run overhead and failed attempts remain part of end-to-end timing; no whole-lifecycle one-tenth result is claimed.</p>
+<p>When a completed full application validation and the next command have identical complete source, installed Python/environment and intact original private test history, an unintended worker-count change is now refused <strong>before any tests start</strong>. The mandatory CLI names the original receipt and says to keep its <code>PYTEST_JOBS</code> process-locally through Make and commit, or intentionally run <code>make test-current PYTEST_JOBS=&lt;new count&gt;</code>. A new pool still requires full execution. Missing/changed/incomplete/corrupt evidence retains the original full route; no graph is copied and coverage/assertions/deadlines are unchanged. This two-file tool candidate passed original Make (192 passed/6 skipped), the separate original hook (192 passed/6 skipped), complete public-source checks and all nine applicable actual hosted jobs before normal <a href="https://github.com/sudoprivacy/mosswork/pull/48">PR #48</a> merge. These are tool validations, not another full application field or global one-tenth proof.</p>
+<p>Make and the original commit hook select from the complete branch and working tree. Independent docs/tools retain their checked scopes. Regular frontend-source-only changes now run changed-file lint/format, all frontend tests and the TypeScript/Vite build. <strong>The frontend-only local profile omits the full Python suite.</strong> Mixed, dependency, configuration, deleted, linked and unknown inputs retain the application gate.</p>
+<p>Make and hook reuse only this worktree's matching actual success: complete raw source and built SPA bytes, Node executable/environment, installed frontend payloads and the original successful checks/receipt. Source/index drift, missing or damaged proof and a failed/interrupted attempt require fresh validation; partial staging and untracked frontend source refuse. No copied testmon database is accepted.</p>
+<p>Framework bootstrap used the original full application gate: 5555 passed/239 skipped/0 failed with four Normal test workers, one compiler; the separate original hook passed 0 cases with 35 actual skips plus frontend build on the same real private graph. All23 actual Git/Make/npm and stdlib-only entry controls ran in that full field. Source/dependencies remained unchanged. This bootstrap is not a measurement of an eligible product PR's speedup. <a href="https://github.com/sudoprivacy/mosswork/pull/45">Frontend validation PR #45</a>.</p>
+<p>Accepted catalog isolation remains: unrelated fixtures use the supported absent optional snapshot; explicit parser/server/icon tests retain all2693 first-slug-wins resources and original icon bytes. One unchanged API observation was47.68s before/13.11s after, not a whole-lifecycle comparison. Existing full-app source-bound testmon, first-failure stop, and formatting refusal remain. Earlier failed, interrupted and superseded runs are retained.</p>
+</td>
       <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
@@ -1822,55 +1751,17 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Mosswork hosted CI selection</td>
-      <td>Within the triggered release workflow, a complete committed diff may
-      omit the three-platform ACP and two-platform Sudograph matrices only for
-      explicitly listed documentation and validation inputs. Runtime, dependency,
-      mixed, unknown or unprovable inputs retain both matrices; release checks
-      always run. Real Git controls cover scope selection, missing history,
-      nonregular inputs and index isolation. Each runtime or identity matrix
-      cancels its remaining peers after a failure. A replacement commit on the
-      same PR cancels its superseded release workflow; distinct PRs and manual
-      runs use separate groups. Linux deployment regressions run once in the
-      unconditional release job rather than again in the interoperability job;
-      Windows retains the original interoperability arguments. Unknown platforms
-      retain the full arguments. PR #39 additionally makes six independent
-      validator regression modules conditional for complete, existing regular
-      product Python source/test changes. Both full product matrices remain;
-      each platform retains the real Make/Git/testmon smoke and complete source
-      export/check. Validator, dependency, workflow, configuration, mixed,
-      unknown, deleted, renamed, nonregular or unprovable inputs retain all
-      validator cases. Missing selector output also defaults to full regression.
-      Collection controls preserve all other case IDs: release checks collect
-      274 versus 91, and Windows interoperability 235 versus 52, with the same
-      183 independent validator cases deferred in each. These are collection
-      counts, not executed passes or measured runner savings. The initial
-      dispatcher/workflow change passed all seven applicable hosted checks;
-      its real local hook passed 161 cases with six platform skips, and the
-      186.3-second local controller includes complete source export/check.
-      No first eligible product-only hosted saving is claimed. Original product
-      platforms, assertions, deadlines and live acceptance remain unchanged.
-      Main identity pushes may reuse the newest successful PR attempt only
-      when both original Linux/Windows checkout-step logs identify commits whose
-      complete Git trees match the actual main tree. Both original test
-      commands must have completed successfully. PR and manual validation
-      retain the original full matrix. Failed, incomplete, partial, missing,
-      ambiguous or source-mismatched proof retains every original platform
-      command; an older green run cannot replace a newer failure. A bounded
-      read-only metadata job prints the decision and original source/job
-      references and publishes its actual proof. Reused platform jobs are
-      reported as skipped, not new passes. An earlier identical-tree main
-      push after PR #34 used 173 summed runner seconds. The accepted new
-      main run used 10.0 summed runner seconds, including the proof
-      job startup and artifact upload; its two already-tested platform jobs
-      were skipped before matrix expansion. These are separate observed
-      runs, not a controlled benchmark. This removes after-merge runner burden,
-      not time already spent reaching that PR merge. The original PR #35
-      full-log refusal and complete-matrix fallback remain recorded;
-      only PR #36 established the actual step-log reuse result.
-      On 2026-11-12, two validation-only runs recorded 854 versus
-      61 summed runner seconds and 412 versus 58 seconds from workflow creation
-      to its last job. These observations exclude local acceptance and merge
-      waiting; they do not prove the whole end-to-end target.</td>
+      <td>
+<p>CI scope is bound to the <strong>actual checked merge composition</strong>, requiring both supplied base and branch commits in its ancestry. Changed paths, regular files and the job-recipe fingerprint use that checked source; <code>CI_SCOPE.checked_head</code> exposes its commit. An accepted main advancement is therefore not misclassified as a product edit in an older tool branch. Missing or unproven inputs retain the complete matrices. The Linux tool consumer now fetches two history levels: real private shallow clones showed both input commits missing at depth1 and present at depth2 with identical checked source. No old-recipe equivalence or automatic rebase is used.</p><p>This three-file workflow fix passed original tools Make (202 passed/6 skipped), the separate original hook (202 passed/6 skipped), complete source checks and all nine actual bootstrap jobs before normal <a href="https://github.com/sudoprivacy/mosswork/pull/50">PR #50</a> merge. Original CI logs verified both the checked commit and the Linux depth2 checkout. Existing branch/symlink/mixed-input refusal controls and all assertions/deadlines remain. The dedicated route job count is not a measured global end-to-end saving.</p>
+<p>Strict independent validator changes to <code>tools/precommit.py</code>, <code>tools/frontend_gate.py</code> and its existing test module use the dedicated validation route. <strong>Both Linux and Windows validator regressions remain required.</strong> The two-platform Dashboard build and real built-browser journey also remain. ACP and compiler/worker product matrices are omitted only for the complete closed regular-file tool diff with its exact qualified selector and both job recipes. Runtime, dependency, workflow, unknown, missing, deleted, renamed or mixed changes retain the full matrices. Eligible future validator changes select five execution jobs instead of nine; actual wall-time savings remain unmeasured.</p><p>This three-file workflow/selector change itself retained the original complete nine-job matrix for bootstrap and passed all nine actual exact-head jobs before normal <a href="https://github.com/sudoprivacy/mosswork/pull/49">PR #49</a> merge. Original tools Make passed 198/6 skips, original hook 198/6 skips, alongside complete public-source checks and real committed-Git positive/refusal controls. No existing assertion, case body or deadline was removed. This is CI infrastructure acceptance; original failed/interrupted costs remain and global one-tenth reduction is unproven.</p>
+<p>Current required ACP macOS CI uses the standard <code>macos-15-intel</code> pool and the existing pinned Darwin x64 engine. <strong>ARM64 is outside this required ACP CI leg.</strong> Original commands/assertions/deadlines and Linux/Windows ACP remain. The original4b Intel job obtained a real runner in3 seconds and passed; the earlier PR45 ARM job was cancelled after15 minutes without any runner/steps. The original cancellation, successful job-only recovery, queues and subsequent failed Windows browser job remain separate operational costs.</p>
+<p><strong>Full hosted frontend unit tests now run on Linux. Windows retains five original filesystem/source/asset test modules; other Windows frontend unit modules are omitted.</strong> Both platforms retain changed-file lint/format, TypeScript/Vite/PWA build, shared backend lifecycle checks and the actual built-browser journey. Local frontend-only validation remains complete. Original PR45 unit steps were153s Linux and354s Windows; that354s is a baseline step cost, before subtracting the Windows subset and unrelated critical jobs. No controlled or whole-lifecycle saving is inferred.</p>
+<p>The original Windows browser failure was traced to Enter preceding local-mode metadata responses by208/287ms and choosing the default remote socket. Existing-thread input now waits for hydrated history. The controlled metadata hold failed on unchanged original UI, then passed the repaired complete real browser flow with all original45s/reload/cancel/file/approval assertions and deadlines retained. It remains required on both platforms. The private Git/Make fixture also binds its own hook route, retaining real execution/reuse controls.</p>
+<p>This six-file candidate passed the original full application Make (5556 passed/239 skipped/0failed, two Normal workers/one compiler), the separate original hook (0 passed/35 actual skips) and frontend build,50 affected input/routing checks and the complete real local browser flow. All nine applicable actual hosted jobs and current checkout trees were verified before normal <a href="https://github.com/sudoprivacy/mosswork/pull/46">PR #46</a> merge. Original failed/interrupted fields remain; this is source/CI acceptance, without native/provider/production or global one-tenth acceptance.</p>
+<p>Linux complete Dashboard unit tests, the Windows five-module source/path subset, both type/build checks, shared runtime lifecycle and the actual built-browser journey remain enabled. Framework input changes also require the original runtime/interop/packaging validator routes. The new frontend gate's actual process controls run on Linux and Windows; Linux explicitly selects Node20. All eleven applicable source checks passed, retaining ten original successful jobs and the actual Mac recovery. The initial Mac job had no runner/steps and was cancelled by hosted ARM64 capacity exhaustion; only that unstarted job was retried. Original cancellation and wait remain in the operational clock. This preceded the normal <a href="https://github.com/sudoprivacy/mosswork/pull/45">PR #45</a> merge.</p>
+<p>Existing committed-input CI selection still omits duplicate private-validator regressions only for qualified product Python payloads, and retains them for changed or unknown validator inputs. The independent Windows validator cohort keeps two workers and its original inventories/platforms/assertions/deadlines. Same-PR stale Dashboard runs cancel; matrix peers and queued tests stop after a failure. Full catalog tests remain on both platforms.</p>
+<p>Local preparation, all attempted/failed/interrupted gates, queue waits and CI-to-failure/merge remain part of the end-to-end clock. No global one-tenth result, causal hosted-time saving, native/provider or production acceptance is claimed by these validation changes.</p>
+</td>
       <td>No: CI scheduling controls; skipped matrices are not PTY passes.</td>
       <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
       <a href="https://github.com/sudoprivacy/mosswork/pull/26">PR #26</a>;
@@ -1884,7 +1775,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
     </tr>
     <tr>
       <td>Mosswork validation-tool CI</td>
-      <td>A closed list of source checker/exporter and read-only identity
+      <td>
+<p><strong>Three validator-only file paths no longer trigger unrelated product journeys.</strong> Edits solely to <code>tools/frontend_gate.py</code>, <code>tools/precommit.py</code> or <code>tests/unit/deployment/test_frontend_gate.py</code> retain the core scope job and complete applicable Linux/Windows validation/exports; they no longer trigger the two Dashboard builds and browser jobs, which do not execute these tools. The shared <code>tools/test_gate.py</code> plugin, product/frontend/runtime paths, shared fixtures and workflow-self triggers remain. All job bodies, platforms, assertions and deadlines are identical. This one-file workflow change itself passed the full nine-job bootstrap, original tools Make (196 passed/6 skipped), separate hook (196 passed/6 skipped), full current-source checks and normal <a href="https://github.com/sudoprivacy/mosswork/pull/52">PR #52</a> merge.</p><p>Observed earlier exact-head executions: PR #50 ran nine jobs: 46.6 runner minutes and 15.2 minutes of hosted wall time. PR #51 ran five jobs: 23.1 runner minutes and 8.6 minutes of hosted wall time. Its successful local route took 8.4 minutes separately; earlier local revisions and failed CI remain in the total. These are different source/tool counts, runner/cache attempts, not a controlled causal or whole-lifecycle one-tenth result. The new three-job trigger route is a qualified selection contract; no future-run time is presented as measured. Product/platform coverage remains as separately disclosed below.</p>A closed list of source checker/exporter and read-only identity
       metadata modules with their existing regressions keeps Linux release
       checks on both Linux and Windows instead of unrelated packaging tests
       and the ACP/Sudograph runtime matrices. Each selected platform runs

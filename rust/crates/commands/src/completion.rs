@@ -157,8 +157,7 @@ fn placeholder_values(name: &str, partial: &str, context: &CompletionContext) ->
         "session-id" | "session-path" => context
             .sessions
             .as_ref()
-            .map(|list| list())
-            .unwrap_or_default()
+            .map_or_default(|list| list())
             .into_iter()
             .filter(|value| value.starts_with(partial))
             .collect(),

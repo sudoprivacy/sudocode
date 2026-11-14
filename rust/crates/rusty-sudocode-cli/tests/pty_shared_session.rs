@@ -195,7 +195,7 @@ fn concurrent_context_diagnostics(
         "first recorded: {}; second recorded: {}; dumped files: {}\nFirst CLI:\n{}\nSecond CLI:\n{}",
         durable.contains("FIRST_CONTEXT_PROMPT"),
         durable.contains("SECOND_CONTEXT_PROMPT"),
-        fs::read_dir(dump).map(Iterator::count).unwrap_or_default(),
+        fs::read_dir(dump).map_or_default(Iterator::count),
         first.render(common::screen_contents),
         second.render(common::screen_contents),
     )

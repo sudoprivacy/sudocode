@@ -225,8 +225,7 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
     let pre_compact_discovered = session
         .compaction
         .as_ref()
-        .map(|c| c.pre_compact_discovered_tools.clone())
-        .unwrap_or_default();
+        .map_or_default(|c| c.pre_compact_discovered_tools.clone());
     let mut system_tools = Vec::new();
     let mut mcp_tools = Vec::new();
     for definition in client.request_tool_definitions(session.messages(), &pre_compact_discovered) {
@@ -257,8 +256,8 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
 
     let agent_types = collect_agent_type_usage(cwd);
 
-    let memory_files = ProjectContext::discover(cwd, runtime::today_local())
-        .map(|context| {
+    let memory_files =
+        ProjectContext::discover(cwd, runtime::today_local()).map_or_default(|context| {
             context
                 .instruction_files
                 .iter()
@@ -269,8 +268,7 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
                     loaded: true,
                 })
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     let skills = commands::skill_prompt_entries(cwd, Some(built.plugin_load_outcome()))
         .into_iter()

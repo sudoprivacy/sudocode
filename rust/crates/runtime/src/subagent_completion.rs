@@ -956,8 +956,7 @@ impl CompletionJournal {
                         .iter()
                         .filter(|(_, s)| s.terminal.is_some())
                         .nth(49)
-                        .map(|(id, _)| id.clone())
-                        .unwrap_or_default()
+                        .map_or_default(|(id, _)| id.clone())
                 }),
             task_set_hash: checksum(
                 &serde_json::to_vec(

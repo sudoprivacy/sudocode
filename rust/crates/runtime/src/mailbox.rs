@@ -1818,7 +1818,7 @@ pub fn receiver_health(agent: &str, binding_failed: bool) -> ReceiverHealth {
     ReceiverHealth {
         level,
         outage_secs: elapsed.map(|elapsed| elapsed.as_secs()),
-        failing: outage.map(|outage| outage.scopes).unwrap_or_default(),
+        failing: outage.map_or_default(|outage| outage.scopes),
     }
 }
 

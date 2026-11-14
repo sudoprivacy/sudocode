@@ -515,8 +515,7 @@ impl SessionStore {
                 .ok()
                 .and_then(|m| m.modified)
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or_default();
+                .map_or_default(|duration| duration.as_millis());
             sessions.push((path, modified));
         }
         Ok(sessions)

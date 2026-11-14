@@ -5430,16 +5430,13 @@ fn tool_use_ids_by_message(messages: &[Value]) -> Vec<(usize, Vec<String>)> {
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
-            let ids = message["content"]
-                .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|block| block["type"].as_str() == Some("tool_use"))
-                        .filter_map(|block| block["id"].as_str().map(str::to_owned))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let ids = message["content"].as_array().map_or_default(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block["type"].as_str() == Some("tool_use"))
+                    .filter_map(|block| block["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            });
             (!ids.is_empty()).then_some((index, ids))
         })
         .collect()
@@ -5542,16 +5539,13 @@ async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
                 "compaction request messages.{} must be the user message carrying the tool_results: {body}",
                 index + 1
             );
-            let result_ids = next["content"]
-                .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|block| block["type"].as_str() == Some("tool_result"))
-                        .filter_map(|block| block["tool_use_id"].as_str().map(str::to_owned))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let result_ids = next["content"].as_array().map_or_default(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block["type"].as_str() == Some("tool_result"))
+                    .filter_map(|block| block["tool_use_id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            });
             for id in &tool_use_ids {
                 assert!(
                     result_ids.contains(id),
@@ -10749,13 +10743,12 @@ async fn cron_edits_and_change_notice(
     let names = |message: &Value| -> Vec<String> {
         message["params"]["crons"]
             .as_array()
-            .map(|crons| {
+            .map_or_default(|crons| {
                 crons
                     .iter()
                     .filter_map(|c| c["prompt"].as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default()
     };
     let (_, changed) = client
         .recv_until(Duration::from_secs(15), |message| {

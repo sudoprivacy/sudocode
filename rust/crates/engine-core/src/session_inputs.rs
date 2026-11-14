@@ -414,13 +414,12 @@ impl SessionInputs {
             .entries()
             .next()
             .and_then(|(item, _)| item.receipt.as_ref())
-            .map(|receipt| {
+            .map_or_default(|receipt| {
                 receipt.context.clone().unwrap_or_else(|| PromptContext {
                     trace_id: receipt.client_id.clone(),
                     ..PromptContext::default()
                 })
-            })
-            .unwrap_or_default();
+            });
         context.input_views = inputs.iter().map(TurnInput::view).collect();
         let mut blocks = Vec::new();
         for input in inputs {

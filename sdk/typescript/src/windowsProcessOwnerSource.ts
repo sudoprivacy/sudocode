@@ -8,6 +8,16 @@ $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::WriteLine('{"phase":"bootstrap_started"}')
 [Console]::Out.Flush()
+# Resolve the same cmdlet before its unchanged invocation, so the original
+# startup deadline can distinguish command discovery from compiler startup.
+# This may warm discovery caches; reaching this marker is not qualification.
+$bootstrapCommand = $ExecutionContext.InvokeCommand.GetCommand('Add-Type', [System.Management.Automation.CommandTypes]::Cmdlet)
+if ($null -eq $bootstrapCommand) {
+    [Console]::WriteLine('{"diagnostic":"bootstrap_command_lookup_returned","found":false}')
+} else {
+    [Console]::WriteLine('{"diagnostic":"bootstrap_command_lookup_returned","found":true}')
+}
+[Console]::Out.Flush()
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;

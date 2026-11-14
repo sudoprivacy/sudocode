@@ -75,7 +75,8 @@ def compiler_inputs(root):
     names = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
              "CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "LDFLAGS", "RUSTUP_TOOLCHAIN", "ImageOS", "ImageVersion"}
     inputs = {"pin": pin(root), "root": str(source), "recipe": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              "rustc": capture("rustc", "-vV", cwd=root).decode(),
+              # The driver builds with the toolchain its own revision pins.
+              "rustc": capture("rustc", "-vV", cwd=source).decode(),
               "environment": {key: value for key, value in os.environ.items()
                               if key in names or key.startswith(prefixes)},
               "cargo_configs": {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -245,8 +246,15 @@ def run(root, output, test=False):
         start = time.monotonic()
         path = output / f"{index:02d}.log"
         print("VFS normal Cargo command: " + " ".join(command), flush=True)
+        # From the driver's own checkout, so its rust-toolchain.toml selects the
+        # compiler that revision was validated with. From this repository's root,
+        # this repository's pin would build another repository's pinned source,
+        # and a toolchain bump here would surface layout assumptions only that
+        # repository can fix (Rust 1.100 moved test executables out of
+        # target/<profile>/deps; nexus-vfs's search-plugin test helper expects
+        # them there).
         with path.open("wb") as stream:
-            result = subprocess.run(command, cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT)
+            result = subprocess.run(command, cwd=source, env=env, stdout=stream, stderr=subprocess.STDOUT)
         row = {"command": command, "exit_code": result.returncode, "seconds": round(time.monotonic() - start, 3),
                "log_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         artifacts = []

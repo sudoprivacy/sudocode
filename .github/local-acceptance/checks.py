@@ -1150,7 +1150,7 @@ def native_guard_files():
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
         ".github/scripts/local_acceptance.py": "188605d39e922b7c14da9d2c747e8323563e336c86ff44439898802fea69553e",
-        ".github/scripts/vfs_search_cache.py": "7bc2ca0b1dcae653e534f810842824d176f4ad9bc1c5eaec0f60b4b5dbda94b6",
+        ".github/scripts/vfs_search_cache.py": "b3ef0fa05c4077d1618b09db8af062e3cfe32b02f7fc3dca0ddedd3708754fb1",
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",

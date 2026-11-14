@@ -57,10 +57,16 @@ function startAdapter(request: Record<string, unknown>, signal?: AbortSignal) {
   { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
   let buffer = '', stderr = '', settled = false, closing = false, bootstrapComplete = false;
   const startedAt = performance.now();
+  // Capture exactly what this launcher passes through inheritance. This is
+  // diagnostic context, not the helper's post-start environment or identity.
+  const launchContext = { at: new Date().toISOString(), parentPid: process.pid,
+    executable: windowsPowerShell(), sourceSha256: createHash('sha256').update(windowsProcessOwnerSource).digest('hex'),
+    inheritedEnvironment: Object.fromEntries(['TEMP', 'TMP', 'PSModulePath', 'SystemRoot'].map(key =>
+      [key, process.env[key]?.slice(0, 2048) ?? null])) };
   let lastPhase = 'spawn_requested';
   const phases: { phase: string; elapsedMs: number }[] = [];
   const diagnostic = () => `ownerMonitor=${JSON.stringify({ pid: child.pid ?? null,
-    lastPhase, elapsedMs: Math.round(performance.now() - startedAt), phases, stderr })}`;
+    lastPhase, elapsedMs: Math.round(performance.now() - startedAt), phases, stderr, launchContext })}`;
   let finish!: (result: ReceiverOwnerEnd) => void;
   const ended = new Promise<ReceiverOwnerEnd>(resolve => { finish = resolve; });
   const end = (result: ReceiverOwnerEnd) => { if (!settled) { settled = true; finish(result); } };

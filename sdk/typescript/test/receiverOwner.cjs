@@ -19,6 +19,60 @@ function originalProcess(){
   let closing;
   return {child,close(){return closing??=(async()=>{child.stdin.end();await deadline(closed);})();}};
 }
+async function observePackagedStart(directory){
+  // Start before the packaged process, so short-lived compiler children can
+  // leave original native start/stop events even if the later snapshot misses them.
+  const journal=path.join(directory,'owner-start-events.jsonl');
+  const child=spawn(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),
+    ['-NoLogo','-NoProfile','-NonInteractive','-File',path.join(root,'test/fixtures/windows-owner-observer.ps1'),String(process.pid)],
+    {windowsHide:true,stdio:['pipe','pipe','pipe']});
+  let output='',stderr='',ready=false,bytes=0,dropped=0,closing;
+  const closed=new Promise(resolve=>{child.once('close',(code,signal)=>resolve({code,signal}));});
+  let started;
+  const initialized=new Promise(resolve=>{started=resolve;});
+  const record=value=>{
+    const line=JSON.stringify(value)+'\n';
+    if(bytes+Buffer.byteLength(line)<=65536){
+      try{fs.appendFileSync(journal,line);bytes+=Buffer.byteLength(line);}
+      catch(error){stderr=('Observer journal: '+String(error)).slice(-4096);}
+    }else{dropped++;}
+  };
+  child.on('error',error=>{record({kind:'observer_spawn_error',error:String(error)});started();});
+  child.stdin.on('error',error=>{record({kind:'observer_input_error',error:String(error)});});
+  child.stderr.on('data',chunk=>{stderr=(stderr+String(chunk)).slice(-4096);});
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data',chunk=>{
+    output+=String(chunk);
+    if(Buffer.byteLength(output)>65536){record({kind:'observer_output_bound'});output='';return;}
+    let end;
+    while((end=output.indexOf('\n'))>=0){
+      const line=output.slice(0,end);output=output.slice(end+1);
+      try{const row=JSON.parse(line);record(row);if(row.kind==='observer_ready'){ready=true;started();}}
+      catch(error){record({kind:'observer_decode_error',error:String(error)});}
+    }
+  });
+  void closed.then(value=>{record({kind:'observer_closed',...value,stderr});started();});
+  try{await deadline(initialized,5000);}catch(error){record({kind:'observer_setup_error',error:String(error)});}
+  const timers=[];
+  return {
+    sampleStartup(){
+      if(ready)for(const ms of [3000,7000])timers.push(setTimeout(()=>{
+        record({kind:'sample_requested',at:new Date().toISOString(),offsetMs:ms});
+        if(!child.stdin.destroyed)child.stdin.write('s');
+      },ms));
+    },
+    close(){return closing??=(async()=>{
+      for(const timer of timers)clearTimeout(timer);
+      if(!child.stdin.destroyed)child.stdin.end('q');
+      try{await deadline(closed,2500);}catch(error){
+        record({kind:'observer_close_error',error:String(error)});
+        child.kill(); // Only this observer's returned child, never a discovered process.
+        try{await deadline(closed,2500);}catch(cause){record({kind:'observer_exit_unknown',error:String(cause)});}
+      }
+      console.error('PACKAGED_OWNER_OBSERVER_SUMMARY='+JSON.stringify({pid:child.pid,ready,bytes,dropped,stderr}));
+    })();}
+  };
+}
 async function retainPackagedFailure(directory,transport,owner,stderr,error){
   // Run only after an original assertion fails, before its existing cleanup.
   // This current process snapshot is diagnostic, never custody/exit proof.
@@ -27,7 +81,7 @@ async function retainPackagedFailure(directory,transport,owner,stderr,error){
   const report={observedAt:new Date().toISOString(),error:String(error),rootPids,stderr,
     parentEnvironment:Object.fromEntries(['TEMP','TMP','PSModulePath','SystemRoot'].map(key=>[key,process.env[key]??null])),
     files:{}};
-  for(const name of ['fixture.jsonl','audit.jsonl']){
+  for(const name of ['fixture.jsonl','audit.jsonl','owner-start-events.jsonl']){
     try{
       const file=path.join(directory,name),size=fs.statSync(file).size,fd=fs.openSync(file,'r');
       try{
@@ -92,10 +146,12 @@ async function main(){
     fs.writeFileSync(config,JSON.stringify({version:1,scodeArgv:[process.execPath,path.join(root,'test/fixtures/scode-direct-a2a-agent.mjs')],
       workspace:directory,acpSessionId:'receiver-owner-existing-session',auditLog,closeTimeoutMs:200,
       receiverOwner:await captureReceiverOwner(owner.child.pid),env:{HYDRA_DIRECT_FIXTURE_JOURNAL:log}}));
+    const observation=await observePackagedStart(directory);
     const transport=new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/server.cjs'),'--config',config],stderr:'pipe'});
     const client=new Client({name:'receiver-owner-acceptance',version:'1'});let stderr='';
     transport.stderr?.on('data',chunk=>{stderr+=String(chunk);});
     try{
+      observation.sampleStartup();
       await client.connect(transport,{timeout:5000});
       const end=Date.now()+12000;let ready=false;
       while(Date.now()<end){
@@ -116,10 +172,11 @@ async function main(){
       assert.equal(audit.find(row=>row.phase==='receiver_owner_ended')?.reason,'owner_exited');
       console.log('PASS packaged MCP: one config/SID/guard; real owner exit closes receiver');
     }catch(error){
+      await observation.close();
       try{await retainPackagedFailure(directory,transport,owner,stderr,error);}
       catch(cause){console.error('Packaged owner diagnostic failed: '+String(cause));}
       throw error;
-    }finally{await client.close();await owner.close();}
+    }finally{await observation.close();await client.close();await owner.close();}
 
     // Full packaged MCP + real Windows compiler-bootstrap failure. A regular
     // file is not a temporary directory. This environment is child-local;

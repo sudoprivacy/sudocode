@@ -5,18 +5,24 @@ import { Readable, Writable } from 'node:stream';
 const scenario = process.argv[2] ?? 'normal';
 let sessionId = 'fixture-native-session';
 let cancelled = false;
-let peerOwned = false;
+let peerOwned = 0;
 const hang = () => new Promise(() => {});
 const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
   .onRequest(acp.methods.agent.initialize, async ctx => {
     if (scenario === 'startup-hang') return hang();
     // An older scode ignores the request and keeps answering peers itself.
-    peerOwned = scenario !== 'no-peer-input'
-      && ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version >= 1;
+    peerOwned = scenario === 'no-peer-input' ? 0
+      : Math.min(2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
     return { protocolVersion: 1, agentCapabilities: { loadSession: scenario !== 'no-load' },
-      ...(peerOwned ? { _meta: { sudocode: { peerInput: { version: 1 } } } } : {}) };
+      ...(peerOwned ? { _meta: { sudocode: { peerInput: { version: peerOwned } } } } : {}) };
   })
   .onRequest(acp.methods.agent.session.new, () => ({ sessionId }))
+  .onRequest('_fixture/input-state', value=>value, async ctx=>{
+    await ctx.client.notify('_sudocode/session/input_update', {
+      sessionId:ctx.params.sessionId ?? sessionId,update:ctx.params.update,
+    });
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, async ctx => {
     if (scenario === 'load-fails') throw new Error('Fixture refuses this native session');
     sessionId = ctx.params.sessionId;
@@ -56,8 +62,8 @@ const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
     }
     if (text === 'peer-message' && peerOwned) {
       for (const from of ['fixture-peer', 'stranger']) {
-        await ctx.client.notify('_sudocode/session/peer_message', {
-          sessionId, text: `<mailbox-message from="${from}">\nhello from ${from}\n</mailbox-message>`,
+        await ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', {
+          sessionId, deliveryId: from==='fixture-peer'?'a'.repeat(64):'b'.repeat(64), text: `<mailbox-message from="${from}">\nhello from ${from}\n</mailbox-message>`,
           body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting' } },
         });
       }

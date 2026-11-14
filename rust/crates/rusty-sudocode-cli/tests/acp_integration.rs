@@ -212,6 +212,7 @@ impl AcpTestClient {
                     // retain its requests while awaiting command metadata.
                     if is_server_request(&message, "_sudocode/task/completed")
                         || is_server_request(&message, "_sudocode/subagent/completed")
+                        || is_server_request(&message, "_sudocode/session/peer_message")
                     {
                         notifications.push(message);
                         continue;
@@ -8268,9 +8269,206 @@ async fn acp_client_owned_peer_input_starts_no_session_turn() {
     workspace.cleanup();
 }
 
+/// The real mailbox must retain its cursor until a durable owner acknowledges
+/// the exact delivery, not merely until ACP writes a notification to stdout.
+#[tokio::test]
+async fn acp_durable_peer_input_replays_until_matching_acceptance() {
+    const AGENT: &str = "acp-durable-receiver";
+    const PEER: &str = "acp-durable-peer";
+    let server = MockAnthropicService::spawn().await.expect("model fixture");
+    let workspace = TestWorkspace::new("stdio-peer-durable");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let mut client = spawn_stdio_client(&workspace);
+    let (_, initialized) = client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta":{"sudocode":{"peerInput":{"version":2}}}},
+            }),
+        )
+        .await;
+    assert_eq!(
+        initialized["result"]["_meta"]["sudocode"]["peerInput"]["version"],
+        2
+    );
+    let session = open_direct_session(&mut client, &workspace.root).await;
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let sender = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
+    let envelope = runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: PEER.into(),
+        to: AGENT.into(),
+        body: "durable peer input".into(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    };
+    sender.send(envelope.clone()).expect("first send");
+    let is_peer = |message: &Value| message["method"] == "_sudocode/session/peer_message";
+    let (_, first) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("peer request");
+    assert!(first.get("id").is_some(), "durable handoff is a request");
+    let delivery = first["params"]["deliveryId"].clone();
+    assert_eq!(delivery.as_str().unwrap().len(), 64);
+    // A mismatched receipt must not consume the mailbox record.
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":first["id"],"result":{
+            "accepted":true,"sessionId":session,"deliveryId":"wrong-delivery"
+        }}))
+        .await;
+    let (_, retry) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("redelivery");
+    assert_eq!(
+        retry["params"], first["params"],
+        "cursor replay preserves exact input and identity"
+    );
+    // Losing a response is also recoverable, without advancing or reminting.
+    let (_, after_timeout) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("timeout redelivery");
+    assert_eq!(after_timeout["params"]["deliveryId"], delivery);
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":after_timeout["id"],"result":{
+            "accepted":true,"sessionId":session,"deliveryId":delivery
+        }}))
+        .await;
+    sender
+        .send(envelope)
+        .expect("distinct logical send with same body");
+    let (_, second) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("second delivery");
+    assert_ne!(
+        second["params"]["deliveryId"], delivery,
+        "identical bodies do not collapse independent sends"
+    );
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":second["id"],"result":{
+            "accepted":true,"sessionId":session,"deliveryId":second["params"]["deliveryId"]
+        }}))
+        .await;
+    assert!(client
+        .recv_until(Duration::from_secs(2), is_peer)
+        .await
+        .is_err());
+    assert!(
+        server.captured_requests().await.is_empty(),
+        "no inner scode inference"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 // ---------------------------------------------------------------------------
 // Direct A2A requests (`_sudocode/a2a/*`)
 // ---------------------------------------------------------------------------
+
+/// Equal legacy bytes are separate committed sends; a lost ACK followed by a
+/// real receiver process restart must replay the original record's identity.
+#[tokio::test]
+async fn acp_durable_legacy_positions_survive_receiver_restart() {
+    use std::io::Write;
+    const AGENT: &str = "acp-legacy-receiver";
+    const PEER: &str = "acp-legacy-peer";
+    let server = MockAnthropicService::spawn().await.expect("model fixture");
+    let workspace = TestWorkspace::new("stdio-legacy-position");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let initialize = json!({"protocolVersion":1,
+        "clientCapabilities":{"_meta":{"sudocode":{"peerInput":{"version":2}}}}});
+    let mut client = spawn_stdio_client(&workspace);
+    client.send_request("initialize", initialize.clone()).await;
+    let session = open_direct_session(&mut client, &workspace.root).await;
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let sender = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.into());
+    sender.ensure_conversation(AGENT).expect("conversation");
+    let mut transcript = fs::OpenOptions::new()
+        .append(true)
+        .open(sender.transcript_path(AGENT))
+        .expect("original transcript");
+    let line = format!(
+        "{}\n",
+        json!({"from":PEER,"to":AGENT,"body":"same legacy bytes"})
+    );
+    transcript.write_all(line.repeat(2).as_bytes()).unwrap();
+    transcript.sync_all().unwrap();
+    drop(transcript);
+    let is_peer = |message: &Value| message["method"] == "_sudocode/session/peer_message";
+    let (_, first) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("first record");
+    let original = first["params"].clone();
+    // The durable client has accepted this ID, but its ACK never reaches ACP.
+    let mut accepted =
+        std::collections::HashSet::from([original["deliveryId"].as_str().unwrap().to_owned()]);
+    client.shutdown().await;
+
+    let mut client = spawn_stdio_client(&workspace);
+    client.send_request("initialize", initialize).await;
+    let (during_load, loaded) = client
+        .send_request(
+            "session/load",
+            json!({"sessionId":session,"cwd":workspace.root.to_string_lossy(),"mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay = if let Some(message) = during_load.into_iter().find(is_peer) {
+        message
+    } else {
+        client
+            .recv_until(Duration::from_secs(30), is_peer)
+            .await
+            .expect("original replay")
+            .1
+    };
+    assert_eq!(
+        replay["params"], original,
+        "same persisted position after process restart"
+    );
+    assert!(!accepted.insert(replay["params"]["deliveryId"].as_str().unwrap().to_owned()));
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":replay["id"],"result":{
+        "accepted":true,"sessionId":session,"deliveryId":replay["params"]["deliveryId"]}}))
+        .await;
+    let (_, second) = client
+        .recv_until(Duration::from_secs(30), is_peer)
+        .await
+        .expect("second record");
+    assert_eq!(second["params"]["body"], original["body"]);
+    assert!(
+        accepted.insert(second["params"]["deliveryId"].as_str().unwrap().to_owned()),
+        "distinct legacy positions must not collapse"
+    );
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":second["id"],"result":{
+        "accepted":true,"sessionId":session,"deliveryId":second["params"]["deliveryId"]}}))
+        .await;
+    assert!(client
+        .recv_until(Duration::from_secs(2), is_peer)
+        .await
+        .is_err());
+    assert_eq!(accepted.len(), 2);
+    assert!(
+        server.captured_requests().await.is_empty(),
+        "no inner model turn"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
 
 /// Open a session in `dir` and return its id.
 async fn open_direct_session(client: &mut AcpTestClient, dir: &Path) -> String {

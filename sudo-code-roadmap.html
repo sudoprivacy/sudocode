@@ -2553,6 +2553,19 @@ hook/allowlist cases and isolated TLS-daemon pause/withheld-reply cases are wire
 to CI; source preparation is not deployment or cross-host callback acceptance.
 See <a href="docs/acp.md#direct-a2a-requests">the wire contract and test limits</a>.</p>
 
+<p><strong>Durable Codex peer handoff (source in progress).</strong>
+Negotiated ACP peer-input v2 retains the mailbox cursor until the original
+client confirms durable custody. The SDK stores a bounded private inbox,
+recovers pending deliveries and reconnects its native proxy with the same
+delivery ID. Native <code>thread/queue/addOnce</code> requires a matching Codex
+build with persistent acceptance receipts; older servers refuse without an
+unsafe enqueue fallback. Runtime compaction health checks respect the session's
+tool allowlist. Real ACP stdio and CLI compaction cases cover receipt loss and
+restricted-session continuation; SDK proxy-process cases cover restart,
+backpressure and transport recovery. These are source/test changes, not a
+production deployment or a Box lifecycle acceptance. See the
+<a href="docs/design/codex-native-queue-callback.md">queue contract</a>.</p>
+
 <h4>2. Tool usage — file operations</h4>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>

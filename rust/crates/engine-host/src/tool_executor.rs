@@ -287,6 +287,10 @@ fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
 }
 
 impl ToolExecutor for CliToolExecutor {
+    fn is_tool_enabled(&self, name: &str) -> bool {
+        self.check_allowed_tool(name).is_ok()
+    }
+
     fn external_a2a_binding(&self) -> Option<runtime::external_a2a::MailboxBinding> {
         self.mailbox.as_ref().map(|mailbox| mailbox.binding())
     }

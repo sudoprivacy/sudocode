@@ -12,10 +12,11 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   send({id:call.id,method:'account/chatgptAuthTokens/refresh',params:{}});return;
  }
  let result={};
+ if(call.method==='initialize'&&scenario!=='old-native')result={serverCapabilities:{durableQueueAddOnce:1}};
  if(call.method==='thread/loaded/list'){
   inventory++;result={data:scenario==='loaded-before'||(scenario==='loaded-after'&&inventory===2)?['other-root']:[],nextCursor:null};
  }
- if(call.method==='thread/queue/add'){
+ if(call.method==='thread/queue/addOnce'){
   log({phase:'append',params:call.params});
   if(scenario==='loss'){process.exit(17);}
   if(scenario==='post-error'){send({id:call.id,error:{code:-32602,message:'backend failure after possible append'}});return;}

@@ -31,8 +31,10 @@ the admission and lifecycle gates below still apply.
   installation must inspect conflicting entries rather than assume a global
   entry replaced them. No Codex executable wrapper is required for MCP startup.
 - The existing callback attaches to an already-loaded native app-server thread.
-  Its idle `turn/start` and active `turn/steer` paths remain the only notification
-  delivery implementation. It never resumes, forks or creates a shadow thread.
+  Durable peer input goes through `thread/queue/addOnce`, with an inbox retained
+  across proxy/owned-receiver recovery. It never resumes, forks or creates a
+  shadow thread; interrupted targets remain interrupted. See the
+  [delivery contract](codex-native-queue-callback.md).
 - Nexus preparation belongs to scode's existing shared-service owner. The
   [setup/recovery slice](https://github.com/sudoprivacy/sudocode/pull/1071) selects
   an existing Box and can recover explicitly registered local ownership. ACP and

@@ -1,5 +1,6 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
@@ -11,9 +12,10 @@ const actor = scenario === 'operator'
   ? JSON.parse(readFileSync(path.join(process.cwd(),'.nexus/sudocode/settings.json'),'utf8')).agentName
   : process.env.SCODE_DIRECT_FIXTURE_ACTOR ?? 'bound-fixture-actor';
 const journal = process.env.HYDRA_DIRECT_FIXTURE_JOURNAL;
-const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry })+'\n');
+const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, executable: process.execPath, ...entry })+'\n');
 let sessionId;
-let peerOwned = false;
+let peerOwned = 0;
+let returnedInitialListFailure = false;
 const frame = (hash, value) => {
   const bytes = Buffer.from(value), length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length)); hash.update(length).update(bytes);
@@ -32,26 +34,33 @@ const inputDigest = (tool, params) => {
   }
   return hash.digest('hex');
 };
-// `failure` is a tool result scode reports as an error, audited like any other.
-const result = (value, tool, input, failure) => {
-  const content = failure ?? JSON.stringify(value);
-  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([failure ? 1 : 0])); frame(hash, content);
-  return { content, isError: failure !== undefined || scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
+const result = (value, tool, input, operationError = false) => {
+  const content = operationError ? value : JSON.stringify(value);
+  const hash = createHash('sha256').update('sudocode.direct-a2a.result.v1\0').update(Buffer.from([operationError ? 1 : 0])); frame(hash, content);
+  return { content, isError: operationError || scenario === 'flipped-is-error', _meta: { sudocode: { directA2a: { audit: {
     version: 1, commandId: `external-a2a-${randomUUID()}`, sessionId: scenario === 'bad-audit' ? 'wrong' : sessionId,
     actor, namespaceRoot: '', tool,
     requestedInputSha256: inputDigest(tool, input), effectiveInputSha256: inputDigest(tool, input), resultSha256: hash.digest('hex'),
   } } } } };
 };
 const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
-  .onRequest(acp.methods.agent.initialize, ctx => {
+  .onRequest(acp.methods.agent.initialize, async ctx => {
+    if (['delayed-initialize', 'closing-initialize'].includes(scenario)) {
+      log({ method: 'initialize-pending' });
+      while (!existsSync(`${journal}.initialize`)) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (scenario === 'cold-recovery' && !existsSync(`${journal}.online`)) {
+      log({ method: 'initialize-offline' });
+      process.exit(18);
+    }
     // Like scode, every advertising fixture echoes peer input a client declares.
-    peerOwned = scenario !== 'legacy'
-      && ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version >= 1;
+    peerOwned = scenario === 'legacy' ? 0
+      : Math.min(2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
     log({ method: 'initialize', peerOwned });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
         version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
-      }, ...(peerOwned ? { peerInput: { version: 1 } } : {}) } } }),
+      }, ...(peerOwned ? { peerInput: { version: peerOwned } } : {}) } } }),
     };
   })
   .onRequest(acp.methods.agent.session.new, () => {
@@ -59,7 +68,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   })
   .onRequest('_fixture/peer', value=>value, async ctx=>{
     const target=ctx.params.wrongSession?'another-session':sessionId, from=ctx.params.from;
-    if(peerOwned)await ctx.client.notify('_sudocode/session/peer_message',{sessionId:target,
+    if(peerOwned)await ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message',{sessionId:target, deliveryId:'a'.repeat(64),
       text:`<mailbox-message from="${from}">\n${ctx.params.text}\n</mailbox-message>`,body:ctx.params.text,
       sudocode:{a2a:{from,kind:'message'}}});
     else await ctx.client.notify(acp.methods.client.session.update,{sessionId:target,
@@ -67,11 +76,16 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
       _meta:{sudocode:{a2a:{from,kind:'message'}}}});
     return {};
   })
+  .onRequest('_fixture/input-state', value=>value, async ctx=>{
+    await ctx.client.notify('_sudocode/session/input_update',{sessionId,update:ctx.params.update});
+    return {};
+  })
   .onRequest(acp.methods.agent.session.load, ctx => {
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
     // A client that owns peer input hears peers even before its own startup completes.
     if (peerOwned && scenario.startsWith('channel')) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
-      void ctx.client.notify('_sudocode/session/peer_message', { sessionId,
+      log({ method: 'peer-notification', from });
+      void ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', { sessionId, deliveryId:'b'.repeat(64),
         text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
         body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting',
           verified: scenario === 'channel-node-namespace' } } }).catch(() => {});
@@ -106,14 +120,32 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     log({ method: '_sudocode/a2a/agent_list', input: ctx.params });
     const gate=process.env.SCODE_DIRECT_FIXTURE_LIST_GATE;
     while(gate&&!existsSync(gate))await new Promise(resolve=>setTimeout(resolve,10));
+    const failure = process.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE;
+    if (scenario.startsWith('initial-list-unavailable') && failure && !existsSync(failure)) {
+      writeFileSync(failure, JSON.stringify({pid:process.pid,sessionId}), {flag:'wx'});
+      returnedInitialListFailure = true;
+      return result('list recipients at /agents: status: Unavailable, message: "tcp connect error", details: [], metadata: MetadataMap { headers: {} }', 'agent_list', ctx.params, true);
+    }
     // While this file exists the Node refuses the session's credential, as one
     // whose validity window has not opened yet on this host.
     const refused=process.env.SCODE_DIRECT_FIXTURE_LIST_REFUSED;
     if(refused&&existsSync(refused)){
-      return result(undefined, 'agent_list', ctx.params, 'list recipients at /agents: status: Unknown, message: "transport error"');
+      return result('list recipients at /agents: status: Unknown, message: "transport error"', 'agent_list', ctx.params, true);
     }
     return result({ agents: [{ name: 'fixture-peer', send_to: 'fixture-peer' }] }, 'agent_list', ctx.params);
   })
-  .onRequest(acp.methods.agent.session.close, () => ({}));
+  .onRequest(acp.methods.agent.session.close, () => {
+    if (scenario.startsWith('initial-list-unavailable')) log({method:'session/close',sessionId});
+    if (scenario === 'initial-list-unavailable-cleanup-unknown' && returnedInitialListFailure) {
+      // POSIX-only test: this real bounded descendant holds the original stderr
+      // pipe past the close deadline even after its direct parent exits.
+      const drained = process.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE+'.drained';
+      const holder = spawn(process.execPath, ['-e',
+        'setTimeout(()=>require("node:fs").writeFileSync(process.argv[1],"drained"),4000)', drained],
+        {stdio:['ignore','ignore',process.stderr]});
+      holder.unref();
+    }
+    return {};
+  });
 const connection = app.connect(acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
 await connection.closed;

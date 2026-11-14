@@ -77,8 +77,8 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
   const workspace = environment.CLAUDE_PROJECT_DIR || process.cwd();
   const bindingDirectory = path.join(config.stateDirectory, 'bindings');
   const bindings = readBindings(bindingDirectory);
-  settleInterruptedBindings(bindingDirectory, bindings);
-  const binding = claimBinding(bindingDirectory, bindings, { id: sessionId, cwd: workspace, frontend: 'claude' });
+  await settleInterruptedBindings(bindingDirectory, bindings);
+  const binding = await claimBinding(bindingDirectory, bindings, { id: sessionId, cwd: workspace, frontend: 'claude' });
   await serveScodeMcp({ auditLog: config.auditLog, claudeChannel: { peerPolicy: config.peerPolicy,
     ...(config.peers ? { peers: config.peers } : {}), wakeSpool: claudeWakeSpool(config, sessionId) } }, async () => {
     // A retryable failure keeps the binding pending, so the next attempt drives the same operation.

@@ -3197,3 +3197,48 @@ fn assert_delegated_manifest(workspace: &HarnessWorkspace) {
     assert_eq!(manifests[0]["model"], "claude-sonnet");
     assert_eq!(manifests[0]["status"], "completed");
 }
+
+#[test]
+fn compacted_a2a_only_session_continues_without_enabling_filesystem_tools() {
+    let provider = Provider::new("budget-weak-then-target");
+    let env = budget_env("compacted-a2a-only", &provider);
+    let path = budget_fixture(&env);
+    let (code, screen) = compact_env(&env, &path);
+    assert_eq!(code, 0, "{screen}");
+    assert!(Session::load_from_path(&path).unwrap().compaction.is_some());
+
+    let mut cli = env.spawn(&[
+        "-p",
+        "--resume",
+        path.to_str().unwrap(),
+        "--allowedTools",
+        "agent_list,send",
+        "Continue PROJECT_ALPHA. A2A_AFTER_COMPACT_SENTINEL",
+    ]);
+    let code = cli.expect_eof().unwrap();
+    let screen = cli.render(rendered_contents);
+    assert_eq!(code, 0, "{screen}");
+    assert!(screen.contains("ALPHA_CONTEXT_OK"), "{screen}");
+
+    let requests = provider.requests.lock().unwrap();
+    let tasks: Vec<_> = requests
+        .iter()
+        .filter(|r| !is_compaction_request(r))
+        .collect();
+    assert_eq!(tasks.len(), 1);
+    let names: Vec<_> = tasks[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"agent_list") && names.contains(&"send"));
+    assert!(!names.contains(&"glob_search") && !names.contains(&"read_file"));
+    assert_eq!(
+        tasks[0]["messages"]
+            .to_string()
+            .matches("A2A_AFTER_COMPACT_SENTINEL")
+            .count(),
+        1
+    );
+}

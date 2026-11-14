@@ -12,6 +12,49 @@ Linux ARM64 (including DGX Spark), Linux x64, macOS and Windows use the same
 JavaScript payload. CI runs actual stdio/package workflows on these platforms;
 a new machine still needs its own scode, credential and transport acceptance.
 
+## Receiver lifetime attached to an existing Windows frontend
+
+For a fixed-session receiver which must retire with one original frontend,
+capture its identity with `node dist/server.cjs --capture-receiver-owner PID`.
+This read-only command returns `platform`, `pid`, decimal-string
+`createdFiletime100ns` and `exe`. Place that object in `receiverOwner` in the
+same private runtime config as `acpSessionId` and `codexCallback.threadId`.
+Run the ordinary `--config` entry. There is no second launcher, identity
+sidecar, repeated PID probe or application-maintained heartbeat.
+
+The shared adapter verifies the exact identity and holds the original Windows
+process handle. A timeout during initial qualification reports liveness UNKNOWN;
+once ready, only the kernel exit event proves that the original owner exited.
+Monitor failure is separately recorded and closes the receiver without claiming
+owner exit. It never adopts a replacement PID. A named pipe keyed by the original
+process identity and existing ACP session prevents duplicate receivers even when
+the config is copied or renamed. Unconfirmed child cleanup retains ownership;
+the lock is released after the owned receiver and monitor close successfully.
+The monitor requests synchronization and limited query access, never termination
+rights. Receiver EOF closes only its own helper. Windows PowerShell and .NET are
+used from the OS installation, with no Python/psutil or native Node addon needed.
+The helper imports the Utility module from that PowerShell installation and
+qualifies its compiler and JSON commands, including under MCP's reduced environment.
+If PowerShell exits before its synchronous compiler-bootstrap completion
+marker, descendant cleanup remains UNKNOWN and the receiver lock is retained.
+If initial qualification also failed, the cleanup error retains that original
+error as its `cause` and includes it in MCP status and stderr. A later monitor
+exit or repeated shutdown does not replace the first qualification failure.
+The common CLI signal adapter waits for receiver cleanup before exiting.
+Rejected cleanup keeps the original MCP endpoint available for status and
+retains exclusivity; another graceful signal does not reinterpret failure as
+success. Forced OS termination is outside this guarantee. The global inventory
+owner uses this same shutdown adapter and releases its endpoint only after
+startup and all owned connections finish cleanup.
+
+MCP initialization remains independent of owner qualification and ACP startup;
+tools refuse as `not_submitted` until ready. Once bound, the existing shared
+same-SID connection recovery handles transport failure. Process lifetime,
+durable inbox delivery, native acceptance and model completion remain distinct.
+Approval settings remain the responsibility of the original foreground launcher;
+this observer does not set or authorize them. This option is Windows-only. The
+global autojoin owner still follows native-root inventory, not one frontend PID.
+
 ## Existing-thread native queue ingress
 
 For an explicitly known legacy thread without a reachable native socket,
@@ -117,6 +160,12 @@ enrolled actor after it changes (a scode upgrade, a timeout). Protocol fixtures 
 or current-node compatibility.
 The [ownership, enrollment and recovery contract](../../docs/design/codex-a2a-autojoin.md)
 defines that remaining integration boundary and rollout gates.
+
+Initial Node queries validate the native audit and actor/session binding before
+reporting an operation failure. An authenticated `agent_list` failure retains
+its original result as `Error.cause`; it does not imply an identity mismatch.
+The owner reconnects with the same durable binding after confirmed child cleanup.
+Unknown cleanup keeps the binding disconnected and prevents a replacement.
 
 Reception defaults to the exact configured peer allowlist. A network-wide
 installation can explicitly select `--peer-policy node-namespace` during
@@ -293,6 +342,15 @@ unchanged cold-daemon and legacy-import cases; it does not modify a live user
 home or certify a production migration. A setup result alone still reports
 `a2aJourneyVerified: false`.
 
+The installed fixture also accepts `CODEX_ENROLLMENT_INSTALLED_COLD=1`,
+`CODEX_ENROLLMENT_CROSS_WORKSPACE=1` and `CODEX_ENROLLMENT_RESUME_COLD=1`
+to exercise an absent backend, a second workspace and original history after
+backend shutdown. Completed history receives peer input automatically. Cancelled
+history preserves native interruption: the fixture observes the same durable
+queued message and zero new model requests for 15 seconds, then explicitly
+starts that queued item as a fixture user action and checks consumption exactly
+once. This explicit action is not performed by the callback or by startup.
+
 ## Build a source-bound archive
 
 From this directory in a clean committed checkout:
@@ -409,6 +467,34 @@ text block. A lost/ambiguous response remains Unknown. Only proven local or
 advertised typed pre-admission refusal is not_submitted. Listing means
 visibility/addressability, not online proof. The host binds actual actor and
 namespace; the wrapper does not accept a caller-selected sender.
+
+`scode_status` separates transport attachment from input and delivery progress.
+Each attached autojoin row includes the actual receiver PID, executable path,
+ACP SID, and `receiver.input`: the negotiated input owner, last observed queue
+state/revision/count, and retained last error. An unobserved queue is `unknown`.
+Foreign-session, stale and malformed updates cannot clear a failure. These
+observations never flush a queue, resume a user interruption, or replay input.
+
+`delivery` reports the durable callback inbox separately: pending count, current
+failure/cleanup state, and the last actual downstream queue acceptance. A closed
+ACP child does not clear `cleanup_unknown`. A client-owned peer callback can
+continue while the model's input queue is paused; a session-owned paused/error
+queue is `input_blocked`. Downstream failure is `delivery_blocked`. `connected`
+alone proves neither end-to-end delivery nor that the frontend woke. Match the
+original delivery/queue/turn receipts before claiming recovery.
+
+For upgrades, compare the **running** executable and installed SDK with their
+qualified artifacts, rather than only checking a prepared package. A legacy
+owner without per-receiver recovery cannot be repaired by killing its child:
+the remaining owner may retain a disconnected binding. Preserve its pending
+inputs and original actor/SID, then use the qualified owner transition. Do not
+expand a messaging-only tool allowlist to make a filesystem health probe pass.
+
+The MCP handshake is available while the original ACP session is connecting.
+`scode_status` reports that state, and commands return `not_submitted` until
+the session is ready. A slow first connection cannot hold up the MCP handshake;
+the same-session supervisor continues independently. Refused commands are not
+buffered for later execution.
 
 ## Optional Codex callback adapter and existing-thread migration
 
@@ -535,15 +621,48 @@ outlive a disconnected CLI, and source labels alone do not establish root
 identity. These checks do not qualify Agent enrollment, a production handoff,
 all frontend launch modes or automatic network admission.
 
-`codexCallback` is an optional adapter, separate from the ACP transport. It
-connects to the existing native app-server proxy/socket and original loaded
-thread. It steers an active turn or starts an idle turn through the native
-frontend; it does not resume, fork, create another controller or weaken the
-frontend's approvals. Configure it using `CodexCallbackConfig` from the
-`/codexCallback` export. The bridge's scode connection then owns peer input, so
-the frontend is the only respondent to each peer message. Message content
-remains peer data, not user authority. An active steer or a delayed callback is not proof of true idle
-wakeup: acceptance must observe native idle and an accepted `turn/start`.
+`codexCallback` owns a private durable inbox beside its diagnostic log
+(`<log>.inbox`). The scode connection negotiates `peerInput` v2: the mailbox
+cursor advances only after that inbox has fsynced the exact message. Upstream
+redelivery uses the same identity. A full inbox (64 pending messages), storage
+failure or closed owner refuses the handoff rather than dropping it.
+Current scode sends carry a distinct `send_id`; truly identical historical
+envelopes without that ID cannot be distinguished from a cursor replay.
+Receipt files are retained without a time-based deduplication expiry.
+
+Both socket and native-queue transports submit through the versioned
+`thread/queue/addOnce` method. It must be supplied by the matching Codex native
+build. There is **no fallback** to `turn/start`, `turn/steer` or ordinary
+`thread/queue/add`: those APIs cannot safely retry an ambiguous outcome. The
+native store accepts each `(thread, clientUserMessageId)` once, rejects changed
+content for an existing ID, and retains acceptance after dequeue/edit/delete.
+Acceptance means durable queuing; the existing owner decides when it is idle
+and eligible to run. Paused/interrupted threads are not forcibly resumed.
+
+The callback reloads pending inbox records after restart, retries with the same
+ID using 1–30 second backoff, and writes a done receipt before releasing the
+message bytes. Unsupported native versions retain pending records and an error.
+Legacy JSONL `pending` records have no safe idempotent submission contract and
+are **not** automatically imported or replayed. Do not delete either inbox or
+native delivery receipts to resolve an uncertain delivery.
+
+The callback and autojoin owner reconnect their own native proxy to the same
+endpoint after disconnect. Autojoin can reopen a failed owned scode using its
+unchanged ready binding, actor and ACP session; it never repeats an ambiguous
+enrollment or falls back to a new session. Ordinary tool/send RPCs are still
+sent once. Reconnection does not replay them. The fixed-session MCP bridge
+also reopens only its configured ACP session after startup failure or child
+exit, with 5–30 second backoff. Its MCP status remains available; commands
+attempted while disconnected return `not_submitted`. An in-flight call with
+a lost reply remains `unknown`. Unconfirmed child cleanup stops replacement.
+These changes require rebuilt
+SDK, scode and Codex native artifacts; changing the shared scode symlink does
+not upgrade existing processes or absolute profile pins.
+
+Messages remain peer data, not user authority. Queue acceptance does not prove
+final handling, global idle, or exactly-once tool side effects. This recovery
+protocol does not restart a native server, change credentials, create threads
+or override approvals.
 
 A pre-existing thread can retain a temporary MCP config override. On Codex
 0.162.1 an isolated actual app-server test showed that changing disk config
@@ -602,3 +721,16 @@ the recipient before the send; one run did not deliver within its unchanged
 30-second budget. That unresolved receiver-reentry observation is retained as
 a separate native lifetime/lease concern. The append fixture avoids that
 unnecessary setup and does not claim to validate same-agent cold handoff.
+
+Durable Codex ingress requires the actual server's `initialize` response to
+advertise `serverCapabilities.durableQueueAddOnce: 1` on each connection,
+including a replacement proxy after reconnect. The CLI version or SDK package
+alone cannot establish this: the proxy can reach an older shared daemon.
+Autojoin refuses admission before enrollment or starting a peer receiver when
+the capability is absent. An unavailable native connection retains incoming
+delivery upstream; existing locally persisted input remains pending. A native
+queue producer checks its own handshake before submitting any write. There is
+no fallback to `turn/start`, `turn/steer` or non-idempotent `thread/queue/add`.
+This admission change requires a newly qualified native/SDK pair; previously
+qualified e690 binaries without the capability declaration are not accepted by
+the new gate. It does not restart a running native daemon or user frontend.

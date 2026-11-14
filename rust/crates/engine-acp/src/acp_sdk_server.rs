@@ -49,7 +49,7 @@ use runtime::{PermissionMode, PermissionPromptDecision, PermissionRequest, Quest
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::session_ops;
 use crate::subagent_completions::{
@@ -374,12 +374,13 @@ pub const PEER_INPUT_META_KEY: &str = "peerInput";
 /// Whether the client asked to own peer input
 /// (`clientCapabilities._meta.sudocode.peerInput.version >= 1`). Anything
 /// malformed is "not asked".
-fn peer_input_owned(meta: Option<&agent_client_protocol_schema::Meta>) -> bool {
+fn peer_input_version(meta: Option<&agent_client_protocol_schema::Meta>) -> u64 {
     meta.and_then(|meta| meta.get("sudocode"))
         .and_then(|sudocode| sudocode.get(PEER_INPUT_META_KEY))
         .and_then(|peer_input| peer_input.get("version"))
         .and_then(serde_json::Value::as_u64)
-        .is_some_and(|version| version >= 1)
+        .unwrap_or(0)
+        .min(2)
 }
 
 /// ACP presentation subscriptions and durable wire delivery. All lifecycle
@@ -862,7 +863,7 @@ async fn ensure_a2a_receiver(
     cx: &ConnectionTo<Client>,
     _config: &SdkAcpConfig,
     session_id: &str,
-    client_owned: bool,
+    client_owned: u64,
 ) {
     let Some(agent) = registry.agent_of(session_id) else {
         return;
@@ -900,7 +901,7 @@ async fn ensure_a2a_receiver(
 }
 
 type PeerDelivery = (
-    runtime::agent_mailbox::MailboxEnvelope,
+    runtime::mailbox::MailboxRecord,
     std::sync::mpsc::SyncSender<bool>,
 );
 type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
@@ -909,7 +910,7 @@ type PeerInbox = tokio::sync::mpsc::UnboundedReceiver<PeerDelivery>;
 #[derive(Clone, Copy)]
 struct PeerRoute {
     /// The client owns peer input (`peerInput`): deliver to it, start no turn.
-    client_owned: bool,
+    client_owned: u64,
     /// The session's mailbox authenticates every writer.
     verified: bool,
 }
@@ -940,7 +941,7 @@ async fn admit_peer_receiver(
                 let stop = HookAbortSignal::new();
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
                 let callback_stop = stop.clone();
-                let worker = runtime::mailbox::spawn_inbox_poller(
+                let worker = runtime::mailbox::spawn_inbox_record_poller(
                     Arc::clone(mailbox),
                     200,
                     "acp-peer",
@@ -979,11 +980,11 @@ async fn admit_peer_receiver(
 }
 
 fn deliver_peer_envelope(
-    message: &runtime::agent_mailbox::MailboxEnvelope,
+    message: &runtime::mailbox::MailboxRecord,
     tx: &tokio::sync::mpsc::UnboundedSender<PeerDelivery>,
     callback_stop: &HookAbortSignal,
 ) -> bool {
-    if message.body.trim().is_empty() {
+    if message.envelope().body.trim().is_empty() {
         return true;
     }
     let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
@@ -1021,9 +1022,10 @@ async fn run_peer_receiver(
             () = stop.cancelled() => break,
             inbound = rx.recv() => inbound,
         };
-        let Some((message, ack)) = inbound else {
+        let Some((record, ack)) = inbound else {
             break;
         };
+        let message = record.envelope();
         // The session this agent's messages go to: the one bound so far
         // while it lives, else another session of the same agent.
         // A refusal leaves the message unread; the mailbox receiver backs off
@@ -1033,15 +1035,28 @@ async fn run_peer_receiver(
             continue;
         };
         bound.clone_from(&session_id);
-        if client_owned {
-            // The client is the agent: hand it the message instead of this
-            // session's model. The cursor advances once the notification is
-            // written to the transport; a closed client leaves it unread.
-            let delivered = cx
-                .send_notification(peer_message_notification(&session_id, &message, verified))
-                .is_ok();
+        if client_owned >= 1 {
+            // v2 advances the mailbox only after the owner durably accepts.
+            // A lost response or disconnected client leaves this exact ID unread.
+            let delivered = if client_owned >= 2 {
+                let payload = peer_message_payload(&session_id, &record, verified);
+                let response = tokio::select! {
+                    () = stop.cancelled() => None,
+                    response = tokio::time::timeout(std::time::Duration::from_secs(10),
+                        cx.send_request(ClientRequest::ExtMethodRequest(ExtRequest::new(
+                            "_sudocode/session/peer_message", payload.into(),
+                        ))).block_task()) => Some(response),
+                };
+                matches!(response, Some(Ok(Ok(ref value)))
+                    if value["accepted"] == true
+                    && value["sessionId"] == session_id
+                    && value["deliveryId"] == record.delivery_id())
+            } else {
+                cx.send_notification(peer_message_notification(&session_id, &record, verified))
+                    .is_ok()
+            };
             let _ = ack.send(delivered);
-            if !delivered {
+            if !delivered && client_owned < 2 {
                 break;
             }
             continue;
@@ -1052,7 +1067,7 @@ async fn run_peer_receiver(
         };
         let text = message.to_prompt(verified);
         let mut states = driver.input_changes();
-        let action = peer_input_action(&message, &text);
+        let action = peer_input_action(message, &text);
         let receipt = tokio::select! {
             () = stop.cancelled() => { let _ = ack.send(false); break; },
             receipt = driver.input(action, cx.clone()) => receipt,
@@ -1097,24 +1112,31 @@ async fn run_peer_receiver(
 /// model would read, plus the sender fields a client routes and replies on.
 fn peer_message_notification(
     session_id: &str,
-    message: &runtime::agent_mailbox::MailboxEnvelope,
+    message: &runtime::mailbox::MailboxRecord,
     verified: bool,
 ) -> AgentNotification {
-    let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified});
+    AgentNotification::ExtNotification(ExtNotification::new(
+        "_sudocode/session/peer_message",
+        peer_message_payload(session_id, message, verified).into(),
+    ))
+}
+
+fn peer_message_payload(
+    session_id: &str,
+    record: &runtime::mailbox::MailboxRecord,
+    verified: bool,
+) -> Box<serde_json::value::RawValue> {
+    let message = record.envelope();
+    let mut a2a = json!({"from": message.from, "kind": message.kind, "verified": verified, "sendId": message.send_id});
     if let Some(summary) = &message.summary {
         a2a["summary"] = json!(summary);
     }
-    let payload = serde_json::value::to_raw_value(&json!({
-        "sessionId": session_id,
-        "text": message.to_prompt(verified),
-        "body": message.body,
+    serde_json::value::to_raw_value(&json!({
+        "sessionId": session_id, "deliveryId": record.delivery_id(),
+        "text": message.to_prompt(verified), "body": message.body,
         "sudocode": {"a2a": a2a},
     }))
-    .expect("peer message projection is serializable");
-    AgentNotification::ExtNotification(ExtNotification::new(
-        "_sudocode/session/peer_message",
-        payload.into(),
-    ))
+    .expect("peer message projection is serializable")
 }
 
 async fn wait_peer_input_commit(
@@ -2663,7 +2685,7 @@ pub(crate) async fn run_acp_on_transport(
     // Per connection: whether this client opted into sub-agent events at
     // `initialize`. Sessions it creates or loads get a sub-agent route.
     let subagent_events = Arc::new(AtomicBool::new(false));
-    let peer_input_client = Arc::new(AtomicBool::new(false));
+    let peer_input_client = Arc::new(AtomicU64::new(0));
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
@@ -2700,12 +2722,15 @@ pub(crate) async fn run_acp_on_transport(
                     let mut meta = initialize_meta(subagent_version);
                     // Hosted sessions have no client of their own to own peer
                     // input; their host already routes it.
-                    let owns_peer_input =
-                        !hosted && peer_input_owned(req.client_capabilities.meta.as_ref());
+                    let owns_peer_input = if hosted {
+                        0
+                    } else {
+                        peer_input_version(req.client_capabilities.meta.as_ref())
+                    };
                     peer_input_client.store(owns_peer_input, Ordering::SeqCst);
-                    if owns_peer_input {
+                    if owns_peer_input >= 1 {
                         meta.get_mut("sudocode").unwrap()[PEER_INPUT_META_KEY] =
-                            json!({"version": 1});
+                            json!({"version": owns_peer_input});
                     }
                     if completion_version {
                         meta.get_mut("sudocode").unwrap()[if tasks {

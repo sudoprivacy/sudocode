@@ -2,7 +2,8 @@ import * as assert from 'node:assert/strict';
 import * as path from 'node:path';
 import type { ScodeAcpConfig, SessionNotification, ScodeQuestionRequest, ScodePeerMessage } from '../src/scodeAcp';
 const root = path.resolve(__dirname, '../..');
-const { connectScode, validateScodeQuestionResponse } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/scodeAcp');
+const { connectScode, validateScodeQuestionResponse } = require(process.env.SCODE_ACP_TEST_LIBRARY
+  ?? path.join(root, 'dist/index.cjs')) as typeof import('../src/scodeAcp');
 
 const fixture = path.join(root, 'test/fixtures/scode-acp-agent.mjs');
 const base: ScodeAcpConfig = {
@@ -24,6 +25,27 @@ async function main(): Promise<void> {
     assert.equal(runtime.sessionId, 'original-native-id');
     assert.ok(methods.includes('session/load'));
     assert.ok(!methods.includes('session/new'));
+    assert.equal(runtime.receiveHealth.state,'unknown','connected is not evidence of a progressing input queue');
+    assert.equal(runtime.receiveHealth.inputOwner,'session');
+    const state=(revision:number,paused:boolean,pending=0)=>({kind:'state',state:{revision,paused,running:false,
+      pending:Array.from({length:pending},()=>({clientId:'original-peer',source:'peer'}))}});
+    await runtime.request('_fixture/input-state',{update:state(1,false)});
+    assert.equal(runtime.receiveHealth.state,'ready');
+    await runtime.request('_fixture/input-state',{update:{kind:'error',message:'glob_search is not enabled'}});
+    await runtime.request('_fixture/input-state',{update:state(2,true,1)});
+    assert.equal(runtime.receiveHealth.state,'paused');
+    assert.equal(runtime.receiveHealth.pendingCount,1);
+    assert.match(runtime.receiveHealth.lastError!.message,/glob_search/);
+    await runtime.request('_fixture/input-state',{sessionId:'another-native-id',update:state(3,false)});
+    await runtime.request('_fixture/input-state',{update:state(1,false)});
+    await runtime.request('_fixture/input-state',{update:{kind:'state',state:{revision:3,paused:false}}});
+    assert.equal(runtime.receiveHealth.state,'paused','foreign, stale or malformed state cannot hide the original failure');
+    const copy=runtime.receiveHealth;copy.lastError!.message='changed by caller';
+    assert.match(runtime.receiveHealth.lastError!.message,/glob_search/);
+    assert.ok(!methods.includes('_sudocode/session/input'),'health observation cannot flush, resume or replay input');
+    await runtime.request('_fixture/input-state',{update:state(3,false)});
+    assert.equal(runtime.receiveHealth.state,'ready');
+    assert.match(runtime.receiveHealth.lastError!.message,/glob_search/,'recovery keeps the historical failure');
     const response = await runtime.request<{ stopReason: string }>('session/prompt', prompt(runtime.sessionId, 'hello'));
     assert.equal(response.stopReason, 'end_turn');
     assert.equal(notices.filter(n => n.update.sessionUpdate === 'user_message_chunk').length, 0);
@@ -35,6 +57,7 @@ async function main(): Promise<void> {
     assert.equal(denied._meta.permission.outcome.outcome, 'cancelled');
   } finally { await runtime.close(); }
   assert.equal(runtime.closed, true);
+  assert.equal(runtime.receiveHealth.state,'closed');
   await runtime.exited;
   await runtime.close(); // Close is idempotent.
   await assert.rejects(runtime.request('session/prompt', prompt(runtime.sessionId, 'closed')), /closed/);
@@ -80,7 +103,7 @@ async function main(): Promise<void> {
 
   // A client that owns peer input receives each message instead of the session.
   const peerMessages: ScodePeerMessage[] = [];
-  const peerOwner = await connectScode({ ...base, onPeerMessage: message => peerMessages.push(message) });
+  const peerOwner = await connectScode({ ...base, onPeerMessage: message => { peerMessages.push(message); } });
   try {
     await peerOwner.request('session/prompt', prompt(peerOwner.sessionId, 'peer-message'));
     assert.deepEqual(peerMessages.map(message => message.sudocode.a2a.from), ['fixture-peer', 'stranger']);

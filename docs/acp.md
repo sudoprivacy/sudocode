@@ -304,18 +304,35 @@ input. Clients can use this metadata for their own message presentation.
 
 ### Client-owned peer input (`clientCapabilities._meta.sudocode.peerInput`)
 
-A client that is itself the agent its peers address declares
-`clientCapabilities._meta.sudocode.peerInput = { "version": 1 }`; scode echoes
-it in `initialize.result._meta.sudocode.peerInput`. A peer message for one of
-its sessions then arrives as the extension notification
-`_sudocode/session/peer_message` with `{ "sessionId", "text", "body",
-"sudocode": { "a2a": { "from", "kind", "verified", "summary"? } } }`, where `text` is the
-same `<mailbox-message>` wrapper a session model reads. It starts no turn of
-the scode session, so one message has one respondent. The mailbox cursor
-advances once the notification is written to the transport; a closed client
-leaves the message unread for the next delivery. A client that needs this mode
-refuses a scode that does not echo it, because that scode would also answer
-the peer itself. Managed (hosted) sessions do not offer it.
+A durable client declares `clientCapabilities._meta.sudocode.peerInput =
+{ "version": 2 }` and requires version 2 in the initialize response. scode
+sends `_sudocode/session/peer_message` as a **request**, containing `sessionId`,
+`deliveryId`, `text`, `body` and `sudocode.a2a` (`from`, `kind`, `verified`,
+optional `summary` and `sendId`). For envelopes with a logical send ID,
+`deliveryId` remains the SHA-256 of the complete envelope. Legacy envelopes
+without a send ID also bind the transcript path and actual committed stream
+position (or absolute JSONL byte position). These positions come from the reader,
+never sender-supplied fields. Replaying a record after a lost ACK or restart
+retains its ID, while two identical legacy records at different positions have
+different IDs. Ambiguous framing or non-advancing positions refuse consumption.
+
+The client must durably store the original message before returning
+`{ "accepted": true, "sessionId": "…", "deliveryId": "…" }`. Only that exact
+matching response advances the mailbox cursor. Timeout, disconnect, refusal or
+an invalid response leaves the original envelope unread for receiver retry.
+The ten-second request timeout bounds each handoff; it does not expire the
+message. A receipt means custody transfer, not a completed model turn.
+
+The SDK's Codex callback uses a private disk inbox, stable downstream IDs and
+`thread/queue/addOnce`; lost responses can be retried without duplicate enqueue.
+A full or unwritable inbox refuses acceptance so the server retains the message.
+No scode model turn runs for client-owned peer input. Sender policy remains in
+force, and the envelope is peer data rather than user authority.
+
+Version 1 remains available to notification-only clients: its cursor advances
+when the notification is written to the transport, with no durable downstream
+acceptance guarantee. The Codex bridge requires v2 and does not silently fall
+back. Hosted sessions do not offer client-owned peer input.
 
 ### Direct A2A requests
 

@@ -1150,7 +1150,7 @@ def native_guard_files():
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
         ".github/scripts/local_acceptance.py": "188605d39e922b7c14da9d2c747e8323563e336c86ff44439898802fea69553e",
-        ".github/scripts/vfs_search_cache.py": "b3ef0fa05c4077d1618b09db8af062e3cfe32b02f7fc3dca0ddedd3708754fb1",
+        ".github/scripts/vfs_search_cache.py": "410727c5e215727b688e536dc932e86f65ecb661924c88a2cb23705ccd2fcd0a",
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",
@@ -1175,7 +1175,7 @@ def native_guard_files():
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "cc1ff8e34a12ebcac284330497a26c4ea5af336cd208e1ab2a8531e83180eeb0",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "453b4bca68e242e4635490e97e45dbb0124195b78c43c2e0a71ac5f4fa24cd66",
-        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "c04b927c5ca9dbc1c1fadf0e0cc8c3e9d7b5bb1bf2d3bc8df9109b20789834f0",
+        "e2e/local-acceptance/vfs_search_cache_acceptance.py": "2b6dbee011188630ea87e07bdc9e988934cefbd9f85df5aa8d588bf08091b444",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
     }

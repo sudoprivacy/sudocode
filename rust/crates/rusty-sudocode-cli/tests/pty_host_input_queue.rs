@@ -14,6 +14,10 @@ struct Host {
     terminal: PtySession,
     session: String,
     id: u64,
+    /// Everything the last reply's read consumed, the reply and what preceded it.
+    /// An event written concurrently with that reply can be in here and nowhere
+    /// else: the terminal does not show it again.
+    last_read: String,
 }
 
 impl Host {
@@ -33,6 +37,7 @@ impl Host {
             terminal,
             session: String::new(),
             id: 0,
+            last_read: String::new(),
         };
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
@@ -76,6 +81,7 @@ impl Host {
                     self.terminal.render(common::screen_contents)
                 )
             });
+        self.last_read.clone_from(&response);
         let response: Value = response
             .lines()
             .rev()
@@ -258,6 +264,14 @@ fn host_flush_preserves_the_running_tool_and_all_recalled_attachments() {
     host.close();
 }
 
+/// Whether `text` holds a state notification with a started turn: the same line
+/// `"kind":"state","state":{"activeTurnId":[1-9]` matches on the terminal.
+fn admits_a_turn(text: &str) -> bool {
+    const STATE: &str = r#""kind":"state","state":{"activeTurnId":"#;
+    text.match_indices(STATE)
+        .any(|(at, _)| matches!(text[at + STATE.len()..].chars().next(), Some('1'..='9')))
+}
+
 #[test]
 fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
     let env = TestEnv::new("host-input-cancel");
@@ -294,10 +308,15 @@ fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
     }
     let flushed = host.input(json!({"action":"flush_or_cancel"}));
     assert_eq!(flushed["cancelled"], false);
-    // The control receipt precedes the automatic turn. Wait for its admission first.
-    host.terminal
-        .expect(r#""kind":"state","state":\{"activeTurnId":[1-9]"#)
-        .unwrap();
+    // The flush admits the queued input before it replies, but the turn's state
+    // notification and the reply are written by different tasks, so either can
+    // reach the wire first. Wait for the admission unless reading the reply
+    // already consumed it.
+    if !admits_a_turn(&host.last_read) {
+        host.terminal
+            .expect(r#""kind":"state","state":\{"activeTurnId":[1-9]"#)
+            .unwrap();
+    }
     let done = host.idle();
     assert!(done["pending"].as_array().unwrap().is_empty(), "{done}");
     if env.is_mock() {

@@ -45,6 +45,20 @@ export interface ScodePeerMessage {
   sudocode: { a2a: { from: string; kind?: string; summary?: string; verified?: boolean; sendId?: string | null } };
 }
 
+export interface ScodePeerUnread {
+  sessionId: string;
+  unread: number;
+}
+
+function parsePeerUnread(value: unknown): ScodePeerUnread {
+  const event = value as Partial<ScodePeerUnread> | null;
+  if (!event || typeof event.sessionId !== 'string' || !event.sessionId
+      || !Number.isSafeInteger(event.unread) || event.unread! < 0) {
+    throw new Error('Invalid _sudocode/session/peer_unread notification');
+  }
+  return event as ScodePeerUnread;
+}
+
 function parsePeerMessage(value: unknown): ScodePeerMessage {
   const message = value as Partial<ScodePeerMessage> | null;
   const from = message?.sudocode?.a2a?.from;
@@ -105,7 +119,10 @@ export interface ScodeAcpConfig {
   onPeerMessage?: (message: ScodePeerMessage) => void | Promise<void>;
   /** v2 requires durable acceptance before resolving onPeerMessage. v1 is
    * notification-only for clients without a durable inbox (e.g. channels). */
-  peerInputVersion?: 1 | 2;
+  peerInputVersion?: 1 | 2 | 3;
+  /** Opt in to mailbox offers. v3 reports only unread counts; the client must
+   * obtain text and forward model acknowledgements with peer_offer. */
+  onPeerUnread?: (event: ScodePeerUnread) => void | Promise<void>;
 }
 
 export interface ScodeConnection {
@@ -192,6 +209,15 @@ export async function connectScode(
       || (config.onQuestion !== undefined && typeof config.onQuestion !== 'function')) {
     throw new Error('ACP input handlers must be functions');
   }
+  if ((config.onPeerMessage !== undefined && typeof config.onPeerMessage !== 'function')
+      || (config.onPeerUnread !== undefined && typeof config.onPeerUnread !== 'function')
+      || (config.peerInputVersion !== undefined && ![1, 2, 3].includes(config.peerInputVersion))
+      || (config.onPeerUnread && (config.onPeerMessage || config.peerInputVersion !== 3))
+      || (config.peerInputVersion === 3 && !config.onPeerUnread)
+      || (config.peerInputVersion !== undefined && !config.onPeerMessage && !config.onPeerUnread)) {
+    throw new Error('peerInput v3 requires onPeerUnread without onPeerMessage; v1/v2 require onPeerMessage');
+  }
+  const peerOwned = !!(config.onPeerMessage || config.onPeerUnread);
   const startupMs = duration(config.startupTimeoutMs, 30000);
   const closeMs = duration(config.closeTimeoutMs, 3000);
   const closePhaseMs = Math.max(1, Math.floor(closeMs / 3));
@@ -209,7 +235,7 @@ export async function connectScode(
     cwd: config.workspace, env, stdio: ['pipe','pipe','pipe'], windowsHide: true, shell: false,
   });
   let sessionId = config.acpSessionId ?? '';
-  let receiveHealth: ScodeReceiveHealth = {inputOwner:config.onPeerMessage?'client':'session',state:'unknown'};
+  let receiveHealth: ScodeReceiveHealth = {inputOwner:peerOwned?'client':'session',state:'unknown'};
   const closing = new AbortController();
   let stopped = false;
   let closePromise: Promise<void> | undefined;
@@ -300,6 +326,14 @@ export async function connectScode(
       return { accepted: true, sessionId: ctx.params.sessionId, deliveryId: ctx.params.deliveryId };
     });
   }
+  if (config.onPeerUnread) {
+    app.onNotification('_sudocode/session/peer_unread', parsePeerUnread, async ctx => {
+      try {
+        if (!sessionId || ctx.params.sessionId !== sessionId) throw new Error('Unread notification is not for the loaded ACP session');
+        await config.onPeerUnread!(ctx.params);
+      } catch (error) { report(error); }
+    });
+  }
   if (config.onQuestion) {
     app.onRequest('_scode/ask_user_question', parseQuestion, ctx =>
       abortable(signal => config.onQuestion!(ctx.params, signal), [ctx.signal,closing.signal]).then(response => {
@@ -353,10 +387,11 @@ export async function connectScode(
     const initialized = await timeout(request<acp.InitializeResponse>(acp.methods.agent.initialize, {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
-        ...(config.onPeerMessage ? { _meta: { sudocode: { peerInput: { version: config.peerInputVersion ?? 2 } } } } : {}) },
+        ...(peerOwned ? { _meta: { sudocode: { peerInput: { version: config.peerInputVersion ?? 2 } } } } : {}) },
     }), startupMs, 'ACP initialize');
     const peerInput = (initialized._meta?.sudocode as { peerInput?: { version?: number } } | undefined)?.peerInput;
-    if (config.onPeerMessage && !(typeof peerInput?.version === 'number' && peerInput.version >= (config.peerInputVersion ?? 2))) {
+    if (peerOwned && !(typeof peerInput?.version === 'number'
+        && (config.peerInputVersion === 3 ? peerInput.version === 3 : peerInput.version >= (config.peerInputVersion ?? 2)))) {
       throw new Error('This scode does not support client-owned peer input; refusing a connection whose peers would be answered twice');
     }
     if (config.acpSessionId) {

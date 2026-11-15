@@ -37,6 +37,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 async-trait = "0.1"
+# peerInput v3 acknowledgement tokens (peer_offer): HMAC-SHA256, base32.
+hmac = "0.13"
+sha2 = "0.11"
+data-encoding = "2"
+getrandom = "0.2"
 # The ACP stdio server polls stdin + watches the parent PID via termios/poll on
 # Unix (the ppid-death watchdog); the whole block is `#[cfg(unix)]`.
 [target.'cfg(unix)'.dependencies]

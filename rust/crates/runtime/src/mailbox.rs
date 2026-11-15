@@ -296,6 +296,80 @@ impl MailboxRecord {
     }
 }
 
+/// One committed unit of a conversation transcript: a stream append, or one
+/// JSONL line of a byte log. A reader register always sits on a frame
+/// boundary, so frames are what a consumer acknowledges.
+#[derive(Clone, Debug)]
+pub struct MailboxFrame {
+    start: u64,
+    end: u64,
+    records: Vec<MailboxRecord>,
+}
+
+impl MailboxFrame {
+    /// Transcript position the frame starts at.
+    #[must_use]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// Transcript position just past the frame: the register value that
+    /// acknowledges it.
+    #[must_use]
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// The frame's delivery records, in transcript order. One stream frame can
+    /// hold several.
+    #[must_use]
+    pub fn records(&self) -> &[MailboxRecord] {
+        &self.records
+    }
+}
+
+/// The unread delivery frames of one conversation, read from its register.
+#[derive(Clone, Debug)]
+pub struct UnreadFrames {
+    start: u64,
+    frames: Vec<MailboxFrame>,
+}
+
+impl UnreadFrames {
+    /// The register value the read started from: a commit's `start`.
+    #[must_use]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The frames holding at least one delivery, in transcript order.
+    #[must_use]
+    pub fn frames(&self) -> &[MailboxFrame] {
+        &self.frames
+    }
+}
+
+/// What [`Mailbox::commit_through`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The register moved from `start` to `end`.
+    Committed,
+    /// The register was already at or past `end`; it stays where it is.
+    Already,
+    /// The register stays where it is, for this reason.
+    Refused(CommitRefusalReason),
+}
+
+/// Why [`Mailbox::commit_through`] left the register alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitRefusalReason {
+    /// Another instance holds this conversation's reader, or this claim was
+    /// lost before the write.
+    LeaseLost,
+    /// The register is neither at `start` nor past `end`.
+    PositionMoved,
+}
+
 type RecordSink = dyn Fn(&MailboxRecord) -> bool + Send + Sync;
 
 impl MailboxBackend {
@@ -640,6 +714,71 @@ impl Mailbox {
         }))
     }
 
+    /// The delivery frames after this agent's register in the conversation with
+    /// `peer`, read without claiming the reader or moving anything.
+    ///
+    /// Offering is separate from committing: a consumer presents these frames
+    /// and later commits the run it was given back with
+    /// [`Self::commit_through`], which claims the reader only for that write.
+    /// Session-control records are left out, as for every peer consumer; a
+    /// frame left with no delivery record is not offered, and a commit to a
+    /// later frame's end passes over it.
+    ///
+    /// # Errors
+    /// Returns an error when the register or the transcript cannot be read.
+    pub fn unread_frames(&self, peer: &str) -> Result<UnreadFrames, String> {
+        let start = self
+            .conversation_reader(peer)
+            .load()?
+            .map_or(0, |register| register.read_offset);
+        let (frames, _next) = self.poll_tail_frames(&self.transcript_path(peer), start, 0)?;
+        let frames = frames
+            .into_iter()
+            .filter_map(|mut frame| {
+                frame
+                    .records
+                    .retain(|record| record.envelope.kind != a2a::session::SESSION_KIND);
+                (!frame.records.is_empty()).then_some(frame)
+            })
+            .collect();
+        Ok(UnreadFrames { start, frames })
+    }
+
+    /// Move this agent's register in the conversation with `peer` from `start`
+    /// to `end`, if it is still at `start`.
+    ///
+    /// The reader is claimed for this write alone and released afterwards.
+    /// A register already at or past `end` is left as it is: the range was
+    /// committed before, so the call succeeds without moving it backwards. A
+    /// register anywhere else, or a reader held by another instance, refuses.
+    ///
+    /// # Errors
+    /// Returns an error when the reader cannot be claimed or the register
+    /// write fails while the claim still holds.
+    pub fn commit_through(
+        &self,
+        peer: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<CommitOutcome, String> {
+        let Some(mut reader) = self.conversation_reader(peer).acquire()? else {
+            return Ok(CommitOutcome::Refused(CommitRefusalReason::LeaseLost));
+        };
+        if reader.offset >= end {
+            return Ok(CommitOutcome::Already);
+        }
+        if reader.offset != start {
+            return Ok(CommitOutcome::Refused(CommitRefusalReason::PositionMoved));
+        }
+        match reader.commit(end) {
+            Ok(()) => Ok(CommitOutcome::Committed),
+            Err(refusal) if refusal.loss.is_some() || !reader.is_valid() => {
+                Ok(CommitOutcome::Refused(CommitRefusalReason::LeaseLost))
+            }
+            Err(refusal) => Err(format!("commit {peer} {start}..{end}: {refusal}")),
+        }
+    }
+
     /// Gather pending deliveries across conversations, retaining their receipts.
     pub fn read_pending(&self) -> Result<PendingMessages, String> {
         let mut batches = Vec::new();
@@ -977,9 +1116,29 @@ impl Mailbox {
     fn poll_tail_records(
         &self,
         path: &str,
-        mut cursor: u64,
+        cursor: u64,
         block_ms: u64,
     ) -> Result<(Vec<MailboxRecord>, u64), String> {
+        let (frames, next) = self.poll_tail_frames(path, cursor, block_ms)?;
+        Ok((
+            frames.into_iter().flat_map(|frame| frame.records).collect(),
+            next,
+        ))
+    }
+
+    /// Read the frames after `cursor`, each with the delivery records it holds.
+    ///
+    /// A stream read returns one committed frame and its end cursor; a byte log
+    /// returns everything after `cursor`, and each of its JSONL lines is a
+    /// frame. Frames holding no delivery (our own writes, senderless or empty
+    /// frames) are left out, and the returned cursor is past them all, so a
+    /// commit to a later frame's end passes over them.
+    fn poll_tail_frames(
+        &self,
+        path: &str,
+        mut cursor: u64,
+        block_ms: u64,
+    ) -> Result<(Vec<MailboxFrame>, u64), String> {
         let mut out = Vec::new();
         let backend = self.backend.resolve()?;
         let mut first = true;
@@ -1005,28 +1164,49 @@ impl Mailbox {
                     "mailbox poll {path}@{cursor}: ambiguous byte record positions"
                 ));
             }
-            let mut append = |env: MailboxEnvelope, within: u64| {
-                if !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(&env) {
-                    // A stream read returns one committed frame and its end
-                    // cursor. File reads may regroup JSONL records on replay;
-                    // absolute byte positions stay unchanged across grouping.
-                    let (position, within) = if framed {
-                        (next, within)
-                    } else {
-                        (cursor + within, 0)
-                    };
-                    out.push(MailboxRecord::new(env, path, framed, position, within));
-                }
+            let delivery = |env: &MailboxEnvelope| {
+                !env.from.is_empty() && !env.body.is_empty() && self.is_delivery(env)
             };
-            if let Some(env) = framed.then(|| MailboxEnvelope::from_bytes(&data)).flatten() {
-                append(env, 0);
-            } else {
-                let mut within = 0;
-                for line in data.split_inclusive(|byte| *byte == b'\n') {
-                    if let Some(env) = MailboxEnvelope::from_bytes(line) {
-                        append(env, within);
+            if framed {
+                // One committed append: a single envelope, or JSONL lines that
+                // share the frame's end as their position.
+                let mut records = Vec::new();
+                if let Some(env) = MailboxEnvelope::from_bytes(&data) {
+                    if delivery(&env) {
+                        records.push(MailboxRecord::new(env, path, true, next, 0));
                     }
-                    within += line.len() as u64;
+                } else {
+                    let mut within = 0;
+                    for line in data.split_inclusive(|byte| *byte == b'\n') {
+                        if let Some(env) = MailboxEnvelope::from_bytes(line) {
+                            if delivery(&env) {
+                                records.push(MailboxRecord::new(env, path, true, next, within));
+                            }
+                        }
+                        within += line.len() as u64;
+                    }
+                }
+                if !records.is_empty() {
+                    out.push(MailboxFrame {
+                        start: cursor,
+                        end: next,
+                        records,
+                    });
+                }
+            } else {
+                // File reads may regroup JSONL records on replay; each line
+                // keeps its absolute byte position across groupings.
+                let mut start = cursor;
+                for line in data.split_inclusive(|byte| *byte == b'\n') {
+                    let end = start + line.len() as u64;
+                    if let Some(env) = MailboxEnvelope::from_bytes(line).filter(delivery) {
+                        out.push(MailboxFrame {
+                            start,
+                            end,
+                            records: vec![MailboxRecord::new(env, path, false, start, 0)],
+                        });
+                    }
+                    start = end;
                 }
             }
             cursor = next;
@@ -2854,6 +3034,141 @@ mod tests {
              where the first stopped, not replay what it already took"
         );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Each JSONL line of a byte log is a frame. A commit moves the register
+    /// over exactly the offered run, a repeated commit is a no-op success, and
+    /// a commit from a stale start is refused without moving anything.
+    #[test]
+    fn byte_log_frames_commit_from_the_register_only() {
+        let ws = temp_workspace("frames-commit");
+        let peer = local_mailbox(&ws, "peer");
+        let me = local_mailbox(&ws, "me");
+        peer.send(note("peer", "me", "first")).unwrap();
+        peer.send(note("peer", "me", "second")).unwrap();
+
+        let unread = me.unread_frames("peer").unwrap();
+        assert_eq!(unread.start(), 0);
+        let frames = unread.frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].start(), 0);
+        assert_eq!(frames[0].end(), frames[1].start());
+        assert_eq!(frames[0].records()[0].envelope().body, "first");
+        assert_eq!(frames[1].records()[0].envelope().body, "second");
+        assert_eq!(
+            me.read_position("peer").unwrap(),
+            None,
+            "offering moves nothing"
+        );
+
+        let first_end = frames[0].end();
+        assert_eq!(
+            me.commit_through("peer", 0, first_end).unwrap(),
+            CommitOutcome::Committed
+        );
+        assert_eq!(me.read_position("peer").unwrap(), Some(first_end));
+        assert_eq!(
+            me.commit_through("peer", 0, first_end).unwrap(),
+            CommitOutcome::Already
+        );
+        assert_eq!(
+            me.commit_through("peer", 0, frames[1].end()).unwrap(),
+            CommitOutcome::Refused(CommitRefusalReason::PositionMoved),
+            "a run that starts before the register no longer applies"
+        );
+        assert_eq!(me.read_position("peer").unwrap(), Some(first_end));
+
+        let resumed = me.unread_frames("peer").unwrap();
+        assert_eq!(resumed.start(), first_end);
+        assert_eq!(resumed.frames().len(), 1);
+        assert_eq!(resumed.frames()[0].records()[0].envelope().body, "second");
+        assert_eq!(
+            resumed.frames()[0].records()[0].delivery_id(),
+            frames[1].records()[0].delivery_id(),
+            "a re-offered record keeps its delivery identity"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Our own writes and session-control frames are not offered, yet a commit
+    /// to a later frame's end moves the register past them.
+    #[test]
+    fn skipped_frames_are_committed_past() {
+        let ws = temp_workspace("frames-skipped");
+        let peer = local_mailbox(&ws, "peer");
+        let me = local_mailbox(&ws, "me");
+        me.send(note("me", "peer", "my own write")).unwrap();
+        let mut control = note("peer", "me", "control");
+        control.kind = a2a::session::SESSION_KIND.to_string();
+        peer.send(control).unwrap();
+        peer.send(note("peer", "me", "for me")).unwrap();
+
+        let unread = me.unread_frames("peer").unwrap();
+        assert_eq!(unread.start(), 0);
+        assert_eq!(unread.frames().len(), 1);
+        let frame = &unread.frames()[0];
+        assert_eq!(frame.records()[0].envelope().body, "for me");
+        assert!(frame.start() > 0, "two skipped frames precede it");
+        assert_eq!(
+            me.commit_through("peer", unread.start(), frame.end())
+                .unwrap(),
+            CommitOutcome::Committed
+        );
+        assert!(me.unread_frames("peer").unwrap().frames().is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// While another instance holds the conversation's reader, a commit is
+    /// refused and the register stays where it was.
+    #[test]
+    fn a_commit_is_refused_while_another_reader_holds_the_seat() {
+        let ws = temp_workspace("frames-lease");
+        let peer = local_mailbox(&ws, "peer");
+        let me = local_mailbox(&ws, "me");
+        peer.send(note("peer", "me", "held")).unwrap();
+        let end = me.unread_frames("peer").unwrap().frames()[0].end();
+
+        let held = me.read_unread("peer").unwrap().expect("first claim");
+        assert_eq!(
+            me.commit_through("peer", 0, end).unwrap(),
+            CommitOutcome::Refused(CommitRefusalReason::LeaseLost)
+        );
+        assert_eq!(
+            me.read_position("peer").unwrap().unwrap_or(0),
+            0,
+            "the refused commit moved nothing"
+        );
+        drop(held);
+        assert_eq!(
+            me.commit_through("peer", 0, end).unwrap(),
+            CommitOutcome::Committed,
+            "the seat is free again once the other claim is released"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A new mailbox over the same storage starts from the committed register.
+    #[test]
+    fn a_restarted_mailbox_offers_from_the_committed_register() {
+        let ws = temp_workspace("frames-restart");
+        let peer = local_mailbox(&ws, "peer");
+        peer.send(note("peer", "me", "done")).unwrap();
+        peer.send(note("peer", "me", "pending")).unwrap();
+        let end = {
+            let me = local_mailbox(&ws, "me");
+            let end = me.unread_frames("peer").unwrap().frames()[0].end();
+            assert_eq!(
+                me.commit_through("peer", 0, end).unwrap(),
+                CommitOutcome::Committed
+            );
+            end
+        };
+        let restarted = local_mailbox(&ws, "me");
+        let unread = restarted.unread_frames("peer").unwrap();
+        assert_eq!(unread.start(), end);
+        assert_eq!(unread.frames().len(), 1);
+        assert_eq!(unread.frames()[0].records()[0].envelope().body, "pending");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

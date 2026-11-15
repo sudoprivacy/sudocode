@@ -3136,9 +3136,10 @@ mod tests {
         // share the same prompt glyph. Both reference render::PROMPT_PREFIX, so
         // this asserts the echo starts with it — if someone hardcodes a
         // different glyph again (the old `›` bug), this fails.
+        // The echo may carry the editor's shade; the visible text is checked.
         let (echo, _) = format_input_echo("hi", &[], 80);
         assert!(
-            echo.starts_with(crate::render::PROMPT_PREFIX),
+            strip_ansi(&echo).starts_with(crate::render::PROMPT_PREFIX),
             "echo must start with the shared prompt prefix: {echo:?}"
         );
     }

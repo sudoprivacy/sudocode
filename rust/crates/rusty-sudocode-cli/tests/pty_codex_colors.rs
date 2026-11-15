@@ -144,7 +144,7 @@ fn assert_reference(light: bool, no_color: bool) {
         }
         let row = rows
             .iter()
-            .position(|row| row.contains("Unhighlighted fallback stays plain."))
+            .rposition(|row| row.contains("Unhighlighted fallback stays plain."))
             .unwrap();
         let col = rows[row].find("Unhighlighted").unwrap();
         assert_eq!(
@@ -213,7 +213,7 @@ fn provider_errors_use_regular_red_and_leave_the_next_draft_readable() {
             common::DEFAULT_TIMEOUT,
             "type after error",
         );
-        assert_cell(&sess, "AfterErrorDraft", "Default", "Default");
+        assert_draft(&sess, "AfterErrorDraft", background == "0;15", no_color);
         sess.send("\x15").unwrap();
         common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
         finish(&mut sess);
@@ -338,6 +338,36 @@ fn unsupported_probe_keeps_typing_and_late_replies_separate() {
     finish(&mut sess);
 }
 
+/// A draft sits on the editor's shade in the theme's readable foreground, or
+/// in the terminal's own colors where no shade is drawn.
+fn assert_draft(sess: &PtySession, needle: &str, light: bool, no_color: bool) {
+    if no_color {
+        assert_cell(sess, needle, "Default", "Default");
+        return;
+    }
+    let background = sess.render(|screen| {
+        let raw = screen.raw();
+        let row = raw
+            .rows(0, raw.size().1)
+            .enumerate()
+            .filter(|(_, s)| s.contains(needle))
+            .last()
+            .unwrap_or_else(|| panic!("{needle}: {}", raw.contents()))
+            .0;
+        format!(
+            "{:?}",
+            raw.cell(u16::try_from(row).unwrap(), 0).unwrap().bgcolor()
+        )
+    });
+    assert_ne!(background, "Default", "{needle} sits on the editor's shade");
+    assert_cell(
+        sess,
+        needle,
+        if light { "Idx(0)" } else { "Idx(15)" },
+        &background,
+    );
+}
+
 fn assert_cell(sess: &PtySession, needle: &str, foreground: &str, background: &str) {
     sess.render(|screen| {
         let raw = screen.raw();
@@ -457,7 +487,7 @@ fn diff_roundtrip(light: bool) {
         common::DEFAULT_TIMEOUT,
         "input during colored preview",
     );
-    assert_cell(&sess, "draft-copy-test", "Default", "Default");
+    assert_draft(&sess, "draft-copy-test", light, false);
     // Resize, input and async wakeups can share a native readiness batch.
     // Each key must appear without a second key waking a stalled reader.
     let mut draft = String::from("draft-copy-test");
@@ -513,7 +543,7 @@ fn diff_roundtrip(light: bool) {
         common::DEFAULT_TIMEOUT,
         "paste source snippet",
     );
-    assert_cell(&sess, "source ~/.zshrc && cc-sudo", "Default", "Default");
+    assert_draft(&sess, "source ~/.zshrc && cc-sudo", light, false);
     sess.send("\x15").unwrap();
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear pasted draft");
     finish(&mut sess);
@@ -771,7 +801,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "paste beside highlighted running command",
     );
-    assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
+    assert_draft(&sess, "draft '$HOME' && echo hi", light, no_color);
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
     expect_tool_border(&sess, &header, queued, "╎");

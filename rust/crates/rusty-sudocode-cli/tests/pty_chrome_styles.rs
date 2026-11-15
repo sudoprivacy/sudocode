@@ -91,6 +91,36 @@ fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
     surface_attributes(sess, needle).map(|(foreground, _, bold, dim)| (foreground, bold, dim))
 }
 
+/// Editor text uses the editor's own colours: on its shade, the theme's
+/// readable black or white; where no shade is drawn (`NO_COLOR`), the
+/// terminal's defaults. It is never dimmed, bold or recoloured by the chrome
+/// around it. That colour terminals draw the shade is `pty_prompt_viewport`'s.
+fn expect_editor_text(sess: &PtySession, needle: &str) {
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    loop {
+        let actual = surface_attributes(sess, needle);
+        if actual
+            .as_ref()
+            .is_some_and(|(foreground, background, bold, dim)| {
+                let readable = if background == "Default" {
+                    foreground == "Default"
+                } else {
+                    ["Idx(0)", "Idx(15)"].contains(&foreground.as_str())
+                };
+                readable && !bold && !dim
+            })
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{needle:?}: expected editor text in the editor's colours, got {actual:?}; screen:\n{}",
+            sess.render(|screen| screen.raw().contents())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn expect_surface(sess: &PtySession, needle: &str, foreground: &str, background: &str) {
     let expected = (
         terminal_palette::expected_color(foreground),
@@ -241,7 +271,7 @@ fn settle_chrome(sess: &PtySession) {
     // visible input AND a settled frame, not a fixed sleep. Do not use the
     // input-buffer parser here: after resize, terminal soft-wraps can join the
     // empty input row to the following separator, which is not typed content.
-    expect_style(sess, "❯", ("Default", false, false));
+    expect_editor_text(sess, "❯");
     let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
     let mut previous = String::new();
     let mut stable = 0;
@@ -274,7 +304,7 @@ fn exit(sess: &mut PtySession) {
         common::DEFAULT_TIMEOUT,
         "exit must reach input",
     );
-    expect_style(sess, "❯ /exit", ("Default", false, false));
+    expect_editor_text(sess, "❯ /exit");
     sess.send("\r").expect("submit exit");
     assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
 }
@@ -326,7 +356,7 @@ fn chrome_uses_semantic_muted_and_border_without_dimming_the_draft() {
             common::DEFAULT_TIMEOUT,
             "neutral input after themed chrome",
         );
-        expect_style(&sess, "NeutralDraft", ("Default", false, false));
+        expect_editor_text(&sess, "NeutralDraft");
         sess.send("\x15").unwrap();
         common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "neutral draft cleared");
         exit(&mut sess);
@@ -491,7 +521,7 @@ fn question_focus_surface_moves_without_recoloring_ordinary_text() {
                 common::DEFAULT_TIMEOUT,
                 "draft after closing selected surface",
             );
-            expect_surface(&sess, "NeutralAfterSurface", "Default", "Default");
+            expect_editor_text(&sess, "NeutralAfterSurface");
             sess.send("\x15").unwrap();
             common::expect_input_line_cleared(
                 &sess,
@@ -606,7 +636,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "typing beside info status",
     );
-    expect_style(&sess, "info-draft", ("Default", false, false));
+    expect_editor_text(&sess, "info-draft");
     sess.send("\x15").unwrap();
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
     common::expect_turn_complete_after(

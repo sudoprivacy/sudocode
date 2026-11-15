@@ -340,8 +340,9 @@ fn asynchronous_tool_result_does_not_close_a_streaming_code_fence() {
     common::expect_screen(
         &sess,
         |s| {
-            s.lines()
-                .any(|row| row.contains("FENCE STREAM READY.") && !row.contains("TOOL_BATCH:"))
+            after_prompt_echo(s)
+                .iter()
+                .any(|row| row.contains("FENCE STREAM READY."))
         },
         Duration::from_secs(30),
         "streamed prefix",
@@ -366,9 +367,8 @@ fn asynchronous_tool_result_does_not_close_a_streaming_code_fence() {
         "Answer after fence.",
     ] {
         assert_eq!(
-            screen
-                .lines()
-                .filter(|row| !row.contains("TOOL_BATCH:"))
+            after_prompt_echo(&screen)
+                .iter()
                 .filter(|row| row.contains(content))
                 .count(),
             1,
@@ -432,4 +432,21 @@ fn assert_interleaved_code_colors(sess: &pty_expect::PtySession, screen: &str) {
         colors[0], colors[1],
         "code fence lost its parser context: {screen}"
     );
+}
+
+/// The rows after the submitted prompt's echo. The prompt carries the batch
+/// JSON, which repeats the very text the response streams; the shaded echo is
+/// wrapped to the terminal width, so its continuation rows are not marked by
+/// `TOOL_BATCH:` and must be cut off by position. The echo ends at the blank
+/// row that separates it from the response.
+fn after_prompt_echo(screen: &str) -> Vec<&str> {
+    let rows: Vec<&str> = screen.lines().collect();
+    let Some(echo) = rows.iter().position(|row| row.contains("TOOL_BATCH:")) else {
+        return Vec::new();
+    };
+    let end = rows[echo..]
+        .iter()
+        .position(|row| row.trim().is_empty())
+        .map_or(rows.len(), |offset| echo + offset);
+    rows[end..].to_vec()
 }

@@ -24,6 +24,20 @@ runs:
       shell: pwsh
       working-directory: ${{ github.workspace }}
       run: ./.github/actions/release-artifact/msvc.ps1
+    # Unauthenticated GitHub API calls from shared runner addresses hit the
+    # rate limit. As in local-acceptance.yml, a trusted step fetches the pinned
+    # tools into the home tool cache with the job token; the gate below runs
+    # without it and verifies the cached bytes against the same pins.
+    - name: Prepare pinned tools through the authenticated GitHub API
+      shell: python
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ACCEPTANCE_NATIVE_CHECKS: native-release
+        ACCEPTANCE_OUTPUT: ${{ runner.temp }}/release-tool-preparation
+      run: |
+        import subprocess, sys
+        subprocess.run([sys.executable, '.github/local-acceptance/prepare_tools.py'], check=True)
     - name: Check the exact built executable before packaging
       shell: python
       working-directory: ${{ github.workspace }}

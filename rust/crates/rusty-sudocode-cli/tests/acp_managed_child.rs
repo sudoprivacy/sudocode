@@ -428,3 +428,134 @@ fn a_managed_child_serves_its_sessions_on_its_daemon() {
         "a host-closed child with confirmed cleanup exits cleanly: {status}"
     );
 }
+
+/// One field of `/proc/<pid>/status`, in KiB (Linux only).
+fn status_kib(pid: u32, field: &str) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .expect("read the process status")
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no {field} for {pid}"))
+}
+
+fn millis(samples: &mut [f64]) -> Value {
+    samples.sort_by(f64::total_cmp);
+    let at = |percent: usize| samples[(samples.len() - 1) * percent / 100];
+    json!({"p50": at(50), "p95": at(95), "max": at(100)})
+}
+
+/// The managed-child route's cost on its daemon: memory per active agent,
+/// start-up time, and the storage round trip every session and tool pays.
+/// Prints one `MEASURE` JSON line; the harness runs it with release builds.
+#[test]
+#[ignore = "measurement; run by the cost-measurement harness"]
+#[allow(clippy::too_many_lines)] // one measured fleet of children on one daemon
+fn measure_managed_child_cost() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT");
+    let bundle = std::env::var("NEXUS_A2A_TEST_CERT_DIR").expect("set NEXUS_A2A_TEST_CERT_DIR");
+    let daemon_pid: u32 = std::env::var("NEXUS_A2A_DAEMON_PID")
+        .expect("set NEXUS_A2A_DAEMON_PID")
+        .parse()
+        .expect("a daemon pid");
+    let credential = AgentCredential::load(&bundle).expect("the session bundle");
+    let agent = credential.agent.clone();
+    let client = Config {
+        endpoint: endpoint.clone(),
+        agent: credential.agent,
+        tls: credential.tls,
+    }
+    .connect()
+    .expect("the measurement's own connection");
+    let daemon: Arc<dyn FsBackend> = Arc::new(NexusVfsFsBackend::from_arc_mtls(
+        client,
+        String::new(),
+        "root",
+    ));
+    let fresh = format!(
+        "{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let initialize = json!({"jsonrpc": "2.0", "id": "init", "method": "initialize",
+        "params": {"protocolVersion": 1, "clientCapabilities": {}}});
+    let daemon_idle = status_kib(daemon_pid, "VmRSS:");
+    let (mut to_ready, mut to_session) = (Vec::new(), Vec::new());
+    let mut children = Vec::new();
+    let mut points = Vec::new();
+    for n in 1..=8 {
+        let workspace = format!("/measure-{fresh}-{n}/workspace");
+        daemon.create_dir_all(&workspace).unwrap();
+        let started = Instant::now();
+        let journey = Journey::start();
+        write_config(&journey.home.path().join("config"), "nexus:///model");
+        let mut frame = journey.bootstrap();
+        frame.descriptor.pid = format!("measure-{fresh}-{n}");
+        frame.descriptor.name.clone_from(&agent);
+        frame
+            .descriptor
+            .labels
+            .insert("model".into(), "remote-test".into());
+        frame.connection = BootstrapConnection {
+            endpoint: endpoint.clone(),
+            credential_directory: PathBuf::from(&bundle),
+        };
+        frame.workspace_vfs_root = workspace;
+        let shell = journey.home.path().join("shell");
+        std::fs::create_dir_all(&shell).unwrap();
+        frame.shell_root = Some(shell.clone());
+        let (mut served, home) = Served::start(journey, &frame, &initialize);
+        to_ready.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(served.response("init").get("result").is_some());
+        served.send(
+            &json!({"jsonrpc": "2.0", "id": "new", "method": "session/new",
+            "params": {"cwd": shell.to_string_lossy(), "mcpServers": []}}),
+        );
+        let created = served.response("new");
+        assert!(
+            created["result"]["sessionId"].is_string(),
+            "session/new: {created}"
+        );
+        to_session.push(started.elapsed().as_secs_f64() * 1000.0);
+        children.push((served, home));
+        if [1, 4, 8].contains(&n) {
+            let rss: Vec<u64> = children
+                .iter()
+                .map(|(served, _)| status_kib(served.child.id(), "VmRSS:"))
+                .collect();
+            let hwm: Vec<u64> = children
+                .iter()
+                .map(|(served, _)| status_kib(served.child.id(), "VmHWM:"))
+                .collect();
+            points.push(json!({"agents": n,
+                "child_rss_kib": rss, "child_hwm_kib": hwm,
+                "daemon_rss_kib": status_kib(daemon_pid, "VmRSS:")}));
+        }
+    }
+    let file = format!("/measure-{fresh}-1/workspace/latency.bin");
+    let payload = vec![7_u8; 1024];
+    let (mut writes, mut reads, mut stats) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..200 {
+        let op = Instant::now();
+        daemon.write(&file, &payload).unwrap();
+        writes.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        assert_eq!(daemon.read(&file).unwrap().len(), 1024);
+        reads.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        daemon.stat(&file).unwrap();
+        stats.push(op.elapsed().as_secs_f64() * 1000.0);
+    }
+    println!(
+        "MEASURE {}",
+        json!({"route": "managed-child", "daemon_idle_rss_kib": daemon_idle, "points": points,
+            "ready_ms": millis(&mut to_ready), "session_new_ms": millis(&mut to_session),
+            "write_1k_ms": millis(&mut writes), "read_1k_ms": millis(&mut reads),
+            "stat_ms": millis(&mut stats)})
+    );
+    for (served, _home) in children {
+        assert!(served.close().success(), "a measured child exits cleanly");
+    }
+}

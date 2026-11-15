@@ -1299,3 +1299,105 @@ fn a_cohost_whose_session_lease_was_broken_is_not_terminated() {
         cleanup.outcome()
     );
 }
+
+/// One field of this process's `/proc/self/status`, in KiB (Linux only).
+fn self_status_kib(field: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .expect("read the process status")
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no {field}"))
+}
+
+fn millis(samples: &mut [f64]) -> serde_json::Value {
+    samples.sort_by(f64::total_cmp);
+    let at = |percent: usize| samples[(samples.len() - 1) * percent / 100];
+    json!({"p50": at(50), "p95": at(95), "max": at(100)})
+}
+
+/// The co-host route's cost: agents hosted in one process on one kernel,
+/// through the production adapter. Memory per agent is this process's growth
+/// over its own baseline. Prints one `MEASURE` JSON line; the harness runs it
+/// with release builds.
+#[test]
+#[ignore = "measurement; run by the cost-measurement harness"]
+fn measure_cohost_cost() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let harness = harness();
+    let kernel = Arc::new(Kernel::new());
+    mount_agent_world(&kernel);
+    let _model = common::mount_model(
+        &kernel,
+        "anthropic",
+        &harness.service.base_url(),
+        "test-cohost-key",
+    );
+    let user_fs = test_agent_fs(&kernel, USER, "/");
+    let baseline = self_status_kib("VmRSS:");
+    let (mut to_ready, mut to_session) = (Vec::new(), Vec::new());
+    let mut hosts = Vec::new();
+    let mut points = Vec::new();
+    for n in 1..=8 {
+        let pid = format!("pid-measure-{n}");
+        let agent = format!("measure-agent-{n}");
+        user_fs.create_dir_all(&agent_workspace(&pid)).unwrap();
+        let ready_at = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&ready_at);
+        let started = Instant::now();
+        let host = spawn_managed_agent(
+            Arc::clone(&kernel),
+            make_desc(&pid, &agent, MODEL),
+            move |state, _| {
+                if state == AgentState::Ready {
+                    seen.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert_with(Instant::now);
+                }
+            },
+        )
+        .expect("spawn a measured co-host agent");
+        to_session.push(started.elapsed().as_secs_f64() * 1000.0);
+        let became_ready = ready_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .expect("the host reported Ready");
+        to_ready.push(became_ready.duration_since(started).as_secs_f64() * 1000.0);
+        hosts.push(host);
+        if [1, 4, 8].contains(&n) {
+            points.push(json!({"agents": n,
+                "process_rss_kib": self_status_kib("VmRSS:"),
+                "process_hwm_kib": self_status_kib("VmHWM:")}));
+        }
+    }
+    let fs = test_agent_fs(
+        &kernel,
+        "measure-agent-1",
+        &agent_workspace("pid-measure-1"),
+    );
+    let file = format!("{}/latency.bin", agent_workspace("pid-measure-1"));
+    let payload = vec![7_u8; 1024];
+    let (mut writes, mut reads, mut stats) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..200 {
+        let op = Instant::now();
+        fs.write(&file, &payload).unwrap();
+        writes.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        assert_eq!(fs.read(&file).unwrap().len(), 1024);
+        reads.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        fs.stat(&file).unwrap();
+        stats.push(op.elapsed().as_secs_f64() * 1000.0);
+    }
+    println!(
+        "MEASURE {}",
+        json!({"route": "cohost", "process_baseline_rss_kib": baseline, "points": points,
+            "ready_ms": millis(&mut to_ready), "session_new_ms": millis(&mut to_session),
+            "write_1k_ms": millis(&mut writes), "read_1k_ms": millis(&mut reads),
+            "stat_ms": millis(&mut stats)})
+    );
+    for host in hosts {
+        host.abort_signal.abort();
+        let _ = host.join.join();
+    }
+}

@@ -91,6 +91,14 @@ jobs:
             exit 1
           fi
 
+      - name: Split release symbols
+        shell: python
+        working-directory: ${{ github.workspace }}
+        run: |
+          import subprocess, sys
+          subprocess.run([sys.executable, '.github/scripts/split_release_symbols.py',
+                          'rust/target/x86_64-unknown-linux-musl/release/scode', 'rust/dist/symbols-scode-linux-x64.tar.gz'], check=True)
+
       - name: Accept the built native artifact before packaging
         uses: ./.github/actions/release-artifact
         with:
@@ -146,6 +154,13 @@ jobs:
           name: scode-linux-x64
           path: rust/dist/scode-linux-x64.tar.gz
 
+      - name: Upload symbols workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: symbols-scode-linux-x64
+          path: rust/dist/symbols-scode-linux-x64.tar.gz
+          if-no-files-found: error
+
       - name: Upload deb workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -184,6 +199,14 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
+
+      - name: Split release symbols
+        shell: python
+        working-directory: ${{ github.workspace }}
+        run: |
+          import subprocess, sys
+          subprocess.run([sys.executable, '.github/scripts/split_release_symbols.py',
+                          'rust/target/release/${{ matrix.bin }}', 'rust/dist/symbols-${{ matrix.package_dir }}.tar.gz'], check=True)
 
       - name: Accept the built native artifact before packaging
         uses: ./.github/actions/release-artifact
@@ -253,6 +276,13 @@ jobs:
           name: ${{ matrix.package_dir }}
           path: rust/dist/${{ matrix.archive_name }}
 
+      - name: Upload symbols workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: symbols-${{ matrix.package_dir }}
+          path: rust/dist/symbols-${{ matrix.package_dir }}.tar.gz
+          if-no-files-found: error
+
       - name: Upload ARM64 installers
         if: matrix.name == 'linux-arm64'
         uses: actions/upload-artifact@v4
@@ -289,6 +319,16 @@ jobs:
         with:
           path: dist
           pattern: scode-*
+          merge-multiple: true
+
+      # Symbols are GitHub release assets only: outside SHA256SUMS, which the
+      # installers and the COS mirror verify as an exact set.
+      - name: Download symbol artifacts
+        if: inputs.resume_tag == ''
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/symbols
+          pattern: symbols-scode-*
           merge-multiple: true
 
       - name: Generate checksums
@@ -371,6 +411,7 @@ jobs:
             dist/scode-*
             dist/scode_*.deb
             dist/SHA256SUMS.txt
+            dist/symbols/symbols-scode-*
           fail_on_unmatched_files: true
 
       - name: Stage and verify immutable Tencent COS release

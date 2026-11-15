@@ -15,6 +15,8 @@ mod input_control;
 pub mod managed;
 #[cfg(feature = "mailbox")]
 pub mod managed_agent;
+/// scode `peerInput` version 3: offers, acknowledgement tokens and windows.
+pub mod peer_offer;
 mod session_driver;
 /// ACP-side session lifecycle + turn glue on top of the `engine_core` seam
 /// (build/load/fork a session, drive it through `EngineHandle`, and translate

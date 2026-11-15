@@ -2365,6 +2365,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let shaded_prompts =
         runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
     let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
+    // The shade replaces the separator lines only where it is drawn. Without
+    // color (NO_COLOR, or a palette too small for a shade) the experiment
+    // has no surface, and the lines are the editor's only boundary.
     let input_background = prompt_style
         .and_then(|style| style.background_color)
         .and_then(ansi_text::ui_color);
@@ -2393,7 +2396,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(row_text("todo", layout.todo.content, layout.todo.rows))
             #((layout.separators > 0).then(|| element! {
                 View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
-                    #((!shaded_prompts).then(|| element! { Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap) }))
+                    #(input_background.is_none().then(|| element! { Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             #((!reviewable && layout.input_rows > 0).then(|| element! {
@@ -2572,7 +2575,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             #((layout.separators > 0).then(|| element! {
                 View(height: row_height(layout.separators), flex_shrink: 0.0, background_color: input_background) {
-                    #((!shaded_prompts).then(|| element! { Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap) }))
+                    #(input_background.is_none().then(|| element! { Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap) }))
                 }
             }))
             // FooterSlot

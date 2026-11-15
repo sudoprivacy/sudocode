@@ -1,5 +1,5 @@
 import * as acp from '@agentclientprotocol/sdk';
-import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -69,7 +69,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   })
   .onRequest('_fixture/peer', value=>value, async ctx=>{
     const target=ctx.params.wrongSession?'another-session':sessionId, from=ctx.params.from;
-    if(peerOwned)await ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message',{sessionId:target, deliveryId:'a'.repeat(64),
+    if(peerOwned)await ctx.client.request('_sudocode/session/peer_message',{sessionId:target, deliveryId:'a'.repeat(64),
       text:`<mailbox-message from="${from}">\n${ctx.params.text}\n</mailbox-message>`,body:ctx.params.text,
       sudocode:{a2a:{from,kind:'message'}}});
     else await ctx.client.notify(acp.methods.client.session.update,{sessionId:target,
@@ -114,14 +114,18 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   })
   .onRequest(acp.methods.agent.session.load, ctx => {
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
-    // A client that owns peer input hears peers even before its own startup completes.
-    if (peerOwned && scenario.startsWith('channel')) setTimeout(() => { for (const from of ['fixture-peer', 'stranger']) {
-      log({ method: 'peer-notification', from });
-      void ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', { sessionId, deliveryId:'b'.repeat(64),
-        text: `<mailbox-message from="${from}" summary="greeting">\nhello from ${from}\n</mailbox-message>`,
-        body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting',
-          verified: scenario === 'channel-node-namespace' } } }).catch(() => {});
-    } }, 50);
+    // Opt-in: report the unread count after loading and on each append to this
+    // file, as scode does when a peer frame arrives.
+    const unreadTrigger = process.env.SCODE_DIRECT_FIXTURE_UNREAD;
+    if (scenario === 'mailbox' && peerOwned === 3 && unreadTrigger) {
+      let seen;
+      setInterval(() => {
+        const size = existsSync(unreadTrigger) ? statSync(unreadTrigger).size : 0;
+        if (size === seen) return;
+        seen = size;
+        void ctx.client.notify('_sudocode/session/peer_unread', { sessionId, unread: mailboxRetired ? 0 : 1 }).catch(() => {});
+      }, 20).unref();
+    }
     return {};
   })
   .onRequest(acp.methods.agent.session.prompt, async ctx => {

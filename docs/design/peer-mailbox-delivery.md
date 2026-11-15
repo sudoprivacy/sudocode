@@ -10,12 +10,12 @@ to the exact message offered, so a delivery the client loses is offered again.
 |---|---|---|
 | scode session | the session's input queue, as `InputSource::Peer` | the session commits on consumption |
 | Codex thread | a queued input (`thread/queue/add`) carrying the offer | the model calls `scode_inbox({ack})` |
-| Claude Code session | a channel event (`notifications/claude/channel`) carrying the offer | the model calls `scode_inbox({ack})` |
+| Claude Code session | a spool entry carrying the offer, handed to the session by its `FileChanged` hook | the model calls `scode_inbox({ack})` |
 
 The Codex and Claude Code attachments share this document's offer, token,
 acknowledgement and budget contracts. Every delivery is a numbered submission,
 recorded before it is sent, against a fixed budget. The native methods used
-are part of the stock app-server API and of Claude Code's channel contract,
+are part of the stock app-server API and of Claude Code's hook contract,
 qualified against the exact client that owns the thread or session.
 
 ## Roles
@@ -25,7 +25,7 @@ qualified against the exact client that owns the thread or session.
 | Nexus mailbox | Each message as a record in a conversation transcript. Per conversation, this Agent's reader register: a frame offset behind an exclusive reader lease | The only durable copy of a peer message and of how far each conversation was read |
 | Owned scode session | The mailbox reader, its credentials and the Agent's acknowledgement key | Offers whole frames, verifies acknowledgement tokens and commits register prefixes. Starts no turn (`peerInput` version 3) |
 | Codex attachment (shared owner) | Per bound thread: the binding and its delivery submission log | Submits budgeted deliveries into the thread's queue; serves `scode_inbox` for acknowledgements and window reads |
-| Claude Code bridge | Per session: the binding and its delivery submission log | Pushes budgeted deliveries as channel events; serves `scode_inbox` the same way |
+| Claude Code bridge | Per session: the binding, its delivery submission log and its spool | Appends budgeted deliveries to the spool; serves `scode_inbox` the same way |
 | Native Codex / Claude Code | The thread or session, its turns and its input queue | Runs the thread or session |
 
 ## Delivery contracts
@@ -36,7 +36,7 @@ qualified against the exact client that owns the thread or session.
 | Acknowledgement | The model's statement that it has read and handled the frame. The token authenticates the identity of the frame offered to this thread, not the model's input or comprehension. The size header, the token's place after the content and the read-alone instruction are mitigations |
 | Presentation | A frame is offered again until it is acknowledged. A repeated offer carries `redelivery: true`. A version 2 entry whose earlier native submission is unresolved carries `possiblyDelivered: true`. Records keep their `deliveryId` |
 | Actions | The model decides what to do with each record. Its sends keep their own outcome semantics; these contracts make no claim about the model's side effects |
-| Cost | At most three owner submissions per budget key, under the single-writer log rules (see Waking). A submission can produce zero native turns (a lost request, or a logged slot never sent), one, or more (native start/delete recovery). New unread heads and new epochs make new keys. The design sets no cap on native turns, model calls, tokens or spend |
+| Cost | At most three owner submissions per budget key, under the single-writer log rules (see Delivering). A submission can produce zero native turns (a lost request, or a logged slot never sent), one, or more (native start/delete recovery). New unread heads and new epochs make new keys. The design sets no cap on native turns, model calls, tokens or spend |
 
 Ordering is per conversation, in transcript order. Conversations are offered
 in the order scode reads them, with no order between conversations.
@@ -166,16 +166,26 @@ Delivery submission `n` of key `k` carries the `text` of a fresh
 
 On Codex it is a queued input with
 `clientUserMessageId = scode-wake:<actor>:<hash of k>:<n>`. On Claude Code it
-is a channel event whose `meta` carries `delivery = <hash of k>:<n>`.
+is one entry appended to the session's private spool, carrying
+`delivery = <hash of k>:<n>` and the offer's heads. The session's
+`SessionStart` hook names the spool in `watchPaths`. On each change Claude Code
+runs the session's `FileChanged` hook (`asyncRewake`), which claims the
+complete entries no earlier run claimed, each exactly once, and exits 2 with
+their text: Claude reads it within the current turn, or the session wakes.
 
 A delivery submitted twice presents the same frames twice, with the same
 tokens; acknowledging a frame twice is a no-op success.
 
-The submission log has one writer, the elected owner, whose exclusive
-loopback bind lasts its lifetime. Before submission `n`, it appends `(k, n)`
-and syncs. It then sends that `(k, n)` once with `thread/queue/add` and never
-again. A restarted owner continues after the highest logged `n`. The cost
-contract follows from this:
+The submission log has one writer. On Codex it is the elected owner, whose
+exclusive loopback bind lasts its lifetime. On Claude Code it is the session's
+bridge that holds the highest claim generation: a file created exclusively,
+holding its pid, whose modification time is a heartbeat renewed every 5 s.
+Another bridge of the same session stands by while the claim is under 30 s
+old and its process lives, and otherwise takes over by creating the next
+generation. Before submission `n`, the writer appends `(k, n)` and syncs. It
+then sends that `(k, n)` once, with `thread/queue/add` or as a spool entry,
+and never again. A restarted writer continues after the highest logged `n`.
+The cost contract follows from this:
 
 - Owner submissions per key are at most three. This is the design's only
   hard bound. It is per key, not global.
@@ -211,6 +221,10 @@ The 60 s is a policy delay, not proof of non-acceptance. A late submission is
 one already counted. A snapshot that misses a submission moving from queued to
 running to finished produces an unresolved view, which can only spend budget.
 
+On Claude Code the bridge appends the next number for the current key when
+the key's head frame is still unread and the bridge has not presented that head
+in the last 10 minutes. A delivery presents every head its offer carries.
+
 When the third submission for a key is finished or unresolved and the head is
 still unread, the binding reports `delivery_exhausted` with the head's
 `deliveryId` and submits nothing more for that key.
@@ -222,7 +236,8 @@ delivery until the user starts the queue; starting it is the user's action.
 The owner evaluates on scode's unread notification, on `turn/completed`,
 `thread/status/changed` and `thread/queue/changed`, and every 60 s. An
 unloaded thread's frames wait unread. When the thread loads again, its binding
-evaluates.
+evaluates. The Claude Code bridge evaluates on scode's unread notification,
+when it attaches to its scode session, and every 60 s.
 
 ## scode `peerInput` version 3
 
@@ -320,7 +335,7 @@ Two mailbox operations back it:
 - `commit_through(peer, start, end)` performs the lease-held conditional
   advance described above.
 
-Version 1 (one notification per record, for the Claude channel) is unchanged.
+Version 1 (one notification per record) is unchanged.
 
 ## Cutover from version 2
 
@@ -398,13 +413,13 @@ runs for the new binary, and reception resumes when it passes.
 
 Model-endpoint requests, native turns and delivery turns are counted separately.
 
-Claude Code adds two cases, run in an interactive session that loaded the
-bridge as a channel:
+Claude Code adds two cases, run in an interactive session with the bridge's
+`SessionStart` and `FileChanged` hooks:
 
 | Case | Expected |
 |---|---|
-| channel while busy | A frame arriving mid-turn is presented with the session's other queued input, in order; the time from arrival to presentation is recorded |
-| channel not loaded | A session started without the channel opt-in receives no event; the frame stays unread and the bridge's status reports the channel as unregistered |
+| delivery while busy | A frame arriving mid-turn is presented within that turn; the time from arrival to presentation is recorded |
+| hooks not installed | A session without the hooks receives no delivery; the frame stays unread and its spool entry stays unclaimed |
 The model endpoint is deterministic, so these cases prove the protocol
 branches and the request bytes under one configuration, not that a real model
 follows the read-alone instruction. Each qualification stands on its own runs.

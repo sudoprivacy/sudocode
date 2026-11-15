@@ -62,7 +62,7 @@ const app = acp.agent({ name: 'hydra-acp-fixture', version: '1' })
     }
     if (text === 'peer-message' && peerOwned) {
       for (const from of ['fixture-peer', 'stranger']) {
-        await ctx.client[peerOwned >= 2 ? 'request' : 'notify']('_sudocode/session/peer_message', {
+        await ctx.client.request('_sudocode/session/peer_message', {
           sessionId, deliveryId: from==='fixture-peer'?'a'.repeat(64):'b'.repeat(64), text: `<mailbox-message from="${from}">\nhello from ${from}\n</mailbox-message>`,
           body: `hello from ${from}`, sudocode: { a2a: { from, kind: 'message', summary: 'greeting' } },
         });

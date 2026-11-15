@@ -9,8 +9,7 @@ import { installCommandShutdownSignals } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from './codexEnrollment';
 import { installCodexMcp, checkCodexNative } from './codexSetup';
 import { captureReceiverOwner } from './receiverOwner';
-import { waitForClaudeWake } from './claudeWake';
-import { claudeWakeSpool, joinsAgentNetwork, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
+import { claudeDeliver, claudeWatch, runClaudeMcp } from './claudeAutojoin';
 
 interface Manifest {
   sourceCommit: string;
@@ -57,7 +56,7 @@ async function main(): Promise<void> {
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
     'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
-    'claude-wake': {type:'boolean'}, claude: {type:'boolean'},
+    'claude-watch': {type:'boolean'}, 'claude-deliver': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
@@ -73,7 +72,8 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
-      + 'scode-acp-bridge --claude-wake --config FILE  (Claude Code asyncRewake hook: wait for spooled peers, exit 2 to wake)\n'
+      + 'scode-acp-bridge --claude-watch --config FILE  (Claude Code SessionStart hook: watch the session\'s delivery spool)\n'
+      + 'scode-acp-bridge --claude-deliver --config FILE  (Claude Code FileChanged asyncRewake hook: exit 2 with new deliveries)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --check-codex-native --config FILE  (read-only receiver capability check on the existing native daemon)\n'
@@ -132,19 +132,15 @@ async function main(): Promise<void> {
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
     await runCodexEnrollment(values.config);return;
   }
-  if(values['claude-wake']){
-    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude-wake'].includes(key)))throw new Error('--claude-wake takes only --config');
-    const raw=JSON.parse(fs.readFileSync(values.config,'utf8'));
-    // An autojoin config names the session's spool from the hook input; a
-    // fixed-session config names its one spool directly.
-    const autojoin=raw?.mode==='claude-autojoin'?readClaudeAutojoinConfig(values.config):undefined;
-    // A session that runs without an Agent has no spool to wait on.
-    if(autojoin&&!joinsAgentNetwork(process.env))return;
-    const spool=autojoin
-      ? claudeWakeSpool(autojoin,String(JSON.parse(await hookInput()||'{}').session_id??''))
-      : raw?.claudeChannel?.wakeSpool;
-    if(typeof spool!=='string')throw new Error('--claude-wake requires claudeChannel.wakeSpool or a claude-autojoin --config');
-    process.exitCode=await waitForClaudeWake(spool);return;
+  if(values['claude-watch']||values['claude-deliver']){
+    const hook=values['claude-watch']?'claude-watch':'claude-deliver';
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config',hook].includes(key)))throw new Error(`--${hook} takes only --config`);
+    const input=await hookInput();
+    if(hook==='claude-watch'){const output=claudeWatch(values.config,input);if(output)console.log(output);return;}
+    // Exit 2 hands stderr to Claude: mid-turn, or by waking an idle session.
+    const text=claudeDeliver(values.config,input);
+    if(text){process.stderr.write(text);process.exitCode=2;}
+    return;
   }
   if(values.claude){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude'].includes(key)))throw new Error('--claude takes only --config');

@@ -276,14 +276,35 @@ node /absolute/package/dist/server.cjs --install-codex \
   --config /absolute/private/runtime.json --command-entry /absolute/public/codex
 ```
 
-It registers the existing Windows owner Task when applicable, asks official
-Codex to prepare its managed daemon, installs and reads back the global
+It asks official Codex to prepare its managed daemon and negotiates the current
+receiver's required `durableQueueAddOnce: 1` capability with that running server.
+A running status or CLI version alone is insufficient. Missing capability or a
+failed connection stops installation before registering the Windows owner Task,
+writing the global MCP entry or replacing the ordinary launcher. The private
+installation record retains the stopped attempt and native preparation outcome.
+After the check, it registers the existing Windows owner Task when applicable,
+installs and reads back the global
 `nexus_scode` MCP entry, then replaces only the explicitly selected ordinary
 launcher. The previous small script or symlink is backed up in the private
 installation record. Native binaries are refused. An entry or runtime changed
 during preparation is preserved; a different existing MCP registration needs
 explicit migration. Each native home admits one create-only installation, so
 concurrent configurations and uncertain partial attempts cannot replay writes.
+
+To check an already running daemon before preparing a cutover, use:
+
+```sh
+node /absolute/package/dist/server.cjs --check-codex-native \
+  --config /absolute/private/runtime.json
+```
+
+This connects through the runtime's exact native argv, environment and socket,
+then closes only its own proxy. It does not start a daemon, change configuration,
+enroll an actor, load a thread or submit input. It exits nonzero on missing
+capability or connection/cleanup failure. The check is for the current v2
+receiver contract, not mailbox-v3 native/model qualification. Every receiver
+connection still checks admission; a successful preflight cannot qualify a
+future updated daemon.
 
 This configures **new Codex launches**. A shell function already loaded in an
 existing terminal can still shadow the selected disk entry; verify resolution

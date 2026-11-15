@@ -7,7 +7,7 @@ import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
 import { installCommandShutdownSignals } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from './codexEnrollment';
-import { installCodexMcp } from './codexSetup';
+import { installCodexMcp, checkCodexNative } from './codexSetup';
 import { captureReceiverOwner } from './receiverOwner';
 import { waitForClaudeWake } from './claudeWake';
 import { claudeWakeSpool, joinsAgentNetwork, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
@@ -50,6 +50,7 @@ async function main(): Promise<void> {
     'prepare-codex-owner': { type: 'boolean' },
     'launch-codex': {type:'boolean'},
     'install-codex': {type:'boolean'}, 'command-entry': {type:'string'},
+    'check-codex-native': {type:'boolean'},
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     'native-env-file': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --claude-wake --config FILE  (Claude Code asyncRewake hook: wait for spooled peers, exit 2 to wake)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
+      + 'scode-acp-bridge --check-codex-native --config FILE  (read-only receiver capability check on the existing native daemon)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
       + 'scode-acp-bridge --refresh-codex-profiles --config OWNER_GRANT  (republish enrolled actors\' profiles under the current launch policy)\n'
@@ -93,6 +95,10 @@ async function main(): Promise<void> {
     return;
   }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
+  if(values['check-codex-native']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','check-codex-native'].includes(key)))throw new Error('Native preflight takes only --config');
+    console.log(JSON.stringify(await checkCodexNative(values.config,__filename)));return;
+  }
   if(values['install-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','install-codex','command-entry'].includes(key)))throw new Error('Select one installation mode');
     if(!values['command-entry'])throw new Error('--command-entry must select the ordinary Codex launcher');

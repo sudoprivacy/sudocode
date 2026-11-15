@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { WebSocketServer } from 'ws';
 
 const root=path.resolve(__dirname,'../..');
 const server=path.join(root,'dist/server.cjs');
@@ -19,13 +20,33 @@ async function run(argv:string[],env=process.env):Promise<{code:number|null;stdo
 
 async function main():Promise<void>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'codex-setup-process-'));
+  const nativeServer=new WebSocketServer({host:'127.0.0.1',port:0});
+  await once(nativeServer,'listening');
+  const address=nativeServer.address();assert(address&&typeof address!=='string');
+  let capability:unknown=1;
+  const nativeMethods:string[]=[];
+  let changeDuringHandshake:string|undefined;
+  let handshakeEdits=0;
+  nativeServer.on('connection',socket=>socket.on('message',bytes=>{
+    const call=JSON.parse(bytes.toString());nativeMethods.push(call.method);
+    if(call.method==='initialize'){
+      if(changeDuringHandshake){
+        const config=JSON.parse(fs.readFileSync(changeDuringHandshake,'utf8'));
+        config.peers=[`independent-native-handshake-edit-${++handshakeEdits}`];
+        fs.writeFileSync(changeDuringHandshake,JSON.stringify(config));
+      }
+      socket.send(JSON.stringify({id:call.id,result:{userAgent:'native-setup-process-fixture',
+        ...(capability===undefined?{}:{serverCapabilities:{durableQueueAddOnce:capability}})}}));
+    }else assert.equal(call.method,'initialized','Preflight must not discover threads or submit input');
+  }));
   const tasks:Array<{taskName:string;config:string}>=[];
   const fixture=(name:string,extra:Record<string,string>={})=>{
     const work=path.join(dir,name);fs.mkdirSync(work,{mode:0o700});
     const home=path.join(work,'home');fs.mkdirSync(home,{mode:0o700});
     const target=path.join(work,windows?'codex.ps1':'codex');
     fs.writeFileSync(target,windows?'Write-Output original\r\n':'#!/bin/sh\nexit 19\n',{mode:0o755});
-    const env:Record<string,string>={CODEX_HOME:home,HOME:home,USERPROFILE:home,SCODE_SETUP_FAKE_ROOT:work,...extra};
+    const env:Record<string,string>={CODEX_HOME:home,HOME:home,USERPROFILE:home,SCODE_SETUP_FAKE_ROOT:work,
+      SCODE_SETUP_PROXY_PORT:String(address.port),...extra};
     for(const name of ['PATH','SystemRoot','TEMP','TMP','TMPDIR'])if(process.env[name])env[name]=process.env[name]!;
     const config=path.join(work,'runtime.json');
     const envFile=path.join(work,'native-env.json');fs.writeFileSync(envFile,JSON.stringify(env),{mode:0o600});
@@ -34,6 +55,10 @@ async function main():Promise<void>{
       '--native-env-file',envFile,'--enrollment',JSON.stringify([process.execPath,'never-enroll-in-this-install-test']),
       '--peers','[]','--command-entry',target],{encoding:'utf8',windowsHide:true}));
     assert.deepEqual(prepared.installationArgv,[process.execPath,server,'--install-codex','--config',config,'--command-entry',target]);
+    const runtime=JSON.parse(fs.readFileSync(config,'utf8'));
+    runtime.native.socket='fixture-setup.sock';
+    runtime.native.requireDurableQueue=false; // Operator config cannot disable installation admission.
+    fs.writeFileSync(config,JSON.stringify(runtime));
     const calls=()=>fs.existsSync(path.join(work,'calls.jsonl'))
       ? fs.readFileSync(path.join(work,'calls.jsonl'),'utf8').trim().split('\n').filter(Boolean).map(x=>JSON.parse(x)) as string[][]:[];
     const install=async()=>{
@@ -44,7 +69,8 @@ async function main():Promise<void>{
       }
       return result;
     };
-    return {work,home,target,config,calls,install};
+    const preflight=()=>run([process.execPath,server,'--check-codex-native','--config',config]);
+    return {work,home,target,config,calls,install,preflight};
   };
   try{
     const good=fixture('happy space');const before=fs.readFileSync(good.target);
@@ -54,6 +80,11 @@ async function main():Promise<void>{
     const journal=JSON.parse(fs.readFileSync(report.journal,'utf8'));
     assert.equal(journal.phase,'installed');assert.equal(journal.inFlight,undefined);
     assert(journal.completed.includes('officialNativeReadback'));
+    assert(journal.completed.includes('nativeReceiverPreflight'));
+    const commands=good.calls();
+    const proxy=commands.findIndex(c=>c[0]==='app-server'&&c[1]==='proxy');
+    assert(proxy>=0&&proxy<commands.findIndex(c=>c[0]==='mcp'&&c[1]==='add'));
+    assert.deepEqual(commands[proxy],['app-server','proxy','--sock','fixture-setup.sock']);
     assert(Buffer.from(journal.backup.bytes,'base64').equals(before));
     const args=['resume','original-id','a prompt with spaces','semi;colon'];
     const launch=windows
@@ -64,6 +95,53 @@ async function main():Promise<void>{
     const writes=good.calls().filter(c=>c[0]==='mcp'&&c[1]==='add').length;assert.equal(writes,1);
     const again=await good.install();assert.equal(again.code,1);assert.match(again.stderr,/installation record already exists/);
     assert.equal(good.calls().filter(c=>c[0]==='mcp'&&c[1]==='add').length,writes,'No replay of a completed setup');
+
+    const check=fixture('check-only');
+    const checkEntry=fs.readFileSync(check.target),checkConfig=fs.readFileSync(check.config);
+    const checked=await check.preflight();assert.equal(checked.code,0,checked.stderr);
+    assert.deepEqual(JSON.parse(checked.stdout),{checked:true,requiredCapability:'durableQueueAddOnce',version:1,a2aJourneyVerified:false});
+    assert.deepEqual(check.calls(),[['app-server','proxy','--sock','fixture-setup.sock']]);
+    assert(fs.readFileSync(check.target).equals(checkEntry));assert(fs.readFileSync(check.config).equals(checkConfig));
+    assert(!fs.existsSync(check.config+'.installation.json'));
+    assert(!fs.existsSync(path.join(check.home,'.sudocode-a2a-installation.json')));
+    assert(!fs.existsSync(path.join(check.work,'registration.json')));
+
+    for(const [label,value] of [['missing',undefined],['wrong-version','1']] as const){
+      capability=value;
+      const unsupported=fixture('capability-'+label);
+      const entry=fs.readFileSync(unsupported.target),runtime=fs.readFileSync(unsupported.config);
+      const checked=await unsupported.preflight();assert.equal(checked.code,1);
+      assert.match(checked.stderr,/did not negotiate durable/);
+      assert(!fs.existsSync(unsupported.config+'.installation.json'));
+      const stopped=await unsupported.install();assert.equal(stopped.code,1);
+      const attempt=JSON.parse(fs.readFileSync(unsupported.config+'.installation.json','utf8'));
+      assert.equal(attempt.inFlight,'nativeReceiverPreflight');assert.equal(attempt.phase,'stopped');
+      assert.match(attempt.error,/did not negotiate durable/);assert.equal(attempt.ownerTask,undefined);
+      assert(fs.readFileSync(unsupported.target).equals(entry));assert(fs.readFileSync(unsupported.config).equals(runtime));
+      assert(!fs.existsSync(path.join(unsupported.work,'registration.json')));
+      assert.equal(unsupported.calls().filter(c=>c[0]==='mcp'&&c[1]==='add').length,0);
+    }
+    capability=1;
+    const unreachable=fixture('native-connection-refused',{SCODE_SETUP_PROXY_REFUSAL:'1'});
+    const unreachableEntry=fs.readFileSync(unreachable.target);
+    assert.equal((await unreachable.install()).code,1);
+    const unreachableAttempt=JSON.parse(fs.readFileSync(unreachable.config+'.installation.json','utf8'));
+    assert.equal(unreachableAttempt.inFlight,'nativeReceiverPreflight');assert.equal(unreachableAttempt.ownerTask,undefined);
+    assert(fs.readFileSync(unreachable.target).equals(unreachableEntry));
+    assert(!fs.existsSync(path.join(unreachable.work,'registration.json')));
+
+    const handshakeEdit=fixture('native-handshake-runtime-edit');
+    changeDuringHandshake=handshakeEdit.config;
+    const handshakeEntry=fs.readFileSync(handshakeEdit.target);
+    assert.equal((await handshakeEdit.preflight()).code,1);
+    assert(!fs.existsSync(handshakeEdit.config+'.installation.json'));
+    assert.equal((await handshakeEdit.install()).code,1);
+    const editedAttempt=JSON.parse(fs.readFileSync(handshakeEdit.config+'.installation.json','utf8'));
+    assert.match(editedAttempt.error,/runtime changed during installation/);
+    assert.equal(editedAttempt.ownerTask,undefined);
+    assert(fs.readFileSync(handshakeEdit.target).equals(handshakeEntry));
+    assert(!fs.existsSync(path.join(handshakeEdit.work,'registration.json')));
+    changeDuringHandshake=undefined;
 
     const conflict=fixture('conflict');const original=fs.readFileSync(conflict.target);
     fs.writeFileSync(path.join(conflict.work,'registration.json'),JSON.stringify({name:'nexus_scode',transport:{type:'stdio',command:'another-owner'}}));
@@ -106,8 +184,12 @@ async function main():Promise<void>{
     assert.equal(attempt.inFlight,'globalMcpRegistration');assert.equal(attempt.phase,'stopped');
     const count=partial.calls().filter(c=>c[1]==='add').length;
     assert.equal((await partial.install()).code,1);assert.equal(partial.calls().filter(c=>c[1]==='add').length,count);
-    console.log('Codex setup process integration PASS: one command installs canonical MCP/entry; started action plus running readback, stopped readback refuses; actual delegate exit/argv and backup; conflict/racing entry and initial runtime edits preserved; lost result and completed setup not replayed');
+    assert(nativeMethods.includes('initialize'));
+    assert(nativeMethods.every(method=>method==='initialize'||method==='initialized'));
+    console.log('Codex setup process integration PASS: actual proxy negotiation precedes global writes; missing/wrong capability and transport refusal preserve config/entry with no owner Task; read-only preflight and handshake edit refusal; canonical MCP/delegate, running readback, conflicts and uncertain setup retained');
   }finally{
+    for(const socket of nativeServer.clients)socket.terminate();
+    await new Promise<void>((resolve,reject)=>nativeServer.close(error=>error?reject(error):resolve()));
     if(windows)for(const task of tasks){
       const xml=execFileSync(system('schtasks.exe'),['/Query','/TN',task.taskName,'/XML'],{windowsHide:true});
       const text=xml.toString(xml[0]===0xff?'utf16le':'utf8');

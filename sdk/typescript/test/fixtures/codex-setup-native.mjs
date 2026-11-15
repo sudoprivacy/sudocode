@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
 const args=process.argv.slice(2);
 const root=process.env.SCODE_SETUP_FAKE_ROOT;
 fs.appendFileSync(path.join(root,'calls.jsonl'),JSON.stringify(args)+'\n');
@@ -24,6 +25,15 @@ if(args.join(' ')==='mcp get nexus_scode --json'){
   console.log(JSON.stringify({status:'started',managedCodexVersion:'fixture'}));
 }else if(args.join(' ')==='app-server daemon version'){
   console.log(JSON.stringify({status:process.env.SCODE_SETUP_UNHEALTHY_DAEMON?'stopped':'running',managedCodexVersion:'fixture'}));
+}else if(args[0]==='app-server'&&args[1]==='proxy'){
+  if(process.env.SCODE_SETUP_PROXY_REFUSAL){
+    process.stdout.write('HTTP/1.1 503 Fixture refusal\r\nContent-Length: 0\r\n\r\n',()=>process.exit(23));
+  }else{
+    const socket=net.createConnection({host:'127.0.0.1',port:Number(process.env.SCODE_SETUP_PROXY_PORT)});
+    process.stdin.pipe(socket);socket.pipe(process.stdout);
+    socket.on('error',error=>{console.error(error);process.exitCode=1;});
+    socket.on('close',()=>process.exit());
+  }
 }else{
   console.log(JSON.stringify({foregroundArgs:args}));process.exitCode=17;
 }

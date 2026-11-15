@@ -304,6 +304,33 @@ naturally before the global owner loads its profile. The normal authenticated
 available. Merely installing the global entry does not retire a private
 launch-time override or old receiver.
 
+## Programmatic mailbox reception
+
+The SDK's explicit `CodexAutojoinConfig.mailbox` path negotiates scode
+`peerInput` v3. scode retains unread frames and accepts only model ACK tokens;
+the SDK forwards its bounded presentation unchanged through `scode_inbox`.
+The elected owner journals each wake slot before one ordinary native
+`thread/queue/add` request. Complete queue/history observations, the unresolved
+delay and the three-slot limit bound resubmission. It never starts an interrupted
+queue. On unload or owner exit, it drains an ACK already in flight before
+closing its ACP child. Legacy v2 inboxes remain immutable, with cutover outcomes
+in a separate hash-only ledger after the old owner has exited.
+
+Production admission must bind both encoded queue-submission and MCP-result
+limits to the actual native executable and effective loaded-thread settings,
+and recheck that evidence on every call. A fixture callback returning true is
+not admission. This path has no runtime JSON or installer enable switch; the
+existing installer still requires its durable queue capability. In an isolated
+Codex 0.169.0 process, `config/read` reported the disk's 4096-token limit while a
+loaded root retained a temporary 64-token limit and truncated a tool result.
+That API and the thread-specific MCP catalog do not establish the effective
+limit. A production qualification provider remains outstanding.
+
+The [native mailbox fixture](../../sdk/typescript/README.md#native-mailbox-presentation-fixture)
+records actual PTY, native and scode evidence using a deterministic loopback
+model endpoint. These measurements do not establish Node enrollment, installed
+receiver ownership, semantic reading, or bilateral idle delivery.
+
 ## Validation and activation
 
 `npm test` runs real proxy/ACP processes for root filtering, same-cwd identity

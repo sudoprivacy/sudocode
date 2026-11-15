@@ -16,6 +16,7 @@ const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, 
 let sessionId;
 let peerOwned = 0;
 let returnedInitialListFailure = false;
+let mailboxRetired = false, mailboxOffered = false;
 const frame = (hash, value) => {
   const bytes = Buffer.from(value), length = Buffer.alloc(8);
   length.writeBigUInt64BE(BigInt(bytes.length)); hash.update(length).update(bytes);
@@ -55,7 +56,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     }
     // Like scode, every advertising fixture echoes peer input a client declares.
     peerOwned = scenario === 'legacy' ? 0
-      : Math.min(2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
+      : Math.min(scenario === 'mailbox' ? 3 : 2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
     log({ method: 'initialize', peerOwned });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
@@ -79,6 +80,37 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   .onRequest('_fixture/input-state', value=>value, async ctx=>{
     await ctx.client.notify('_sudocode/session/input_update',{sessionId,update:ctx.params.update});
     return {};
+  })
+  .onRequest('_sudocode/session/peer_offer', value=>value, async ctx=>{
+    if (scenario !== 'mailbox' || peerOwned !== 3 || ctx.params.sessionId !== sessionId) {
+      throw acp.RequestError.methodNotFound('_sudocode/session/peer_offer');
+    }
+    log({ method: 'peer_offer', params: ctx.params });
+    if (ctx.params.ack?.length && process.env.SCODE_MAILBOX_ACK_BARRIER) {
+      log({ method: 'ack-waiting' });
+      const deadline = performance.now() + 5000;
+      while (!existsSync(process.env.SCODE_MAILBOX_ACK_BARRIER)) {
+        if (performance.now() >= deadline) throw new Error('Private ACK barrier timed out');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    const commits = [];
+    if (ctx.params.ack?.includes('fixture-ack')) {
+      commits.push({ conversation: 'conversation', from: 0, to: 100, status: mailboxRetired ? 'already' : 'committed' });
+      mailboxRetired = true;
+    }
+    for (const entry of ctx.params.legacy ?? []) if (ctx.params.ack?.includes(`legacy-ack:${entry.eventId}`)) {
+      commits.push({ legacyEventId: entry.eventId, status: 'committed' });
+    }
+    // Emulate scode's bounded ordering: only the first legacy entry fits.
+    // Legacy presentation is deliberately absent from response.frames.
+    const firstLegacy = ctx.params.legacy?.find(entry => !ctx.params.ack?.includes(`legacy-ack:${entry.eventId}`));
+    const response = { text: firstLegacy ? firstLegacy.message.text + `\n⟦ack legacy-ack:${firstLegacy.eventId}⟧`
+      : mailboxRetired ? 'No unread mailbox frames' : 'Peer body 🧪\n⟦ack fixture-ack⟧', commits,
+      frames: mailboxRetired || firstLegacy ? [] : [{ frameId:'conversation:0-100',conversation:'conversation',deliveryIds:['delivery-one'],
+        bytes:100,window:null,complete:true,redelivery:mailboxOffered }], unread:mailboxRetired ? 0 : 1 };
+    log({ method: 'peer_offer_result', response });
+    mailboxOffered = true; return response;
   })
   .onRequest(acp.methods.agent.session.load, ctx => {
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });

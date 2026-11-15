@@ -57,6 +57,8 @@
     "test:native": "node scripts/native.cjs",
     "test:codex-lifecycle": "node test/nativeCodexLifecycle.cjs",
     "test:codex-queue": "node test/nativeCodexQueue.cjs",
+    "test:codex-mailbox": "node test/nativeCodexMailbox.cjs",
+    "test:codex-mailbox-protocol": "node dist/testing/mailboxIntegration.cjs && node dist/testing/mailboxOwnerIntegration.cjs && node test/mailboxCloseDrain.cjs",
     "test:codex-entry": "node test/nativeCodexLifecycle.cjs --human-review-entry"
   },
   "devDependencies": {

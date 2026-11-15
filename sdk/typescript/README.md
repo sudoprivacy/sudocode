@@ -689,6 +689,38 @@ final handling, global idle, or exactly-once tool side effects. This recovery
 protocol does not restart a native server, change credentials, create threads
 or override approvals.
 
+The draft programmatic `CodexAutojoinConfig.mailbox` path uses negotiated scode
+`peerInput` v3 offers and model acknowledgements. It is not enabled by runtime
+JSON or by the v2 installer preflight. Its admission provider must qualify the
+actual owning native executable and effective thread settings on every call,
+including two separate measured bounds: `encodedSubmissionBytes` for native
+queue-add params and `encodedResultBytes` for an MCP tool result (each 4096–65536
+bytes). Both require evidence from the actual model-endpoint request. A fixture
+provider returning `true` is not production admission.
+
+For that path, the elected owner obtains a fresh no-ACK offer immediately
+before submission and queues its text verbatim after a fixed peer-data
+provenance line. Offer sizing accounts for the provenance, identity and JSON
+escaping as well as the tool-result bound. An over-budget presentation refuses
+before reserving a submission; it is never clipped. A read-alone tool window
+uses the same conservative text bound. For legacy entries omitted from scode's
+frame metadata, only the first legacy entry in that request is known to have
+been presented; other pending ledger rows do not create submission keys.
+
+The existing `.wake.jsonl` identity and `scode-wake:` client ID prefix remain
+stable. The owner syncs each slot before sending ordinary `thread/queue/add`
+once. It never retries that ID. Complete native queue/history observations,
+the binding-wide pending gate, the actual 60-second unresolved delay and the
+three-submission limit remain in force. An exhausted key reports
+`delivery_exhausted` with its delivery ID. Only explicit model ACK tokens can
+retire peer frames; the journal stores no peer body. This protocol bounds owner
+submissions, not native turns or side effects, and does not qualify the installed
+receiver or the ordinary CLI joining journey by itself.
+
+When a root unloads or the owner stops, it refuses new mailbox calls and drains
+an ACK already in flight before closing and joining the ACP child. A drain
+failure still runs child cleanup and is reported; it never triggers another ACK.
+
 A pre-existing thread can retain a temporary MCP config override. On Codex
 0.162.1 an isolated actual app-server test showed that changing disk config
 and calling `config/mcpServer/reload` still retained that thread override.
@@ -709,6 +741,77 @@ installation. Fixtures are protocol peers, not a real scode/Node/model backend.
 They do not establish native worker pause/cancellation, mTLS policy, a real
 Node append, actual idle wakeup or safe live migration. Those paired acceptance
 receipts must identify the full CLI binary/source and each actual device.
+
+### Native mailbox presentation fixture
+
+After building this checkout, run the following through the repository's
+managed host acceptance lease, with a fresh absolute output directory:
+
+```sh
+npm run test:codex-mailbox -- --codex /absolute/native/codex \
+  --case real-mailbox --scode /absolute/qualified/scode \
+  --output /absolute/new-evidence-directory
+```
+
+This fixture currently supports macOS. It starts an isolated native app-server
+and an ordinary CLI in a real PTY, with a deterministic loopback Responses
+endpoint. The `real-mailbox` case also starts two actual scode processes in a
+private local-pair namespace. It sends a large frame, verifies all UTF-8
+windows byte-for-byte in the model-facing requests before acknowledging it,
+and checks that a valid token commits once while an invalid or repeated token
+commits nothing. The private scode provider refuses requests; startup
+`GET /v1/models` discovery is recorded separately and inference requests fail
+the case. The receipt records exact binaries, source inputs, model requests,
+queue submissions, turns and process cleanup. It does not use a real Node or
+qualify enrollment, a published artifact, a production admission provider or
+live receiver ownership. The `real-mailbox-restart` variant closes and joins
+the receiving scode after the model reads every window, loads the same ACP
+session in a new process, and submits the original ACK token. It verifies the
+persistent token authority, unchanged unread delivery identity and one commit;
+it does not claim crash recovery or a production owner handoff.
+The `real-mailbox-burst` variant requires five distinct real appends within one
+second, all five complete bodies in the native model request, and one reader
+commit spanning those frames. Repeated model ACKs must make no further commit;
+the native thread must finish idle with nothing unread after one wake submission.
+It uses a separately recorded 32768-byte presentation bound.
+
+`native-settings-probe` creates a private native root with an explicit 64-token
+per-tool override, then resumes it in the actual TUI. It compares that setting
+with a 4096-token disk setting and records `config/read`,
+thread-specific MCP inventory, and the tool text that reaches the model. It
+also matches `server/diagnostics` to the owned process and executable. This
+diagnoses the source of effective settings; it does not admit a production
+binding or prove real mailbox acknowledgement behaviour.
+On the measured 0.169.0 native binary, `config/read` reported 4096 while that
+loaded thread's 64-token override truncated the middle of the model-facing
+tool result. Its thread-specific MCP inventory did not report the effective
+limit. These observations cannot supply production mailbox admission.
+
+`real-mailbox-truncation` sets a deliberately small 256-token native tool limit
+in its private home. An explicit fixture user turn reads five real scode frames;
+their combined offer must lose its middle in the actual model request. Each
+frame then must be read alone byte-for-byte before its ACK commits. A duplicate
+ACK must commit nothing. No peer body is supplied in the user input and no wake
+controller runs under the deliberately unqualified limit. This measures
+truncation recovery separately from queue presentation and production admission.
+
+Other `--case` values are `idle`, `active-reply-loss`, `interrupted`, `owner-crash-budget`,
+`request-loss-budget` and `whole-budget`. The request-loss case waits the real
+60-second policy delay and observes the three-submission cap across owner
+reopens. The interrupted case starts the queue as an explicit fixture user
+action; the owner never starts an interrupted queue. The whole-budget case
+uses multibyte text and JSON escapes to exercise the qualified submission and
+tool-result bounds. These cases use a protocol fixture for the mailbox and
+therefore do not establish scode commit behaviour.
+
+`npm run test:codex-mailbox-protocol` is an optional process-level diagnostic
+after building. It exercises ACP/MCP refusals, serialized ACKs, migration,
+paged native observations and owner reopens with protocol peers. It does not
+replace the actual native PTY cases or the remaining crash, compaction,
+reader-lease and Node enrollment acceptance.
+The close-drain process case holds an ACK inside an actual ACP child while its
+root unloads, then requires the original response and one commit before the
+child is closed. Its native endpoint and mailbox contents are protocol fixtures.
 
 ### Real paired process acceptance
 

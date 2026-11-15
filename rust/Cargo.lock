@@ -1530,6 +1530,7 @@ dependencies = [
  "engine-core",
  "engine-host",
  "futures",
+ "getrandom 0.2.17",
  "hmac",
  "kernel",
  "llm-mount",

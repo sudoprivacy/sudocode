@@ -372,16 +372,22 @@ fn subagent_events_version(meta: Option<&agent_client_protocol_schema::Meta>) ->
 pub const PEER_INPUT_META_KEY: &str = "peerInput";
 
 /// Whether the client asked to own peer input
-/// (`clientCapabilities._meta.sudocode.peerInput.version >= 1`). Anything
-/// malformed is "not asked".
+/// (`clientCapabilities._meta.sudocode.peerInput.version >= 1`), and how.
+/// Version 1 takes each record as a notification, version 2 as a request it
+/// durably accepts, and version 3 reads offers itself
+/// (`_sudocode/session/peer_offer`) while scode reports unread changes
+/// (`_sudocode/session/peer_unread`). Anything malformed is "not asked".
 fn peer_input_version(meta: Option<&agent_client_protocol_schema::Meta>) -> u64 {
     meta.and_then(|meta| meta.get("sudocode"))
         .and_then(|sudocode| sudocode.get(PEER_INPUT_META_KEY))
         .and_then(|peer_input| peer_input.get("version"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0)
-        .min(2)
+        .min(PEER_INPUT_OFFERS)
 }
+
+/// The `peerInput` version whose client reads offers.
+const PEER_INPUT_OFFERS: u64 = 3;
 
 /// ACP presentation subscriptions and durable wire delivery. All lifecycle
 /// observations originate from the session's shared engine event stream.
@@ -864,22 +870,35 @@ async fn ensure_a2a_receiver(
     _config: &SdkAcpConfig,
     session_id: &str,
     client_owned: u64,
+    offers: &Arc<PeerOffers>,
 ) {
     let Some(agent) = registry.agent_of(session_id) else {
         return;
     };
-    // The mailbox the session's tools send through: the hosted agent's, else
-    // the peer namespace the session build attached this agent to.
-    let mailbox = match &registry.hosted_factory {
-        Some(factory) => factory.mailbox(),
-        None => Some(engine_host::peer::attach(&agent).mailbox()),
-    };
-    let Some(mailbox) = mailbox else {
+    let Some(mailbox) = agent_mailbox(registry, &agent) else {
         return;
     };
     if !tools::cron_tools_disabled() {
         let firing = Arc::clone(&mailbox);
         runtime::cron_scheduler::start_once(|| runtime::cron_scheduler::Firing::new(firing));
+    }
+    if client_owned >= PEER_INPUT_OFFERS {
+        // The client reads offers and acknowledges what its model handled;
+        // nothing is pushed. scode only reports when the unread set changes.
+        offers.open(session_id);
+        let watcher = (
+            Arc::clone(&mailbox),
+            Arc::clone(registry),
+            cx.clone(),
+            agent.clone(),
+            session_id.to_owned(),
+        );
+        admit_peer_worker(registry, &agent, session_id, move |stop| {
+            let (mailbox, registry, cx, agent, session_id) = watcher;
+            spawn_peer_unread_watcher(mailbox, registry, cx, agent, session_id, stop)
+        })
+        .await;
+        return;
     }
     let verified = mailbox.authenticates_senders();
     let Some((receiver, rx)) = admit_peer_receiver(registry, &agent, &mailbox, session_id).await
@@ -915,12 +934,55 @@ struct PeerRoute {
     verified: bool,
 }
 
+/// The mailbox `agent`'s session tools send through: the hosted agent's,
+/// else the peer namespace the session build attached this agent to.
+fn agent_mailbox(
+    registry: &SessionRegistry,
+    agent: &str,
+) -> Option<Arc<runtime::mailbox::Mailbox>> {
+    match &registry.hosted_factory {
+        Some(factory) => factory.mailbox(),
+        None => Some(engine_host::peer::attach(agent).mailbox()),
+    }
+}
+
 async fn admit_peer_receiver(
     registry: &SharedSessionRegistry,
     agent: &str,
     mailbox: &Arc<runtime::mailbox::Mailbox>,
     session_id: &str,
 ) -> Option<(Arc<PeerReceiver>, PeerInbox)> {
+    let mut inbox = None;
+    let receiver = admit_peer_worker(registry, agent, session_id, |stop| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
+        inbox = Some(rx);
+        let callback_stop = stop.clone();
+        runtime::mailbox::spawn_inbox_record_poller(
+            Arc::clone(mailbox),
+            200,
+            "acp-peer",
+            stop,
+            move |message| deliver_peer_envelope(message, &tx, &callback_stop),
+        )
+    })
+    .await?;
+    Some((
+        receiver,
+        inbox.expect("an admitted receiver started its worker"),
+    ))
+}
+
+/// Register `agent`'s one peer worker for `session_id`, started by `start`
+/// with the worker's stop signal. A live worker for the agent keeps serving;
+/// a stopped one is joined first, so its receiver seat is released before
+/// the new worker claims it.
+async fn admit_peer_worker(
+    registry: &SharedSessionRegistry,
+    agent: &str,
+    session_id: &str,
+    start: impl FnOnce(HookAbortSignal) -> std::thread::JoinHandle<()>,
+) -> Option<Arc<PeerReceiver>> {
+    let mut start = Some(start);
     loop {
         let admission = {
             // Closing the last session and admitting its replacement use this
@@ -939,21 +1001,14 @@ async fn admit_peer_receiver(
                 Err(Arc::clone(previous))
             } else {
                 let stop = HookAbortSignal::new();
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
-                let callback_stop = stop.clone();
-                let worker = runtime::mailbox::spawn_inbox_record_poller(
-                    Arc::clone(mailbox),
-                    200,
-                    "acp-peer",
-                    stop.clone(),
-                    move |message| deliver_peer_envelope(message, &tx, &callback_stop),
-                );
+                let start = start.take().expect("a worker starts once");
+                let worker = start(stop.clone());
                 let receiver = Arc::new(PeerReceiver {
                     stop,
                     worker: Mutex::new(PeerReceiverWorker::Running(worker)),
                 });
                 receivers.insert(agent.to_owned(), Arc::clone(&receiver));
-                Ok((receiver, rx))
+                Ok(receiver)
             }
         };
         match admission {
@@ -1137,6 +1192,413 @@ fn peer_message_payload(
         "sudocode": {"a2a": a2a},
     }))
     .expect("peer message projection is serializable")
+}
+
+// ---------------------------------------------------------------------------
+// peerInput version 3: offers read by the client
+// ---------------------------------------------------------------------------
+
+/// What this connection has offered: its version 3 sessions and, per
+/// session, every frame offered so far, so a frame offered again before it is
+/// acknowledged says `redelivery`.
+#[derive(Default)]
+pub(crate) struct PeerOffers {
+    sessions: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+}
+
+impl PeerOffers {
+    fn open(&self, session_id: &str) {
+        self.lock().entry(session_id.to_owned()).or_default();
+    }
+
+    /// The frames already offered to `session_id`, or `None` when the session
+    /// was not opened on this connection with version 3.
+    fn offered(&self, session_id: &str) -> Option<std::collections::HashSet<String>> {
+        self.lock().get(session_id).cloned()
+    }
+
+    fn record(&self, session_id: &str, frames: impl IntoIterator<Item = String>) {
+        if let Some(offered) = self.lock().get_mut(session_id) {
+            offered.extend(frames);
+        }
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, std::collections::HashSet<String>>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// How often the unread watcher re-counts.
+const PEER_UNREAD_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Report `agent`'s unread frame count to its session whenever the count
+/// changes, and once at start. The notification is a hint for the client's
+/// wake: the count itself is re-read on every offer.
+fn spawn_peer_unread_watcher(
+    mailbox: Arc<runtime::mailbox::Mailbox>,
+    registry: SharedSessionRegistry,
+    cx: ConnectionTo<Client>,
+    agent: String,
+    session_id: String,
+    stop: HookAbortSignal,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("acp-peer-unread".into())
+        .spawn(move || {
+            let mut bound = session_id;
+            let mut reported: Option<(String, u64)> = None;
+            while !stop.is_aborted() {
+                if let Some(session) = registry.session_of_agent(&agent, &bound) {
+                    bound = session;
+                    match count_unread(&mailbox) {
+                        Ok(unread) if reported.as_ref() != Some(&(bound.clone(), unread)) => {
+                            if cx
+                                .send_notification(peer_unread_notification(&bound, unread))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            reported = Some((bound.clone(), unread));
+                        }
+                        Ok(_) => {}
+                        Err(error) => eprintln!("[acp-peer] unread count for {agent}: {error}"),
+                    }
+                }
+                let deadline = std::time::Instant::now() + PEER_UNREAD_POLL;
+                while !stop.is_aborted() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        })
+        .expect("spawn the peer unread watcher")
+}
+
+/// Unread frames across every conversation of `mailbox`.
+fn count_unread(mailbox: &runtime::mailbox::Mailbox) -> Result<u64, String> {
+    let mut unread = 0u64;
+    for peer in mailbox.list_conversations()? {
+        let frames = mailbox.unread_frames(&peer)?;
+        unread += u64::try_from(frames.frames().len()).unwrap_or(u64::MAX);
+    }
+    Ok(unread)
+}
+
+fn peer_unread_notification(session_id: &str, unread: u64) -> AgentNotification {
+    AgentNotification::ExtNotification(ExtNotification::new(
+        "_sudocode/session/peer_unread",
+        serde_json::value::to_raw_value(&json!({"sessionId": session_id, "unread": unread}))
+            .expect("peer unread notification is serializable")
+            .into(),
+    ))
+}
+
+/// The Agent's acknowledgement key, created on first use as 32 random bytes
+/// in the private config home (`peer-input/<sha256 of the agent>.ack-key`,
+/// mode 0600) and cached for the process. It never leaves scode: tokens are
+/// its only output.
+fn agent_ack_key(agent: &str) -> Result<crate::peer_offer::AckKey, String> {
+    static KEYS: std::sync::OnceLock<Mutex<HashMap<String, crate::peer_offer::AckKey>>> =
+        std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(Mutex::default);
+    let mut keys = keys
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(key) = keys.get(agent) {
+        return Ok(key.clone());
+    }
+    let directory = runtime::config::default_config_home().join("peer-input");
+    let key = load_or_create_ack_key(&directory, agent)?;
+    keys.insert(agent.to_owned(), key.clone());
+    Ok(key)
+}
+
+fn load_or_create_ack_key(
+    directory: &std::path::Path,
+    agent: &str,
+) -> Result<crate::peer_offer::AckKey, String> {
+    use sha2::{Digest, Sha256};
+    let digest = data_encoding::HEXLOWER.encode(&Sha256::digest(agent.as_bytes()));
+    let path = directory.join(format!("{digest}.ack-key"));
+    let read = |path: &std::path::Path| -> Result<crate::peer_offer::AckKey, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("read ack key: {e}"))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "ack key file is not 32 bytes".to_string())?;
+        Ok(crate::peer_offer::AckKey::new(bytes))
+    };
+    if path.exists() {
+        return read(&path);
+    }
+    create_private_dir(directory)?;
+    let mut bytes = [0u8; 32];
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut bytes)
+        .and_then(|()| getrandom::getrandom(&mut nonce))
+        .map_err(|e| format!("ack key randomness: {e}"))?;
+    // Write a complete file under a unique name, then link it into place:
+    // the link fails when another process won the race, and its key is read.
+    let staged = directory.join(format!(".{}.tmp", data_encoding::HEXLOWER.encode(&nonce)));
+    write_private_file(&staged, &bytes)?;
+    let linked = std::fs::hard_link(&staged, &path);
+    let _ = std::fs::remove_file(&staged);
+    match linked {
+        Ok(()) => Ok(crate::peer_offer::AckKey::new(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read(&path),
+        Err(error) => Err(format!("install ack key: {error}")),
+    }
+}
+
+fn create_private_dir(directory: &std::path::Path) -> Result<(), String> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .map_err(|e| format!("create ack key directory: {e}"))
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("stage ack key: {e}"))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write ack key: {e}"))
+}
+
+/// Serve one `_sudocode/session/peer_offer`: commit what `ack` covers, then
+/// offer the next frames, or read the one `read` names.
+async fn serve_peer_offer(
+    registry: &SharedSessionRegistry,
+    negotiated: u64,
+    offers: &Arc<PeerOffers>,
+    request: crate::peer_offer::PeerOfferRequest,
+) -> Result<crate::peer_offer::PeerOfferResponse, crate::peer_offer::PeerOfferError> {
+    use crate::peer_offer::PeerOfferError;
+    request.validate()?;
+    if negotiated < PEER_INPUT_OFFERS {
+        return Err(PeerOfferError::BindingMismatch);
+    }
+    let offered = offers
+        .offered(&request.session_id)
+        .ok_or(PeerOfferError::BindingMismatch)?;
+    let agent = registry
+        .agent_of(&request.session_id)
+        .ok_or(PeerOfferError::BindingMismatch)?;
+    let mailbox = agent_mailbox(registry, &agent)
+        .ok_or_else(|| PeerOfferError::MailboxUnavailable("no mailbox for this agent".into()))?;
+    let key = agent_ack_key(&agent).map_err(PeerOfferError::MailboxUnavailable)?;
+    let binding = crate::peer_offer::AckBinding {
+        actor: agent,
+        session: request.session_id.clone(),
+        thread: request.thread_id.clone(),
+    };
+    let session_id = request.session_id.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        offer_from_mailbox(&mailbox, &key, &binding, &request, &offered)
+    })
+    .await
+    .map_err(|e| PeerOfferError::MailboxUnavailable(e.to_string()))??;
+    offers.record(
+        &session_id,
+        response.frames.iter().map(|frame| frame.frame_id.clone()),
+    );
+    Ok(response)
+}
+
+/// Every conversation's unread frames, rendered as the session model reads
+/// its records, with `redelivery` for frames this session was offered before.
+fn unread_offer_frames(
+    mailbox: &runtime::mailbox::Mailbox,
+    offered: &std::collections::HashSet<String>,
+) -> Result<Vec<(String, u64, Vec<crate::peer_offer::OfferFrame>)>, String> {
+    let verified = mailbox.authenticates_senders();
+    let mut conversations = Vec::new();
+    for peer in mailbox.list_conversations()? {
+        let unread = mailbox.unread_frames(&peer)?;
+        let frames = unread
+            .frames()
+            .iter()
+            .map(|frame| {
+                let mut offer = crate::peer_offer::OfferFrame {
+                    conversation: peer.clone(),
+                    start: frame.start(),
+                    end: frame.end(),
+                    delivery_ids: frame
+                        .records()
+                        .iter()
+                        .map(|record| record.delivery_id().to_owned())
+                        .collect(),
+                    blocks: frame
+                        .records()
+                        .iter()
+                        .map(|record| record.envelope().to_prompt(verified))
+                        .collect(),
+                    redelivery: false,
+                };
+                offer.redelivery = offered.contains(&offer.frame_id());
+                offer
+            })
+            .collect();
+        conversations.push((peer, unread.start(), frames));
+    }
+    Ok(conversations)
+}
+
+/// Commit, per conversation, the run of unread frames `acks` acknowledges.
+fn commit_acknowledged(
+    mailbox: &runtime::mailbox::Mailbox,
+    key: &crate::peer_offer::AckKey,
+    binding: &crate::peer_offer::AckBinding,
+    conversations: &[(String, u64, Vec<crate::peer_offer::OfferFrame>)],
+    acks: &std::collections::HashSet<String>,
+) -> Result<Vec<crate::peer_offer::CommitReport>, crate::peer_offer::PeerOfferError> {
+    use crate::peer_offer::{
+        CommitReason, CommitReport, CommitStatus, ConversationCommit, PeerOfferError,
+    };
+    use runtime::mailbox::{CommitOutcome, CommitRefusalReason};
+    let mut commits = Vec::new();
+    if acks.is_empty() {
+        return Ok(commits);
+    }
+    for (peer, start, frames) in conversations {
+        let Some((from, to)) =
+            crate::peer_offer::acknowledged_run(key, binding, *start, frames, acks)
+        else {
+            continue;
+        };
+        let (status, reason) = match mailbox
+            .commit_through(peer, from, to)
+            .map_err(PeerOfferError::MailboxUnavailable)?
+        {
+            CommitOutcome::Committed => (CommitStatus::Committed, None),
+            CommitOutcome::Already => (CommitStatus::Already, None),
+            CommitOutcome::Refused(CommitRefusalReason::LeaseLost) => {
+                (CommitStatus::Refused, Some(CommitReason::LeaseLost))
+            }
+            CommitOutcome::Refused(CommitRefusalReason::PositionMoved) => {
+                (CommitStatus::Refused, Some(CommitReason::PositionMoved))
+            }
+        };
+        commits.push(CommitReport::Conversation(ConversationCommit {
+            conversation: peer.clone(),
+            from,
+            to,
+            status,
+            reason,
+        }));
+    }
+    Ok(commits)
+}
+
+fn offer_from_mailbox(
+    mailbox: &runtime::mailbox::Mailbox,
+    key: &crate::peer_offer::AckKey,
+    binding: &crate::peer_offer::AckBinding,
+    request: &crate::peer_offer::PeerOfferRequest,
+    offered: &std::collections::HashSet<String>,
+) -> Result<crate::peer_offer::PeerOfferResponse, crate::peer_offer::PeerOfferError> {
+    use crate::peer_offer::{CommitReport, CommitStatus, LegacyCommit, PeerOfferError, ReadTarget};
+    let unavailable = PeerOfferError::MailboxUnavailable;
+    let acks: std::collections::HashSet<String> = request.ack.iter().cloned().collect();
+    let before = unread_offer_frames(mailbox, offered).map_err(unavailable)?;
+    let mut commits = commit_acknowledged(mailbox, key, binding, &before, &acks)?;
+    let committed_legacy =
+        crate::peer_offer::acknowledged_legacy(key, binding, &request.legacy, &acks);
+    commits.extend(committed_legacy.iter().map(|event_id| {
+        CommitReport::Legacy(LegacyCommit {
+            legacy_event_id: event_id.clone(),
+            status: CommitStatus::Committed,
+            reason: None,
+        })
+    }));
+    let all_before: Vec<&crate::peer_offer::OfferFrame> = before
+        .iter()
+        .flat_map(|(_, _, frames)| frames.iter())
+        .collect();
+    let unmatched =
+        crate::peer_offer::unmatched_acks(key, binding, &all_before, &request.legacy, &acks);
+
+    let after = unread_offer_frames(mailbox, offered).map_err(unavailable)?;
+    let frames: Vec<crate::peer_offer::OfferFrame> = after
+        .into_iter()
+        .flat_map(|(_, _, frames)| frames)
+        .collect();
+    let unread = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+    let legacy: Vec<crate::peer_offer::LegacyEntry> = request
+        .legacy
+        .iter()
+        .filter(|entry| !committed_legacy.contains(&entry.event_id))
+        .cloned()
+        .collect();
+    let presentation = match &request.read {
+        Some(read) => {
+            let target = frames
+                .iter()
+                .find(|frame| frame.frame_id() == read.frame_id)
+                .map(ReadTarget::Frame)
+                .or_else(|| {
+                    read.frame_id
+                        .strip_prefix("legacy:")
+                        .and_then(|event_id| legacy.iter().find(|entry| entry.event_id == event_id))
+                        .map(ReadTarget::Legacy)
+                })
+                .ok_or(PeerOfferError::UnknownFrame)?;
+            crate::peer_offer::read_window(
+                key,
+                binding,
+                &target,
+                read.window,
+                read.after.as_deref(),
+                unread,
+                request.max_bytes,
+            )?
+        }
+        None => crate::peer_offer::build_offer(
+            key,
+            binding,
+            &legacy,
+            &frames,
+            unread,
+            request.max_bytes,
+        )?,
+    };
+    let presentation = crate::peer_offer::with_unmatched_notice(
+        presentation,
+        &unmatched,
+        unread,
+        request.max_bytes,
+    );
+    Ok(crate::peer_offer::PeerOfferResponse {
+        text: presentation.text,
+        commits,
+        frames: presentation.frames,
+        unread,
+    })
+}
+
+fn peer_offer_error(error: &crate::peer_offer::PeerOfferError) -> Error {
+    if error.code() == -32603 {
+        Error::internal_error().data(error.data())
+    } else {
+        Error::invalid_params().data(error.data())
+    }
 }
 
 async fn wait_peer_input_commit(
@@ -2686,6 +3148,8 @@ pub(crate) async fn run_acp_on_transport(
     // `initialize`. Sessions it creates or loads get a sub-agent route.
     let subagent_events = Arc::new(AtomicBool::new(false));
     let peer_input_client = Arc::new(AtomicU64::new(0));
+    // Per connection: its peerInput version 3 sessions and what they were offered.
+    let peer_offers = Arc::new(PeerOffers::default());
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
@@ -2771,6 +3235,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
                 let peer_input_client = Arc::clone(&peer_input_client);
+                let peer_offers = Arc::clone(&peer_offers);
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -2808,6 +3273,7 @@ pub(crate) async fn run_acp_on_transport(
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
                     let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
+                    let peer_offers = Arc::clone(&peer_offers);
                     let cx_notify = cx.clone();
                     let completions_enabled = subagent_completions.load(Ordering::SeqCst);
                     let tasks_enabled = task_completions.load(Ordering::SeqCst);
@@ -2930,6 +3396,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &peer_config,
                                     &session_id,
                                     client_owns_peer_input,
+                                    &peer_offers,
                                 )
                                 .await;
                             }
@@ -3131,6 +3598,7 @@ pub(crate) async fn run_acp_on_transport(
                 let subagent_completions = Arc::clone(&subagent_completions);
                 let task_completions = Arc::clone(&task_completions);
                 let peer_input_client = Arc::clone(&peer_input_client);
+                let peer_offers = Arc::clone(&peer_offers);
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -3161,6 +3629,7 @@ pub(crate) async fn run_acp_on_transport(
                     let commands = session_ops::available_commands();
                     let peer_config = config.clone();
                     let client_owns_peer_input = peer_input_client.load(Ordering::SeqCst);
+                    let peer_offers = Arc::clone(&peer_offers);
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
@@ -3318,6 +3787,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &peer_config,
                                     &session_id,
                                     client_owns_peer_input,
+                                    &peer_offers,
                                 )
                                 .await;
                             }
@@ -3641,6 +4111,30 @@ pub(crate) async fn run_acp_on_transport(
                             Err(error) => responder.respond_with_error(acp_error_to_sdk(
                                 &AcpError::invalid_params(error),
                             ))?,
+                        }
+                        Ok(())
+                    })?;
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        // --- _sudocode/session/peer_offer (peerInput version 3) ---
+        .on_receive_request(
+            {
+                let registry = Arc::clone(&registry);
+                let peer_input_client = Arc::clone(&peer_input_client);
+                let peer_offers = Arc::clone(&peer_offers);
+                async move |req: crate::peer_offer::PeerOfferRequest,
+                            responder: Responder<crate::peer_offer::PeerOfferResponse>,
+                            cx: ConnectionTo<Client>| {
+                    let registry = Arc::clone(&registry);
+                    let negotiated = peer_input_client.load(Ordering::SeqCst);
+                    let peer_offers = Arc::clone(&peer_offers);
+                    cx.spawn(async move {
+                        match serve_peer_offer(&registry, negotiated, &peer_offers, req).await {
+                            Ok(response) => responder.respond(response)?,
+                            Err(error) => responder.respond_with_error(peer_offer_error(&error))?,
                         }
                         Ok(())
                     })?;

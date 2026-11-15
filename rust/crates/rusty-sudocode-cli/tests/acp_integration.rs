@@ -8371,6 +8371,294 @@ async fn acp_durable_peer_input_replays_until_matching_acceptance() {
     workspace.cleanup();
 }
 
+fn peer_envelope(from: &str, to: &str, body: &str) -> runtime::agent_mailbox::MailboxEnvelope {
+    runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: from.into(),
+        to: to.into(),
+        body: body.into(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+        request_id: None,
+    }
+}
+
+/// `⟦<label> <token>⟧` values in an offer's text, in order.
+fn offer_tokens(text: &str, label: &str) -> Vec<String> {
+    let marker = format!("⟦{label} ");
+    text.match_indices(&marker)
+        .map(|(at, _)| {
+            let rest = &text[at + marker.len()..];
+            rest[..rest.find('⟧').expect("token is closed")].to_string()
+        })
+        .collect()
+}
+
+/// Initialize as a peerInput version 3 client and open a session pinned to `agent`.
+async fn open_offer_session(workspace: &TestWorkspace, agent: &str) -> (AcpTestClient, String) {
+    pin_agent_name(&workspace.root, agent);
+    let mut client = spawn_stdio_client(workspace);
+    let (_, initialized) = client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta":{"sudocode":{"peerInput":{"version":3}}}},
+            }),
+        )
+        .await;
+    assert_eq!(
+        initialized["result"]["_meta"]["sudocode"]["peerInput"]["version"], 3,
+        "scode echoes the offer version"
+    );
+    let session = open_direct_session(&mut client, &workspace.root).await;
+    (client, session)
+}
+
+/// Wait until scode reports at least one unread frame for `session`; return
+/// what arrived before the report.
+async fn await_unread(client: &mut AcpTestClient, session: &str) -> Vec<Value> {
+    let (seen, unread) = client
+        .recv_until(Duration::from_secs(30), |message| {
+            message["method"] == "_sudocode/session/peer_unread"
+                && message["params"]["unread"].as_u64().unwrap_or(0) >= 1
+        })
+        .await
+        .expect("unread notification");
+    assert_eq!(unread["params"]["sessionId"], session);
+    seen
+}
+
+/// A call outside this connection's version 3 sessions, or with a budget too
+/// small for one window, is refused with the contract's reasons.
+async fn assert_offer_refusals(client: &mut AcpTestClient, session: &str) {
+    let (_, wrong) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            json!({"sessionId": "no-such-session", "threadId": "thread-1", "maxBytes": 8000}),
+        )
+        .await;
+    assert_eq!(wrong["error"]["code"], -32602);
+    assert_eq!(wrong["error"]["data"]["reason"], "binding_mismatch");
+    let (_, small) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            json!({"sessionId": session, "threadId": "thread-1", "maxBytes": 10}),
+        )
+        .await;
+    assert_eq!(small["error"]["data"]["reason"], "max_bytes_too_small");
+    assert!(small["error"]["data"]["minimum"].as_u64().unwrap() > 10);
+}
+
+/// peerInput version 3: scode reports unread changes, offers whole frames with
+/// ack tokens, re-offers them as redelivery until acknowledged, commits what
+/// the tokens cover and refuses bindings and budgets it cannot serve.
+#[tokio::test]
+async fn acp_peer_offers_commit_only_what_the_model_acknowledged() {
+    const AGENT: &str = "acp-offer-receiver";
+    const PEER: &str = "acp-offer-peer";
+    let server = MockAnthropicService::spawn().await.expect("model fixture");
+    let workspace = TestWorkspace::new("stdio-peer-offers");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let (mut client, session) = open_offer_session(&workspace, AGENT).await;
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let sender = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
+    sender
+        .send(peer_envelope(PEER, AGENT, "offered peer input"))
+        .expect("send");
+
+    let seen = await_unread(&mut client, &session).await;
+    assert!(
+        seen.iter()
+            .all(|message| message["method"] != "_sudocode/session/peer_message"),
+        "version 3 pushes no peer message"
+    );
+
+    let offer = |ack: Vec<&str>| json!({"sessionId": session, "threadId": "thread-1", "maxBytes": 8000, "ack": ack});
+    let (_, first) = client
+        .send_request("_sudocode/session/peer_offer", offer(vec![]))
+        .await;
+    let first = &first["result"];
+    let text = first["text"].as_str().expect("offer text");
+    assert!(text.contains("offered peer input"), "{text}");
+    let acks = offer_tokens(text, "ack");
+    assert_eq!(acks.len(), 1, "{text}");
+    let frame = &first["frames"][0];
+    assert!(frame["frameId"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(frame["deliveryIds"].as_array().map(Vec::len), Some(1));
+    assert!(frame["window"].is_null());
+    assert_eq!(frame["complete"], true);
+    assert_eq!(frame["redelivery"], false);
+    assert_eq!(first["unread"], 1);
+    assert_eq!(first["commits"], json!([]));
+
+    let (_, again) = client
+        .send_request("_sudocode/session/peer_offer", offer(vec![]))
+        .await;
+    let again = &again["result"];
+    assert_eq!(again["frames"][0]["redelivery"], true);
+    assert_eq!(again["frames"][0]["frameId"], frame["frameId"]);
+    assert_eq!(
+        offer_tokens(again["text"].as_str().unwrap(), "ack"),
+        acks,
+        "a re-offered frame shows the same token"
+    );
+
+    let (_, acked) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            offer(vec![acks[0].as_str(), "notatokenatall"]),
+        )
+        .await;
+    let acked = &acked["result"];
+    assert_eq!(
+        acked["commits"].as_array().map(Vec::len),
+        Some(1),
+        "{acked}"
+    );
+    assert_eq!(acked["commits"][0]["status"], "committed");
+    assert_eq!(
+        acked["commits"][0]["conversation"],
+        frame["frameId"]
+            .as_str()
+            .unwrap()
+            .rsplit_once(':')
+            .unwrap()
+            .0
+    );
+    assert_eq!(acked["unread"], 0);
+    assert_eq!(acked["frames"], json!([]));
+    assert!(
+        acked["text"]
+            .as_str()
+            .unwrap()
+            .contains("ack not recognised: notatokenatall"),
+        "{acked}"
+    );
+
+    let (_, after) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            offer(vec![acks[0].as_str()]),
+        )
+        .await;
+    let after = &after["result"];
+    assert_eq!(
+        after["frames"],
+        json!([]),
+        "a committed frame is not offered again"
+    );
+    assert_eq!(after["commits"], json!([]));
+
+    assert_offer_refusals(&mut client, &session).await;
+    assert!(
+        server.captured_requests().await.is_empty(),
+        "no inner scode inference"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// A frame larger than `maxBytes` is read window by window, each unlocked by
+/// the previous window's token; only the last window carries the ack token.
+#[tokio::test]
+async fn acp_peer_offers_read_a_large_frame_in_windows() {
+    const AGENT: &str = "acp-window-receiver";
+    const PEER: &str = "acp-window-peer";
+    let server = MockAnthropicService::spawn().await.expect("model fixture");
+    let workspace = TestWorkspace::new("stdio-peer-windows");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let (mut client, session) = open_offer_session(&workspace, AGENT).await;
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let sender = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
+    let mut body = String::new();
+    for i in 0..400 {
+        use std::fmt::Write as _;
+        let _ = writeln!(body, "line {i} 窗口 🙂");
+    }
+    sender
+        .send(peer_envelope(PEER, AGENT, &body))
+        .expect("send");
+    await_unread(&mut client, &session).await;
+
+    let max_bytes = 2000u64;
+    let (_, first) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            json!({"sessionId": session, "threadId": "thread-w", "maxBytes": max_bytes}),
+        )
+        .await;
+    let mut result = first["result"].clone();
+    let frame_id = result["frames"][0]["frameId"].as_str().unwrap().to_string();
+    let count = result["frames"][0]["window"]["count"].as_u64().unwrap();
+    assert!(count > 1, "{result}");
+    assert_eq!(result["frames"][0]["window"]["index"], 0);
+    assert_eq!(result["frames"][0]["complete"], false);
+    let mut seen = String::new();
+    for window in 0..count {
+        let text = result["text"].as_str().unwrap().to_string();
+        assert!(
+            text.len() as u64 <= max_bytes,
+            "window {window} within budget"
+        );
+        seen.push_str(&text);
+        if window + 1 == count {
+            break;
+        }
+        assert!(
+            offer_tokens(&text, "ack").is_empty(),
+            "no ack before the last window"
+        );
+        let after = text
+            .split("after: \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("continuation token")
+            .to_string();
+        if window + 1 < count {
+            let (_, wrong) = client
+                .send_request(
+                    "_sudocode/session/peer_offer",
+                    json!({"sessionId": session, "threadId": "thread-w", "maxBytes": max_bytes,
+                        "read": {"frameId": frame_id, "window": window + 1, "after": "wrongtoken"}}),
+                )
+                .await;
+            assert_eq!(wrong["error"]["data"]["reason"], "window_token_invalid");
+        }
+        let (_, next) = client
+            .send_request(
+                "_sudocode/session/peer_offer",
+                json!({"sessionId": session, "threadId": "thread-w", "maxBytes": max_bytes,
+                    "read": {"frameId": frame_id, "window": window + 1, "after": after}}),
+            )
+            .await;
+        result = next["result"].clone();
+        assert_eq!(result["frames"][0]["window"]["index"], window + 1, "{next}");
+    }
+    assert_eq!(result["frames"][0]["complete"], true);
+    let acks = offer_tokens(result["text"].as_str().unwrap(), "ack");
+    assert_eq!(acks.len(), 1);
+    assert!(seen.contains("line 0 ") && seen.contains("line 399 "));
+    let (_, acked) = client
+        .send_request(
+            "_sudocode/session/peer_offer",
+            json!({"sessionId": session, "threadId": "thread-w", "maxBytes": max_bytes, "ack": acks}),
+        )
+        .await;
+    assert_eq!(
+        acked["result"]["commits"][0]["status"], "committed",
+        "{acked}"
+    );
+    assert_eq!(acked["result"]["unread"], 0);
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 // ---------------------------------------------------------------------------
 // Direct A2A requests (`_sudocode/a2a/*`)
 // ---------------------------------------------------------------------------

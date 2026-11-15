@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
 
+use agent_client_protocol::{JsonRpcRequest, JsonRpcResponse};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,7 +40,8 @@ scode_inbox({read: frameId}) instead of acknowledging it.";
 // ---------------------------------------------------------------------------
 
 /// `_sudocode/session/peer_offer` request.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcRequest)]
+#[request(method = "_sudocode/session/peer_offer", response = PeerOfferResponse)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PeerOfferRequest {
     pub session_id: String,
@@ -54,7 +56,7 @@ pub struct PeerOfferRequest {
 }
 
 /// One frame read alone, optionally one of its windows.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadRequest {
     pub frame_id: String,
@@ -65,7 +67,7 @@ pub struct ReadRequest {
 }
 
 /// An open version 2 entry the cutover owner passes on each call.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LegacyEntry {
     pub event_id: String,
@@ -111,7 +113,7 @@ impl PeerOfferRequest {
 }
 
 /// `_sudocode/session/peer_offer` response.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonRpcResponse)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerOfferResponse {
     pub text: String,
@@ -121,14 +123,14 @@ pub struct PeerOfferResponse {
 }
 
 /// What `ack` committed, per conversation or per legacy entry.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommitReport {
     Conversation(ConversationCommit),
     Legacy(LegacyCommit),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationCommit {
     pub conversation: String,
@@ -139,7 +141,7 @@ pub struct ConversationCommit {
     pub reason: Option<CommitReason>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyCommit {
     pub legacy_event_id: String,
@@ -148,7 +150,7 @@ pub struct LegacyCommit {
     pub reason: Option<CommitReason>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommitStatus {
     Committed,
@@ -156,7 +158,7 @@ pub enum CommitStatus {
     Refused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommitReason {
     LeaseLost,
@@ -165,7 +167,7 @@ pub enum CommitReason {
 }
 
 /// One offered frame, as the client records it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameMeta {
     pub frame_id: String,
@@ -179,7 +181,7 @@ pub struct FrameMeta {
     pub redelivery: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowMeta {
     pub index: u64,
     pub count: u64,
@@ -543,11 +545,21 @@ impl<'a> Unit<'a> {
     }
 
     fn header(&self, position: (u64, u64), window: Option<(u64, u64)>) -> String {
+        self.header_flagged(position, window, self.redelivery, self.possibly_delivered)
+    }
+
+    fn header_flagged(
+        &self,
+        position: (u64, u64),
+        window: Option<(u64, u64)>,
+        redelivery: bool,
+        possibly_delivered: bool,
+    ) -> String {
         let mut flags = String::new();
-        if self.redelivery {
+        if redelivery {
             flags.push_str(" · redelivery");
         }
-        if self.possibly_delivered {
+        if possibly_delivered {
             flags.push_str(" · possiblyDelivered");
         }
         if let Some((index, count)) = window {
@@ -578,10 +590,16 @@ impl<'a> Unit<'a> {
     }
 
     /// The longest a header plus window frame lines can be, whatever the
-    /// position, window index and count. Windows are cut against this bound,
-    /// so they depend on the frame and `maxBytes` only.
+    /// position, window index, count and flags. Windows are cut against this
+    /// bound, so they depend on the frame and `maxBytes` only: a frame read
+    /// again as a redelivery shows the windows and tokens it showed first.
     fn window_overhead_max(&self) -> u64 {
-        let header = self.header((u64::MAX, u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+        let header = self.header_flagged(
+            (u64::MAX, u64::MAX),
+            Some((u64::MAX - 1, u64::MAX)),
+            true,
+            true,
+        );
         let token = "x".repeat(token_len());
         let lines = format!(
             "\n⟦next {token}⟧\n{}",
@@ -678,6 +696,41 @@ fn continuation(frame_id: &str, next_window: u64, token: &str) -> String {
 #[must_use]
 pub fn footer(unread: u64) -> String {
     format!("⟦unread {unread}⟧\n{FOOTER_INSTRUCTION}\n")
+}
+
+/// The line naming `ack` tokens that matched no unread frame or legacy entry
+/// of this call: issued for something already acknowledged, or not issued
+/// here at all. They acknowledged nothing.
+#[must_use]
+pub fn unmatched_notice(unmatched: &[String]) -> String {
+    format!(
+        "⟦ack not recognised: {}; nothing was acknowledged for them⟧\n",
+        unmatched.join(", ")
+    )
+}
+
+/// Name `unmatched` tokens in `presentation`'s text, just before its footer,
+/// when the line still fits `max_bytes`. Windows are cut without this line,
+/// so a read's windows and tokens stay the same whether or not it carries
+/// a notice.
+#[must_use]
+pub fn with_unmatched_notice(
+    mut presentation: Presentation,
+    unmatched: &[String],
+    unread: u64,
+    max_bytes: u64,
+) -> Presentation {
+    if unmatched.is_empty() {
+        return presentation;
+    }
+    let notice = unmatched_notice(unmatched);
+    let footer = footer(unread);
+    let fits = len_u64(&presentation.text) + len_u64(&notice) <= max_bytes;
+    if fits && presentation.text.ends_with(&footer) {
+        let at = presentation.text.len() - footer.len();
+        presentation.text.insert_str(at, &notice);
+    }
+    presentation
 }
 
 /// SHA-256 of a legacy entry's message JSON bytes (`serde_json::to_vec`).
@@ -912,6 +965,48 @@ mod tests {
 
     fn key() -> AckKey {
         AckKey::new([7; 32])
+    }
+
+    #[test]
+    fn a_redelivered_frame_keeps_its_windows_and_tokens() {
+        let mut body = String::new();
+        for i in 0..300 {
+            let _ = writeln!(body, "line {i} 窗口 🙂");
+        }
+        let first = OfferFrame {
+            conversation: "peer".into(),
+            start: 0,
+            end: 9000,
+            delivery_ids: vec!["d".into()],
+            blocks: vec![body],
+            redelivery: false,
+        };
+        let again = OfferFrame {
+            redelivery: true,
+            ..first.clone()
+        };
+        let offered = build_offer(&key(), &binding(), &[], &[first], 1, 1500).unwrap();
+        let next = offered
+            .text
+            .split("after: \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .to_owned();
+        let read = read_window(
+            &key(),
+            &binding(),
+            &ReadTarget::Frame(&again),
+            1,
+            Some(&next),
+            1,
+            1500,
+        );
+        assert!(read.is_ok(), "{read:?}");
+        assert_eq!(
+            offered.frames[0].window.map(|window| window.count),
+            read.unwrap().frames[0].window.map(|window| window.count)
+        );
     }
 
     fn binding() -> AckBinding {

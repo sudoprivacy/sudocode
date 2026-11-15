@@ -431,7 +431,14 @@ fn a_managed_child_serves_its_sessions_on_its_daemon() {
 
 /// One field of `/proc/<pid>/status`, in KiB (Linux only).
 fn status_kib(pid: u32, field: &str) -> u64 {
-    std::fs::read_to_string(format!("/proc/{pid}/status"))
+    proc_kib(pid, "status", field)
+}
+
+/// One `/proc/<pid>/<file>` field in KiB: `status` for RSS, `smaps_rollup`
+/// for the proportional and private memory that RSS overcounts by the
+/// binary's shared pages.
+fn proc_kib(pid: u32, file: &str, field: &str) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/{file}"))
         .expect("read the process status")
         .lines()
         .find_map(|line| line.strip_prefix(field))
@@ -529,8 +536,20 @@ fn measure_managed_child_cost() {
                 .iter()
                 .map(|(served, _)| status_kib(served.child.id(), "VmHWM:"))
                 .collect();
+            let pss: Vec<u64> = children
+                .iter()
+                .map(|(served, _)| proc_kib(served.child.id(), "smaps_rollup", "Pss:"))
+                .collect();
+            let private: Vec<u64> = children
+                .iter()
+                .map(|(served, _)| {
+                    proc_kib(served.child.id(), "smaps_rollup", "Private_Clean:")
+                        + proc_kib(served.child.id(), "smaps_rollup", "Private_Dirty:")
+                })
+                .collect();
             points.push(json!({"agents": n,
                 "child_rss_kib": rss, "child_hwm_kib": hwm,
+                "child_pss_kib": pss, "child_private_kib": private,
                 "daemon_rss_kib": status_kib(daemon_pid, "VmRSS:")}));
         }
     }

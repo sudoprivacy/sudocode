@@ -117,9 +117,8 @@ export interface ScodeAcpConfig {
    * and never start a turn of the scode session. Requires a scode that echoes
    * `peerInput`; an older one would answer every peer itself, so it is refused. */
   onPeerMessage?: (message: ScodePeerMessage) => void | Promise<void>;
-  /** v2 requires durable acceptance before resolving onPeerMessage. v1 is
-   * notification-only for clients without a durable inbox (e.g. channels). */
-  peerInputVersion?: 1 | 2 | 3;
+  /** v2 requires durable acceptance before resolving onPeerMessage. */
+  peerInputVersion?: 2 | 3;
   /** Opt in to mailbox offers. v3 reports only unread counts; the client must
    * obtain text and forward model acknowledgements with peer_offer. */
   onPeerUnread?: (event: ScodePeerUnread) => void | Promise<void>;
@@ -211,11 +210,11 @@ export async function connectScode(
   }
   if ((config.onPeerMessage !== undefined && typeof config.onPeerMessage !== 'function')
       || (config.onPeerUnread !== undefined && typeof config.onPeerUnread !== 'function')
-      || (config.peerInputVersion !== undefined && ![1, 2, 3].includes(config.peerInputVersion))
+      || (config.peerInputVersion !== undefined && ![2, 3].includes(config.peerInputVersion))
       || (config.onPeerUnread && (config.onPeerMessage || config.peerInputVersion !== 3))
       || (config.peerInputVersion === 3 && !config.onPeerUnread)
       || (config.peerInputVersion !== undefined && !config.onPeerMessage && !config.onPeerUnread)) {
-    throw new Error('peerInput v3 requires onPeerUnread without onPeerMessage; v1/v2 require onPeerMessage');
+    throw new Error('peerInput v3 requires onPeerUnread without onPeerMessage; v2 requires onPeerMessage');
   }
   const peerOwned = !!(config.onPeerMessage || config.onPeerUnread);
   const startupMs = duration(config.startupTimeoutMs, 30000);
@@ -314,9 +313,6 @@ export async function connectScode(
       try { onNotification(ctx.params); } catch (error) { report(error); }
     });
   if (config.onPeerMessage) {
-    app.onNotification('_sudocode/session/peer_message', parsePeerMessage, async ctx => {
-      try { await config.onPeerMessage!(ctx.params); } catch (error) { report(error); }
-    });
     app.onRequest('_sudocode/session/peer_message', parsePeerMessage, async ctx => {
       if ((config.peerInputVersion ?? 2) !== 2 || !/^[a-f0-9]{64}$/.test(ctx.params.deliveryId ?? '')) {
         throw new Error('A durable peer delivery identity is required');

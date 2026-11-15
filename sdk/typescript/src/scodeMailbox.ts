@@ -59,6 +59,27 @@ export type ScodeMailboxOffer = z.infer<typeof offer> & {
   legacyHead?: { eventId: string; deliveryId: string };
 };
 
+/** A conversation's first unread frame: the peer, the frame's start offset and
+ * its first record's `deliveryId`. Budget keys are made of heads. */
+export interface ScodeMailboxHead { conversation: string; start: number; deliveryId: string }
+
+/** Each conversation's head in an offer. Refuses a frame whose identity does
+ * not carry its conversation, its original range and a delivery identity. */
+export function scodeMailboxHeads(offer: ScodeMailboxOffer): ScodeMailboxHead[] {
+  const heads = new Map<string, ScodeMailboxHead>();
+  for (const frame of offer.frames) {
+    if (!frame.frameId.startsWith(frame.conversation + ':')) throw new Error('Mailbox frame conversation differs');
+    const offsets = /^:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$/.exec(frame.frameId.slice(frame.conversation.length));
+    const start = Number(offsets?.[1]), end = Number(offsets?.[2]);
+    if (!offsets || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start
+        || !frame.deliveryIds.length) throw new Error('Mailbox frame lacks its original range or delivery identity');
+    const previous = heads.get(frame.conversation);
+    if (!previous || start < previous.start) heads.set(frame.conversation,
+      { conversation: frame.conversation, start, deliveryId: frame.deliveryIds[0] });
+  }
+  return [...heads.values()];
+}
+
 /** A response error can follow partial ACK commits. It is never evidence
  * that nothing happened; preserve the peer's diagnostic without retrying. */
 export class ScodeMailboxError extends Error {

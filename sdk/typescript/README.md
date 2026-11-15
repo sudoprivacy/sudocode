@@ -65,57 +65,7 @@ contract](../../docs/design/codex-native-queue-callback.md) specifies the explic
 native home, bounded unloaded producer, Unknown/no-replay behavior and actual
 native/ConPTY acceptance. Socket callbacks remain the default.
 
-## Claude Code channel attachment
-
-Claude Code joins the agent network through the fixed-session bridge with
-`claudeChannel` in its config. The bridge declares the Claude Code
-[`claude/channel`](https://code.claude.com/docs/en/channels-reference) capability
-and asks scode for [client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput):
-each peer message arrives in the Claude Code session as
-`<channel source="…" from="…" verified="…">` holding the same
-`<mailbox-message>` block a scode model reads, and the scode session's own model
-never answers it. Claude replies with `scode_send`; `scode_agent_list`,
-`scode_prompt` and `scode_status` are unchanged.
-
-```json
-{ "version": 1, "scodeArgv": ["/abs/scode", "acp"], "workspace": "/abs/workspace",
-  "acpSessionId": "EXISTING_NODE_SESSION", "auditLog": "/abs/private/audit.jsonl",
-  "claudeChannel": { "peerPolicy": "node-namespace" } }
-```
-
-`node-namespace` accepts any sender the Node stamped, after `agent_list` proves
-the session's Node identity. `allowlist` with `peers` accepts only those names.
-`verified` comes from scode's per-message provenance (`true` when the session's
-mailbox authenticates writers); for a scode that does not report it, the bridge
-marks events verified only after its own Node identity check. Register the bridge as an
-MCP server (for example `claude mcp add nexus_scode -- node /abs/server.cjs
---config /abs/private/claude.json`) and start Claude Code with
-`claude --dangerously-load-development-channels server:nexus_scode` while
-channels are in research preview. A scode without client-owned peer input is
-refused at startup instead of answering peers alongside Claude.
-
-Channel events reach only a session started with that flag on an installation
-where channels are available. To wake any Claude Code session instead, add an
-absolute private `"wakeSpool"` to `claudeChannel`: the bridge appends each
-admitted peer there, and a background command hook hands it to Claude. Register
-the hook for `SessionStart` and `Stop` with `asyncRewake`, so it is re-armed at
-the end of every turn:
-
-```json
-{ "type": "command", "asyncRewake": true, "timeout": 86400,
-  "command": "node /abs/server.cjs --claude-wake --config /abs/private/claude.json" }
-```
-
-The waiter exits 2 with the pending `<channel …>` frames on stderr, which wakes
-the session. Claude Code ends an `asyncRewake` hook at its `timeout` (600 s
-when unset), so the entry sets 86400 and the waiter returns on its own a minute
-earlier. The waiter armed last waits and an older one returns, so the session is
-covered for a day after its latest turn. Each delivered range of the spool is
-claimed exactly once, so a peer is never handed over twice; one that arrives
-while no waiter is armed waits for the next. This is Claude Code's counterpart
-of the `turn/start` a Codex attachment uses.
-
-### Every Claude Code session as its own Agent
+## Claude Code attachment
 
 `--claude --config FILE` is a user-scope MCP entry that needs no launch flag.
 Claude Code starts one MCP server per session and names it in
@@ -123,13 +73,12 @@ Claude Code starts one MCP server per session and names it in
 session is the native root exactly as a user root thread is for `--codex`.
 Interactive means a `CLAUDE_CODE_ENTRYPOINT` of `cli`, `claude-vscode` or
 `claude-desktop`; print-mode, SDK, CI and hosted sessions run the entry without
-tools or an Agent, and their hook arms no waiter. The session's first start enrolls a
+tools or an Agent, and their hooks print nothing. The session's first start enrolls a
 `claude-<32 hex>` Agent through the same operator adapter, later starts reuse
 the original Agent and ACP session, an enrollment that failed after issuance
 resumes the same operation, and an uncertain issuance is never replayed. The entry serves at once and attaches in the background with bounded
 backoff, so a session that starts while its Node is unreachable joins when the
-Node returns; until then its tools refuse as `not_submitted` with the reason. Each session has its own wake spool; the hook reads the session from
-Claude Code's hook input, so one hook command serves every session.
+Node returns; until then its tools refuse as `not_submitted` with the reason.
 
 ```json
 { "version": 1, "mode": "claude-autojoin", "stateDirectory": "/abs/private/claude",
@@ -137,9 +86,42 @@ Claude Code's hook input, so one hook command serves every session.
   "enrollmentArgv": ["/abs/node", "/abs/server.cjs", "--enroll-codex", "--config", "/abs/private/operator.json"] }
 ```
 
-Register it with `claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`
-and the `SessionStart`/`Stop` `asyncRewake` hook with `--claude-wake --config FILE`
-in the user settings. The operator's `scode` must support client-owned peer input.
+The bridge owns the session's mailbox through
+[client-owned peer input](../../docs/acp.md#client-owned-peer-input-clientcapabilities_metasudocodepeerinput)
+version 3, so the scode session's own model never answers a peer; a scode
+without version 3 is refused. Once `agent_list` proves that the loaded session
+is the bound Agent on its Node, the mailbox offers peer data from the whole
+Node namespace. Peers reach Claude as budgeted deliveries under the
+[mailbox delivery contract](../../docs/design/peer-mailbox-delivery.md): each is
+the delivery provenance line and scode's offer, appended to the session's
+private spool `<stateDirectory>/<session>.wake.jsonl`. Claude replies with
+`scode_send` and acknowledges each frame with `scode_inbox`, which also reads
+the windows of a large frame; a frame stays unread until it is acknowledged.
+`scode_status` reports the delivery state, including `standby` in a second
+Claude Code process on the same session while the first one delivers.
+
+Two hooks in the user settings hand the deliveries to Claude:
+
+```json
+"hooks": {
+  "SessionStart": [{ "hooks": [{ "type": "command",
+    "command": "node /abs/server.cjs --claude-watch --config /abs/private/claude/autojoin.json" }] }],
+  "FileChanged": [{ "hooks": [{ "type": "command", "asyncRewake": true, "timeout": 60,
+    "command": "node /abs/server.cjs --claude-deliver --config /abs/private/claude/autojoin.json" }] }]
+}
+```
+
+`--claude-watch` reads the session from the hook input, creates its spool if
+needed and prints the `watchPaths` that name it, using local files only.
+Claude Code then runs `--claude-deliver` on each change to the spool. It claims
+the complete entries no earlier run claimed, each exactly once, prints the
+newest on stderr and exits 2, which hands it to Claude within the current turn
+or wakes an idle session. Each entry is the whole offer at its time, so the
+newest supersedes the others and stays within Claude Code's 10,000-character
+hook output cap. A change to any other path, a removal, or a change with
+no new entry exits 0. Register the entry with
+`claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`.
+The operator's `scode` must support client-owned peer input version 3.
 
 ## Global native Codex attachment
 

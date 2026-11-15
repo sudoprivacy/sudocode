@@ -6,9 +6,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { z } from 'zod';
+import { CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 const root = path.resolve(__dirname, '../..');
-const { connectScode, sendScodeMessage, scodeNativeA2aAudit, CLAUDE_WAKE_HOOK_TIMEOUT_SECONDS } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectScode, sendScodeMessage, scodeNativeA2aAudit } = require(path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scode-acp-mcp-'));
 const fixture = path.join(root, 'test/fixtures/scode-direct-a2a-agent.mjs');
 const journal = (file: string) => fs.existsSync(file)
@@ -169,252 +169,265 @@ async function checkMcp(scenario: string): Promise<void> {
   }
 }
 
-/** Claude Code channel: peers arrive as `notifications/claude/channel`, gated by policy. */
-async function checkChannel(peerPolicy: 'node-namespace' | 'allowlist'): Promise<void> {
-  const scenario = `channel-${peerPolicy}`;
-  const config = path.join(directory, `${scenario}.json`);
-  const log = path.join(directory, `${scenario}-fixture.jsonl`);
-  const auditLog = path.join(directory, `${scenario}-audit.jsonl`);
-  const identityGate = path.join(directory, `${scenario}-identity.ready`);
-  fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, scenario],
-    workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
-    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log,
-      ...(peerPolicy === 'node-namespace' ? { SCODE_DIRECT_FIXTURE_LIST_GATE: identityGate } : {}),
-    },
-    claudeChannel: { peerPolicy, ...(peerPolicy === 'allowlist' ? { peers: ['fixture-peer'] } : {}) },
-  }), { mode: 0o600 });
-  const transport = new StdioClientTransport({ command: process.execPath,
-    args: process.argv[2] ? [process.argv[2], '--config', config] : [path.join(root, 'dist/server.cjs'), '--config', config],
-    env: { ...process.env, NODE_PATH: '' } as Record<string, string>, stderr: 'pipe' });
-  let stderr = '';
-  transport.stderr?.on('data', bytes => { stderr += String(bytes); });
-  const client = new Client({ name: 'channel-smoke', version: '1' });
-  const events: Array<{ content: string; meta: Record<string, string> }> = [];
-  client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'),
-    params: z.object({ content: z.string(), meta: z.record(z.string(), z.string()) }) }), notification => {
-    events.push(notification.params);
-  });
-  try {
-    await client.connect(transport, { timeout: 5000 });
-    assert.deepEqual(client.getServerCapabilities()?.experimental?.['claude/channel'], {});
-    assert.match(String(client.getInstructions()), /reply only with the scode_send tool/);
-    if (peerPolicy === 'node-namespace') {
-      const pendingDeadline = Date.now() + 5000;
-      while (journal(log).filter(row => row.method === 'peer-notification').length < 2 && Date.now() < pendingDeadline)
-        await new Promise(resolve => setTimeout(resolve, 20));
-      assert.equal(journal(log).filter(row => row.method === 'peer-notification').length, 2);
-      await new Promise(resolve => setTimeout(resolve, 200));
-      assert.equal(events.length, 0, 'MCP readiness must not bypass the Node identity check');
-      fs.writeFileSync(identityGate, 'allow this connection identity check');
-    }
-    const deadline = Date.now() + 5000;
-    const expected = peerPolicy === 'allowlist' ? 1 : 2;
-    while (events.length < expected && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-    await new Promise(resolve => setTimeout(resolve, 200));
-    assert.deepEqual(events.map(event => event.meta.from),
-      peerPolicy === 'allowlist' ? ['fixture-peer'] : ['fixture-peer', 'stranger'], 'policy gates the sender');
-    for (const event of events) {
-      assert.match(event.content, /^<mailbox-message from="/);
-      assert.equal(event.meta.verified, String(peerPolicy === 'node-namespace'),
-        'only a checked Node identity makes `from` verified');
-      assert.equal(event.meta.summary, 'greeting');
-    }
-    assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
-    assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message').length, expected);
-  } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
-  finally { await client.close(); }
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+async function until(predicate: () => boolean, ms: number, failure: string): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new assert.AssertionError({ message: failure });
+    await pause(20);
+  }
 }
+const toolText = (result: unknown) => (result as { content: Array<{ text: string }> }).content[0].text;
+interface Delivery { delivery: string; heads: unknown[]; text: string }
 
-/** Claude Code wake: the bridge spools peers and the asyncRewake hook waiter hands them over with exit 2. */
-async function checkWake(): Promise<void> {
-  const config = path.join(directory, 'wake.json');
-  const log = path.join(directory, 'wake-fixture.jsonl');
-  const auditLog = path.join(directory, 'wake-audit.jsonl');
-  const spool = path.join(directory, 'wake-spool.jsonl');
-  fs.writeFileSync(config, JSON.stringify({ version: 1, scodeArgv: [process.execPath, fixture, 'channel-allowlist'],
-    workspace: directory, acpSessionId: 'channel-session', auditLog, closeTimeoutMs: 200,
-    env: { HYDRA_DIRECT_FIXTURE_JOURNAL: log },
-    claudeChannel: { peerPolicy: 'allowlist', peers: ['fixture-peer'], wakeSpool: spool },
+/** One Claude Code autojoin installation over the mailbox fixture: its bridges
+ * are real `--claude` processes and its hooks real hook processes. Bridges run
+ * on a test monotonic clock, so ten minutes pass without waiting. */
+function claudeInstallation(name: string) {
+  const state = path.join(directory, `${name}-state`), issuer = path.join(directory, `${name}-issuer`);
+  fs.mkdirSync(issuer, { mode: 0o700 });
+  const config = path.join(directory, `${name}.json`);
+  fs.writeFileSync(config, JSON.stringify({ version: 1, mode: 'claude-autojoin', stateDirectory: state,
+    auditLog: path.join(directory, `${name}-audit.jsonl`), peerPolicy: 'node-namespace',
+    enrollmentArgv: [process.execPath, path.join(root, 'test/fixtures/codexAgentEnrollment.cjs'), issuer, 'mailbox'],
   }), { mode: 0o600 });
   const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
-  const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--config', config],
-    env: { ...process.env, NODE_PATH: '' } as Record<string, string>, stderr: 'pipe' });
-  const client = new Client({ name: 'wake-smoke', version: '1' });
-  let notifications = 0;
-  client.setNotificationHandler(z.object({ method: z.literal('notifications/claude/channel'), params: z.any() }),
-    () => { notifications += 1; });
-  const waiters: Array<ReturnType<typeof spawn>> = [];
-  const arm = () => {
-    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['ignore', 'ignore', 'pipe'] });
-    waiters.push(child);
-    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
-    return { child, exited: new Promise<{ code: number | null; stderr: string }>(resolve =>
-      child.on('exit', code => resolve({ code, stderr }))) };
+  const unread = path.join(issuer, 'unread'), clock = path.join(issuer, 'clock');
+  fs.writeFileSync(clock, '0');
+  return {
+    state, issuer, config,
+    spool: (sessionId: string) => path.join(state, `${sessionId}.wake.jsonl`),
+    deliveries: (sessionId: string) => journal(path.join(state, `${sessionId}.wake.jsonl`)) as unknown as Delivery[],
+    claims: () => journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }>,
+    acp: () => journal(path.join(issuer, 'acp.jsonl')) as Array<{ method: string; params?: any; response?: any }>,
+    /** scode reports the unread count again, as on a new peer frame. */
+    unread: () => fs.appendFileSync(unread, '.'),
+    advance: (ms: number) => fs.writeFileSync(clock, String(Number(fs.readFileSync(clock, 'utf8')) + ms)),
+    async bridge(sessionId: string, entrypoint = 'cli') {
+      const transport = new StdioClientTransport({ command: process.execPath,
+        args: ['--require', path.join(root, 'test/fixtures/monotonicClock.cjs'), server, '--claude', '--config', config],
+        env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: entrypoint, CLAUDE_CODE_SESSION_ID: sessionId,
+          CLAUDE_PROJECT_DIR: directory, SCODE_FIXTURE_CLOCK: clock, SCODE_DIRECT_FIXTURE_UNREAD: unread } as Record<string, string>,
+        stderr: 'pipe' });
+      let stderr = ''; transport.stderr?.on('data', bytes => { stderr += String(bytes); });
+      const client = new Client({ name: `claude-${name}`, version: '1' });
+      await client.connect(transport);
+      return { client, transport, stderr: () => stderr,
+        status: async () => JSON.parse(toolText(await client.callTool({ name: 'scode_status', arguments: {} }))) };
+    },
+    hook: (flag: '--claude-watch' | '--claude-deliver', input: object, entrypoint = 'cli') =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+        const child = spawn(process.execPath, [server, flag, '--config', config], { stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: entrypoint } });
+        let stdout = '', stderr = '';
+        child.stdout!.on('data', bytes => { stdout += String(bytes); });
+        child.stderr!.on('data', bytes => { stderr += String(bytes); });
+        child.on('close', code => resolve({ code, stdout, stderr }));
+        child.stdin!.end(JSON.stringify(input));
+      }),
   };
-  const wake = () => arm().exited;
-  const peer = (text: string) => fs.appendFileSync(spool, JSON.stringify({ at: new Date().toISOString(),
-    from: 'fixture-peer', verified: true, text: `<mailbox-message from="fixture-peer">${text}</mailbox-message>` }) + '\n');
-  const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  const within = <T>(promise: Promise<T>, ms: number, failure: string) => Promise.race([promise,
-    pause(ms).then(() => { throw new assert.AssertionError({ message: failure }); })]);
-  try {
-    await client.connect(transport);
-    const deadline = Date.now() + 5000;
-    while (!(fs.existsSync(spool) && fs.readFileSync(spool, 'utf8').trim()) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const spooled = fs.readFileSync(spool, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(spooled.map(entry => entry.from), ['fixture-peer'], 'the allowlist still gates spooled peers');
-    assert.equal(notifications, 0, 'a wake spool replaces channel notifications');
-    if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
-    const first = await wake();
-    assert.equal(first.code, 2, 'pending peers wake Claude');
-    assert.match(first.stderr, /^<channel source="nexus_scode" from="fixture-peer" verified="false" kind="message" summary="greeting">\n<mailbox-message from="/);
-    // The waiter armed by the latest turn covers the session; an earlier one returns without delivering.
-    const earlier = wake();
-    await pause(300);
-    const newest = wake();
-    const superseded = await within(earlier, 3000, 'a newer waiter takes over');
-    assert.equal(superseded.code, 0, 'a newer waiter takes over');
-    assert.equal(superseded.stderr, '');
-    peer('later');
-    const later = await newest;
-    assert.equal(later.code, 2);
-    assert.doesNotMatch(later.stderr, /greeting/, 'delivered peers are not repeated');
-    assert.match(later.stderr, /verified="true">\n<mailbox-message from="fixture-peer">later/);
-    // Claude Code ends a waiter at its hook timeout: the next waiter delivers what arrived meanwhile.
-    const ended = arm();
-    await pause(300);
-    ended.child.kill('SIGKILL');
-    await ended.exited;
-    peer('while-unarmed');
-    const next = await wake();
-    assert.equal(next.code, 2);
-    assert.match(next.stderr, /while-unarmed/);
-    assert.doesNotMatch(next.stderr, /later/);
-    // Waiters overlapping in a handover hand each peer over exactly once.
-    for (let round = 0; round < 5; round += 1) {
-      peer(`overlap-${round}`);
-      const overlapping = [arm(), arm(), arm()];
-      const results: Array<{ code: number | null; stderr: string }> = [];
-      for (const waiter of overlapping) void waiter.exited.then(result => results.push(result));
-      const deadline = Date.now() + 5000;
-      while (!results.some(result => result.code === 2) && Date.now() < deadline) await pause(20);
-      await pause(1200);
-      // A waiter that lost the overlap keeps waiting for the next peer; release it.
-      if (results.length < overlapping.length) peer(`release-${round}`);
-      const all = await Promise.all(overlapping.map(waiter => waiter.exited));
-      const delivered = all.map(result => result.stderr).join('');
-      assert.equal(delivered.match(new RegExp(`overlap-${round}<`, 'g'))?.length, 1, `round ${round}: one delivery`);
-      assert.ok((delivered.match(new RegExp(`release-${round}<`, 'g'))?.length ?? 0) <= 1);
-      assert.ok(all.every(result => result.code === 0 || result.code === 2), JSON.stringify(all));
-    }
-    // The documented hook entry carries the timeout the waiter plans around.
-    assert.match(fs.readFileSync(path.join(root, 'README.md'), 'utf8'),
-      new RegExp(`"asyncRewake": true, "timeout": ${CLAUDE_WAKE_HOOK_TIMEOUT_SECONDS},`));
-    assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0, 'no model turn for a peer');
-    assert.equal(journal(auditLog).filter(row => row.phase === 'peer_message' && row.delivery === 'wake').length, 1);
-  } finally {
-    // A failed check must not leave a waiter polling the fixture spool.
-    for (const child of waiters) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    await client.close();
+}
+
+/** The SessionStart hook names the session's spool; the FileChanged hook hands
+ * each complete entry over exactly once and ignores every other change. */
+async function checkClaudeHooks(): Promise<void> {
+  const claude = claudeInstallation('claude-hooks');
+  const sessionId = randomUUID(), spool = claude.spool(sessionId);
+  const nothing = { code: 0, stdout: '', stderr: '' };
+  assert.deepEqual(await claude.hook('--claude-watch', { session_id: sessionId, hook_event_name: 'SessionStart', source: 'startup' }),
+    { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', watchPaths: [spool] } }) + '\n', stderr: '' });
+  assert.equal(fs.readFileSync(spool, 'utf8'), '', 'the watched spool exists before the first delivery');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
+  const other = randomUUID();
+  assert.deepEqual(await claude.hook('--claude-watch', { session_id: other }, 'sdk-cli'), nothing, 'a session without an Agent watches nothing');
+  assert.ok(!fs.existsSync(claude.spool(other)));
+  const changed = (event = 'change', file = spool) => ({ session_id: sessionId, hook_event_name: 'FileChanged', file_path: file, event });
+  const deliver = (input: object = changed(), entrypoint?: string) => claude.hook('--claude-deliver', input, entrypoint);
+  const entry = (text: string) => fs.appendFileSync(spool, JSON.stringify({ delivery: `${'0'.repeat(64)}:1`, heads: [], text }) + '\n');
+  assert.deepEqual(await deliver(), nothing, 'a change without a new entry hands nothing over');
+  // Overlapping runs for one change hand each entry over exactly once.
+  for (let round = 0; round < 5; round += 1) {
+    entry(`delivery ${round} 🧪`);
+    const runs = await Promise.all([deliver(), deliver(), deliver()]);
+    assert.deepEqual(runs.filter(run => run.code === 2).map(run => run.stderr), [`delivery ${round} 🧪\n`], `round ${round}: one claim`);
+    assert.ok(runs.every(run => run.code === 2 || (run.code === 0 && !run.stderr && !run.stdout)), JSON.stringify(runs));
   }
+  entry('second'); entry('third');
+  fs.appendFileSync(spool, '{"delivery":"partial');
+  assert.deepEqual(await deliver(changed('unlink')), nothing, 'a removal hands nothing over');
+  assert.deepEqual(await deliver(changed('change', spool + '.cursor')), nothing, 'another path hands nothing over');
+  assert.deepEqual(await deliver(changed(), 'sdk-cli'), nothing, 'a session without an Agent hands nothing over');
+  assert.deepEqual(await deliver(changed('add')), { code: 2, stdout: '', stderr: 'third\n' },
+    'the newest complete new entry, which supersedes the others, and no entry still being written');
+  fs.appendFileSync(spool, ':1","heads":[],"text":"completed"}\n');
+  assert.deepEqual(await deliver(), { code: 2, stdout: '', stderr: 'completed\n' });
+  assert.deepEqual(await deliver(), nothing);
+  // Entries of a full text budget, claimed by one run, stay within Claude Code's hook output cap.
+  entry('a'.repeat(9_900)); entry('b'.repeat(9_900));
+  assert.deepEqual(await deliver(), { code: 2, stdout: '', stderr: 'b'.repeat(9_900) + '\n' });
+  // Mailbox offers are not filtered by sender: an allowlist is refused.
+  const allowlist = path.join(directory, 'claude-allowlist.json');
+  fs.writeFileSync(allowlist, JSON.stringify({ ...JSON.parse(fs.readFileSync(claude.config, 'utf8')), peerPolicy: 'allowlist',
+    peers: ['fixture-peer'] }), { mode: 0o600 });
+  const refused = await new Promise<{ code: number | null; stderr: string }>(resolve => {
+    const child = spawn(process.execPath, [process.argv[2] ?? path.join(root, 'dist/server.cjs'), '--claude-watch', '--config', allowlist],
+      { stdio: ['pipe', 'ignore', 'pipe'], env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'cli' } });
+    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
+    child.on('close', code => resolve({ code, stderr }));
+    child.stdin!.end(JSON.stringify({ session_id: sessionId }));
+  });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /peerPolicy node-namespace/);
+}
+
+/** The bridge delivers an unread frame under its budget: one spool entry per
+ * delivery, at most three per key, ten minutes apart, a new key when the
+ * session calls a bridge tool, and nothing after the model's acknowledgement. */
+async function checkClaudeDelivery(): Promise<void> {
+  const claude = claudeInstallation('claude-delivery');
+  const sessionId = randomUUID();
+  const entries = () => claude.deliveries(sessionId);
+  const quiet = async (count: number, failure: string) => { await pause(500); assert.equal(entries().length, count, failure); };
+  const bridge = await claude.bridge(sessionId);
+  try {
+    // No bridge tool has been called yet.
+    await until(() => entries().length === 1, 10000, 'an unread frame is delivered once the bridge attaches');
+    const [first] = entries();
+    assert.equal(first.text, `${CODEX_MAILBOX_DELIVERY_PROVENANCE}\nPeer body 🧪\n⟦ack fixture-ack⟧`);
+    assert.deepEqual(first.heads, [{ conversation: 'conversation', start: 0, deliveryId: 'delivery-one' }]);
+    assert.match(first.delivery, /^[0-9a-f]{64}:1$/);
+    const offers = claude.acp().filter(row => row.method === 'peer_offer');
+    assert.ok(offers.length && offers.every(row => row.params.threadId === sessionId && !row.params.ack),
+      'the session is the mailbox thread, and a delivery acknowledges nothing');
+    assert.ok(offers[0].params.maxBytes + CODEX_MAILBOX_DELIVERY_PROVENANCE.length + 1 <= 10000,
+      'a delivery fits the hook output Claude Code adds to its context');
+    assert.deepEqual(await claude.hook('--claude-deliver', { session_id: sessionId, hook_event_name: 'FileChanged',
+      file_path: claude.spool(sessionId), event: 'change' }), { code: 2, stdout: '', stderr: first.text + '\n' });
+    claude.advance(9 * 60_000); claude.unread();
+    await quiet(1, 'no redelivery within ten minutes');
+    for (const n of [2, 3]) {
+      claude.advance(n === 2 ? 60_000 : 10 * 60_000); claude.unread();
+      await until(() => entries().length === n, 5000, `delivery ${n} follows ten minutes after the previous one`);
+      assert.deepEqual(entries()[n - 1], { ...first, delivery: first.delivery.replace(/:1$/, `:${n}`) }, 'the same key spends its next number');
+    }
+    claude.advance(10 * 60_000); claude.unread();
+    await quiet(3, 'three deliveries exhaust the key');
+    // This call is itself a bridge tool call: it renews the epoch.
+    const exhausted = (await bridge.status()).delivery;
+    assert.deepEqual(exhausted, { state: 'delivery_exhausted', deliveryId: 'delivery-one', submissions: 3 });
+    claude.unread();
+    await until(() => entries().length === 4, 5000, 'a bridge tool call renews the epoch');
+    const renewed = entries()[3];
+    assert.match(renewed.delivery, /^[0-9a-f]{64}:1$/);
+    assert.notEqual(renewed.delivery.split(':')[0], first.delivery.split(':')[0], 'a new epoch makes a new key');
+    assert.equal(journal(path.join(claude.state, `${sessionId}.delivery.jsonl`)).length, 4, 'each delivery was logged');
+    // Only the model's acknowledgement retires the frame.
+    assert.equal(toolText(await bridge.client.callTool({ name: 'scode_inbox', arguments: { ack: ['fixture-ack'] } })),
+      'No unread mailbox frames');
+    assert.deepEqual(claude.acp().filter(row => row.method === 'peer_offer_result' && row.response.commits.length)
+      .map(row => row.response.commits), [[{ conversation: 'conversation', from: 0, to: 100, status: 'committed' }]]);
+    claude.advance(10 * 60_000); claude.unread();
+    await quiet(4, 'an acknowledged frame is not delivered again');
+    assert.equal((await bridge.status()).delivery.state, 'idle');
+    assert.equal(claude.acp().filter(row => row.method === 'session/prompt').length, 0, 'no turn of the scode session');
+  } catch (error) { throw new Error(`${String(error)}\n${bridge.stderr()}`); }
+  finally { await bridge.client.close(); }
+}
+
+/** Two Claude Code processes on one session: exactly one bridge delivers, and
+ * the other takes over when the first is killed. */
+async function checkClaudeOwners(): Promise<void> {
+  const claude = claudeInstallation('claude-owners');
+  const sessionId = randomUUID();
+  const entries = () => claude.deliveries(sessionId);
+  const owners = path.join(claude.state, `${sessionId}.delivery.owner`);
+  const first = await claude.bridge(sessionId);
+  let second: Awaited<ReturnType<typeof claude.bridge>> | undefined;
+  try {
+    await until(() => entries().length === 1, 10000, 'the first bridge delivers');
+    second = await claude.bridge(sessionId);
+    let standby: Record<string, any> = {};
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      standby = await second.status();
+      if (standby.closed === false) break;
+      await pause(50);
+    }
+    assert.deepEqual(standby.delivery, { state: 'standby', detail: 'another bridge owns this session\'s deliveries',
+      owner: first.transport.pid });
+    claude.advance(10 * 60_000); claude.unread();
+    await until(() => entries().length === 2, 5000, 'the owner delivers again after ten minutes');
+    await pause(500);
+    assert.equal(entries().length, 2, 'exactly one bridge delivers');
+    process.kill(first.transport.pid!, 'SIGKILL');
+    await until(() => entries().length === 3, 15000, 'the standing-by bridge takes over from a killed owner');
+    await pause(500);
+    assert.equal(entries().length, 3);
+    assert.equal((await second.status()).delivery.state, 'submitted', 'the new owner continues the same log');
+    const generations = fs.readdirSync(owners).filter(name => /^[0-9]+$/.test(name));
+    assert.deepEqual(generations, ['2'], 'the takeover created the next claim generation');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(owners, '2'), 'utf8')).pid, second.transport.pid);
+  } catch (error) { throw new Error(`${String(error)}\n${first.stderr()}\n${second?.stderr() ?? ''}`); }
+  finally { await first.client.close().catch(() => {}); await second?.client.close(); }
 }
 
 /** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,
- * resumes it by session id, and wakes through its own spool. */
+ * resumes it by session id, and receives deliveries through its own spool. */
 async function checkClaudeAutojoin(): Promise<void> {
-  const state = path.join(directory, 'claude-autojoin');
-  const issuer = path.join(directory, 'claude-issuer');
-  fs.mkdirSync(issuer, { mode: 0o700 });
-  const config = path.join(directory, 'claude-autojoin.json');
-  fs.writeFileSync(config, JSON.stringify({ version: 1, mode: 'claude-autojoin', stateDirectory: state,
-    auditLog: path.join(directory, 'claude-autojoin-audit.jsonl'), peerPolicy: 'allowlist', peers: ['fixture-peer'],
-    enrollmentArgv: [process.execPath, path.join(root, 'test/fixtures/codexAgentEnrollment.cjs'), issuer, 'channel-allowlist'],
-  }), { mode: 0o600 });
-  const server = process.argv[2] ?? path.join(root, 'dist/server.cjs');
-  const claims = () => fs.existsSync(path.join(issuer, 'claims.jsonl'))
-    ? journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }> : [];
+  const claude = claudeInstallation('claude-autojoin');
   const session = async (sessionId: string) => {
-    const transport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
-      env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ID: sessionId,
-        CLAUDE_PROJECT_DIR: directory } as Record<string, string>,
-      stderr: 'pipe' });
-    let stderr = ''; transport.stderr?.on('data', bytes => { stderr += String(bytes); });
-    const client = new Client({ name: 'claude-autojoin', version: '1' });
-    const spool = path.join(state, `${sessionId}.wake.jsonl`);
-    const before = fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
+    const before = claude.deliveries(sessionId).length;
+    const bridge = await claude.bridge(sessionId);
     try {
-      await client.connect(transport);
-      const deadline = Date.now() + 5000;
-      const count = () => fs.existsSync(spool) ? fs.readFileSync(spool, 'utf8').split('\n').filter(Boolean).length : 0;
-      while (count() <= before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-      assert.equal(count(), before + 1, 'the allowlisted peer reaches this session\'s own spool');
-    } catch (error) { throw new Error(`${String(error)}\n${stderr}`); }
-    finally { await client.close(); }
+      await until(() => claude.deliveries(sessionId).length > before, 10000, 'the unread frame reaches this session\'s own spool');
+      await pause(200);
+      assert.equal(claude.deliveries(sessionId).length, before + 1);
+    } catch (error) { throw new Error(`${String(error)}\n${bridge.stderr()}`); }
+    finally { await bridge.client.close(); }
   };
   const first = randomUUID(), second = randomUUID();
   await session(first);
-  assert.equal(claims().length, 1);
-  assert.match(claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
-  assert.equal(claims()[0].threadId, first, 'the session id is the native root');
+  assert.equal(claude.claims().length, 1);
+  assert.match(claude.claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
+  assert.equal(claude.claims()[0].threadId, first, 'the session id is the native root');
   await session(first);
-  assert.equal(claims().length, 1, 'resuming a session reuses its original Agent and ACP session');
+  assert.equal(claude.claims().length, 1, 'resuming a session reuses its original Agent and ACP session');
   await session(second);
-  assert.equal(claims().length, 2);
-  assert.notEqual(claims()[1].actor, claims()[0].actor, 'each session gets its own Agent');
+  assert.equal(claude.claims().length, 2);
+  assert.notEqual(claude.claims()[1].actor, claude.claims()[0].actor, 'each session gets its own Agent');
   // A print-mode session has no user to address: no Agent, no tools, no spool.
   const scripted = randomUUID();
-  const printTransport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
-    env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CLAUDE_CODE_SESSION_ID: scripted,
-      CLAUDE_PROJECT_DIR: directory } as Record<string, string>, stderr: 'pipe' });
-  const printClient = new Client({ name: 'claude-print', version: '1' });
+  const print = await claude.bridge(scripted, 'sdk-cli');
   try {
-    await printClient.connect(printTransport);
-    assert.equal(printClient.getServerCapabilities()?.tools, undefined, 'a print-mode session runs without an Agent or tools');
-  } finally { await printClient.close(); }
-  assert.equal(claims().length, 2, 'a print-mode session enrolls nothing');
-  assert.ok(!fs.existsSync(path.join(state, `${scripted}.wake.jsonl`)));
+    assert.equal(print.client.getServerCapabilities()?.tools, undefined, 'a print-mode session runs without an Agent or tools');
+  } finally { await print.client.close(); }
+  assert.equal(claude.claims().length, 2, 'a print-mode session enrolls nothing');
+  assert.ok(!fs.readdirSync(claude.state).some(file => file.startsWith(scripted)));
   // A session that starts while its Node is unreachable joins once it returns, without a restart.
   const outaged = randomUUID();
-  fs.writeFileSync(path.join(issuer, 'outage'), '');
-  const outageTransport = new StdioClientTransport({ command: process.execPath, args: [server, '--claude', '--config', config],
-    env: { ...process.env, NODE_PATH: '', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ID: outaged,
-      CLAUDE_PROJECT_DIR: directory } as Record<string, string>, stderr: 'pipe' });
-  let outageStderr = ''; outageTransport.stderr?.on('data', bytes => { outageStderr += String(bytes); });
-  const outageClient = new Client({ name: 'claude-outage', version: '1' });
+  fs.writeFileSync(path.join(claude.issuer, 'outage'), '');
+  const outage = await claude.bridge(outaged);
   try {
-    await outageClient.connect(outageTransport);
-    const refused = JSON.stringify(await outageClient.callTool({ name: 'scode_status', arguments: {} }));
+    const refused = JSON.stringify(await outage.client.callTool({ name: 'scode_status', arguments: {} }));
     assert.match(refused, /not_submitted/);
     assert.match(refused, /Not attached to the agent network yet/);
-    assert.equal(claims().length, 2, 'an unreachable Node issues nothing');
-    fs.rmSync(path.join(issuer, 'outage'));
-    const spool = path.join(state, `${outaged}.wake.jsonl`);
-    const deadline = Date.now() + 10000;
-    while (!fs.existsSync(spool) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
-    assert.ok(fs.existsSync(spool), 'the session attaches in the background and receives its peer');
-    assert.equal(claims().length, 3, 'the retried operation issues exactly once');
-    assert.match(JSON.stringify(await outageClient.callTool({ name: 'scode_status', arguments: {} })), /fixture-/);
-  } catch (error) { throw new Error(`${String(error)}\n${outageStderr}`); }
-  finally { await outageClient.close(); }
-  assert.ok(!fs.readdirSync(state).some(file => file.endsWith('.mcp.json')), 'no derived session config is persisted');
+    assert.equal(claude.claims().length, 2, 'an unreachable Node issues nothing');
+    fs.rmSync(path.join(claude.issuer, 'outage'));
+    await until(() => claude.deliveries(outaged).length === 1, 10000, 'the session attaches in the background and receives its frame');
+    assert.equal(claude.claims().length, 3, 'the retried operation issues exactly once');
+    assert.match(JSON.stringify(await outage.client.callTool({ name: 'scode_status', arguments: {} })), /fixture-/);
+  } catch (error) { throw new Error(`${String(error)}\n${outage.stderr()}`); }
+  finally { await outage.client.close(); }
+  assert.ok(!fs.readdirSync(claude.state).some(file => file.endsWith('.mcp.json')), 'no derived session config is persisted');
   // The hook names its session through Claude Code's JSON input.
-  const wake = (entrypoint: string) => new Promise<{ code: number | null; stderr: string }>(resolve => {
-    const child = spawn(process.execPath, [server, '--claude-wake', '--config', config], { stdio: ['pipe', 'ignore', 'pipe'],
-      env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: entrypoint } });
-    let stderr = ''; child.stderr!.on('data', bytes => { stderr += String(bytes); });
-    child.on('exit', code => resolve({ code, stderr }));
-    child.stdin!.end(JSON.stringify({ session_id: first, hook_event_name: 'Stop' }));
-  });
-  const unarmed = await wake('sdk-cli');
-  assert.equal(unarmed.code, 0, 'a session without an Agent never arms a waiter');
-  assert.equal(unarmed.stderr, '');
-  const woke = await wake('cli');
-  assert.equal(woke.code, 2);
-  assert.equal((woke.stderr.match(/<channel source="nexus_scode" from="fixture-peer"/g) ?? []).length, 2,
-    'both peers spooled for this session wake it, and none of the other session\'s');
+  const changed = { session_id: first, hook_event_name: 'FileChanged', file_path: claude.spool(first), event: 'change' };
+  assert.deepEqual(await claude.hook('--claude-deliver', changed, 'sdk-cli'), { code: 0, stdout: '', stderr: '' },
+    'a session without an Agent hands nothing over');
+  const woke = await claude.hook('--claude-deliver', changed);
+  const deliveries = claude.deliveries(first);
+  assert.equal(deliveries.length, 2);
+  assert.deepEqual(woke, { code: 2, stdout: '', stderr: deliveries[1].text + '\n' },
+    'the newer of this session\'s two deliveries wakes it, and none of another session\'s');
 }
 
 async function main(): Promise<void> {
@@ -425,8 +438,9 @@ async function main(): Promise<void> {
     await checkMcp('delayed-initialize');
     return;
   }
-  for (const peerPolicy of ['node-namespace', 'allowlist'] as const) await checkChannel(peerPolicy);
-  await checkWake();
+  await checkClaudeHooks();
+  await checkClaudeDelivery();
+  await checkClaudeOwners();
   await checkClaudeAutojoin();
   for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'delayed-initialize', 'closing-initialize', 'malformed']) await checkMcp(scenario);
@@ -446,7 +460,7 @@ async function main(): Promise<void> {
     assert.equal(scodeNativeA2aAudit(first)?.requestedInputSha256, scodeNativeA2aAudit(second)?.requestedInputSha256);
   } finally { await connection.close(); }
 
-  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit, same-session recovery and Claude channel delivery');
+  console.log('PASS scode MCP: exact direct calls, one owner, no prompt fallback, strict inputs, response loss, audit, same-session recovery and Claude Code mailbox delivery');
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   // The smoke created and owns this exact disposable directory.

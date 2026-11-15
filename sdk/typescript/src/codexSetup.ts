@@ -5,6 +5,7 @@ import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, 
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { codexMcpInstallationCommands, prepareWindowsCodexOwner } from './codexMcp';
+import { connectCodex, type CodexConnectionConfig } from './codexConnection';
 
 const execute=promisify(execFile);
 const digest=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex');
@@ -73,6 +74,26 @@ function matchesRegistration(value:unknown,file:string,entry:string):boolean {
     && transport.cwd==null;
 }
 
+/** Inspect the actual existing server through the configured proxy, not the
+ * wrapper's version. This is the current v2 receiver's admission requirement;
+ * it is not mailbox-v3 native/model qualification or a delivery probe. */
+async function checkNativeReceiver(native:CodexConnectionConfig):Promise<void> {
+  const connection=await connectCodex({...native,requireDurableQueue:true});
+  await connection.close();
+}
+
+/** Read-only preflight for an existing native daemon. No daemon start, thread
+ * discovery, enrollment, queue submission or global configuration write. */
+export async function checkCodexNative(file:string,entry:string):Promise<{
+  checked:true; requiredCapability:'durableQueueAddOnce'; version:1; a2aJourneyVerified:false;
+}> {
+  const before=digest(readFileSync(file));
+  const {native}=codexMcpInstallationCommands(file,entry);
+  await checkNativeReceiver(native);
+  if(digest(readFileSync(file))!==before)throw new Error('The selected runtime changed during native preflight; run the check for its new configuration');
+  return {checked:true,requiredCapability:'durableQueueAddOnce',version:1,a2aJourneyVerified:false};
+}
+
 /** One installation of an explicitly prepared, operator-authorized machine.
  * Native Codex and the existing current-user Task own their usual lifecycles.
  * No enrollment, Node/CA provision, root migration or input injection occurs.
@@ -139,18 +160,23 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
     // One create-only record per selected native home fences different runtime
     // installers too. It is a setup journal, not a native-service owner/lease.
     writeFileSync(claim,claimBytes,{flag:'wx',mode:0o600});
-    if(process.platform==='win32'){
-      unchanged();const owner=prepareWindowsCodexOwner(file,entry);
-      state.ownerTask=owner;save(journal,state);
-      // Preparation and installation use the existing canonical owner action;
-      // registration has no trigger and does not start the task.
-      await step('ownerTaskRegistration',owner.installationArgv);
-    }
     await step('officialNativePreparation',plan.nativePreparationArgv);
     // Start reports an action (for example "started"); version reads whether
     // the selected default daemon is actually running after that action.
     const native=await step('officialNativeReadback',[...plan.native.codexArgv,'app-server','daemon','version']);
     if(JSON.parse(native.stdout).status!=='running')throw new Error('Official native daemon readback did not report running');
+    unchanged();state.inFlight='nativeReceiverPreflight';save(journal,state);
+    // Refuse before registering a Task, changing global MCP configuration or
+    // replacing the ordinary command. Runtime admission still checks every
+    // connection, since a successful check cannot pin a future daemon.
+    await checkNativeReceiver(plan.native);
+    unchanged();state.completed.push('nativeReceiverPreflight');delete state.inFlight;save(journal,state);
+    if(process.platform==='win32'){
+      const owner=prepareWindowsCodexOwner(file,entry);
+      state.ownerTask=owner;save(journal,state);
+      // Registration has no trigger and does not start the task.
+      await step('ownerTaskRegistration',owner.installationArgv);
+    }
     unchanged();
     const current=await registration(plan.native);
     if(current!==undefined && !matchesRegistration(current,file,entry))throw new Error('MCP registration changed during preparation; independent configuration is preserved');

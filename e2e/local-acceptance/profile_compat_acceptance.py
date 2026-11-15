@@ -362,3 +362,10 @@ def verify_profile_compatibility(directory, work, command):
         install_note(original_note)
         run("git", "fetch", str(work), f"+{original_main}:refs/heads/main", cwd=origin)
         run("git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")
+
+    from resource_scheduling_acceptance import verify_resource_scheduling
+    verify_resource_scheduling(
+        directory / "resource-scheduling",
+        Path(__file__).resolve().parents[2],
+        command,
+    )

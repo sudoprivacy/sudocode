@@ -28,6 +28,8 @@
 
 #[path = "support/node_home.rs"]
 mod node_home;
+#[path = "acp_a2a_receive/runtime_observation.rs"]
+mod runtime_observation;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -313,9 +315,21 @@ fn spawn_acp_from_binary(
     binary: &std::ffi::OsStr,
     endpoint: &str,
     agent: &str,
+    peer: &str,
+    workspace: &tempfile::TempDir,
+    config_home: &tempfile::TempDir,
+) -> AcpStdio {
+    spawn_acp_from_binary_with_args(binary, endpoint, agent, peer, workspace, config_home, &[])
+}
+
+fn spawn_acp_from_binary_with_args(
+    binary: &std::ffi::OsStr,
+    endpoint: &str,
+    agent: &str,
     _peer: &str,
     workspace: &tempfile::TempDir,
     config_home: &tempfile::TempDir,
+    args: &[&str],
 ) -> AcpStdio {
     // An isolated config home needs a config: the point of isolating it is the
     // read cursor, not to test scode's behaviour without providers.
@@ -337,7 +351,8 @@ fn spawn_acp_from_binary(
     );
     node_home::pin_agent_name(workspace.path(), agent);
     let mut cmd = Command::new(binary);
-    cmd.arg("acp")
+    cmd.args(args)
+        .arg("acp")
         .current_dir(workspace.path())
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())
         .envs(node_home.env())

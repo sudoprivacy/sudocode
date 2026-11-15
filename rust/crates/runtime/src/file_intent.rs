@@ -138,8 +138,7 @@ impl UserRequestIntent {
         let file_name = Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .map(str::to_lowercase)
-            .unwrap_or_default();
+            .map_or_default(str::to_lowercase);
 
         // 1. Direct file name match
         if self.requested_files.contains(&file_name) {
@@ -150,8 +149,7 @@ impl UserRequestIntent {
         let ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
-            .map(str::to_lowercase)
-            .unwrap_or_default();
+            .map_or_default(str::to_lowercase);
 
         let ext_to_type: std::collections::HashMap<&str, &str> = [
             ("py", "python"),
@@ -195,8 +193,7 @@ impl UserRequestIntent {
         let ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| format!(".{}", e.to_lowercase()))
-            .unwrap_or_default();
+            .map_or_default(|e| format!(".{}", e.to_lowercase()));
 
         self.requested_deliverable_extensions.contains(&ext)
     }
@@ -396,8 +393,7 @@ pub fn detect_file_intent(
     let ext = Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| format!(".{}", e.to_lowercase()))
-        .unwrap_or_default();
+        .map_or_default(|e| format!(".{}", e.to_lowercase()));
 
     if DRAFT_EXTENSIONS.contains(&ext.as_str()) {
         return FileIntent::Draft;

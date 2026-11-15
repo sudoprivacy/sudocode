@@ -94,6 +94,52 @@ def run(output):
         (repository / path).mkdir(parents=True, exist_ok=True)
     (repository / "rust/Cargo.toml").write_text('[package]\nname="rusty-sudocode-cli"\nversion="0.0.0"\nedition="2021"\n')
     (repository / "rust/src/lib.rs").write_text("pub fn fixture() {}\n")
+    # A tiny compiler can finish between supervisor samples. Hold a real rustc
+    # on stdin until the unchanged supervisor has lowered it, then compile the
+    # supplied source. This tests priority handling without slowing product code.
+    priority_probe = repository / "compiler_priority.py"
+    priority_probe.write_text('''import json, os, subprocess, sys, time
+from pathlib import Path
+import psutil
+
+expected = psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10
+normal = psutil.NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+assert psutil.Process().nice() == normal, "The build fixture must start at Normal"
+process = subprocess.Popen([sys.argv[1], "--crate-name", "priority_probe", "--crate-type", "lib",
+    "--emit=metadata", "-o", str(Path(os.environ["OUT_DIR"]) / "priority.rmeta"), "-"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    compiler = psutil.Process(process.pid)
+    born = compiler.create_time()
+    deadline = time.monotonic() + 10
+    while compiler.nice() != expected and time.monotonic() < deadline:
+        assert process.poll() is None, "The native compiler exited before receiving its source"
+        time.sleep(.01)
+    assert compiler.nice() == expected, "The supervisor did not lower the real compiler"
+    Path(os.environ["MODEL_FIXTURE_PRIORITY"]).write_text(json.dumps({
+        "pid": process.pid, "created": born, "priority": compiler.nice(), "launcher": normal}))
+    stdout, stderr = process.communicate(b"pub fn priority_fixture() {}", timeout=10)
+    assert process.returncode == 0, (stdout, stderr)
+finally:
+    if process.poll() is None:
+        for child in psutil.Process(process.pid).children(recursive=True)[::-1]:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        process.kill()
+        process.wait(timeout=10)
+''')
+    (repository / "rust/build.rs").write_text('''fn main() {
+    let result = std::process::Command::new(std::env::var("MODEL_FIXTURE_PYTHON").unwrap())
+        .arg(std::env::var("MODEL_FIXTURE_COMPILER_PROBE").unwrap())
+        .arg(std::env::var("RUSTC").unwrap()).status().unwrap();
+    assert!(result.success(), "Real compiler-priority fixture failed");
+}
+''')
+    environment.update(MODEL_FIXTURE_PYTHON=sys.executable,
+                       MODEL_FIXTURE_COMPILER_PROBE=str(priority_probe),
+                       MODEL_FIXTURE_PRIORITY=str(output / "compiler-priority.json"))
     fixture = repository / "rust/tests/pty_headless.rs"
     fixture.write_text(r'''
 fn record(value: &str) {
@@ -164,10 +210,10 @@ fn print_completes_tool_roundtrip_in_each_output_format() { record("second"); }
     assert not marker.exists()
 
     for workflow in ["model-compat.yml", "subagent-parity-live.yml"]:
-        text = (SOURCE / ".github/workflows" / workflow).read_text()
+        text = (SOURCE / ".github/workflows" / workflow).read_text(encoding="utf-8")
         events = text.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
         assert re.findall(r"^  ([a-z_]+):", events, re.M) == ["workflow_dispatch"], workflow
-    workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text()
+    workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     assert "if: &paid_model_acceptance" in workflow and "if: *paid_model_acceptance" in workflow
     assert "github.event_name == 'workflow_dispatch' && inputs.live_only && !inputs.cache_only" in workflow
     assert "cargo test -p rusty-sudocode-cli --test pty_step_budget" not in workflow
@@ -184,7 +230,7 @@ fn print_completes_tool_roundtrip_in_each_output_format() { record("second"); }
             assert source.is_file(), source
             if "--exact" in arguments:
                 case = arguments[arguments.index("--test") + 2]
-                assert re.search(r"\bfn " + re.escape(case) + r"\(", source.read_text()), (suite, case)
+                assert re.search(r"\bfn " + re.escape(case) + r"\(", source.read_text(encoding="utf-8")), (suite, case)
     (output / "result.json").write_text(json.dumps({"outcome": "passed", "paid_calls": 0,
         "scope": "Real Git/Cargo process and manual trigger enforcement; no product/provider acceptance claim",
         "explicit_failures_retained": failures, "empty_selection_rejected": True,

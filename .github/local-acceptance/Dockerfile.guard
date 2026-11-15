@@ -1,6 +1,6 @@
 FROM docker:29.4.3-cli@sha256:51e23845f5caff1e688a2fae003b0c69d635c9200ad544731db1593731df1d3a AS docker-client
 
-FROM rust:1.99@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+FROM rust:1.100.0@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31
 
 COPY --from=docker-client /usr/local/bin/docker /usr/local/bin/docker
 RUN docker --version
@@ -16,5 +16,12 @@ RUN nice -n 10 rustup component add rustfmt clippy \
 ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 COPY nextest_seed.py /opt/nextest_seed.py
 RUN python3 /opt/nextest_seed.py --verify-cache
+COPY compiler-objects /opt/compiler-objects
+RUN mkdir -p /opt/compiler-objects/src \
+ && printf 'fn main() {}\n' > /opt/compiler-objects/src/main.rs \
+ && nice -n 10 cargo fetch --locked --manifest-path /opt/compiler-objects/Cargo.toml
+COPY compiler_cache.py compiler_seed.py /opt/
+RUN python3 /opt/compiler_seed.py --verify-cache
 COPY guard.py /opt/acceptance-guard.py
+ENV SCODE_ACCEPTANCE_BUILD_JOBS=1
 ENTRYPOINT ["python3", "/opt/acceptance-guard.py"]

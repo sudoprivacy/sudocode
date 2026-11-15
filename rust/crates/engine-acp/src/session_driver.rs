@@ -821,7 +821,10 @@ impl SessionDriver {
 
     /// Release this host's owner and await the engine's final storage lifetime.
     /// Aborting a wire task schedules its drop; it does not release its owner yet.
-    pub(crate) fn shutdown(self: Arc<Self>) -> bool {
+    /// Every stage runs even after an earlier one failed, so a stalled engine
+    /// cannot leave the completion retirement unawaited; the error names the
+    /// first stage that did not finish.
+    pub(crate) fn shutdown(self: Arc<Self>) -> Result<(), &'static str> {
         let retirement = self.completion_retirement();
         self.unbind();
         let handle = self
@@ -838,7 +841,16 @@ impl SessionDriver {
             .recv_timeout(Duration::from_secs(30))
             .is_ok();
         drop(self);
-        reaped && stopped && retirement.wait(Duration::from_secs(30))
+        let retired = retirement.wait(Duration::from_secs(30));
+        if !reaped {
+            Err("engine thread not reaped")
+        } else if !stopped {
+            Err("event bridge not stopped")
+        } else if !retired {
+            Err("completion retirement not finished")
+        } else {
+            Ok(())
+        }
     }
 }
 

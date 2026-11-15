@@ -91,8 +91,7 @@ pub(crate) fn render_session_list(
             .as_deref()
             .map(format_session_summary)
             .filter(|summary| !summary.is_empty())
-            .map(|summary| format!(" summary={summary}"))
-            .unwrap_or_default();
+            .map_or_default(|summary| format!(" summary={summary}"));
         lines.push(format!(
             "  {id:<20} {marker:<10} lifecycle={lifecycle} msgs={msgs:<4} modified={modified}{lineage}{summary} path={path}",
             id = session.id,
@@ -135,8 +134,7 @@ pub(crate) fn format_session_picker_entry(
         .as_deref()
         .map(format_session_summary)
         .filter(|summary| !summary.is_empty())
-        .map(|summary| format!("  summary={summary}"))
-        .unwrap_or_default();
+        .map_or_default(|summary| format!("  summary={summary}"));
     format!(
         "{marker} {id:<20}  msgs={msgs:<4}  modified={modified}  lifecycle={lifecycle}{lineage}{summary}",
         id = session.id,

@@ -1159,6 +1159,9 @@ struct ReplContext {
     /// ids, the working directory). The coordinator refreshes it between turns,
     /// so a key press only filters what is already here.
     completions: Arc<Mutex<commands::CompletionContext>>,
+    /// The status line a resumed session opens with. Part of the first frame,
+    /// not a later command, so the editor never accepts input without it.
+    initial_turn_result: Option<(u32, Arc<StyledText>)>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
     /// coordinator's staging area and returns its text for the input slot,
     /// skipping inbound A2A/peer items. `None` when no queue is wired (the
@@ -1184,6 +1187,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
     let todo_items = Arc::clone(&ctx.todo_items);
+    let initial_turn_result = ctx.initial_turn_result.clone();
     let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
@@ -1208,7 +1212,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut background_animation = hooks.use_ref_default::<bool>();
     let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
-    let mut turn_result = hooks.use_state(|| None::<(u32, Arc<StyledText>)>);
+    let mut turn_result = hooks.use_state(move || initial_turn_result);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
@@ -2149,10 +2153,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let todos = if task_panel.is_some() {
         Vec::new()
     } else {
-        todo_items
-            .lock()
-            .map(|items| items.clone())
-            .unwrap_or_default()
+        todo_items.lock().map_or_default(|items| items.clone())
     };
     // PendingSlot projects tools and queued messages in arrival order. It
     // never commits history: completed cards and flushed messages have their
@@ -2160,10 +2161,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_items = if task_panel.is_some() {
         Vec::new()
     } else {
-        pending
-            .lock()
-            .map(|items| items.clone())
-            .unwrap_or_default()
+        pending.lock().map_or_default(|items| items.clone())
     };
     let queued = pending_items
         .iter()
@@ -2196,19 +2194,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         StatusSlot::Empty => Arc::default(),
     };
     let heading = ansi_with_style(
-        question
-            .map(|q| {
-                let title = q.title.as_ref().map(|title| format!("[{title}]"));
-                if q.description.is_some() {
-                    format!(
-                        "{} · Ctrl+O view full text",
-                        title.as_deref().unwrap_or("Review document")
-                    )
-                } else {
-                    title.unwrap_or_default()
-                }
-            })
-            .unwrap_or_default(),
+        question.map_or_default(|q| {
+            let title = q.title.as_ref().map(|title| format!("[{title}]"));
+            if q.description.is_some() {
+                format!(
+                    "{} · Ctrl+O view full text",
+                    title.as_deref().unwrap_or("Review document")
+                )
+            } else {
+                title.unwrap_or_default()
+            }
+        }),
         question_style,
     );
     let mut controls = if let Some(panel) = task_panel.clone() {
@@ -2274,8 +2270,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(crate::cli::format::todo::panel(&todos, 10)),
-                summary: ansi(crate::cli::format::todo::panel(&todos, 0)),
+                full: ansi(crate::cli::format::todo::panel(&todos, 10, w)),
+                summary: ansi(crate::cli::format::todo::panel(&todos, 0, w)),
             },
             Slot {
                 minimum_full_rows: 0,
@@ -2606,6 +2602,7 @@ pub fn spawn_repl_ui(
     input_history: Vec<String>,
     dequeue_hook: Option<UpArrowDequeueHook>,
     completions: Arc<Mutex<commands::CompletionContext>>,
+    turn_result: Option<(&crate::render::StyledLine, u32)>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2633,6 +2630,7 @@ pub fn spawn_repl_ui(
         pending: Arc::new(Mutex::new(Vec::new())),
         input_history: Arc::new(input_history),
         completions,
+        initial_turn_result: turn_result.map(|(text, turn)| (turn, Arc::new(text.structured()))),
         dequeue_hook,
     };
 

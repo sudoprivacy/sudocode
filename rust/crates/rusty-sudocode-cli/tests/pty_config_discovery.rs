@@ -85,6 +85,55 @@ fn tab_completion_shows_slash_commands() {
 /// Tab completes a command's arguments from its usage hint and from runtime
 /// values: a literal choice, a subcommand followed by a session id, a file in
 /// the working directory, and a model.
+/// Tab on a session id stays instant however slowly a stored transcript reads.
+/// Completion runs on the input thread, so it lists ids from the store's names
+/// alone. Here one stored transcript is a FIFO with no writer: opening it
+/// would block forever, so reading any transcript would freeze the REPL at
+/// this Tab, as a slow disk, a locked file or a network filesystem would.
+#[cfg(unix)]
+#[test]
+fn session_id_completion_never_reads_a_transcript() {
+    let env = TestEnv::new("tab-complete-unreadable-session");
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "REPL input ready");
+
+    let sessions = env.workspace_root().join(".scode/sessions");
+    let store = std::fs::read_dir(&sessions)
+        .expect("the running session created its store")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("one workspace store");
+    let blocked = store.join("session-unreadable");
+    std::fs::create_dir_all(&blocked).unwrap();
+    let fifo = blocked.join("transcript.jsonl");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo {}", fifo.display());
+
+    sess.send("/session switch ").expect("type the command");
+    common::expect_screen(
+        &sess,
+        |screen| common::input_line_of(screen) == "/session switch",
+        common::DEFAULT_TIMEOUT,
+        "command reached the editor",
+    );
+    sess.send("\t").expect("send Tab");
+    common::expect_screen(
+        &sess,
+        |screen| {
+            common::input_line_of(screen)
+                .strip_prefix("/session switch ")
+                .is_some_and(|id| !id.is_empty() && !id.contains(' '))
+        },
+        common::DEFAULT_TIMEOUT,
+        "a session id, without opening the unreadable transcript",
+    );
+    // Dropping the session kills the child, even one blocked opening the FIFO.
+}
+
 #[test]
 fn tab_completion_completes_arguments() {
     let env = TestEnv::new("tab-complete-args");
@@ -350,20 +399,40 @@ fn compact_flag_shows_only_final_text() {
 #[test]
 fn informational_commands_bypass_credentials() {
     let env = TestEnv::new_mock("informational-without-credentials");
+    // Keep HOME, cwd and config roots in the shared isolated fixture, then
+    // remove its model credentials so informational commands must need none.
+    std::fs::remove_file(env.config_home().join("sudocode.json")).unwrap();
+    let auth = [
+        ("ANTHROPIC_API_KEY", ""),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("PROXY_AUTH_TOKEN", ""),
+        ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+    ];
     for subcmd in &["version", "help", "doctor", "status", "sandbox", "config"] {
-        // Diagnose the command's credential-free behavior, independent of a
-        // developer's saved credentials, invalid settings or active workspace.
-        let mut sess = spawn_without_credentials(&env, &[subcmd]);
+        let mut sess = env.spawn_with_env_at_size(&[subcmd], &auth, 60, 240);
         if *subcmd == "doctor" {
-            sess.expect("no supported auth env vars were found")
-                .expect("doctor must observe the credential-free fixture");
+            for credential in [
+                "ANTHROPIC_API_KEY=absent",
+                "ANTHROPIC_AUTH_TOKEN=absent",
+                "PROXY_AUTH_TOKEN=absent",
+                "CLAUDE_CODE_OAUTH_TOKEN=absent",
+            ] {
+                sess.expect(credential)
+                    .expect("doctor confirms no auth env");
+            }
         }
 
         let exit = sess
             .expect_eof()
             .unwrap_or_else(|_| panic!("{subcmd} should exit"));
-        assert_eq!(exit, 0, "{subcmd} should exit 0 without credentials");
+        assert_eq!(
+            exit,
+            0,
+            "{subcmd} should exit 0 without credentials:\n{}",
+            sess.render(common::screen_contents)
+        );
     }
+    assert_eq!(env.captured_message_count(), 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────

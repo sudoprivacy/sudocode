@@ -217,6 +217,16 @@ fn explicit_data_dir_reclaims_external_session_without_workspace_writes() {
         }
         let mut owner = cleanup_client(&root, "owner");
         wait_for(&root.join("ready"));
+        // Keep one actual native I/O admission across both process deaths so
+        // this case exercises durable restart discovery, regardless of how
+        // promptly current runtimes revoke their own idle storage handles.
+        let pending_io = StdFsBackend
+            .try_lock(
+                &path.with_extension("responses.lock").to_string_lossy(),
+                30_000,
+            )
+            .unwrap()
+            .unwrap();
         let mut deleter = cleanup_client(&root, deletion);
         assert!(deleter.0.wait().unwrap().success());
         assert!(root.join("deleted").exists());
@@ -233,6 +243,7 @@ fn explicit_data_dir_reclaims_external_session_without_workspace_writes() {
         owner.0.kill().unwrap();
         owner.0.wait().unwrap();
         assert!(path.exists());
+        drop(pending_io);
         let mut restarted = cleanup_client(&root, "restart");
         assert!(restarted.0.wait().unwrap().success());
         assert!(!path.exists());
@@ -504,7 +515,6 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
         .purge(&journal.storage_ref(), "delete-after-refresh")
         .unwrap();
     let references = store_root.join(".cleanup");
-    assert_eq!(std::fs::read_dir(&references).unwrap().count(), 1);
     assert_eq!(
         a.refresh_compaction_source().unwrap_err().to_string(),
         "session_deleted"
@@ -515,11 +525,14 @@ fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history()
             .to_string(),
         "session_deleted"
     );
+    // Storage retirement is independent of all these still-live snapshots,
+    // runtimes and journal objects. Only their admitted I/O must drain.
+    wait_for_reclaimed_session(&path, &references);
+    assert!(path.with_extension("completions.json").exists());
     drop(journal);
     drop((snapshot, writer, a, b, seed, restored));
     drop(executor);
-    // The worker owns deferred reclamation until the last writer retires.
-    // Observe both its durable reference and the transcript before teardown.
+    // Closing those retired objects must not recreate any owned storage.
     wait_for_reclaimed_session(&path, &references);
     drop(fixture);
 }

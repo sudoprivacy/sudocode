@@ -100,7 +100,10 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
             eprintln!("SKIP: live model did not call write_plan");
             return;
         }
-        panic!("dialog should appear");
+        panic!(
+            "dialog should appear; screen:\n{}",
+            sess.render(common::screen_contents)
+        );
     }
 
     // Arrow down past the 4 options onto the `[+]` custom-input row, then type
@@ -160,7 +163,10 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
             eprintln!("SKIP: live model did not call write_plan");
             return;
         }
-        panic!("dialog should appear");
+        panic!(
+            "dialog should appear; screen:\n{}",
+            sess.render(common::screen_contents)
+        );
     }
 
     // Arrow onto the `[+]` row, then paste multi-line content via the bracketed

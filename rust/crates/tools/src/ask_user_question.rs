@@ -23,7 +23,10 @@ pub(crate) fn input_schema() -> Value {
                     "properties": {
                         "id": { "type": "string" },
                         "prompt": { "type": "string" },
-                        "kind": { "type": "string", "enum": ["single_select", "multi_select", "text", "boolean"] },
+                        "kind": {
+                            "type": "string", "enum": ["single_select", "multi_select", "text", "boolean"],
+                            "description": "boolean is a yes/no question: without options it offers Yes (value \"true\") and No (value \"false\")."
+                        },
                         "required": { "type": "boolean" },
                         "allowCustomInput": {
                             "type": "boolean", "default": DEFAULT_ALLOW_CUSTOM_INPUT,
@@ -93,7 +96,7 @@ pub fn parse_request(input: Value) -> Result<QuestionPromptRequest, String> {
     let fields = input
         .questions
         .into_iter()
-        .map(|field| {
+        .map(|mut field| {
             let kind = field
                 .kind
                 .as_deref()
@@ -104,6 +107,17 @@ pub fn parse_request(input: Value) -> Result<QuestionPromptRequest, String> {
                 } else {
                     QuestionKind::SingleSelect
                 });
+            // A yes/no question offers Yes and No unless it names its own.
+            if kind == QuestionKind::Boolean && field.options.is_empty() {
+                field.options = [("Yes", "true"), ("No", "false")]
+                    .map(|(label, value)| OptionInput {
+                        label: label.to_string(),
+                        value: value.to_string(),
+                        description: None,
+                        recommended: false,
+                    })
+                    .into();
+            }
             Ok(QuestionField {
                 id: field.id,
                 prompt: field.prompt,

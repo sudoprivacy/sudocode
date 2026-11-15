@@ -374,9 +374,8 @@ fn handle_leaf_edit(
             )))
         }
         ConfigInputKind::Text | ConfigInputKind::NumberInput => {
-            let current_str = current_val
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .unwrap_or_default();
+            let current_str =
+                current_val.map_or_default(|v| serde_json::to_string(v).unwrap_or_default());
             out.println(&format!(
                 "{DIM}Current {}{} = {current_str}{RESET}",
                 breadcrumb_display(breadcrumb),

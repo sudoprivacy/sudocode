@@ -48,6 +48,15 @@ pub fn boot_session_fs(
     extra_roots: &[PathBuf],
     agent_name: &str,
 ) -> io::Result<Arc<dyn FsBackend>> {
+    boot_session_host(workspace, extra_roots, agent_name).map(|(fs, _)| fs)
+}
+
+/// Share the existing filesystem kernel with transient runtime observations.
+pub(crate) fn boot_session_host(
+    workspace: &Path,
+    extra_roots: &[PathBuf],
+    agent_name: &str,
+) -> io::Result<(Arc<dyn FsBackend>, Arc<Kernel>)> {
     let kernel = Arc::new(Kernel::new());
     // Mount the whole filesystem root (drive root on Windows, / on unix)
     // FIRST, so an absolute path anywhere on disk routes to a mount instead
@@ -69,10 +78,11 @@ pub fn boot_session_fs(
     // The session's context is its own agent identity (not system); its zone
     // context is trusted-local via `for_standalone_session` — host-env
     // metadata, when present, shapes the authorization there.
-    Ok(Arc::new(
-        KernelFsBackend::for_standalone_session(kernel, agent_name, workspace_root)
+    let fs: Arc<dyn FsBackend> = Arc::new(
+        KernelFsBackend::for_standalone_session(Arc::clone(&kernel), agent_name, workspace_root)
             .with_host_root(workspace.to_string_lossy().into_owned()),
-    ))
+    );
+    Ok((fs, kernel))
 }
 
 /// Mount host directory `root` into `kernel` and return its VFS path.

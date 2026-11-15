@@ -63,10 +63,8 @@ def windows_compiler_environment(output, execute):
     """Compile and run native code through both real shells and a spaced SDK path."""
     if os.name != "nt":
         return {"status": "not-applicable", "system": sys.platform}
-    shells = [Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe",
-              Path(shutil.which("pwsh.exe") or "missing-pwsh")]
-    if not all(shell.is_file() for shell in shells):
-        raise RuntimeError("Release compiler acceptance requires Windows PowerShell and PowerShell 7 on PATH")
+    profiles = load("artifact_shell_prerequisites", SOURCE / ".github/local-acceptance/checks.py")
+    shells = profiles.windows_native_shells()
     script = SOURCE / ".github/actions/release-artifact/msvc.ps1"
     baseline = output / "compiler-environment.txt"
     execute([str(shells[-1]), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script),

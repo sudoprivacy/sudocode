@@ -77,12 +77,19 @@ fn main() {
         text = (SOURCE / ".github/workflows" / workflow).read_text(encoding="utf-8")
         assert text.count("workspaces: ${{ steps.cache_layout.outputs.workspaces }}") == count
     target = Path(layouts[0]["target"])
-    helper.run_command(["cargo", "build", "--locked", "--target-dir", str(target)], producer, output / "producer-build.log")
+    helper.run_command(["cargo", "build", "--locked", "--message-format=json", "--target-dir", str(target)],
+                       producer, output / "producer-build.log")
     extension = ".exe" if os.name == "nt" else ""
     binary = target / "debug" / ("layout-canary" + extension)
     helper.run_command([str(binary)], producer, output / "producer-run.log",
                        {"EXPECTED_SHARED_TARGET": str(target), "EXPECTED_SOURCE": str(producer)})
-    shared = next((target / "debug/deps").glob("liblayout_shared-*.rlib"))
+    # Cargo names the dependency's rlib in its JSON messages; the build-dir
+    # layout that holds it is not a stable interface.
+    messages = [json.loads(line) for line in (output / "producer-build.log").read_text(encoding="utf-8").splitlines()
+                if line.startswith("{")]
+    shared = next(Path(name) for message in messages
+                  if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "layout_shared"
+                  for name in message["filenames"] if name.endswith(".rlib"))
     before = (hashlib.sha256(shared.read_bytes()).hexdigest(), shared.stat().st_mtime_ns)
     # The production cache discards workspace outputs. Keep the dependency but
     # remove the producer's executable/fingerprint before relocating the source.
@@ -149,10 +156,13 @@ def run(name, root, output, base, execute):
             assert message in (output / f"{name}.log").read_text(encoding="utf-8")
         else:
             raise AssertionError(f"Native launcher accepted {name}")
+    compiler = load("compiler_objects_native_fixture", SOURCE / "e2e/local-acceptance/compiler_objects_acceptance.py")
+    compiler.run(output / "compiler-objects")
     result = {"status": "PASS", "publisher_consumer_target_identical": True,
               "pre_restore_environment_unchanged": True, "actual_candidate_executed": True,
               "shared_dependency_bytes_and_mtime_preserved": True, "wrong_target_and_non_native_refused": True,
               "prerequisite_precedes_Cargo_and_failed_prerequisite_stops_native_profiles": True,
+              "compiler_objects": str(output / "compiler-objects/result.json"),
               "scope": "Actual configuration CLI, native launcher, Cargo and native processes. Remote cache restore and product journeys qualify in real CI; this fixture grants no product coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result), flush=True)

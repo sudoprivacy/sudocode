@@ -26,6 +26,8 @@ on:
       - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
+      - rust-toolchain.toml
+      - .github/actions/rust-toolchain/**
       # The a2a-live job RUNS these; without them a harness change ships untested.
       - e2e/**
       - install.sh
@@ -109,7 +111,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy
       - uses: ./.github/actions/setup-protoc
@@ -239,7 +241,7 @@ jobs:
           if [ "$COHOST_REQUIRED" = false ]; then
             echo "CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
           fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -347,7 +349,7 @@ jobs:
           set -eu
           test "$COHOST_REQUIRED" = true
           echo 'DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -369,6 +371,23 @@ jobs:
         env:
           NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
+
+      # The same managed agent hosted OUT of the daemon: the public
+      # nexusd-cluster and an owner credential, with every session effect over
+      # that one authenticated connection. This is the co-host's replacement.
+      # run.sh already requires this exact journey when CLI A2A is selected.
+      # Preserve it here for independently selected co-host changes.
+      - name: Managed scode against the public nexusd-cluster
+        if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+        env:
+          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+        run: |
+          set -eu
+          case "$A2A_REQUIRED" in
+            true) echo 'Managed scode is required by CLI A2A run.sh; the integrated gate requires that job to pass.' ;;
+            false) e2e/nexus-a2a/run-managed-subprocess.sh ;;
+            *) echo '::error::Missing CLI A2A input decision; no managed daemon started'; exit 1 ;;
+          esac
 
       - name: Conditional owner content survives a co-host process restart
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
@@ -447,7 +466,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: rustfmt
       - uses: actions/setup-node@v4
@@ -658,7 +677,7 @@ jobs:
           python-version: '3.12'
       - name: Install shared native process monitor
         run: python -m pip install psutil==7.2.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -777,7 +796,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -926,7 +945,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
       - uses: actions/setup-node@v4

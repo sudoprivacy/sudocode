@@ -176,6 +176,15 @@ pub const DIM: &str = "\x1b[2m";
 /// ANSI bold.
 pub const BOLD: &str = "\x1b[1m";
 
+/// For unit tests that assert colors for an explicit `ColorSupport`. crossterm
+/// also leaves colors out whenever `NO_COLOR` is set, as it is for the
+/// commands a scode session runs, so force them on. iocraft draws with its own
+/// crossterm, which this cannot reach.
+#[cfg(test)]
+pub(crate) fn force_test_colors() {
+    crossterm::style::Colored::set_ansi_color_disabled(false);
+}
+
 /// The REPL prompt glyph (`❯`) and the space after it — the exact prefix a
 /// prompt line starts with. Single source of truth: the live input line, the
 /// resumed-history echo, and any other prompt reprint all reference this so
@@ -1860,6 +1869,7 @@ mod tests {
 
     #[test]
     fn highlight_code_emits_only_256_color_when_ansi256() {
+        force_test_colors();
         let renderer = TerminalRenderer::new().with_color_support(ColorSupport::Ansi256);
         let out = renderer.highlight_code("fn main() {}\n", "rust");
         // No 24-bit truecolor escape sequence.
@@ -1876,6 +1886,7 @@ mod tests {
 
     #[test]
     fn highlight_code_emits_truecolor_when_truecolor() {
+        force_test_colors();
         let renderer = TerminalRenderer::new().with_color_support(ColorSupport::TrueColor);
         let out = renderer.highlight_code("fn main() {}\n", "rust");
         assert!(

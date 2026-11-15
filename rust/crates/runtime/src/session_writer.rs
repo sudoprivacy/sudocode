@@ -15,9 +15,14 @@ pub struct SessionWriter {
     deleted: AtomicBool,
     writes: Mutex<()>,
     history: Mutex<Option<ActiveHistory>>,
-    _legacy_owner: Option<Arc<dyn FsLock>>,
     // Rust drops fields in declaration order. Keep admission visible until
     // the record-log client and legacy writer handle have both retired.
+    native: Mutex<NativeHandles>,
+}
+
+#[derive(Default)]
+struct NativeHandles {
+    legacy_owner: Option<Arc<dyn FsLock>>,
     presence: Option<WriterPresence>,
 }
 
@@ -47,7 +52,6 @@ enum CommitBackend {
 pub struct SessionWriteGuard<'a> {
     _operation: MutexGuard<'a, ()>,
     _storage: Option<Arc<dyn FsLock>>,
-    owners: Vec<Arc<dyn FsLock>>,
 }
 
 pub(crate) struct SessionPurgeGuard {
@@ -130,15 +134,17 @@ impl SessionWriter {
             path,
         };
         drop(guard);
-        Ok(Arc::new(Self {
+        Self::watch(Arc::new(Self {
             backend: CommitBackend::Native(fs),
             transcript: transcript.to_path_buf(),
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
-            presence: Some(presence),
+            native: Mutex::new(NativeHandles {
+                presence: Some(presence),
+                legacy_owner,
+            }),
             history: Mutex::default(),
-            _legacy_owner: legacy_owner,
         }))
     }
 
@@ -173,9 +179,8 @@ impl SessionWriter {
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
-            presence: None,
+            native: Mutex::default(),
             history: Mutex::default(),
-            _legacy_owner: None,
         }))
     }
 
@@ -242,7 +247,7 @@ impl SessionWriter {
         } else {
             None
         };
-        Ok(Arc::new(Self {
+        Self::watch(Arc::new(Self {
             backend: if native {
                 CommitBackend::Native(fs)
             } else {
@@ -252,13 +257,33 @@ impl SessionWriter {
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
-            presence,
+            native: Mutex::new(NativeHandles {
+                presence,
+                legacy_owner: None,
+            }),
             history: Mutex::new(Some(ActiveHistory {
                 context,
                 view_revision,
             })),
-            _legacy_owner: None,
         }))
+    }
+
+    fn watch(writer: Arc<Self>) -> Result<Arc<Self>, String> {
+        if let CommitBackend::Native(fs) = &writer.backend {
+            crate::session_cleanup::watch(Arc::clone(fs), &writer.transcript, &writer)?;
+        }
+        Ok(writer)
+    }
+
+    fn history(&self) -> Result<MutexGuard<'_, Option<ActiveHistory>>, String> {
+        let history = self
+            .history
+            .lock()
+            .map_err(|_| "session history poisoned")?;
+        if self.deleted() {
+            return Err("session_deleted".into());
+        }
+        Ok(history)
     }
 
     /// Preserve the source bytes before publishing the new record-log binding.
@@ -304,9 +329,7 @@ impl SessionWriter {
     }
 
     pub(crate) fn history_session(&self) -> Result<Option<crate::Session>, String> {
-        self.history
-            .lock()
-            .map_err(|_| "session history poisoned")?
+        self.history()?
             .as_ref()
             .map(|active| active.context.session().map_err(|error| error.to_string()))
             .transpose()
@@ -314,9 +337,7 @@ impl SessionWriter {
 
     #[inline]
     pub(crate) fn refresh_history_session(&self) -> Result<Option<crate::Session>, String> {
-        self.history
-            .lock()
-            .map_err(|_| "session history poisoned")?
+        self.history()?
             .as_mut()
             .map(|active| {
                 active
@@ -328,17 +349,11 @@ impl SessionWriter {
     }
 
     pub(crate) fn has_history(&self) -> Result<bool, String> {
-        self.history
-            .lock()
-            .map(|history| history.is_some())
-            .map_err(|_| "session history poisoned".into())
+        Ok(self.history()?.is_some())
     }
 
     pub(crate) fn message_head(&self) -> Result<Option<String>, String> {
-        let history = self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?;
+        let history = self.history()?;
         if let Some(active) = &*history {
             return active
                 .context
@@ -355,10 +370,7 @@ impl SessionWriter {
         message: &crate::ConversationMessage,
         session: &crate::Session,
     ) -> Result<bool, String> {
-        let mut history = self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?;
+        let mut history = self.history()?;
         let Some(active) = &mut *history else {
             return Ok(false);
         };
@@ -373,10 +385,7 @@ impl SessionWriter {
         &self,
         message: &crate::ConversationMessage,
     ) -> Result<bool, String> {
-        let mut history = self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?;
+        let mut history = self.history()?;
         let Some(active) = &mut *history else {
             return Ok(false);
         };
@@ -392,10 +401,7 @@ impl SessionWriter {
         session: &crate::Session,
         view_revision: u64,
     ) -> Result<bool, String> {
-        let mut history = self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?;
+        let mut history = self.history()?;
         let Some(active) = &mut *history else {
             return Ok(false);
         };
@@ -408,11 +414,7 @@ impl SessionWriter {
     }
 
     pub(crate) fn finish_history(&self, turn_id: &str) -> Result<(), String> {
-        if let Some(active) = &mut *self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?
-        {
+        if let Some(active) = &mut *self.history()? {
             active
                 .context
                 .finish(turn_id)
@@ -430,11 +432,7 @@ impl SessionWriter {
     }
 
     pub(crate) fn history_head(&self) -> Result<Option<String>, String> {
-        if let Some(active) = &*self
-            .history
-            .lock()
-            .map_err(|_| "session history poisoned")?
-        {
+        if let Some(active) = &*self.history()? {
             return active
                 .context
                 .revision()
@@ -527,33 +525,6 @@ impl SessionWriter {
         Ok(SessionWriteGuard {
             _operation: guard,
             _storage: storage,
-            owners: Vec::new(),
-        })
-    }
-
-    pub(crate) fn purge_write(&self) -> Result<SessionWriteGuard<'_>, String> {
-        let mut guard = self.write()?;
-        if let CommitBackend::Native(fs) = &self.backend {
-            guard.owners = Self::exclude_writers(
-                fs.as_ref(),
-                &self.transcript,
-                self.presence
-                    .as_ref()
-                    .map(|presence| presence.path.as_path()),
-            )?;
-        }
-        Ok(guard)
-    }
-
-    pub(crate) fn purge_lock(
-        fs: &dyn FsBackend,
-        transcript: &Path,
-    ) -> Result<SessionPurgeGuard, String> {
-        let storage = Self::commit_lock(fs, transcript)?;
-        let owners = Self::exclude_writers(fs, transcript, None)?;
-        Ok(SessionPurgeGuard {
-            _storage: storage,
-            _owners: owners,
         })
     }
 
@@ -665,5 +636,26 @@ impl SessionWriter {
 
     pub(crate) fn deleted(&self) -> bool {
         self.deleted.load(Ordering::Acquire)
+    }
+}
+
+impl crate::session_cleanup::StorageHandles for SessionWriter {
+    fn try_retire(&self) -> bool {
+        self.retire();
+        // The operation barrier covers transcript, attachments, compaction and
+        // completion writes. History also has readers that retain its log FD.
+        let Ok(_writes) = self.writes.try_lock() else {
+            return false;
+        };
+        let Ok(mut history) = self.history.try_lock() else {
+            return false;
+        };
+        let Ok(mut native) = self.native.try_lock() else {
+            return false;
+        };
+        drop(history.take());
+        drop(native.legacy_owner.take());
+        drop(native.presence.take());
+        true
     }
 }

@@ -3209,7 +3209,7 @@ mod tests {
         let root: Value = serde_json::from_str(&contents).expect("settings json");
         root.get("enabledPlugins")
             .and_then(Value::as_object)
-            .map(|enabled_plugins| {
+            .map_or_default(|enabled_plugins| {
                 enabled_plugins
                     .iter()
                     .map(|(plugin_id, value)| {
@@ -3220,7 +3220,6 @@ mod tests {
                     })
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     fn load_structured_enabled_plugins(path: &Path) -> BTreeMap<String, bool> {
@@ -3230,7 +3229,7 @@ mod tests {
             .and_then(Value::as_object)
             .and_then(|plugins| plugins.get("enabled"))
             .and_then(Value::as_object)
-            .map(|enabled_plugins| {
+            .map_or_default(|enabled_plugins| {
                 enabled_plugins
                     .iter()
                     .map(|(plugin_id, value)| {
@@ -3243,7 +3242,6 @@ mod tests {
                     })
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     #[test]

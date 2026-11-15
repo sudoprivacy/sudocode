@@ -5,9 +5,12 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
 import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
-import { shutdownCommand } from './lifecycle';
-import { runCodexEnrollment, prepareCodexEnrollment } from './codexEnrollment';
+import { installCommandShutdownSignals } from './lifecycle';
+import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from './codexEnrollment';
 import { installCodexMcp } from './codexSetup';
+import { captureReceiverOwner } from './receiverOwner';
+import { waitForClaudeWake } from './claudeWake';
+import { claudeWakeSpool, joinsAgentNetwork, readClaudeAutojoinConfig, runClaudeMcp } from './claudeAutojoin';
 
 interface Manifest {
   sourceCommit: string;
@@ -40,6 +43,7 @@ function verify(): void {
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals:true, options: {
     config: { type: 'string' }, help: { type: 'boolean' }, version: { type: 'boolean' },
+    'capture-receiver-owner': { type: 'string' },
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
@@ -51,12 +55,14 @@ async function main(): Promise<void> {
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
-    'enroll-codex': {type:'boolean'},
+    'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
+    'claude-wake': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
+      + 'scode-acp-bridge --capture-receiver-owner PID  (read-only Windows identity; place once in private config receiverOwner)\n'
       + 'scode-acp-bridge --verify | --version\n'
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
       + 'scode-acp-bridge --init-codex --config FILE --native-codex EXECUTABLE --enrollment JSON_ARGV --peers JSON_NAMES [--port 23262]\n'
@@ -65,10 +71,13 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
+      + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
+      + 'scode-acp-bridge --claude-wake --config FILE  (Claude Code asyncRewake hook: wait for spooled peers, exit 2 to wake)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'
       + 'scode-acp-bridge --prepare-codex-owner --config FILE  (prepare Windows current-user task; does not register/start it)\n'
       + 'scode-acp-bridge --enroll-codex --config OWNER_GRANT  (operator adapter, public JSON stdin)\n'
+      + 'scode-acp-bridge --refresh-codex-profiles --config OWNER_GRANT  (republish enrolled actors\' profiles under the current launch policy)\n'
       + 'scode-acp-bridge --init-codex-operator --config FILE --nexus-operator JSON_ARGV --scode-argv JSON_ARGV [--scode-env JSON_OBJECT]\n'
       + 'Uses the shared scode ACP/MCP implementation; no Hydra application, tmux or Nexus daemon is started.');
     return;
@@ -78,6 +87,11 @@ async function main(): Promise<void> {
     return;
   }
   if (values.verify) { verify(); return; }
+  if (values['capture-receiver-owner'] !== undefined) {
+    if (Object.keys(values).some(key => key !== 'capture-receiver-owner')) throw new Error('Select one capture mode');
+    console.log(JSON.stringify(await captureReceiverOwner(Number(values['capture-receiver-owner']))));
+    return;
+  }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');
   if(values['install-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','install-codex','command-entry'].includes(key)))throw new Error('Select one installation mode');
@@ -101,9 +115,35 @@ async function main(): Promise<void> {
     return;
   }
   if(values['nexus-operator']||values['scode-argv']||values['scode-env'])throw new Error('Operator initializer fields require --init-codex-operator');
+  if(values['refresh-codex-profiles']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','refresh-codex-profiles'].includes(key)))throw new Error('--refresh-codex-profiles takes only --config');
+    const refreshed=refreshCodexProfiles(values.config);
+    for(const row of refreshed)console.log(JSON.stringify(row));
+    if(refreshed.some(row=>row.outcome==='refused'))process.exitCode=1;
+    return;
+  }
   if(values['enroll-codex']){
     if(Object.entries(values).some(([key,value])=>value!==undefined && !['config','enroll-codex'].includes(key)))throw new Error('Select one operator enrollment mode');
     await runCodexEnrollment(values.config);return;
+  }
+  if(values['claude-wake']){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude-wake'].includes(key)))throw new Error('--claude-wake takes only --config');
+    const raw=JSON.parse(fs.readFileSync(values.config,'utf8'));
+    // An autojoin config names the session's spool from the hook input; a
+    // fixed-session config names its one spool directly.
+    const autojoin=raw?.mode==='claude-autojoin'?readClaudeAutojoinConfig(values.config):undefined;
+    // A session that runs without an Agent has no spool to wait on.
+    if(autojoin&&!joinsAgentNetwork(process.env))return;
+    const spool=autojoin
+      ? claudeWakeSpool(autojoin,String(JSON.parse(await hookInput()||'{}').session_id??''))
+      : raw?.claudeChannel?.wakeSpool;
+    if(typeof spool!=='string')throw new Error('--claude-wake requires claudeChannel.wakeSpool or a claude-autojoin --config');
+    process.exitCode=await waitForClaudeWake(spool);return;
+  }
+  if(values.claude){
+    if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude'].includes(key)))throw new Error('--claude takes only --config');
+    installCommandShutdownSignals();
+    await runClaudeMcp(values.config);return;
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
@@ -145,13 +185,23 @@ async function main(): Promise<void> {
   if (values.scode || values.workspace || values['session-id']) throw new Error('init fields require --init');
   // The standalone package changes only the launch surface. Ownership, policy,
   // wire handling and callback behavior stay in the existing shared host.
-  for (const [signal, exit] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
-    process.once(signal, () => { void shutdownCommand().finally(() => process.exit(exit)); });
-  }
+  installCommandShutdownSignals();
   if(values.codex && values['codex-owner'])throw new Error('Select one Codex entry mode');
   if(values['codex-owner'])await runCodexMcpOwner(values.config);
   else if(values.codex)await runCodexMcp(values.config,__filename);
   else await runScodeMcp(values.config);
+}
+
+/** Claude Code writes the hook's JSON input to stdin and closes it. */
+function hookInput(): Promise<string> {
+  if (process.stdin.isTTY) return Promise.resolve('');
+  return new Promise((resolve, reject) => {
+    let text = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { text += chunk; });
+    process.stdin.once('end', () => resolve(text));
+    process.stdin.once('error', reject);
+  });
 }
 
 void main().catch(error => { console.error(String(error)); process.exitCode = 1; });

@@ -14,7 +14,7 @@ configured target. The scode and native workspaces need not be identical.
 ## Ownership and delivery
 
 For each admitted peer message, one bounded native stdio producer performs
-only initialize, complete empty `thread/loaded/list`, `thread/queue/add`, then
+only initialize, complete empty `thread/loaded/list`, `thread/queue/addOnce`, then
 another complete empty inventory check. It checks notifications through EOF,
 refuses a loaded thread or client-action request, and must exit normally to
 produce a queued receipt. It never calls start, resume, fork, turn/start or steer.
@@ -23,8 +23,8 @@ frontend and Node are not controlled by this adapter.
 
 The original native runtime owns queue scheduling. An idle loaded target can
 start the queued message; an active target waits for its native queue policy.
-This is queued **UserInput**, with the same explicit peer-data wrapper as active
-socket steering. It is not the idle socket's namespaced `toolOutput` contract.
+This is queued **UserInput**, with the same explicit peer-data wrapper used by
+the socket callback. Neither transport steers an active turn.
 It cannot grant approvals or alter the existing turn's policy.
 
 Both transports share one SID/peer filter, bounded serial delivery lane and
@@ -35,10 +35,12 @@ events with identical bodies are not deduplicated by a content hash.
 A `queued` record confirms the real queue receipt, not a read or native turn
 acceptance. After possible submission, cancellation, malformed/lost responses,
 RPC errors, late producer loading and forced cleanup are **Unknown**. Available
-queue/event/process evidence is retained. No automatic resend or transport
-fallback occurs. Before submission, a local configuration or producer admission
-failure is recorded as not sent. Operator recovery must inspect the original
-event; an absent queue entry does not establish that it was never consumed.
+queue/event/process evidence is retained. The durable callback retries the same
+logical event with backoff; `addOnce` atomically returns its original acceptance
+without adding another row, even after dispatch. An absent queue entry alone is
+not evidence of non-delivery. A server lacking `addOnce` refuses the method and
+keeps the inbox pending; no ordinary-add or turn/start fallback is allowed.
+A local producer/configuration failure remains not sent. No target is loaded.
 
 ## Actual native acceptance
 
@@ -59,8 +61,9 @@ clean source-bound offline runtime outside the checkout.
 
 The loss fixture wraps a real producer, drops its actual committed queue reply,
 proves its inventory remains empty and lets it exit. The shared callback must
-record Unknown; the original target alone consumes one event, with another
-native scheduling interval observed for no automatic replay. This relay is test
+record Unknown, retry the same ID, and obtain the durable receipt; the original
+target consumes one event despite two submissions. Another native scheduling
+interval observes that no extra turn begins. This relay is test
 instrumentation and is never installed as the production producer.
 
 These fixtures do not prove Node authentication, Windows behavior before the

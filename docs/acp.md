@@ -159,6 +159,11 @@ Every request includes `sessionId` and an `action`:
 `steer` allows delivery at the next model boundary within the active turn.
 `queue` waits for the current turn to end. These actions do not interrupt a
 running tool to inject text. Idle input starts a new turn automatically.
+Background and sub-agent notifications on this path follow the `steer` rule:
+one that arrives while a turn is running is delivered at that turn's next
+model boundary, and otherwise it is queued and starts the next turn, as in
+the CLI. Journaled completions (`taskCompletions`, `subagentCompletions`,
+below) still deliver only after the parent turn commits.
 Cancellation through `session/cancel` always remains available and pauses
 unapplied input; an explicit human steer or flush resumes delivery. Delivery
 does not add a mandatory instruction to abandon the model's existing work.
@@ -299,18 +304,35 @@ input. Clients can use this metadata for their own message presentation.
 
 ### Client-owned peer input (`clientCapabilities._meta.sudocode.peerInput`)
 
-A client that is itself the agent its peers address declares
-`clientCapabilities._meta.sudocode.peerInput = { "version": 1 }`; scode echoes
-it in `initialize.result._meta.sudocode.peerInput`. A peer message for one of
-its sessions then arrives as the extension notification
-`_sudocode/session/peer_message` with `{ "sessionId", "text", "body",
-"sudocode": { "a2a": { "from", "kind", "verified", "summary"? } } }`, where `text` is the
-same `<mailbox-message>` wrapper a session model reads. It starts no turn of
-the scode session, so one message has one respondent. The mailbox cursor
-advances once the notification is written to the transport; a closed client
-leaves the message unread for the next delivery. A client that needs this mode
-refuses a scode that does not echo it, because that scode would also answer
-the peer itself. Managed (hosted) sessions do not offer it.
+A durable client declares `clientCapabilities._meta.sudocode.peerInput =
+{ "version": 2 }` and requires version 2 in the initialize response. scode
+sends `_sudocode/session/peer_message` as a **request**, containing `sessionId`,
+`deliveryId`, `text`, `body` and `sudocode.a2a` (`from`, `kind`, `verified`,
+optional `summary` and `sendId`). For envelopes with a logical send ID,
+`deliveryId` remains the SHA-256 of the complete envelope. Legacy envelopes
+without a send ID also bind the transcript path and actual committed stream
+position (or absolute JSONL byte position). These positions come from the reader,
+never sender-supplied fields. Replaying a record after a lost ACK or restart
+retains its ID, while two identical legacy records at different positions have
+different IDs. Ambiguous framing or non-advancing positions refuse consumption.
+
+The client must durably store the original message before returning
+`{ "accepted": true, "sessionId": "…", "deliveryId": "…" }`. Only that exact
+matching response advances the mailbox cursor. Timeout, disconnect, refusal or
+an invalid response leaves the original envelope unread for receiver retry.
+The ten-second request timeout bounds each handoff; it does not expire the
+message. A receipt means custody transfer, not a completed model turn.
+
+The SDK's Codex callback uses a private disk inbox, stable downstream IDs and
+`thread/queue/addOnce`; lost responses can be retried without duplicate enqueue.
+A full or unwritable inbox refuses acceptance so the server retains the message.
+No scode model turn runs for client-owned peer input. Sender policy remains in
+force, and the envelope is peer data rather than user authority.
+
+Version 1 remains available to notification-only clients: its cursor advances
+when the notification is written to the transport, with no durable downstream
+acceptance guarantee. The Codex bridge requires v2 and does not silently fall
+back. Hosted sessions do not offer client-owned peer input.
 
 ### Direct A2A requests
 
@@ -449,6 +471,30 @@ identity and authorization when routing this request. A missing session is an
 error. Disconnects or unsupported hosts do not establish that an Agent is
 offline. Counts and foreground state are observations of independently moving
 work, not a grant of human control; use the pause/fence protocol for takeover.
+
+The `agent_list` tool also exposes `runtime` on observed instance rows and
+`runtime_discovery` on its result. Several rows can have the same Agent name
+or SID. Only the current running instance is excluded, using its registry
+scope and registration incarnation. SID and operating-system PID are
+diagnostic fields; neither is an instance identity or an authorization grant.
+
+Each observation separates `presence` (`online` or `unknown`) from
+`availability` (`fresh`, `stale`, `unsupported`, or `unavailable`). Only fresh
+facts include an `update`; stale work is never rendered as idle. Heartbeats
+can confirm attendance while the foreground and counts remain unknown.
+`activeOnly` retains positively online peer instances and active workers;
+`unknown_instances` and unavailable scopes retain incomplete coverage even
+when that filter returns no rows. An incomplete empty result does not prove
+that every Agent is offline.
+
+Standalone hosts expose weak engine readers through a process-owned local
+directory. Its private filesystem entries contain routing and read-only
+connection material, never mutable activity or session output. Native
+ownership release retires a crashed process's route. A selected Nexus node
+uses its existing authenticated client and scoped registry instead, with no
+disk-namespace fallback. Cohosted engines bind the same facts reader directly
+to their existing managed registry instance. All three paths consume the
+engine lifecycle and task registry used by `_sudocode/session/status`.
 
 ### Closing a peer session
 
@@ -892,7 +938,15 @@ the `session/load` request.
 is keyed by its workspace and the persisted `workspace_root` is validated on
 load, so loading a session id from another directory is rejected. Continuing
 a conversation in a new directory is a fork, not a load — see `forkFrom`
-below. `session/load` does not currently replay the history to the client as
+below.
+
+`sessionId` must be the exact id a `session/new` returned. CLI aliases such as
+`latest` and file paths are not ids and fail with `invalid_params` (-32602).
+A well-formed id that this workspace never persisted fails with
+`resource_not_found` (-32002) and `data: {"sessionId": <requested id>}`; any
+other load failure (an unreadable transcript, a workspace mismatch, a
+transcript carrying a different id) is an internal error. No failure creates a
+session. `session/load` does not currently replay the history to the client as
 `session/update` notifications; the client is expected to keep its own copy
 of the conversation.
 
@@ -1163,19 +1217,22 @@ creates a journal. Use that exact reference with subsequent operations:
   execution or remove unknown execution facts.
 - `purge {sessionId,cwd,storageRef,cleanupId}` requires no active prompt. Its ACK
   is `{disposition:"purged",cleanupId,storageRef}` after writing a minimal deleted
-  binding. It retires cached results and fences all late writes. It does not
-  remove the transcript, child manifests, project files or original full logs.
-  Native session deletion additionally removes its transcript and offloaded
-  tool results after committing the same tombstone.
+  binding. It retires cached results and fences all late protocol writes and
+  ACKs. Native storage automatically releases idle Session, completion and
+  response handles, drains already admitted I/O, and reclaims owned transcripts,
+  backups, response captures and offloaded tool results. OS process exit is not
+  required. Independent project files, Agent data and mailboxes remain intact.
 
 Transcript saves, compaction, journal writes, ACKs and deletion use the
 [same commit and context ownership contract](#durable-direct-sub-agent-completions-extension-v1).
-Purge checks other native transcript writers and completion context owners. It
-reports `session_writer_busy` while another writer is alive, including CLI
-instances that have no completion extension. Native writer presence is an OS
-lock; a crashed writer's free locator does not assert liveness. The committed
-SID tombstone fences subsequent transcript and journal writes. Context lock
-files retain stable paths for exclusion.
+Purge publishes the irreversible SID tombstone under the native commit barrier.
+Actual native locks prove I/O retirement before reclamation; a PID lookup or
+lease expiry is insufficient. Idle runtimes observe the same durable tombstone
+without waiting for new input. Late callbacks cannot recreate owned files.
+Older clients that retain their locks can defer reclamation until those handles
+close. Context lock files retain stable paths for exclusion, and the minimal
+deleted binding remains permanent. Hosted storage retains its capability refusal
+until equivalent storage ownership and drain are qualified.
 A temporary storage error retains the bounded exit snapshot for
 retry; a process loss before that snapshot was saved becomes
 `execution_unconfirmed`, even if its child later exits. Uncertain process creation

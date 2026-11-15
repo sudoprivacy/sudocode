@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
-  realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+  realpathSync, unlinkSync, writeSync } from 'node:fs';
+import { rename } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import * as path from 'node:path';
 import type { ScodeAcpConfig } from './scodeAcp';
 
@@ -96,9 +98,17 @@ export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
   return profile;
 }
 
-export function writeBinding(directory: string, binding: CodexBinding, create = false): void {
+export async function writeBinding(directory: string, binding: CodexBinding, create = false): Promise<void> {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, `${binding.threadId}.json`);
+  const original = create ? undefined : readFileSync(file);
+  if (original) {
+    const previous = JSON.parse(original.toString('utf8')) as CodexBinding;
+    if (['version','origin','threadId','actor','operationId','workspace','canonicalWorkspace']
+      .some(key => previous[key as keyof CodexBinding] !== binding[key as keyof CodexBinding])) {
+      throw new Error('Durable binding identity changed before local publication');
+    }
+  }
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = openSync(temporary, 'wx', 0o600);
   try {
@@ -106,7 +116,27 @@ export function writeBinding(directory: string, binding: CodexBinding, create = 
     finally { closeSync(handle); }
     // Exclusive initial publication cannot overwrite an existing mapping.
     if (create) linkSync(temporary, file);
-    else renameSync(temporary, file);
+    else {
+      // Windows can temporarily deny replacement while another process holds
+      // the destination without delete sharing. Retry only publication of the
+      // same fsynced bytes, never enrollment, ACP or a native input operation.
+      // The sole owner still fences this file; changed bytes refuse recovery.
+      const deadline = performance.now() + 1000;
+      let firstError: unknown;
+      for (;;) {
+        if (!readFileSync(file).equals(original!)) {
+          throw new Error('Durable binding changed during local publication', {cause:firstError});
+        }
+        try { await rename(temporary, file); break; }
+        catch (error) {
+          firstError ??= error;
+          if (process.platform !== 'win32'
+              || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+              || performance.now() >= deadline) throw firstError;
+          await delay(Math.min(20, Math.max(1, deadline - performance.now())));
+        }
+      }
+    }
     if (create) unlinkSync(temporary);
     if (process.platform !== 'win32') {
       const parent = openSync(directory, 'r');
@@ -149,3 +179,64 @@ export function readBindings(directory: string): Map<string, CodexBinding> {
   }
   return result;
 }
+
+/** A native root that receives its own Agent: a Codex thread or a Claude Code session. */
+export interface NativeRoot { id: string; cwd: string; frontend: 'codex' | 'claude' }
+
+/** The enrollment authority's answer for one claim (see enrollCodexAgent). */
+export interface ProvisionedAgent { actor: string; configFile: string; workspaceBinding?: CodexWorkspaceBinding }
+
+/** Return the root's durable binding, persisting a new pending one first. A new
+ * actor is `<frontend>-<32 hex>`, the only names operator enrollment issues. */
+export async function claimBinding(directory: string, bindings: Map<string, CodexBinding>, root: NativeRoot): Promise<CodexBinding> {
+  const existing = bindings.get(root.id);
+  if (existing) return existing;
+  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: `${root.frontend}-${randomUUID().replaceAll('-', '')}`,
+    operationId: randomUUID(), threadId: root.id, workspace: root.cwd,
+    canonicalWorkspace: canonicalWorkspace(root.cwd), state: 'pending' };
+  // Persist the original operation BEFORE asking any enrollment authority.
+  await writeBinding(directory, binding, true);
+  bindings.set(root.id, binding);
+  return binding;
+}
+
+/** A binding loaded as `provisioning` belongs to an owner that stopped mid
+ * enrollment; its outcome is unknown to this owner, so it needs recovery. */
+export async function settleInterruptedBindings(directory: string, bindings: Map<string, CodexBinding>): Promise<void> {
+  for (const binding of bindings.values()) {
+    if (binding.state !== 'provisioning') continue;
+    binding.state = 'recovery_required';
+    await writeBinding(directory, binding);
+  }
+}
+
+/** Bring a binding to `ready` through its original operation. A failure the
+ * authority calls retryable (nothing issued, or a resumable issued operation)
+ * stays pending for the same operation; any other failure is
+ * recovery_required, so an uncertain issuance is never replayed or reminted. */
+export async function provisionBinding(directory: string, binding: CodexBinding, cwd: string,
+  resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<ProvisionedAgent>,
+  retryable: (error: unknown) => boolean): Promise<void> {
+  assertWorkspace(binding, cwd);
+  if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
+  if (binding.state !== 'pending') return;
+  binding.state = 'provisioning';
+  await writeBinding(directory, binding);
+  try {
+    const profile = await resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
+      operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
+    if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
+    binding.configFile = profile.configFile;
+    bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
+    binding.state = 'ready';
+    await writeBinding(directory, binding);
+  } catch (error) {
+    binding.state = retryable(error) ? 'pending' : 'recovery_required';
+    try { await writeBinding(directory, binding); }
+    catch (persistenceError) {
+      throw new AggregateError([error, persistenceError], 'Enrollment outcome and recovery-state persistence both failed', { cause: error });
+    }
+    throw error;
+  }
+}
+

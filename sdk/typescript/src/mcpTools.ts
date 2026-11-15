@@ -68,8 +68,8 @@ export function registerScodeMcpTools(server: McpServer,
     inputSchema:z.object({to:z.string().min(1),message:z.string(),summary:z.string().min(1)}).strict(),
   },async (input,extra) => external('send',input,extra,connection=>sendScodeMessage(connection,input)));
   server.registerTool('scode_agent_list',{
-    description:'Read the owned scode agent directory without model inference. Visibility does not prove a peer is online.',
-    inputSchema:z.object({activeOnly:z.boolean().optional()}).strict(),
+    description:'Read the owned scode agent directory without model inference: the peers this session can address. It does not report whether a peer is running.',
+    inputSchema:z.object({}).strict(),
   },async (input,extra) => external('agent_list',input,extra,connection=>listScodeAgents(connection,input)));
   server.registerTool('scode_status',{
     description:'Report bridge ownership and attachment state. Directory visibility does not establish connectivity.',inputSchema:{},

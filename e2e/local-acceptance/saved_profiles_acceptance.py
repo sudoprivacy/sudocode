@@ -55,7 +55,9 @@ def run(saved, policy_ref, profiles, refused_profiles, output):
     def copy_evidence(name):
         destination = output / name
         destination.mkdir()
-        for path in [envelope_path, receipt_path]:
+        # A version 2 receipt resolves its carried origins from envelopes.json.
+        stored = saved / "envelopes.json"
+        for path in [envelope_path, receipt_path] + ([stored] if stored.exists() else []):
             if path.is_symlink():
                 raise RuntimeError("Original evidence files must be regular files")
             shutil.copyfile(path, destination / path.name)
@@ -69,12 +71,12 @@ def run(saved, policy_ref, profiles, refused_profiles, output):
         return destination
 
     with helper.host_acceptance_lease(result, helper.value("rev-parse", "HEAD")):
-        reused, provenance, _ = resume(saved, "retained", profiles)
+        reused, provenance, _, _ = resume(saved, "retained", profiles)
         assert set(reused) == set(profiles), "Requested completed profiles require fresh execution under this policy"
         assert all(reused[name] == receipt["checks"][name] for name in profiles)
         result["retained"] = provenance
         if refused_profiles:
-            declined, _, _ = resume(saved, "changed-criteria", refused_profiles)
+            declined, _, _, _ = resume(saved, "changed-criteria", refused_profiles)
             assert not declined, "A profile with changed criteria inherited another profile's approval"
             result["changed_criteria_remain_required"] = refused_profiles
         result["different_head"] = reject("different head", lambda: resume(saved, "wrong-head", profiles, "0" * 40))
@@ -91,7 +93,7 @@ def run(saved, policy_ref, profiles, refused_profiles, output):
             for path in (tampered / profile).glob("*.log"):
                 path.write_bytes(path.read_bytes() + b"\nTAMPERED\n")
         result["changed_logs"] = reject("changed logs", lambda: resume(tampered, "wrong-logs", profiles))
-        partial, _, _ = resume(saved, "missing-profile", [*profiles, "unexecuted-profile"])
+        partial, _, _, _ = resume(saved, "missing-profile", [*profiles, "unexecuted-profile"])
         assert set(partial) == set(profiles) and "unexecuted-profile" not in partial
         result["unexecuted_profile_remains_required"] = True
     result.update(status="PASS", finished_at=datetime.now(timezone.utc).isoformat())

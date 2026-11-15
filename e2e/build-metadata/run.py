@@ -66,15 +66,26 @@ class Fixture:
         return self.git("rev-parse", "--short", "HEAD")
 
     def build(self, expected_count: int, expected_sha: str, verify_paths: bool = True) -> None:
-        self.command("cargo", "build", "--offline", "--jobs", "1", "-vv",
-                     "--manifest-path", str(self.package / "Cargo.toml"),
-                     "--target-dir", str(self.root / "target"))
-        counters = list((self.root / "target/debug/build").glob("metadata-fixture-*/out/count"))
-        assert len(counters) == 1, counters
-        count = int(counters[0].read_text(encoding="utf-8"))
+        messages = self.command("cargo", "build", "--offline", "--jobs", "1", "-vv", "--message-format=json",
+                                "--manifest-path", str(self.package / "Cargo.toml"),
+                                "--target-dir", str(self.root / "target"))
+        # Cargo names the build script's OUT_DIR in its JSON messages, fresh or rerun;
+        # the directory layout under target/ is internal and differs between releases.
+        # `-vv` interleaves the build script's own `[package] ...` lines on stdout.
+        out_dirs = {
+            message["out_dir"]
+            for message in (json.loads(line) for line in messages.splitlines() if line.startswith("{"))
+            if message.get("reason") == "build-script-executed" and "metadata-fixture" in message["package_id"]
+        }
+        assert len(out_dirs) == 1, out_dirs
+        out_dir = Path(out_dirs.pop())
+        count = int((out_dir / "count").read_text(encoding="utf-8"))
         assert count == expected_count, f"{self.root.name}: build script ran {count} times, expected {expected_count}"
-        output = counters[0].parent.parent / "output"
-        for line in output.read_text(encoding="utf-8").splitlines() if verify_paths else []:
+        # Cargo keeps the build script's stdout beside OUT_DIR: `output` before 1.100,
+        # `run/stdout` from 1.100 on.
+        records = [path for path in (out_dir.parent / "output", out_dir.parent / "run" / "stdout") if path.exists()]
+        assert len(records) == 1, f"no single build-script stdout record beside {out_dir}: {records}"
+        for line in records[0].read_text(encoding="utf-8").splitlines() if verify_paths else []:
             if line.startswith("cargo:rerun-if-changed="):
                 path = Path(line.split("=", 1)[1])
                 path = path if path.is_absolute() else self.package / path

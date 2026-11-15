@@ -14,7 +14,9 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -56,8 +58,13 @@ def wait_until(action, timeout=30):
 def nexus_proto_root():
     """Use the same resolved Nexus source as the workspace's typed client."""
     workspace = Path(__file__).resolve().parents[2] / 'rust'
+    # Only the host's graph. An offline resolve of every platform needs packages no
+    # build on this host fetched (Android-only crates, for one), so it fails on any
+    # runner whose registry cache holds just what its own builds downloaded.
+    host, = [line.split(': ', 1)[1] for line in subprocess.check_output(
+        ['rustc', '-vV'], cwd=workspace, text=True, timeout=30).splitlines() if line.startswith('host: ')]
     metadata = json.loads(subprocess.check_output(
-        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'],
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--filter-platform', host],
         cwd=workspace, text=True, encoding='utf-8', timeout=60))
     client, = [package for package in metadata['packages']
                if Path(package['manifest_path']).resolve()
@@ -119,6 +126,7 @@ def run(args, root):
     bootstrap = subprocess.Popen([str(args.daemon), '--bind-addr', bind_addr],
         env=native_env, stdout=daemon_log, stderr=subprocess.STDOUT)
     children = []
+    failure_snapshot_lock = threading.Lock()
     receipt = {'daemonSha256': sha(args.daemon), 'scodeSha256': sha(args.scode),
         'grpcurlSha256': sha(args.grpcurl), 'grpcurlVersion': grpcurl_version,
         'liveFleetTouched': False, 'haAccepted': False, 'domainJoinAccepted': False,
@@ -180,6 +188,24 @@ def run(args, root):
             cwd=root, stdin=subprocess.DEVNULL, capture_output=True, timeout=55)
         with (root / 'cli.log').open('ab') as output:
             output.write(result.stdout + result.stderr)
+        if (result.returncode == 0) != expected:
+            # Observe only after failure; keep recovery's original startup timing.
+            try:
+                import psutil
+                snapshot = dict(at=time.time(), bindAddr=bind_addr, endpoint=endpoint,
+                    cliExit=result.returncode, bootstrapExit=bootstrap.poll(),
+                    serviceDiscoveryPresent=(services / 'run/service.json').exists(),
+                    ownerLogPresent=(services / 'run/runtime.log').exists(),
+                    tcp=[dict(local=tuple(row.laddr), remote=tuple(row.raddr),
+                              status=row.status, pid=row.pid)
+                         for row in psutil.net_connections(kind='tcp')
+                         if (row.laddr and row.laddr.port == port)
+                         or (row.raddr and row.raddr.port == port)])
+                with failure_snapshot_lock:
+                    with (root / 'socket-failure-observations.jsonl').open('a', encoding='utf-8') as stream:
+                        stream.write(json.dumps(snapshot) + '\n')
+            except Exception as error:
+                print(f'TCP failure observation unavailable: {type(error).__name__}', file=sys.stderr)
         assert (result.returncode == 0) == expected, (result.stdout + result.stderr).decode(errors='replace')
         return json.loads(result.stdout) if expected else result
 
@@ -388,7 +414,8 @@ if __name__ == '__main__':
                 run(case, root)
             finally:
                 import shutil
-                for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'grpc-calls.jsonl', 'receipt.json']:
+                for name in ['bootstrap.log', 'cli.log', 'grpc-errors.log', 'grpc-calls.jsonl', 'receipt.json',
+                             'socket-failure-observations.jsonl']:
                     if (root / name).is_file():
                         shutil.copy2(root / name, case.artifacts / name)
                 # Keep the native child diagnostics too; otherwise a failed

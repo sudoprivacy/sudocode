@@ -36,6 +36,8 @@ use crate::tool_executor::{permission_policy, CliToolExecutor};
 /// A co-host's process directory does not identify a session. Its descriptor
 /// supplies the project and identity; resources are discovered in that project.
 pub struct HostContext {
+    /// Instance routing is supplied by the host; foreground facts stay in the seam.
+    pub runtime_observation: Option<Arc<dyn runtime::runtime_status::RuntimeObservationHost>>,
     /// Co-hosted model traffic must use the session's Nexus filesystem.
     pub require_model_mount: bool,
     /// Filesystem the file tools read and write through, and the SSOT for the
@@ -107,8 +109,16 @@ impl HostContext {
         // afterwards would leave the kernel's view of who is writing and the
         // prompt's claim about who this is free to disagree.
         let agent_name = agent_name_under(&cwd);
-        let fs = crate::local_kernel::boot_session_fs(&cwd, &extra_roots, &agent_name)?;
+        let (fs, kernel) = crate::local_kernel::boot_session_host(&cwd, &extra_roots, &agent_name)?;
+        let runtime_observation = match crate::peer::attach(&agent_name) {
+            crate::peer::Peer::Disk(_) => Some(Arc::new(
+                crate::local_runtime::LocalRuntimeHost::new(kernel, &agent_name)?,
+            )
+                as Arc<dyn runtime::runtime_status::RuntimeObservationHost>),
+            crate::peer::Peer::Node(node) => Some(node.observation_host(kernel)),
+        };
         Ok(Self {
+            runtime_observation,
             fs,
             // The CLI's three roots are one directory: what it reads its config
             // from, what its tools address, and where its shell runs.
@@ -120,38 +130,42 @@ impl HostContext {
         })
     }
 
-    /// The co-host's shape: an agent inside `nexusd-cluster`, on the daemon's
-    /// kernel.
+    /// A managed agent's shape: bound by its host registry, on the one backend
+    /// its [`ManagedRuntimeContext`](crate::managed_context::ManagedRuntimeContext)
+    /// resolved (the daemon's kernel when co-hosted).
     ///
     /// Deliberately adjacent to [`Self::for_cli_session`]: the difference between
-    /// the two hosts is the difference between these two functions, and a reader
-    /// who has to open two files to find it will not find it. Everything either
-    /// host supplies is a VALUE here — no engine behaviour branches on which one
-    /// is running.
+    /// the hosts is the difference between these functions, and a reader who has
+    /// to open two files to find it will not find it. Everything either host
+    /// supplies is a VALUE here — no engine behaviour branches on which one is
+    /// running.
     ///
-    /// * `fs` — the daemon's kernel, so the agent's writes pass the hooks, the
-    ///   audit trail and the permission checks that co-hosting exists for.
-    /// * `config_root` — the daemon's own directory. A daemon reads its
+    /// * `fs` — the context's backend, so the agent's writes pass the daemon's
+    ///   hooks, audit trail and permission checks, and the model is reached only
+    ///   through its mount (`require_model_mount`).
+    /// * `config_root` — the host process's own directory. A daemon reads its
     ///   configuration before it can serve the VFS that configuration describes.
-    /// * `agent_name` / `mailbox` — from the descriptor, which is the SSOT for
-    ///   who this agent is. Deriving either here would let `send` address one
-    ///   identity while the agent receives on another.
-    /// * `shell_root` — the kernel-resolved local project when available;
-    ///   otherwise a per-agent host directory for VFS-only workspaces.
-    pub fn for_cohost_agent(
-        fs: Arc<dyn runtime::FsBackend>,
-        agent_name: &str,
-        mailbox: Arc<runtime::mailbox::Mailbox>,
-        shell_root: Option<PathBuf>,
-    ) -> io::Result<Self> {
-        let shell_root = shell_root.unwrap_or_else(|| cohost_shell_root(agent_name));
+    /// * `agent_name` / `mailbox` — from the registry binding, which is the SSOT
+    ///   for who this agent is. Deriving either here would let `send` address
+    ///   one identity while the agent receives on another. The mailbox uses the
+    ///   SAME backend as the file tools: an absolute A2A path bypasses the
+    ///   workspace root, so sender and receiver are two views of one object.
+    /// * `shell_root` — the native directory backing the workspace when there
+    ///   is one; otherwise a per-agent host directory for VFS-only workspaces.
+    pub fn for_managed(ctx: &crate::managed_context::ManagedRuntimeContext) -> io::Result<Self> {
+        let name = &ctx.desc.name;
+        let shell_root = ctx
+            .shell_root
+            .clone()
+            .unwrap_or_else(|| cohost_shell_root(name));
         std::fs::create_dir_all(&shell_root)?;
         Ok(Self {
-            fs,
+            runtime_observation: ctx.runtime_observation.clone(),
+            fs: Arc::clone(&ctx.fs),
             shell_root,
             config_root: std::env::current_dir()?,
-            agent_name: Some(agent_name.to_string()),
-            mailbox: Some(mailbox),
+            agent_name: Some(name.clone()),
+            mailbox: Some(ctx.mailbox()),
             require_model_mount: true,
         })
     }
@@ -821,6 +835,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry.clone(),
         mcp_state.clone(),
     );
+    tool_executor.set_runtime_observation(host.runtime_observation.clone());
     // Hand the dispatcher this session's peer mailbox, so a recipient name means
     // the same destination to the `send` tool, to a sub-agent reporting back,
     // and to the receiver tailing its own inbox.

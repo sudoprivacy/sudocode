@@ -237,6 +237,10 @@ if __name__ == "__main__":
     elif arguments.worker:
         worker(data, arguments.worker)
     else:
+        # A shell starts a background job (`cmd &`) with SIGINT ignored, and
+        # Python then never raises KeyboardInterrupt. Interruption must still
+        # cancel both owned branches, so handle SIGINT like SIGTERM.
+        signal.signal(signal.SIGINT, interrupted)
         signal.signal(signal.SIGTERM, interrupted)
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, interrupted)

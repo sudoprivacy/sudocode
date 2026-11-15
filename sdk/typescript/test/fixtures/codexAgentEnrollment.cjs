@@ -6,9 +6,15 @@ let input='';
 process.stdin.on('data',chunk=>{input+=chunk;});
 process.stdin.on('end',()=>{
   const claim=JSON.parse(input);
+  // While `outage` exists the Node is unreachable: the adapter submits nothing.
+  if(fs.existsSync(path.join(root,'outage'))){
+    process.stdout.write(JSON.stringify({outcome:'not_submitted',detail:'MintAgent connect failed'})+'\n');
+    return;
+  }
   const file=path.join(root,claim.actor+'.profile');
   fs.writeFileSync(file,JSON.stringify({
-    scodeArgv:[process.execPath,path.join(__dirname,'scode-direct-a2a-agent.mjs')],
+    // An optional second argument selects the fixture scode scenario.
+    scodeArgv:[process.execPath,path.join(__dirname,'scode-direct-a2a-agent.mjs'),...process.argv.slice(3,4)],
     workspace:claim.workspace,acpSessionId:'fixture-'+claim.operationId,closeTimeoutMs:300,
     env:{HYDRA_DIRECT_FIXTURE_JOURNAL:path.join(root,'acp.jsonl'),SCODE_DIRECT_FIXTURE_ACTOR:claim.actor},
   }),{flag:'wx',mode:0o600});

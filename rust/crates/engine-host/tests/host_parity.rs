@@ -20,10 +20,11 @@
 
 use std::sync::Arc;
 
+use engine_host::managed_context::ManagedRuntimeContext;
 use engine_host::HostContext;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
-use runtime::{FsBackend, KernelFsBackend, ManagedRoot};
+use runtime::{FsBackend, ManagedRoot};
 
 const COHOST_AGENT: &str = "parity-agent";
 const COHOST_WORKSPACE: &str = "/proc/7/workspace";
@@ -51,23 +52,21 @@ fn sandbox(name: &str) -> tempfile::TempDir {
 /// The co-host's context, built through the production constructor.
 fn cohost() -> HostContext {
     let kernel = Arc::new(Kernel::new());
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-        Arc::clone(&kernel),
+    // A descriptor with no repository mounts: a VFS-only workspace at
+    // `/proc/<pid>/workspace`, so pid 7 yields COHOST_WORKSPACE.
+    let context = ManagedRuntimeContext::cohost(
+        &kernel,
         &AgentDescriptor {
-            pid: "pid-cohost".to_string(),
+            pid: "7".to_string(),
             name: COHOST_AGENT.to_string(),
             owner_id: "test-owner".to_string(),
             zone_id: "root".to_string(),
             ..AgentDescriptor::default()
         },
-        COHOST_WORKSPACE.to_string(),
-    ));
-    let mailbox = Arc::new(runtime::mailbox::Mailbox::daemon_absolute(
-        Arc::clone(&fs),
-        COHOST_AGENT.to_string(),
-    ));
-    HostContext::for_cohost_agent(fs, COHOST_AGENT, mailbox, None)
-        .expect("build the co-host context")
+        false,
+    )
+    .expect("resolve the co-host context");
+    HostContext::for_managed(&context).expect("build the co-host context")
 }
 
 #[test]

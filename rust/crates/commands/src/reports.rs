@@ -590,14 +590,12 @@ pub fn format_status_report(
             "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial status\n  Details          {err}\n  Hint             `scode doctor` classifies config parse errors; fix the listed field and rerun"
         ));
     }
-    let model_source_line = provenance
-        .map(|p| match p.raw {
-            Some(raw) if raw != model => {
-                format!("\n  Model source     {} (raw: {raw})", p.source)
-            }
-            _ => format!("\n  Model source     {}", p.source),
-        })
-        .unwrap_or_default();
+    let model_source_line = provenance.map_or_default(|p| match p.raw {
+        Some(raw) if raw != model => {
+            format!("\n  Model source     {} (raw: {raw})", p.source)
+        }
+        _ => format!("\n  Model source     {}", p.source),
+    });
     blocks.extend([
         format!(
             "{status_line}

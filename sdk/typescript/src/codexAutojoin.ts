@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { connectCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
+import { connectRecoveringCodex, CodexRequestError, type CodexConnection, type CodexConnectionConfig } from './codexConnection';
 import { createCodexCallback, createCodexNodeCallback, type CodexCallback } from './codexCallback';
-import { connectScode, type ScodeConnection, type ScodePeerMessage } from './scodeAcp';
+import { connectScode, ScodeCleanupUnknownError, type ScodeConnection, type ScodePeerMessage } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
-import { assertWorkspace, bindProfile, boundProfile, canonicalWorkspace, identifier, readBindings,
-  readProfile, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
+import type { ScodeReceiveHealth } from './scodeReceiveHealth';
+import type { CodexDeliveryStatus } from './codexInbox';
+import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
+  settleInterruptedBindings, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
 /** The operator's existing enrollment path owns authorization and credentials.
@@ -19,8 +20,17 @@ export interface CodexAgentProfile {
 }
 
 /** Only the authorized adapter can attest that no issuance was submitted. */
+/** An enrollment that returned no profile. `not_submitted`: nothing was issued.
+ * `resumable`: the credential was issued and the operator resumes the same
+ * operation from its durable records. `unknown`: an issuance may have been sent
+ * without a receipt; only operator recovery resolves it. */
 export class CodexEnrollmentError extends Error {
-  constructor(readonly outcome: 'not_submitted' | 'unknown', detail: string) {super(detail);}
+  constructor(readonly outcome: 'not_submitted' | 'resumable' | 'unknown', detail: string) {super(detail);}
+}
+
+/** The same operation may run again: nothing was issued, or the operator resumes it. */
+export function retryableEnrollment(error: unknown): boolean {
+  return error instanceof CodexEnrollmentError && error.outcome !== 'unknown';
 }
 
 export interface CodexRootInventory {
@@ -68,7 +78,8 @@ export interface CodexAutojoin {
   readonly canRetire: boolean;
   /** Host-supplied MCP metadata selects an already loaded root, never arguments. */
   connectionFor(threadId: unknown): ScodeConnection;
-  status(): Array<{threadId: string; actor: string; state: string; error?: string}>;
+  status(): Array<{threadId: string; actor: string; state: string; error?: string;
+    receiver?: {pid:number; executable:string; sessionId:string; input:ScodeReceiveHealth}; delivery?:CodexDeliveryStatus}>;
   refresh(): Promise<void>;
   close(): Promise<void>;
 }
@@ -98,84 +109,71 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   const owners = new Map<string, Owner>();
   let closed = false;
   let chain = Promise.resolve();
+  let refreshing: Promise<void> | undefined;
   let native: CodexConnection;
   let inventoryError: string | undefined;
   const report = (error: unknown) => { try { config.onError?.(error); } catch { /* Observer only. */ } };
   const save = (binding: Binding, create = false) => writeBinding(config.stateDirectory, binding, create);
-  for (const binding of bindings.values()) {
-    if (binding.state === 'provisioning') {
-      binding.state = 'recovery_required';
-      save(binding);
-    }
-  }
+  await settleInterruptedBindings(config.stateDirectory, bindings);
   const stopOwner = async (owner: Owner) => {
-    await owner.callback?.close();
-    await owner.connection?.close();
+    const results = await Promise.allSettled([owner.callback?.close(), owner.connection?.close()]);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   };
   const open = async (thread: Thread) => {
-    let binding = bindings.get(thread.id);
-    if (!binding) {
-      binding = { version: 2, origin: 'enrollment', actor: `codex-${randomUUID().replaceAll('-', '')}`,
-        operationId: randomUUID(), threadId: thread.id, workspace: thread.cwd,
-        canonicalWorkspace: canonicalWorkspace(thread.cwd), state: 'pending' };
-      // Persist the original operation BEFORE asking any enrollment authority.
-      save(binding, true);
-      bindings.set(thread.id, binding);
-    }
+    const binding = await claimBinding(config.stateDirectory, bindings, { id: thread.id, cwd: thread.cwd, frontend: 'codex' });
     const owner: Owner = { binding };
     owners.set(thread.id, owner);
+    const pending: Array<{ message: ScodePeerMessage; resolve(): void; reject(error: unknown): void }> = [];
     try {
-      assertWorkspace(binding,thread.cwd);
-      if (binding.state === 'recovery_required') throw new Error('Prior enrollment outcome is unknown; operator recovery of the original actor/operation is required');
-      if (binding.state === 'pending') {
-        binding.state = 'provisioning';
-        save(binding);
-        try {
-          const profile = await config.resolveAgent(Object.freeze({ version: 1, actor: binding.actor,
-            operationId: binding.operationId, threadId: binding.threadId, workspace: binding.workspace }));
-          if (profile.actor !== binding.actor || !path.isAbsolute(profile.configFile)) throw new Error('Enrollment returned another actor or a nonabsolute profile');
-          binding.configFile = profile.configFile;
-          bindProfile(binding, readProfile(profile.configFile), profile.workspaceBinding);
-          binding.state = 'ready';
-          save(binding);
-        } catch (error) {
-          binding.state = error instanceof CodexEnrollmentError && error.outcome === 'not_submitted' ? 'pending' : 'recovery_required';
-          if(binding.state==='pending')owner.retryAt=performance.now()+2000;
-          save(binding);
-          throw error;
-        }
+      try {
+        await provisionBinding(config.stateDirectory, binding, thread.cwd, claim => {
+          if (closed) throw new CodexEnrollmentError('not_submitted', 'Owner closed before enrollment submission');
+          return config.resolveAgent(claim);
+        }, retryableEnrollment);
+      } catch (error) {
+        if (binding.state === 'pending') owner.retryAt = performance.now() + 2000;
+        throw error;
       }
+      if (closed) return;
       const profile = boundProfile(binding);
       let callback: CodexCallback | undefined;
-      const pending: ScodePeerMessage[] = [];
-      let overflow = false;
+
       // Codex is the agent its peers address: the owned scode hands each peer
       // message over instead of answering it with its own model.
       const connection = await connectScode({ ...profile, onPeerMessage: message => {
-        if(callback)callback.receive(message);
-        else if(pending.length<64)pending.push(message);else overflow=true;
+        if (!native.connected) throw new Error('Native durable ingress unavailable; retain delivery upstream');
+        if(callback) { callback.receive(message); return; }
+        if(pending.length>=64) throw new Error('ACP identity verification pending; retain delivery upstream');
+        return new Promise<void>((resolve,reject) => pending.push({message,resolve,reject}));
       } });
       owner.connection = connection;
       // Native audit proves which Agent was actually loaded. A copied profile
       // cannot quietly attach every root to the same credential/receiver.
       const result = await listScodeAgents(connection);
       requireScodeNodeIdentity(connection,result,binding.actor);
-      if(overflow)throw new Error('ACP input overflowed while verifying the original Node identity');
       const callbackConfig={threadId:thread.id,peers:config.peers,
         log:path.join(config.stateDirectory,`${thread.id}.callback.jsonl`)};
       callback = config.peerPolicy==='node-namespace'
         ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
         : createCodexCallback(native.request,callbackConfig,connection.sessionId);
       owner.callback = callback;
-      for(const message of pending)callback.receive(message);
+      for(const item of pending.splice(0)) {
+        try { callback.receive(item.message); item.resolve(); } catch(error) { item.reject(error); }
+      }
       owner.verified = true;
       void connection.exited.then(exit => {
-        owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; no automatic task or send replay`;
+        if (closed || owners.get(thread.id) !== owner) return;
+        owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; recovering the same session`;
+        owner.retryAt = performance.now() + 5000;
       });
       if (closed) await stopOwner(owner);
     } catch (error) {
       owner.error = String(error);
-      await stopOwner(owner).catch(report);
+      for(const item of pending.splice(0)) item.reject(error);
+      let cleanupKnown = !(error instanceof ScodeCleanupUnknownError);
+      try { await stopOwner(owner); } catch (cleanupError) { cleanupKnown = false; report(cleanupError); }
+      if (cleanupKnown && binding.state === 'ready') owner.retryAt = performance.now() + 5000;
       report(error);
     }
   };
@@ -193,6 +191,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     return loaded;
   };
   const refresh = () => {
+    if (refreshing) return refreshing;
     chain = chain.then(async () => {
       if (closed) return;
       const loaded = await loadedIds();
@@ -224,7 +223,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       const qualified = new Set(observed.filter(thread=>thread.qualified).map(thread=>thread.threadId));
       for (const [id, owner] of owners) {
         if (!loaded.has(id) || (owner.retryAt!==undefined && performance.now()>=owner.retryAt)) {
-          owners.delete(id); await stopOwner(owner);
+          await stopOwner(owner); owners.delete(id);
         }
       }
       for (const [id,thread] of threads) {
@@ -232,7 +231,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         const owner = owners.get(id);
         if (owner?.error) continue;
         if (!qualified.has(id)) {
-          if (owner) {owners.delete(id);await stopOwner(owner);}
+          if (owner) {await stopOwner(owner);owners.delete(id);}
         } else if (owner) {
           try {
             assertWorkspace(owner.binding,thread.cwd);
@@ -247,9 +246,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       try {void Promise.resolve(config.onInventory?.({loaded:[...loaded],roots:observed})).catch(report);}
       catch (error) {report(error);}
     }).catch(error=>{inventoryError=String(error);report(error);});
-    return chain;
+    refreshing = chain.finally(() => { refreshing = undefined; });
+    return refreshing;
   };
-  native = await connectCodex(config.native, notification => {
+  native = await connectRecoveringCodex({...config.native, requireDurableQueue:true}, notification => {
     if (['thread/started', 'thread/closed'].includes(notification.method)) void refresh();
   });
   const timer = setInterval(() => { void refresh(); }, config.pollIntervalMs ?? 1000);
@@ -262,14 +262,14 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     await chain;
     try {
       const results = await Promise.allSettled([...owners.values()].map(stopOwner));
-      await native.close();
+      results.push(...await Promise.allSettled([native.close()]));
       const error = results.find(result => result.status === 'rejected');
       if(error?.status==='rejected')throw error.reason;
     } finally {
       try {config.onClosed?.();} catch(error) {report(error);}
     }
   })();
-  void native.exited.then(()=>close()).catch(report);
+
   return {
     get canRetire() {return closed || (!inventoryError && owners.size === 0);},
     refresh,
@@ -282,10 +282,19 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       }
       return owner.connection;
     },
-    status: () => [...owners.values()].map(owner => ({threadId:owner.binding.threadId,actor:owner.binding.actor,
-      state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
-        : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
-        : owner.verified ? 'connected' : 'connecting',error:owner.error})),
+    status: () => [...owners.values()].map(owner => {
+      const input=owner.connection?.receiveHealth, delivery=owner.callback?.status();
+      return {threadId:owner.binding.threadId,actor:owner.binding.actor,
+        state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
+          : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
+          : delivery?.state==='cleanup_unknown' ? 'cleanup_unknown' : owner.connection?.closed ? 'disconnected'
+          : delivery?.state==='blocked' ? 'delivery_blocked'
+          : !native.connected || inventoryError ? 'native_unavailable'
+          : input?.inputOwner==='session' && ['paused','error'].includes(input.state) ? 'input_blocked'
+          : owner.verified ? 'connected' : 'connecting',error:owner.error,
+        ...(owner.connection&&input?{receiver:{pid:owner.connection.pid,executable:owner.connection.executable,
+          sessionId:owner.connection.sessionId,input}}:{}),...(delivery?{delivery}:{})};
+    }),
     close,
   };
 }

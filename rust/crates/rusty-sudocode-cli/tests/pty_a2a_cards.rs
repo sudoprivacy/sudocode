@@ -318,3 +318,62 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
         assert!(!screen.contains("online"));
     });
 }
+
+#[test]
+fn runtime_directory_cards_preserve_instance_activity_and_unknown_coverage() {
+    let env = TestEnv::new_mock("runtime-directory-card-history");
+    let mut source = Session::new().with_workspace_root(env.workspace_root());
+    let instance =
+        |nonce: &str| json!({"registry_id":"registry-scope", "pid":"1234", "incarnation":nonce});
+    add(
+        &mut source,
+        "runtime-instances",
+        "agent_list",
+        &json!({}),
+        &json!({"count":2,"agents":[
+        {"kind":"peer","name":"same-agent","send_to":"same-agent","active":true,"runtime":{
+            "instance":instance("question-instance"),"agent_id":"same-agent","presence":"online","last_seen_age_ms":0,
+            "availability":"fresh","age_ms":0,"update":{"revision":1,"identity":{"session_id":"same-sid","os_pid":1234},
+                "status":{"foreground":{"state":"awaiting_input","waiting_for":"question"},
+                    "background":{"terminals":2,"agents":0,"execution_unconfirmed":0,"tool_operations":1}}}}},
+        {"kind":"peer","name":"same-agent","send_to":"same-agent","active":true,"runtime":{
+            "instance":instance("stale-instance"),"agent_id":"same-agent","presence":"online","last_seen_age_ms":0,
+            "availability":"stale","age_ms":4000,"update":null}},
+    ],"runtime_discovery":{"scopes":[],"unavailable":[]}}),
+        false,
+    );
+    add(
+        &mut source,
+        "partial-directory",
+        "agent_list",
+        &json!({}),
+        &json!({"count":0,"agents":[],"runtime_discovery":{"scopes":[],"unavailable":[{"endpoint":"unreachable-node","reason":"unavailable"}]}}),
+        false,
+    );
+    replay(
+        &env,
+        &source,
+        "Recorded partial-directory.",
+        &[52, 120],
+        |screen| {
+            for expected in [
+                "instance registry/question",
+                "waiting for answer",
+                "background shells=2 agents=0",
+                "operations=1",
+                "instance registry/stale-in",
+                "online · activity unknown",
+                "observations incomplete",
+                "Runtime observations unavailable",
+            ] {
+                assert!(
+                    common::screen_contains(screen, expected),
+                    "missing {expected}: {screen}"
+                );
+            }
+            assert!(!screen.contains("No agents found"));
+            assert!(!screen.contains("\"registry_id\""));
+            assert!(!screen.contains("\"runtime_discovery\""));
+        },
+    );
+}

@@ -10,7 +10,7 @@ process.stdin.on('data',bytes=>{
  input+=bytes;let end;
  while((end=input.indexOf('\n'))>=0){const line=input.slice(0,end);input=input.slice(end+1);const call=JSON.parse(line);
   log({phase:'request',id:call.id,method:call.method,clientUserMessageId:call.params?.clientUserMessageId});
-  if(call.method==='thread/queue/add')queueId=call.id;
+  if(call.method==='thread/queue/addOnce')queueId=call.id;
   child.stdin.write(line+'\n');
  }
 });
@@ -18,7 +18,8 @@ process.stdin.on('end',()=>child.stdin.end());process.stdin.on('error',()=>{});c
 child.stdout.on('data',bytes=>{
  output+=bytes;let end;
  while((end=output.indexOf('\n'))>=0){const line=output.slice(0,end);output=output.slice(end+1);const response=JSON.parse(line);
-  if(response.id===queueId&&response.result?.queuedSubmission){
+  if(response.id===queueId&&response.result?.queuedSubmission&&!fs.existsSync(process.env.NATIVE_QUEUE_RELAY_JOURNAL+'.dropped')){
+   fs.writeFileSync(process.env.NATIVE_QUEUE_RELAY_JOURNAL+'.dropped',JSON.stringify(response.result),{flag:'wx'});
    log({phase:'committed-receipt-dropped',pid:child.pid,result:response.result});checking=true;
    child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:inspect,method:'thread/loaded/list',params:{}})+'\n');continue;
   }

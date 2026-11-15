@@ -62,6 +62,7 @@ mod tests {
 
     #[test]
     fn selected_surface_resets_before_unselected_body_and_hints_are_not_dim() {
+        crate::render::force_test_colors();
         for theme in [ColorTheme::dark(), ColorTheme::light()] {
             for support in [ColorSupport::TrueColor, ColorSupport::Ansi256] {
                 let selected = ChoiceText::new(&theme, support, true);

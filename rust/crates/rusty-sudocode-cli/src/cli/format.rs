@@ -59,10 +59,11 @@ impl ToolInputRegistry {
     }
 }
 
-/// `true` for Text blocks the runtime injected (date announcements,
-/// rollover reminders, task notifications) rather than the user typing.
-/// These travel to the model inside user messages but must not surface
-/// in user-facing echoes: transcript replay and ↑-history recall.
+/// `true` for Text blocks the runtime wraps in `<system-reminder>` (the date
+/// announcement and rollover reminder, for example) rather than the user
+/// typing. These travel to the model inside user messages but must not
+/// surface in user-facing echoes: transcript replay and ↑-history recall.
+/// Task notifications are `<task-notification>` blocks and do not match.
 pub(crate) fn is_system_reminder_text(text: &str) -> bool {
     text.trim_start().starts_with("<system-reminder>")
 }
@@ -428,22 +429,37 @@ pub(crate) fn format_input_echo(
     };
     let mut rendered = String::new();
     let mut offset = lead;
+    let surface =
+        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport)
+            .then(|| theme().prompt_style());
+    // A shaded surface sets the prompt's foreground explicitly, and faint text
+    // over it barely differs from what was typed. There a paste takes the
+    // muted foreground instead, as other low-emphasis text does.
+    let (paste_on, paste_off) = match surface.filter(|style| style.background_color.is_some()) {
+        Some(style) => (
+            theme().fg_seq(TextRole::Secondary),
+            style
+                .foreground_color
+                .map_or_else(|| "\x1b[39m".to_string(), ansi_fg),
+        ),
+        None => (DIM.to_string(), "\x1b[22m".to_string()),
+    };
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
         // box uses. Live commits and replay share this presentation; the
         // experiment adds the same background to both. Continuation lines indent
         // by two spaces to align under the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
-        let body = format!("{prefix}{}", dim_pasted(line, offset, pasted));
+        let body = format!(
+            "{prefix}{}",
+            mark_pasted(line, offset, pasted, &paste_on, &paste_off)
+        );
         offset += line.len() + 1;
         if idx > 0 {
             rendered.push('\n');
         }
-        if runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport) {
-            let styled = crate::render::theme()
-                .prompt_style()
-                .apply(body)
-                .to_string();
+        if let Some(style) = surface {
+            let styled = style.apply(body).to_string();
             rendered.push_str(
                 &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
             );
@@ -454,10 +470,16 @@ pub(crate) fn format_input_echo(
     (rendered, raw_lines.len())
 }
 
-/// `line` (starting at byte `offset` of its prompt) with the pasted parts dim.
-/// Ends the dim with "normal intensity" rather than a reset, which would also
-/// drop the prompt's background.
-fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> String {
+/// `line` (starting at byte `offset` of its prompt) with each pasted part
+/// between `on` and `off`. `off` restores the line's own style rather than
+/// resetting, which would also drop the prompt's background.
+fn mark_pasted(
+    line: &str,
+    offset: usize,
+    pasted: &[std::ops::Range<usize>],
+    on: &str,
+    off: &str,
+) -> String {
     let end = offset + line.len();
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
@@ -472,9 +494,9 @@ fn dim_pasted(line: &str, offset: usize, pasted: &[std::ops::Range<usize>]) -> S
             continue;
         }
         out.push_str(&line[at..start]);
-        out.push_str(crate::render::DIM);
+        out.push_str(on);
         out.push_str(&line[start..stop]);
-        out.push_str("\x1b[22m");
+        out.push_str(off);
         at = stop;
     }
     out.push_str(&line[at..]);
@@ -510,6 +532,7 @@ pub(crate) enum ToolKind {
     PidStatus,
     PidKill,
     TodoWrite,
+    Monitor,
 }
 
 impl ToolKind {
@@ -537,6 +560,7 @@ impl ToolKind {
             Self::PidStatus => "PidStatus",
             Self::PidKill => "PidKill",
             Self::TodoWrite => "TodoWrite",
+            Self::Monitor => "Monitor",
         }
     }
 
@@ -573,6 +597,7 @@ impl ToolKind {
             "pid_status" | "PidStatus" => Some(Self::PidStatus),
             "pid_kill" | "PidKill" => Some(Self::PidKill),
             "TodoWrite" => Some(Self::TodoWrite),
+            "Monitor" => Some(Self::Monitor),
             _ => None,
         }
     }
@@ -648,7 +673,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
 pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardContent {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-    tool_card_content(name, &in_val, None, ToolStatus::Running)
+    tool_card_content(name, &in_val, None, ToolStatus::Running, 0)
 }
 
 /// The single source of truth for a tool card's semantic content, shared by the
@@ -660,12 +685,15 @@ pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardConten
 /// tool's real arguments (command, path, pattern…), so a tool can never render
 /// a bodyless summary that hides what it was called with. The optional `body`
 /// carries the result (stdout, diff, matches). On error the identity still
-/// shows the arguments and the error text becomes the body.
+/// shows the arguments and the error text becomes the body. `width` is the
+/// terminal width the card will be painted at, for a body laid out to it (the
+/// todo list); 0 when it is not known yet.
 pub(crate) fn tool_card_content(
     name: &str,
     input: &serde_json::Value,
     output: Option<&serde_json::Value>,
     status: ToolStatus,
+    width: usize,
 ) -> ToolCardContent {
     match ToolKind::from_name(name) {
         Some(ToolKind::Bash) => shell_card("Bash", input, output),
@@ -690,7 +718,8 @@ pub(crate) fn tool_card_content(
         Some(ToolKind::Skill) => skill_card(input, output, status),
         Some(ToolKind::ReadToolOutput) => read_tool_output_card(input, output, status),
         Some(ToolKind::WebSearch) => web_search_card(input, output, status),
-        Some(ToolKind::TodoWrite) => todo::card(name, output),
+        Some(ToolKind::TodoWrite) => todo::card(name, output, width),
+        Some(ToolKind::Monitor) => monitor_card(input, output),
         None => generic_tool_card(name, input, output, status),
     }
 }
@@ -707,8 +736,7 @@ fn identity_annotation(input: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|d| !d.is_empty())
-        .map(|d| format!(" {DIM}· {d}{RESET}"))
-        .unwrap_or_default()
+        .map_or_default(|d| format!(" {DIM}· {d}{RESET}"))
 }
 
 /// Split a `ToolResult.output` string into its JSON-payload prefix and any
@@ -782,6 +810,17 @@ impl ToolCardContent {
     }
 }
 
+/// Tests paint a card at the current terminal width.
+#[cfg(test)]
+pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
+    render_tool_card_with_width(
+        content,
+        status,
+        crate::render::query_terminal_width(),
+        false,
+    )
+}
+
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
 /// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
 /// syntax-theme green (ok), or red (error). A call that is still queued or
@@ -794,15 +833,7 @@ impl ToolCardContent {
 /// keeps output copy-pasteable and pipe-safe, matching Sudo Code's scrollback
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
-pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    render_tool_card_with_width(
-        content,
-        status,
-        crate::render::query_terminal_width(),
-        false,
-    )
-}
-
+///
 /// The layout owner supplies its width, so all cards in one UI frame use the
 /// same terminal-size snapshot instead of racing independent ioctl queries.
 /// `is_pulse_low` draws a running card's frame at the quiet point of its pulse.
@@ -883,7 +914,9 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
     } else {
         status
     };
-    let mut content = tool_card_content(name, &in_val, Some(&out_val), status);
+    // One width for the body's layout and the frame around it.
+    let term_width = crate::render::query_terminal_width();
+    let mut content = tool_card_content(name, &in_val, Some(&out_val), status, term_width);
     if is_error {
         // The extractor's success body (if any) is meaningless on failure;
         // replace it with the raw error text so the identity + error read
@@ -904,7 +937,7 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
             None => feedback_body,
         });
     }
-    render_tool_card(&content, status)
+    render_tool_card_with_width(&content, status, term_width, false)
 }
 
 /// Read a string field that may live in the tool's `input` (arguments) or its
@@ -981,33 +1014,12 @@ pub(crate) fn shell_card(
 ) -> ToolCardContent {
     use std::fmt::Write as _;
 
-    // Command lives in `input` (never echoed in the result payload).
-    let command = input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
     let language = if label == "PowerShell" {
         "powershell"
     } else {
         "bash"
     };
-
-    let label = tool_label(label);
-    // Pending cards only display the title; avoid highlighting an entire
-    // script until its completed card needs the full command body.
-    let visible_command = if output.is_none() {
-        first_visible_line(command)
-    } else {
-        command
-    };
-    let highlighted =
-        crate::render::TerminalRenderer::new().highlight_code(visible_command, language);
-    let mut header = if command.is_empty() {
-        label
-    } else {
-        format!("{label}({})", first_visible_line(&highlighted))
-    };
-    header.push_str(&identity_annotation(input));
+    let (mut header, highlighted) = command_identity(label, language, input, output.is_some());
 
     let Some(output) = output else {
         // Staging: no result yet — identity only.
@@ -1042,7 +1054,61 @@ pub(crate) fn shell_card(
         .unwrap_or_default();
 
     let mut content = stdout_stderr_card(header, stdout_text, stderr_text, status.is_some());
-    content.command = (!command.is_empty()).then_some(highlighted);
+    content.command = highlighted;
+    content
+}
+
+/// The identity of a card that runs a shell command: `Label(<first line,
+/// highlighted>) · <description>`, and the whole highlighted command for a
+/// card whose header cannot hold it. The command lives in `input`; no result
+/// echoes it. A pending card highlights only the first line: its title is all
+/// it shows.
+fn command_identity(
+    label: &str,
+    language: &str,
+    input: &serde_json::Value,
+    finished: bool,
+) -> (String, Option<String>) {
+    let command = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let label = tool_label(label);
+    let visible_command = if finished {
+        command
+    } else {
+        first_visible_line(command)
+    };
+    let highlighted =
+        crate::render::TerminalRenderer::new().highlight_code(visible_command, language);
+    let mut header = if command.is_empty() {
+        label
+    } else {
+        format!("{label}({})", first_visible_line(&highlighted))
+    };
+    header.push_str(&identity_annotation(input));
+    (header, (!command.is_empty()).then_some(highlighted))
+}
+
+/// `Monitor` watches a shell command in the background, through the same
+/// launcher as a backgrounded `Bash`, so its card is the same command identity
+/// plus the task it started. The rest of its result tells the model to keep
+/// working and not poll; that is for the model, not the user. A result that
+/// names no task is shown raw rather than dropped.
+fn monitor_card(input: &serde_json::Value, output: Option<&serde_json::Value>) -> ToolCardContent {
+    let (mut header, highlighted) = command_identity("Monitor", "bash", input, output.is_some());
+    let Some(output) = output else {
+        return ToolCardContent::header_only(header);
+    };
+    let Some(task) = output
+        .as_str()
+        .and_then(tools::monitor_task_from_tool_result)
+    else {
+        return value_card(header, output);
+    };
+    let _ = std::fmt::Write::write_fmt(&mut header, format_args!(" watching ({task})"));
+    let mut content = ToolCardContent::header_only(header);
+    content.command = highlighted;
     content
 }
 /// Prefix an already highlighted script without reparsing it at paint time.
@@ -2875,6 +2941,37 @@ mod tests {
         strip_ansi(&render_tool_card(content, ToolStatus::Ok))
     }
 
+    /// A `Monitor` card is the watched command and its label, like a shell
+    /// card, plus the task it started; the instruction to the model stays off it.
+    #[test]
+    fn monitor_card_shows_the_watch_not_the_model_instruction() {
+        let input = r#"{"command":"until grep -q ready log; do sleep 2; done","description":"Wait for ready"}"#;
+        let output = "Monitor started (task shell-7f3a, output /tmp/o.log). You will be notified \
+                      when it finishes or fires. Keep working — do not poll or sleep.";
+        let plain = strip_ansi(&format_tool_result("Monitor", input, output, false));
+        for shown in [
+            "Monitor(until grep -q ready log; do sleep 2; done)",
+            "Wait for ready",
+            "watching (shell-7f3a)",
+        ] {
+            assert!(plain.contains(shown), "missing {shown:?}:\n{plain}");
+        }
+        for hidden in ["Keep working", "do not poll", "/tmp/o.log"] {
+            assert!(!plain.contains(hidden), "leaked {hidden:?}:\n{plain}");
+        }
+    }
+
+    #[test]
+    fn monitor_card_shows_an_unrecognised_result_raw() {
+        let plain = strip_ansi(&format_tool_result(
+            "Monitor",
+            r#"{"command":"true","description":"x"}"#,
+            "something else entirely",
+            false,
+        ));
+        assert!(plain.contains("something else entirely"), "{plain}");
+    }
+
     /// A `TodoWrite` card shows the saved list the way the todo panel does,
     /// never the result JSON, and never the nudge addressed to the model.
     #[test]
@@ -3867,7 +3964,7 @@ mod tests {
             "old_string": "line one\nline two\nline three",
             "new_string": "new one\nnew two",
         });
-        let content = tool_card_content("edit_file", &input, None, ToolStatus::Running);
+        let content = tool_card_content("edit_file", &input, None, ToolStatus::Running, 0);
         let plain = strip_ansi(&render_tool_card(&content, ToolStatus::Running));
         assert!(plain.contains("Editing src/main.rs"), "{plain}");
         assert!(plain.contains("1 -line one"), "{plain}");

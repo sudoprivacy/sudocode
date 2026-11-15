@@ -50,7 +50,7 @@ def run(output):
             arguments = ["nice", "-n", "10", *arguments]
         started = time.monotonic()
         stdout, stderr = output / (label + ".stdout.log"), output / (label + ".stderr.log")
-        priorities = {}
+        observed = {}
         with stdout.open("wb") as out, stderr.open("wb") as err:
             process = subprocess.Popen(arguments, cwd=project, env=environment, stdout=out, stderr=err,
                 creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0)
@@ -60,16 +60,21 @@ def run(output):
                         try:
                             name = Path(child.exe()).name.lower()
                             if name in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe"}:
-                                priorities[f"{child.pid}:{name}"] = child.nice()
+                                observed[child.pid, name] = child.nice()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
                 time.sleep(0.01)
+        # The executor's bounded shape: {compiler name: {priority: distinct children}}.
+        priorities = {}
+        for (_pid, name), priority in observed.items():
+            counts = priorities.setdefault(name, {})
+            counts[str(priority)] = counts.get(str(priority), 0) + 1
         if compiler_expected:
             assert priorities, "Did not observe the actual lint compiler; inspect the retained process logs"
         expected = psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10
-        assert all(value == expected for value in priorities.values()), priorities
+        assert all(set(counts) == {str(expected)} for counts in priorities.values()), priorities
         lines = stdout.read_text(encoding="utf-8").splitlines()
         messages = [json.loads(line) for line in lines if line.startswith("{")]
         scopes = [json.loads(line.split("=", 1)[1]) for line in lines if line.startswith("QUEUE_CLIPPY_SCOPE=")]

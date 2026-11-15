@@ -2169,9 +2169,8 @@ fn usage_error(command: &str, argument_hint: &str) -> SlashCommandParseError {
 }
 
 fn command_error(message: &str, command: &str, usage: &str) -> SlashCommandParseError {
-    let detail = render_slash_command_help_detail(command)
-        .map(|detail| format!("\n\n{detail}"))
-        .unwrap_or_default();
+    let detail =
+        render_slash_command_help_detail(command).map_or_default(|detail| format!("\n\n{detail}"));
     SlashCommandParseError::new(format!("{message}\n  Usage            {usage}{detail}"))
 }
 
@@ -4544,8 +4543,7 @@ fn render_mcp_summary_report(
     for (name, server) in servers {
         let provenance = plugin_provenance
             .get(name)
-            .map(|plugin_id| format!("  [SudoCode plugin {plugin_id}]"))
-            .unwrap_or_default();
+            .map_or_default(|plugin_id| format!("  [SudoCode plugin {plugin_id}]"));
         lines.push(format!(
             "  {name:<16} {transport:<13} {scope:<7} {summary}{provenance}",
             transport = mcp_transport_label(&server.config),

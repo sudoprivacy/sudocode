@@ -10,6 +10,7 @@
 
 use std::fs;
 
+use runtime::fs_backend::{FsBackend, StdFsBackend};
 use runtime::{
     compact_session_sync, CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session,
 };
@@ -178,6 +179,13 @@ fn deletion_fences_compaction_and_late_transcript_writes() {
     );
     let original = fs::read(&path).unwrap();
     let compacted = session.clone();
+    let pending_io = StdFsBackend
+        .try_lock(
+            &path.with_extension("responses.lock").to_string_lossy(),
+            30_000,
+        )
+        .unwrap()
+        .unwrap();
     journal.purge(&journal.storage_ref(), "cleanup").unwrap();
     assert!(compacted
         .save_compacted_to_path(&session, &path)
@@ -200,9 +208,7 @@ fn deletion_fences_compaction_and_late_transcript_writes() {
         .to_string()
         .contains("session_deleted"));
     assert_eq!(fs::read(&path).unwrap(), original);
-    drop(journal);
-    drop(session);
-    drop(compacted);
+    drop(pending_io);
     assert!(Session::load_from_path(&path)
         .unwrap_err()
         .to_string()
@@ -228,5 +234,9 @@ fn deletion_fences_compaction_and_late_transcript_writes() {
             .to_string()
             .contains("session_deleted"));
     }
+    // The snapshots and journal remain alive throughout storage reclamation.
+    drop(journal);
+    drop(session);
+    drop(compacted);
     fs::remove_dir_all(cwd).unwrap();
 }

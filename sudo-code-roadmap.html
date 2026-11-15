@@ -215,6 +215,95 @@ verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
+<p><strong>Selection-script changes (2026-11-11).</strong>
+Edits confined to <code>.github/scripts/ci_input_scope.py</code> omit unchanged
+CLI/co-host daemon journeys and three-platform workspace Clippy. Real Git
+PR/push/queue selection, existing scoped executor controls and the complete
+native/Docker contract guard remain required. The mandatory CI JSON reports
+<code>selector_only_product_checks_skipped</code>. Workflow edits, mixed product
+or daemon-harness changes and moves across the product boundary retain their
+checks. This deliberately removes general product smoke coverage from
+selector-only queue revisions; it does not shorten any selected case or add
+feature coverage. Savings depend on the changed inputs and queue load.</p>
+
+<p><strong>Author-scheduling changes (2026-11-11).</strong>
+Daemon journeys may be omitted when committed runner modes, required policy
+and every non-guard reachable execution fingerprint remain identical. Only
+the author lease/check bodies and a plain two-argument reservation helper may
+differ; imports, globals and other function declarations/bodies stay bound.
+Companion inputs are limited to dispatcher changes with the same non-guard
+fingerprints, the host-lease enforcement fixture and documentation. Changed
+executors, product/workflow inputs, dynamic
+namespace observers, unknown declarations or fingerprints retain the original
+scope. Mandatory CI JSON reports <code>acceptance_scheduling_scope</code> with
+the proof or fallback reason. Real Git PR/push/queue controls, preflight and the
+complete native/Docker contract guard remain required. This reduces general
+product smoke coverage on proven author-scheduling-only revisions; selected
+journeys retain every case, assertion and deadline, with no new feature coverage.
+The observed 856 allocated job-seconds on PR #1380's queue describe one prior
+execution, not measured future or population savings.</p>
+
+<p><strong>Scope generic daemon smoke for verifier bodies (2026-11-11).</strong>
+Queue revisions confined to the nine reported verifier/fingerprint function
+bodies can omit the two generic daemon jobs only when committed declarations,
+module context, process/selector consumers and every non-guard command identity
+remain bound. Queue fingerprints use protected-base code; event records identify
+the comparison commit and distinguish protected queue, target merge-base and
+previous push-history inputs. This includes a real refusal of candidate hash forgery plus changed commands. Unknown dynamic
+consumers, frame observers, declarations, policy, signer, workflow and product
+changes retain full daemon scope. The mandatory CI JSON prints the proof or
+fallback. An additional reviewed source-layout digest binds imports, every
+declaration and complete queue-consumer code before importing comparison-base
+code. Equal but unknown module constructors, default factories or decorators
+retain both daemon jobs. Layout mismatch selects full checks automatically,
+without a personal-review or waiver step; only Python CRLF normalization is
+applied. Preflight and the complete native/Docker guard remain required.
+Coverage reduction: generic daemon smoke no longer accompanies qualifying
+verifier-body edits. Selected journeys retain their cases and deadlines.
+The existing 66 real Git/event scheduling controls remain; 28 metadata
+controls cover the boundaries, with representative PR/push/queue events rather
+than repeating the same negative input on all three. Three old-behavior controls
+and six actual helper-launched child processes preserve the eager-observer
+counterexample and refusal before import. These controls add no product coverage. Prior daemon job costs do not establish measured savings.</p>
+<p><strong>Preserve completed proof across compiler budgets and exit waits (2026-11-12).</strong>
+The mandatory verifier compares committed source and recognizes only the known
+serial/adaptive compiler budget and native forwarding forms, plus the exact
+150 ms sleep/completion-notification forms. The supervisor returns when a short
+command exits; running commands retain the same priority-scan interval, Normal
+tests and BelowNormal compiler workers. It first validates
+original signed fingerprints against their original source; selected commands,
+assertions, pools, retries, deadlines, other environment, image, workflow and
+current host responsibilities remain bound. Unknown changes refuse reuse and
+print recovery at the required interface. A reviewed normalized layout also binds
+module initialization and the eighteen actual command/selector consumers;
+equal unknown callbacks or consumer bodies refuse before any source import.
+Complete normalized helper-program layouts also bind outer callers, including
+the check producer; unknown callers retain all current checks.
+The refusal reports the supported original-author route without a personal-review
+or waiver step. The selector and resource proof share Python global-name analysis.
+Original plans, signatures, logs and
+first-start timing stay intact. Real private Git/SSH/CLI execution, signed
+plan/full verification and resume retain two original commands with zero repeated
+commands; eighteen independent changes must refuse reuse. Each wait form runs
+one short native child, one priority/output child, one pending child and one
+failing child, retaining exit codes and logs. Three paired real Git/native observer controls retain changed
+child environments at module initialization, a command consumer and an outer producer,
+and the prior unsafe proof mutant. Their Git/runtime/proof children share the existing
+isolated environment even when outer hooks export repository/index selectors. They add no
+product coverage or missing-host acceptance. The complete native/Docker guard
+still qualifies the verifier change. No whole-lifecycle speedup is inferred.</p>
+<p><strong>Bind transitive shared tool inputs (2026-11-11).</strong>
+The daemon/A2A selector binds the functions reached by the shared nextest
+helpers, including GitHub API authorization and asset download. Unrelated
+function edits in the acceptance dispatcher omit the unchanged journey.
+Changed imported context or reachable functions retain it; unknown data,
+rebinding and runtime reflection require the full journey. The mandatory CI
+JSON includes the bound names or the conservative fallback reason. Real Git
+and CLI regressions cover the actual Windows helper, authorization and asset
+identity branches, with existing PR/push/queue and native selection checks
+retained. Product journeys, tool pins and assertions are unchanged. These
+infrastructure checks add no feature rows; elapsed savings remain unmeasured.</p>
+
 <p><strong>Mandatory local tests plus complementary CI.</strong> Windows authors
 run Windows checks locally; CI runs Linux and macOS. Mac authors run macOS
 locally; CI runs Linux and Windows. Linux authors run Linux locally; CI runs
@@ -373,6 +462,46 @@ executor checks, with no product journey credit. Lint now denies warnings before
 long builds/tests. Full workspace changes lint all targets with the native mailbox
 feature graph; targeted changes lint their targets. The queue additionally checks
 all features.</p>
+<p><strong>Reuse native compiler objects with the original Cargo output layout
+(2026-11-12).</strong> Native Rust profiles use checksum-pinned sccache 0.19.0
+with a local 2 GiB cap. Each profile starts and stops its own finite server;
+compiler workers remain BelowNormal/nice and actual tests stay Normal.
+Busy storage falls back immediately to the original Cargo command. Explicit
+caller wrappers, cache settings, command arguments and target environment are
+preserved, including nested Cargo inheritance and compile-time reads. A retained
+ownership record blocks a second writer after parent interruption; a 10-minute
+tool idle timeout bounds orphaned servers. Client-side compilation retains the
+original compiler-priority observer. Early workspace lint keeps its exact handoff recipe. Real Cargo,
+nextest, nested Cargo and native PTY controls exercise independent outputs,
+feature and compile-time environment changes, source failure/repair, terminal
+sidecars, the public dispatcher and busy storage. The existing native-cache
+guard runs them; cache implementation changes also select the real native
+workspace on author and complementary hosts. Cache hits supply compiler
+objects, never previous test results or a generic source-freshness witness.
+These checks add no product journey credit. Hosted object persistence and
+whole-PR latency savings remain unmeasured. The guard image seeds the same pinned
+fixture manifest and lockfile, then verifies Cargo dependency availability with
+network disabled before starting either full matrix. Missing offline inputs fail
+during preparation. The compiler tool is also provisioned and corruption-checked
+in that image, then verified offline before the matrices; isolated homes retain
+only verified public tools.</p>
+<p>The guard image explicitly selects one compiler job through the executor's
+supported cap and checks that setting at entry. Its two-CPU, 2 GiB and 256-PID
+limits are retained. A compiled canary checks the effective Cargo job count
+against the declared cap; a plain Cargo environment default does not override
+the executor's automatic host-sized budget.</p>
+<p>Protected modules and their companion bytes load from the same frozen Git
+policy, including when the managed runner stages <code>protected_profiles.py</code>.
+An altered candidate companion cannot replace those bytes. Scheduling plans and
+completed receipts now share protected exact recipe approvals and their existing
+conditional source rules. The accepted profile set is printed at the mandatory
+interface. Original signatures, source/tree/base, selected checks, author/native
+responsibility, workflow and dispatcher checks remain. Plans record no completed
+test. Actual Git/SSH/HTTP/finalizer controls preserve the original notes, logs and
+native process counts while rejecting undeclared, malformed and cross-profile
+approvals. Only source-verified prior native recipes receive cache-migration
+approvals; the changed guard and the cache implementation's workspace checks
+still run. These are executor checks without product coverage credit.</p>
 <p><strong>Reduce repeated measurements (2026-10-31).</strong> All six rendering
 scenarios remain. Short retains five A/A and seven alternating A/B pairs,
 preserving the full check that caught a real RSS regression. Long, cap, markdown,
@@ -833,6 +962,15 @@ all three callers and allocate no cancellation runner. A real GitHub fixture tes
 all three failure directions and a clean run; its controlled timings do not establish
 production lifecycle savings. Passing-run coverage, budgets and assertions stay
 unchanged.</p>
+<p><strong>Run each managed-process journey once (2026-11-11).</strong>
+CLI A2A's original <code>run.sh</code> already requires managed scode and remote-context
+acceptance. When both daemon jobs are selected, cohost omits its repeated invocation;
+cohost-only selection keeps the same script. Missing selection refuses before a
+daemon starts. Each selected job must still succeed. Real extracted workflow-shell
+checks protect dispatch and failure propagation, with missing-journey and duplicate
+controls. No original product case, assertion or deadline is removed. A previous
+queue's duplicate cohost step took 101 seconds; that observation is neither measured
+future savings nor a whole author-to-merge result.</p>
 <p><strong>Run independent daemon paths together (2026-11-08).</strong>
 CLI A2A and cohost each start and clean their own nodes, so their original
 journeys run on independent Ubuntu jobs after the same pin preflight. Every
@@ -1024,9 +1162,19 @@ product journey counts and acceptance budgets retain their current values.
 A recorded repository preflight spent 1,013.7 seconds waiting for 1.039 seconds
 of command execution; this is a measured scheduling incident, not a forecast
 of whole-PR savings.</p>
-<p><strong>Rejoin the FIFO between fresh profiles (2026-11-06).</strong>
-Each running profile keeps the existing exclusive host lease through execution
-and its signed checkpoint. Its next fresh profile rejoins the queue after existing
+<p><strong>Prepare the service client before compilation (2026-11-10).</strong>
+Selected native service checks resolve the original grpcurl client and execute
+<code>--version</code> in the first preparation slot. Windows uses Git for Windows
+Bash explicitly. A download or executable failure stops before compilation;
+the actual service journey later uses the same file after verifying its hash.
+Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselected
+profile controls cover this ordering. Both original service journeys remain
+required; product coverage counts and budgets are unchanged. This adds
+infrastructure fault coverage and makes no whole-PR speedup claim.</p>
+<p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
+Each running reservation keeps the existing exclusive host lease through execution
+and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
+examples share one reservation; other fresh profiles rejoin the queue after existing
 waiters. Metadata and fully verified reused results retain their path without a
 host wait; native tool preparation still occurs once in the first fresh slot.
 Required output reports the reservation boundary and active holder profile.
@@ -1037,9 +1185,26 @@ with every required signed profile completed once. The same controls retain
 metadata success/failure, complete/partial resume, abandoned waiters, abrupt
 holder exit and service execution order. Product cases, measurement counts,
 budgets and checkpoint validation retain their current requirements.</p>
+<p><strong>Windows shell prerequisites before queueing (2026-11-10).</strong>
+Fresh Windows guards and native workspaces also check their required Windows
+PowerShell and PowerShell 7 paths before joining the queue. Native lint and
+release compiler checks share the same validator and recheck at execution.
+An actionable missing-tool error grants no completed-check credit. Real
+Git/SSH/native-process controls remove PowerShell 7 only from a private child's
+PATH: guard/workspace source refuses without a queue ticket while a private
+holder remains active; metadata-only source still completes. No product
+coverage, assertion or deadline is removed by this prerequisite check.</p>
 <p><strong>Reject invalid guard inputs before queueing (2026-11-06).</strong>
 Fresh contract guards reuse the existing static staging checks before entering
-the host queue: protected file pins, selection digest and release recipe.
+the host queue: protected file pins, selection digest, release recipe and native
+fixture inventory. The same inventory builder checks protocol/native counts,
+duplicate scripts/logs and missing scripts before admission and execution.
+<code>GUARD_NATIVE_INVENTORY</code> reports counts without preparing tools or
+executing tests. Real Git/SSH/native-process controls correctly pin malformed
+inventories: count, duplicate and missing-script errors refuse before a held
+private queue; a valid list still waits and executes its required profile.
+These infrastructure controls add no product journey coverage or measured
+population saving; passing-run cases, deadlines and full guard remain required.
 Required <code>GUARD_STATIC_PREFLIGHT</code> output explains the check and keeps
 full execution required. An actual malformed pin is refused while another
 private workflow holds the host, with zero host wait, no queue ticket and no
@@ -1140,6 +1305,21 @@ unfinished work remain explicit; the one-tenth goal is not met. The audit retain
 all 27 source observations and the earlier five-history snapshot. These code PRs
 merged before the latest worker/scheduling rollouts, whose prospective effect must
 be measured separately.</p>
+<p><strong>Keep local attempts in the delivery clock (2026-11-13).</strong>
+The November 6?12 observation window now includes 115 merged PRs with indexed
+local/hosted evidence. First observed local-or-CI start to merge averages at
+least 250.287 minutes (median 61.935); 31 Rust/build PRs average at least 644.426
+minutes. The 58 PRs with observed actual failures average at least 77.601 minutes
+to their first failure (median 17.757). Original signed profiles, available
+command logs, prior revisions, failed attempts and partial checkpoints are
+retained; overlapping clocks are not summed. Missing unpublished/manual/other-host
+work remains unknown. This larger mixed cohort is not a controlled before/after
+comparison and does not establish the one-tenth target. A separate read-only
+189-terminal-attempt sample has explicit original lock-wait fields: aggregate
+queued-agent time overlaps across worklines and cannot be claimed as runner CPU
+or removable elapsed time. Recent CLI samples still spent 23?28 minutes waiting
+inside individual local validations. The current workline's unsuccessful and
+stopped local preparation remains additional recorded cost.</p>
 <p><strong>Avoid repeated signature-verification computation (2026-11-06).</strong>
 Modern receipts still validate both recorded fingerprint maps against their
 attested original source. Verification skips an overwritten whole-policy hash
@@ -1282,6 +1462,19 @@ selection and avoid a duplicate build. The mandatory plan prints
 linking, no implicit execution and refusal of a broken example. Existing signed
 workspace execution stays reusable for the same head when its recipe is
 unchanged; the newly selected example check still requires actual execution.</p>
+<p><strong>Share one author reservation for workspace and examples.</strong>
+Adjacent fresh <code>native-workspace</code> and <code>native-examples</code>
+keep their original order, commands, separate signed results and execution
+fingerprints while sharing the existing host FIFO acquisition. Workspace
+success is checkpointed before examples start. An example failure preserves
+that result, and verified resume executes only unfinished profiles. Other
+fresh work still rejoins the FIFO; completed profiles need no reservation.
+Mandatory <code>LOCAL_ACCEPTANCE_RESOURCE_SCOPE</code> output lists the groups,
+and acquisition records list both profiles with their common wait counted once.
+Real private Git/SSH/process controls require existing-waiter handoff after
+the pair, failure propagation and full/partial reuse. No example build, native
+case, complementary platform or deadline is removed. This avoids one author
+queue admission; population time savings remain unmeasured.</p>
 <p><strong>Omit unchanged examples for isolated CLI tests.</strong> When committed
 changes contain only ordinary individual CLI test files, optionally accompanied
 by README or Markdown files under <code>docs/</code>, author and complementary
@@ -1522,10 +1715,131 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><code>pty_bash_mode</code></td>
     </tr>
     <tr>
+      <td>Mosswork author validation</td>
+      <td>
+<p><strong>Known CI metadata retains verified application history.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/65">PR #65</a> allows modifications to five existing inputs (core/identity/browser workflows, canonical product action and tools/precommit.py) to keep this worktree’s real dependency graph only after all original source/environment/cache/completion checks pass. Before affected application cases, the same real graph runs all nine original independent CI-validator modules with testmon selection disabled. Its actual session completion and separate hashed JUnit are retained; application selection then uses the original graph. No copied, seeded or fabricated test history is accepted.</p><p><strong>Failure and coverage boundary:</strong> CI errors, missing/malformed completion, zero actual passes or source/environment drift stop before application cases and leave the incomplete marker. Ordinary application failures and pending cases remain required. Makefile, dependencies, conftest/support, unknown inputs, additions/removals, missing/tampered graphs and changed environments retain full fallback. Pure CI-only local edits still establish the independent tool bar; hosted runtime selection remains unchanged. Testmon remains an affected-test policy, with its existing limits for undeclared order dependencies.</p><p><strong>Actual qualification:</strong> all 25 original gate regression function ASTs and direct pytest hook ASTs are unchanged. Original tools Make: 272 passed/6 skipped, including all 45 gate cases; Make wall 475.5s. Separate original hook: 0 newly executed checker commands, verified matching real tool proof; wall 24.4s. Application history stayed byte-identical through this tool validation. Complete source export/check passed; source/package vectors were unchanged. All eleven applicable hosted jobs passed on the tested composition; Windows canonical: 1394 exact unchanged case/status records; Windows identity: 1645 exact unchanged case/status records; Linux canonical: 1394 exact unchanged case/status records; Linux identity: 1645 exact unchanged case/status records. No case, OS, assertion or deadline was removed. Counts and preparation/wait/Make/hook/CI costs remain separate; no controlled or whole-lifecycle one-tenth speedup is claimed.</p>
+<details><summary>Earlier local validation changes with their original evidence</summary>
+<p><strong>CI configuration uses complete independent validators locally.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/63">PR #63</a> adds the existing identity/browser workflows and canonical local action to the same local CI-tool category as core/dashboard configuration. These pure CI edits establish full tool/static/source/index checks rather than a fresh unrelated business-suite pass or dashboard rebuild. Application/configuration/unknown mixed inputs and missing/removed known scope files keep the full local fallback. This bootstrap still passed all 21 applicable hosted runtime checks on one tested composition; the original application/platform cohorts remain required.</p><p><strong>Validation keeps locked dependencies.</strong> Default Make validation uses uv run --frozen; it keeps the original pip fallback. Mandatory Make failure output retains the original dependency/network cause, distinguishes formatting recovery and requires the original gate to be rerun. No automatic lock rewrite, private SDK replacement, test/deadline change or copied testmon baseline. Actual GNU Make controls cover locked/pip command expansion and nonzero dependency-failure propagation from both all and precommit. All 51 original deployment test functions are retained. Original Make: 271 passed/6 skipped in 454.2s; separate original hook 27.4s, matching proof reused=True. Counts belong to Make; zero repeated checker commands do not mean newly executed tests. Complete current source export/check and actionlint passed. Local qualification controller 589.6s; preparation, failed attempts and subsequent CI remain separate costs.</p>
+<p><strong>Local runner-only edits use the complete independent tool gate.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/60">PR #60</a> adds only tools/test_gate.py and tests/unit/deployment/test_test_gate.py to the existing local tool scope. If either path changes, lint/format, strict runner typing and every existing real-history regression in that module remain required. The ordinary source/proof/index/environment checks still apply. Business code, dependencies, unknown configuration/helpers, mixed application inputs, removal or missing validators retain full local application validation. Hosted runtime/platform selection for these runner paths is unchanged and still requires its original runtime matrices and validator regressions.</p><p><strong>Coverage boundary:</strong> a runner-only local change no longer establishes a new full business-suite pass or rebuilds the unchanged dashboard. It establishes complete real-validator checks instead; this intentionally removes unrelated local business execution from that narrow payload. Current graph/test-selection behavior, all existing assertions, test functions and deadlines remain unchanged. Twelve new real Git/Make/history controls cover both paths, mixed/refused inputs, actual failed-current-check propagation and repair. The separately executed unchanged original graph cohort passed 33 cases/0 skips. The separate original Make passed 250 cases/6 skips in 420.6s, and the original hook took 27.0s with matching actual proof reused=True. Complete source export/check and all three applicable same-tree jobs passed for this classifier candidate. Counts and clocks are separate, not additive or a controlled before/after gain; the end-to-end one-tenth target remains unproven.</p>
+<p><strong>Worker-pool reset warning also covers eligible Python edits.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/59">PR #59</a> uses the existing actual same-worktree history to refuse an unintended pool change before tests, including eligible Python edits and newly added ordinary test modules. Mandatory CLI output names the recorded/requested pools, keeps PYTEST_JOBS through Make and commit, and gives make test-current PYTEST_JOBS= for an intentional full-pool reset. This refusal does not accept the current candidate: new, changed, failed and unexecuted cases remain required. It never chooses a pool, changes test selection, writes/copies a graph or bypasses application checks. Unknown configuration, changed environment and missing/damaged/incomplete proof or cache keep the original full route.</p><p>Fourteen real Git/pytest controls passed, including staged and whole-worktree body/comment/new-module changes, actual current-source failure, repair and pending-case execution. Original assertion ASTs and deadlines are retained. Original Make recorded 230 passed/6 skipped in 443.7s; the separate original hook took 26.9s and reused matching actual tool evidence=True. Complete public source export/check and all three applicable same-tree CI jobs passed; both platform tool/export receipts have six successful commands. These are separate stage clocks, not a causal saving or new whole-application test claim. The end-to-end one-tenth target remains unproven.</p>
+<p><strong>New ordinary test modules retain a qualified dependency graph.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/58">PR #58</a> allows new tests/unit/**/test_*.py and tests/integration/**/test_*.py to use the existing verified worktree graph. Pytest/testmon discovers and executes new, failed and pending cases while reusing unchanged outcomes. This extends affected selection to ordinary test additions; it no longer repeats the entire backend solely because such a module is new. Test removal/rename, conftest, support/unknown helpers, config, missing or invalid graph/environment and interrupted-run guards retain full fallback. Mandatory gate output names blocking inputs. All existing test identities/assertions/deadlines and the separate original live entry remain; no never-failed tests were deleted. Testmon selection is an affected-test policy, not a guarantee against every undeclared order dependency.</p><p><strong>Shared gate change qualified through the full application route.</strong> PR #58 required the original full non-live Make (5599 passed/239 skipped), original including-live hook and frontend build, complete public source export/check and all eleven applicable same-head CI jobs. The separate 33 gate controls cover staged/unstaged new modules, original live scope, failed and unexecuted cases, removal and unknown-input refusal. Per-run counts are separate and are not summed. Full Make took 4873.0s; hook/frontend took 262.3s on this candidate. These are actual stage costs, not a controlled speedup comparison. That accepted PR required full bootstrap acceptance under its then-current local policy; the current runner-only boundary is described above, while hosted runtime coverage remains required. The macro end-to-end one-tenth target remains unproven.</p><p>The prior same-source attempt was stopped for sustained foreground CPU pressure at about94percent: 2546.3s controller/2139.0s Make, exit15, incomplete. It is retained as cost and no acceptance is transferred. The continuation used one original Normal test worker, after bounded resource samples; this was not an exclusive reservation. No source, case, deadline or graph-baseline waiver was introduced.</p>
+<p><strong>Normal project dispatcher avoids duplicate tool validation across caller environments.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/57">PR #57</a> uses the existing project Python and its shell-native bin prefix only inside the dispatcher child. Explicit uv choices or a missing project Python retain the original route. The later full Make/frontend branch receives the original caller PATH; source, environment, tool, Git and index proof checks remain. Original Make executed four checker commands (193 passed/6 skipped); the original commit hook verified that same immutable success and executed zero new checker commands. Their stage clocks were 289.3s and 29.0s. These are separate stages, not a controlled speedup comparison. Original Linux and Windows failed revisions remain separate; no reused attempt is counted as newly executed tests.</p>
+<p><strong>Platform worker follow-up retains the original safe validation fallback.</strong> Normal <a href="https://github.com/sudoprivacy/mosswork/pull/55">PR #55</a> passed all seven applicable jobs. Its original Make and commit hook each executed four checker commands (183 passed/6 skipped per run). PATH changed, so the hook correctly validated afresh; the separate reuse-only measurement remains failed. Later source intake verified these existing successful checks without rerunning them. This follow-up does not claim proof reuse or a controlled speedup.</p>
+<p><strong>A real tools-only change now consumes its original Make proof.</strong> On the same indexed candidate, original Make executed four checker commands (183 passed/6 skipped in pytest). The separate original commit hook verified and reused that immutable success, executing zero new checker commands. Source, environment, Git and installed-tool checks and complete public-source export passed. A reused attempt is not reported as newly executed tests. Normal <a href="https://github.com/sudoprivacy/mosswork/pull/54">PR #54</a> and its seven applicable actual CI jobs passed.</p>
+<p><strong>Make and the commit hook can share actual independent-tool validation.</strong> Reuse requires complete matching source, commands, the frozen Python environment, installed external tools, Git head/configuration and an intact original success. The hook must also have all validated source indexed. Changed, failed, incomplete or missing evidence runs the original checks. Alternate indexes and mixed inputs keep fresh checks. <code>TOOLS_GATE</code> names the original evidence and explicitly reports zero new checks on reuse; testmon data is never copied.</p><p>This shared-transport change retained the application bar: original Make (5583 passed/239 skipped), separate original hook (0 passed/35 skipped), dashboard build, complete source checks and eleven actual hosted jobs, including Linux/Windows canonical identity before normal <a href="https://github.com/sudoprivacy/mosswork/pull/53">PR #53</a> merge. Five real Git/uv/checker controls cover evidence, environment, tool-byte, Git/index, launch and mixed-source boundaries. Counts belong to each run; skips are not passes.</p><p>The earlier same 196-case cohort took 163 seconds in Make and 154 seconds in the hook. The initial bootstrap did not measure a whole-repository tools consumer; the later same-candidate consumer above supplies actual reuse evidence. The macro one-tenth target remains unproven. The original Linux CI reuse failure and its supported leading Git/interpreter PATH repair remain separately recorded. Original failed and revised attempts remain in the total.</p>
+<p><strong>Current TypeScript errors stop before expensive tests.</strong> Both full Make/application precommit and the frontend-only gate run <code>tsc -b --force</code> after format checks and before their test suites. Every original test and the production build remains required. Only the two declared TypeScript build-info outputs are compiler cache; changes to other installed code still refuse, and changed cache forces fresh checks. A real private compiler control showed ordinary build mode returning success for newly invalid source with an older timestamp; the forced check rejected the same bytes. Only private fixture timestamps changed. Real Make/Git/npm controls prove type refusal precedes tests, preserves source/index and invalidates old success. Node version/path metadata uses one equivalent process query per guard; the type check invokes the verified Node and owned installed compiler directly, with no implicit global/NPX compiler fallback. Original30s Windows timeout remains recorded and all assertions/deadlines are retained.</p><p>Normal <a href="https://github.com/sudoprivacy/mosswork/pull/51">PR #51</a> passed the real current-project forced type check, original tool Make (207 passed/6 skipped), separate original hook (196 passed/6 skipped), complete source checks and all five applicable hosted execution jobs. Actual checkout/step logs verify both Linux and Windows validators and both Dashboard journeys; three ACP and two packaged-interop jobs are outside this closed four-file validator-only diff. This exercises the existing narrow route without a new application coverage reduction. Successful-run overhead and failed attempts remain part of end-to-end timing; no whole-lifecycle one-tenth result is claimed.</p>
+<p>When a completed full application validation and the next command have identical complete source, installed Python/environment and intact original private test history, an unintended worker-count change is now refused <strong>before any tests start</strong>. The mandatory CLI names the original receipt and says to keep its <code>PYTEST_JOBS</code> process-locally through Make and commit, or intentionally run <code>make test-current PYTEST_JOBS=&lt;new count&gt;</code>. A new pool still requires full execution. Missing/changed/incomplete/corrupt evidence retains the original full route; no graph is copied and coverage/assertions/deadlines are unchanged. This two-file tool candidate passed original Make (192 passed/6 skipped), the separate original hook (192 passed/6 skipped), complete public-source checks and all nine applicable actual hosted jobs before normal <a href="https://github.com/sudoprivacy/mosswork/pull/48">PR #48</a> merge. These are tool validations, not another full application field or global one-tenth proof.</p>
+<p>Make and the original commit hook select from the complete branch and working tree. Independent docs/tools retain their checked scopes. Regular frontend-source-only changes now run changed-file lint/format, all frontend tests and the TypeScript/Vite build. <strong>The frontend-only local profile omits the full Python suite.</strong> Mixed, dependency, configuration, deleted, linked and unknown inputs retain the application gate.</p>
+<p>Make and hook reuse only this worktree's matching actual success: complete raw source and built SPA bytes, Node executable/environment, installed frontend payloads and the original successful checks/receipt. Source/index drift, missing or damaged proof and a failed/interrupted attempt require fresh validation; partial staging and untracked frontend source refuse. No copied testmon database is accepted.</p>
+<p>Framework bootstrap used the original full application gate: 5555 passed/239 skipped/0 failed with four Normal test workers, one compiler; the separate original hook passed 0 cases with 35 actual skips plus frontend build on the same real private graph. All23 actual Git/Make/npm and stdlib-only entry controls ran in that full field. Source/dependencies remained unchanged. This bootstrap is not a measurement of an eligible product PR's speedup. <a href="https://github.com/sudoprivacy/mosswork/pull/45">Frontend validation PR #45</a>.</p>
+<p>Accepted catalog isolation remains: unrelated fixtures use the supported absent optional snapshot; explicit parser/server/icon tests retain all2693 first-slug-wins resources and original icon bytes. One unchanged API observation was47.68s before/13.11s after, not a whole-lifecycle comparison. Existing full-app source-bound testmon, first-failure stop, and formatting refusal remain. Earlier failed, interrupted and superseded runs are retained.</p>
+</details>
+</td>
+      <td>No: Mosswork validation infrastructure; no Sudo Code PTY credit.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/23">Mosswork PR #23</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/25">PR #25</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/32">PR #32</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/34">source-bound reuse PR #34</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/38">complete-worktree tool route PR #38</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/40">shared Make/hook history PR #40</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/cb3c16ff25bf61e27db0e0b11ff25537134ee46c/tests/unit/deployment/test_make_format_gate.py"><code>test_make_format_gate.py</code></a></td>
+    </tr>
+    <tr>
+      <td>Mosswork canonical product CI</td>
+      <td>
+<p><strong>Retain 40 real CI scope scenarios with 3 private Git initializations.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/70">PR #70</a> keeps the original 21 input classification cases, 11 known tool cases and 8 workflow counterexamples. Each case still receives its own real Git commit and the original complete or deliberately unqualified parent; only repository initialization/accepted parent preparation is shared. No copied graph, testmon seed, shared mutable database or production/CI dispatcher change. The original assertion expressions and scenario vectors remain; 37 redundant parametrized setup records become 3 explicit scenario batches, without removing the 40 logical scenarios. All other regression-function ASTs remain unchanged.</p><p><strong>Repair an ineffective negative fixture:</strong> the 8 old malformed-workflow controls omitted the required companion action, so all could refuse before reaching their intended defect. The corrected fixture seeds the complete workflow and action and first proves a successful tool-only route. Every original workflow mutation remains; the missing case deletes the actual workflow, while other cases retain the original action. A real private-source mutation bypassing only the final recipe hash passes all 8 old controls and is rejected by the corrected batch. No production acceptance standard is relaxed. Existing worker pools, assertions, deadlines and platform coverage remain.</p><p><strong>Actual acceptance and clocks:</strong> original Make passed196cases with6skips in267.9s. Separate original hook took24.5s with0new checker executions under actual source-bound proof rules. Complete public export/check and source/package guards passed; application graph/history stayed unchanged. Original CI input scope, Linux release checks and Windows validation tools all passed on the actual checked tree; the same 5 affected validator modules selected by the unchanged dispatcher plus its complete Ruff, format, mypy and public-source export/check commands ran on both platforms. Job seconds:{'CI input scope': 8.0, 'release-checks': 119.0, 'Windows validation tools': 190.0}. Fixture counts and per-run clocks do not establish a controlled speedup, removable coverage, whole-lifecycle one-tenth or production acceptance.</p>
+
+<p><strong>One transaction for each fresh retained-review test database.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/69">PR #69</a> preserves the four original SQL schema expressions (26CREATE/ALTER/index statements) and seven bound seed statements. The DDL subsequence now precedes the seed subsequence inside one fixture-only transaction; their old interleaving intentionally changes. Every test still uses its own fresh on-disk database, original schema/constraints and actual platform SQLite defaults. No template, in-memory database, shared mutable fixture, production migration, grant/session authority or API change. All16original test-function ASTs and all post-database fixture code for real product migrations, sealed authentication and grants remain identical.</p><p><strong>Actual acceptance:</strong> three new real SQLite guards verify independent databases, committed seed data/default pragmas and rollback after malformed SQL or a genuine seed constraint failure. Restoring autocommit makes the two rollback controls fail; the candidate passes all3. Two private fresh original/candidate fixture pairs have identical complete canonical dumps and pragmas; their timing observations are not a controlled speedup estimate. The original full application Make passed8025cases with239skips in2828.9s; all original affected cases and new guards ran. This full baseline was required after tools/test_gate.py changed, not bypassed or copied. Separate original hook/frontend passed in191.7s using the same actual graph, with per-run counts{'collected': 35, 'passed': 0, 'skipped': 35, 'failed': 0, 'errors': 0}; skipped credential-live bodies are not passes. Source/package vectors stayed unchanged. The first original hook refused before tests after an owned SQLite inspection created empty coordination files; its67.9s cost and original failed receipt remain. The completed main database/history bytes matched their original hashes; only the newly created coordination files were reversibly archived under the original worktree lock. The unchanged original cache guard matched again and the original hook passed. No manual graph/history rewrite, signature retrofit, acceptance-rule change or second full test run.</p><p><strong>Hosted coverage:</strong> the unchanged original browser/native-host workflow passed all12Linux/Windows jobs on one actual checked composition. All10original native-suite XML case/status counters match the original PR63 evidence, with exactly3new review guards per platform: Linux transport: 540 original records + 0 new guards; Linux review: 146 original records + 3 new guards; Linux pages: 49 original records + 0 new guards; Linux product: 104 original records + 0 new guards; Linux startup: 73 original records + 0 new guards; Windows transport: 540 original records + 0 new guards; Windows review: 146 original records + 3 new guards; Windows pages: 49 original records + 0 new guards; Windows product: 104 original records + 0 new guards; Windows startup: 73 original records + 0 new guards. The original real browser control/worker/viewer receipts also passed on each platform; new tests are included through the existing review glob. Current per-job seconds:{'Native host regressions (ubuntu-24.04, transport)': 39.0, 'Native host regressions (ubuntu-24.04, review)': 48.0, 'Native host regressions (ubuntu-24.04, pages)': 66.0, 'Native host regressions (ubuntu-24.04, product)': 65.0, 'Native host regressions (ubuntu-24.04, startup)': 73.0, 'Native host regressions (windows-2022, transport)': 257.0, 'Native host regressions (windows-2022, review)': 241.0, 'Native host regressions (windows-2022, pages)': 196.0, 'Native host regressions (windows-2022, product)': 203.0, 'Native host regressions (windows-2022, startup)': 233.0, 'browser (ubuntu-24.04)': 267.0, 'browser (windows-2022)': 434.0}. Job clocks use different runs/machines and do not isolate the transaction effect. Local preparation, full baseline, hook, failed/partial work, queues and CI remain separate; no whole-lifecycle one-tenth or production/model/phone acceptance claim.</p>
+
+<p><strong>Known test-history tools use the existing two-platform tool route.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/68">PR #68</a> adds tools/test_gate.py and its original regression module to the already-qualified independent-tool input set. Earlier local-tool scope intentionally retained the full hosted runtime; this is an explicit maintained policy update. All ten original classification scenarios remain: only the two complete pure-tool scenarios change their expected hosted route, while the eight mixed/runtime/configuration/unknown/deleted scenarios retain full runtime checks. The entire workflow/action recipe and production dispatcher/selection functions stay unchanged. Actual current composition selected CI input scope, Linux release checks and Windows validation tools: three execution jobs instead of the seven-job core full-runtime route for this validator-only payload. All nine original validator modules plus complete-source export/check ran on both OS. Product, dependency, unknown, missing and unqualified-recipe inputs retain their required matrices; other workflows retain their original path admission.</p><p><strong>Real setup deduplication:</strong> five global-input full-fallback scenarios remain, with all original assertions and a new current-input reason assertion. They share one actual initial baseline; each of five real full executions records its own history and separate output. Inner pytest invocations are10 to6, with no copied/seeded graph. Five redundant parametrized setup records become one five-scenario case, so test-gate records are45 to41; logical scenarios are retained. All other module ASTs remain identical. The original source supplies2pure-tool RED and8mixed/missing GREEN controls; current original Make records318PASS/6SKIP in582.0s; separate original hook took24.3s with0new checker executions under actual exact-proof rules. Complete source/package guards passed and application history stayed unchanged. Actual same-tree hosted job seconds:{'CI input scope': 11.0, 'release-checks': 222.0, 'Windows validation tools': 504.0}. These are per-run observations, not controlled causal speedup or whole-lifecycle one-tenth proof.</p><p><strong>Rejected worker experiments remain closed evidence:</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/67">PR #67</a> passed all functional cases in both sources but did not meet its declared performance criterion and was closed without merging. Combined four-worker source169e01fc:[{'name': 'Packaged Sudograph connector interoperability (windows-2022)', 'originalJobSeconds': 568, 'currentJobSeconds': 710.0, 'originalStageSeconds': 135, 'currentStageSeconds': 170.0, 'jobNotSlower': False, 'stageNotSlower': False}, {'name': 'Canonical identity (windows-2022)', 'originalJobSeconds': 466, 'currentJobSeconds': 361.0, 'originalStageSeconds': 353, 'currentStageSeconds': 258.0, 'jobNotSlower': True, 'stageNotSlower': True}]; freshly qualified identity-only source83d57480:[{'name': 'Packaged Sudograph connector interoperability (windows-2022)', 'originalJobSeconds': 568, 'currentJobSeconds': 713.0, 'originalStageSeconds': 135, 'currentStageSeconds': 172.0, 'jobNotSlower': False, 'stageNotSlower': False}, {'name': 'Canonical identity (windows-2022)', 'originalJobSeconds': 466, 'currentJobSeconds': 533.0, 'originalStageSeconds': 353, 'currentStageSeconds': 441.0, 'jobNotSlower': False, 'stageNotSlower': False}]. Main retains PR66 runner-volume fixtures and its Windows serial settings. No unchanged warm performance retry, forced merge or branch/evidence deletion. Local formatting and explicit-policy expectation failures for the current tools change also remain separate failed attempts, with their actual costs retained.</p>
+
+<p><strong>Fresh Windows functional fixture placement.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/66">PR #66</a> records the actual system and runner temporary directories. Only when their Windows drives differ and no existing explicit basetemp is configured, it creates a new private parent under RUNNER_TEMP. Every one of the fourteen original canonical/identity and ordinary interop pytest invocations uses a distinct child. Same-drive and explicit-directory cases keep their original choice. Global TEMP, child-tool defaults, Linux, native/ACP/calibrated performance legs, schemas, assertions, worker counts and deadlines are unchanged. This intentionally changes incidental functional fixture placement and cross-volume exposure; fresh real databases remain per test, with no template, in-memory substitute or reused mutable fixture.</p><p><strong>Actual source-bound evidence:</strong> canonical: {"existing_explicit_basetemp": false, "fresh_fixture_parent": "D:\\a\\_temp\\mosswork-functional-x_goehdf", "runner_temp": "D:\\a\\_temp", "scope": "new functional pytest directories only; no global environment or performance-leg change", "system_temp": "C:\\Users\\runneradmin\\AppData\\Local\\Temp"}; identity: {"existing_explicit_basetemp": false, "fresh_fixture_parent": "D:\\a\\_temp\\mosswork-functional-69zs4jrt", "runner_temp": "D:\\a\\_temp", "scope": "new functional pytest directories only; no global environment or performance-leg change", "system_temp": "C:\\Users\\runneradmin\\AppData\\Local\\Temp"}; interop: {"existing_explicit_basetemp": false, "fresh_fixture_parent": "D:\\a\\_temp\\mosswork-functional-_9gq7cqn", "runner_temp": "D:\\a\\_temp", "scope": "new functional pytest directories only; no global environment or performance-leg change", "system_temp": "C:\\Users\\runneradmin\\AppData\\Local\\Temp"}. The three original Windows artifact families retain this directory-choice record. Windows canonical: 1394 exact unchanged case/status records; Windows identity: 1645 exact unchanged case/status records; Linux canonical: 1394 exact unchanged case/status records; Linux identity: 1645 exact unchanged case/status records. All nine applicable hosted jobs passed; unchanged Dashboard/browser admission remains. All four original CI recipe test-function ASTs and fourteen original functional pytest argv inventories remain, apart from the new optional storage array. Four new real storage checks passed; separate private C/D and pytest controls retained parent sentinels. Original tools Make: 275 passed/6 skipped in 391.9s; separate original hook: 0 new checker commands in 24.5s, with verified exact tool evidence. Complete source/package vectors and existing application history remained unchanged.</p><p><strong>Observed Windows job seconds:</strong> PR65 {"Canonical identity (windows-2022)": 1180.0, "Packaged Sudograph connector interoperability (windows-2022)": 1825.0}; current {"Canonical identity (windows-2022)": 466.0, "Packaged Sudograph connector interoperability (windows-2022)": 568.0}. Different runners/cache and complete bootstrap costs prevent a controlled disk-root-cause or causal speedup claim. Preparation, failed/incomplete attempts, resource waits, Make, hook and CI remain separate costs; the whole-lifecycle one-tenth target is unproven.</p><p>The original macOS attempt failed downloading the unchanged pinned public Playwright wheel from PyPI after four connection-timeout retries, before ACP tests. Original failure and three fail-fast-cancelled executions remain in the record. One supported same-head failed-job retry resumed those four executions; the original scope/Linux-ACP/Windows-ACP successes were carried with exactly unchanged original step timestamps. GitHub assigned new carried-record IDs; a strict-ID observer refusal is retained and corrected by read-only original step/time comparison. New and old attempts retained same-name artifacts; accepted IDs are taken from the actual successful producer upload logs, with all partial artifacts preserved. No source/lock change, successful-test rerun or repeated retry was used. These incomplete/preparation costs remain separate from the successful job clocks.</p>
+
+<p><strong>Current fixture setup and platform execution.</strong> <a href="https://github.com/sudoprivacy/mosswork/pull/64">PR #64</a> batches the model fixture’s 50 original DDL statements and seed writes in one transaction. Every test keeps its fresh real SQLite database, exact schema/rows/constraints and default connection modes; production transactions are unchanged. Both original-source transaction/rollback controls failed before the repair; 22 private fixture pairs retained equal dumps and modes. All 19 original model/fixture test-function ASTs remain unchanged. Linux ordinary cohorts keep two workers; Windows returns to explicit serial execution after PR63 showed no Windows speedup. The original process, reflection and capacity cases, markers, assertions and deadlines remain required.</p><p><strong>Current acceptance:</strong> Windows canonical: all 1392 original records plus 2 new passed controls; Windows identity: all 1643 original records plus 2 new passed controls; Linux canonical: all 1392 original records plus 2 new passed controls; Linux identity: all 1643 original records plus 2 new passed controls. All 9 applicable hosted jobs passed on the tested composition, including the original three ACP platforms, two interop platforms and two identity platforms; unchanged browser workflow admission is preserved. Related local checks: 66 passed. Separate original Make session (full): 8008 passed/239 skipped; original including-live hook: 0 passed/35 skipped. The actual worktree graph, complete source, installed package vector and final frontend checks were retained. Counts belong to their own runs.</p><p><strong>Observed Windows job seconds:</strong> PR63 {"Canonical identity (windows-2022)": 1882.0, "Packaged Sudograph connector interoperability (windows-2022)": 2365.0}; current {"Canonical identity (windows-2022)": 1339.0, "Packaged Sudograph connector interoperability (windows-2022)": 1600.0}. Different hosted machines/cache and the complete bootstrap prevent a controlled causal speedup claim. Local failed preparation, resource waits, Make, hook and subsequent CI costs remain separate; the whole-lifecycle one-tenth target is unproven.</p>
+<details><summary>Earlier fixture and worker changes with their original evidence</summary>
+<p><strong>Original ordinary cohorts use two hosted workers; startup stays serial.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/63">PR #63</a> keeps all three canonical pytest command inventories and uses -n2. The identity main cohort also uses -n2; its original process, public-type reflection and desktop-capacity modules run separately with explicit -n0 and the same marker/assertion/deadline contract. Original gateway/knowledge calls, Linux/Windows platforms, job budgets and static checks remain. Original/current JUnit case-and-status counters match exactly for both canonical and identity cohorts on each OS; the extra serial startup XML is retained. No application test body or case was removed.</p><p>Both current browser matrices stop their own siblings after the first failure. Existing native prerequisites still gate the browser journey; cancelled/unexecuted work has no completed acceptance. This does not establish cross-workflow cancellation. Nineteen new real controls and all original validator functions were qualified before normal publication. Observed Windows interoperability job: PR62 1597s, this candidate 2365s; identity: 1546s to 1882s. Runners/cache/source context differ, and this CI bootstrap retains extra validator checks, so no causal whole-lifecycle saving or one-tenth result is claimed.</p><p><strong>Fresh canonical SQLite fixture setup uses one transaction.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/62">PR #62</a> batches only existing initialization DDL and original seed writes in four fixture-owned transactions. Every test still creates its independent real database and executes its original schema/seed statements. Foreign keys stay enabled before BEGIN where originally required; unique/FK constraints, synchronous/journal modes, production transactions, assertions and deadlines remain. No shared database cache, test removal or PTY coverage change.</p><p>Seven real SQLite controls verify transaction state, original connection defaults, integrity/FK checks, independent databases, uniqueness and complete setup rollback. All 79 original test-function ASTs and all other fixture statements are retained. Separate paired private initialization observations were approximately 70/38/140/536ms before and 11/8/10/332ms after, with identical committed schema/row dumps and connection pragmas. Those observations are not hosted end-to-end savings.</p><p>Original full Make: 7987 passed/239 skipped, zero failures/errors; 3114.4s. Separate original hook: 0 passed/35 skipped; 213.0s including its required frontend build. Earlier original frontend prebuild took 91.2s; local preparation/full/failed-hook/recovery interval 4122.8s. The original public-wheel TLS EOF and later connection timeout remain separate failed hook records; the successful continuation uses the existing public Make RUN=uv run --frozen parameter and identical installed package/source bytes; no full suite was repeated. Counts and overlapping stages are separate. Complete local candidate source export/check passed; all 21 successful applicable hosted jobs used one tested merge composition before normal merge.</p><p>Original PR47 Windows interoperability/identity jobs took 3182/2063s; this candidate took 1597/1546s. Runners/cache and source context differ: these are actual job clocks, not a controlled causal comparison. Original failed/interrupted fields remain costs. The end-to-end one-tenth target is unproven.</p></details>
+
+
+
+
+</td>
+      <td>No: real per-test SQLite fixtures; original PTY/native coverage remains required.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/62">Mosswork PR #62</a>; <code>test_fixture_schema_transactions.py</code>; original canonical/identity JUnit receipts on both platforms.</td>
+    </tr>
+    <tr>
+      <td>Mosswork metadata initialization</td>
+      <td>Frontmatter uses the installed PyYAML compiled safe loader when
+      available, retaining the original Python safe loader otherwise. No parser
+      cache or dependency change. Controls cover YAML value types, aliases and
+      fresh results, malformed input, refusal of Python object tags and preserved
+      Markdown bodies. The five original tests remain; 490 bundled files and
+      11 bounded inputs match the committed baseline. The candidate passes the
+      full non-live suite and normal hook; Linux and Windows run the added
+      regressions in the existing interoperability job. Alternating parser-only
+      medians were 0.206 versus 0.0355 seconds, excluding file reads, process
+      startup and the rest of validation.</td>
+      <td>No: shared metadata/helper controls; no Sudo Code PTY credit.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/28">Mosswork PR #28</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/9eb422679baf47b719859aeaf5de53f6a3b8a21f/tests/unit/utils/test_frontmatter.py"><code>test_frontmatter.py</code></a></td>
+    </tr>
+    <tr>
+      <td>Mosswork hosted CI selection</td>
+      <td>
+<p><strong>Current core workflow: one native fail-fast matrix.</strong> Normal <a href="https://github.com/sudoprivacy/mosswork/pull/56">PR56</a> retains the original check names and commands: three ACP platforms (Linux, Windows, macos-15-intel), two Linux/Windows packaged compiler/worker consumers and Linux release checks, plus the scope job. Their original 20-minute ACP, 10-minute tool and default 360-minute release/interop limits remain. A failed matrix entry cancels queued/running siblings; cancelled or partial work has no completed acceptance and is never counted as passed. Dashboard and identity workflows remain separately selected. No new cancellation API, permission or local scheduler is added.</p><p>CI_SCOPE.checked_head binds selection to the <strong>actual checked merge composition</strong>, with both supplied base and branch commits proven in ancestry. Source selection and the complete matrix recipe use that checked source; missing or unproven history retains the full checks. Shared checkout fetches two levels. The required macOS leg uses macos-15-intel; ARM64 is outside this required ACP CI leg. Product/platform coverage is unchanged.</p><p><strong>Original fixture coverage is retained.</strong> A single 240-case session plus the separate 39-case startup/reflection/capacity report retain all original 279 reported identities on each original host, with the original database command. Linux shared workers remain two; Windows remains serial. PR55 observed the shared Windows step414s to381s but whole job952s to993s, so no overall gain was credited; Linux whole job151s to175s likewise is not a speedup. These different runner/cache attempts are observations, not causal effects.</p><p><strong>Cost evidence and limits.</strong> The original failed PR53 core workflow allocated21.58runner-minutes after its first failure; this is an opportunity upper bound, not achieved savings from the new matrix. A natural original PR57 Linux failure at 06:48:40Z was followed by the Windows sibling terminal cancellation at 06:48:54Z (14 seconds). Its partial work is not passed. The original defect and later source correction have separate evidence; saved runner-minutes remain unmeasured. No intentional failure was introduced to measure cancellation. Earlier PR50/PR51 observations were46.6/23.1summed runner-minutes and15.2/8.6hosted wall-minutes, with different source/count/cache inputs. Local validation, failed revisions, interruptions and queues remain part of the end-to-end clock. The global one-tenth target is unproven.</p>
+</td>
+      <td>No: CI scheduling controls; skipped matrices are not PTY passes.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/24">Mosswork PR #24</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/26">PR #26</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/27">PR #27</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/39">validator regression scope PR #39</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/36">identity reuse PR #36</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43294467401">actual main-tree proof</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/f8e2862ef35cfe62e6d5d02365c5fe078ae273b5/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43169007910">earlier run</a> /
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43179821767">scoped run</a></td>
+    </tr>
+    <tr>
+      <td>Mosswork validation-tool CI</td>
+      <td>
+<p><strong>Independent validation-tool CI uses two workers.</strong> Accepted <a href="https://github.com/sudoprivacy/mosswork/pull/61">PR #61</a> adds -n2 only to the existing independent CI pytest command. Both original Linux and Windows six-command pipelines, complete source export/check, source/index guards, platforms, case inventory and assertions/deadlines remain. The local application, graph, Make and hook pool choices are unchanged. The original failure-stop flags still apply; cancelled, failed or unexecuted cases are never counted as accepted. Two new actual-process controls observe both workers and both tiny case bodies, and require a failed child to refuse its CI receipt and stop later checks. Export shims isolate those transport controls; the actual production export is checked independently in both platform pipelines.</p><p>Original local Make passed 252 cases/6 skips in 439.6s; separate original hook took 26.8s with matching proof reused=True. All earlier test functions remain AST-identical. All three applicable same-tree jobs passed, and both actual platform receipts record the explicit -n2 command. Observed closest prior PR#60 versus this candidate: Linux release job 161s to 144s; Windows tool job 544s to 361s. Runners/cache differ and this source adds two transport controls, so these are observations, not a controlled causal reduction. Per-run counts and overlapping stages are separate; the end-to-end one-tenth target remains unproven.</p>
+<p><strong>Actual consumer of the current three-job matrix.</strong> PR #57 ran the scope job and both Linux/Windows validator consumers. Original same-head checkout logs, actual six successful validator/export commands per host and both complete source manifests were retained. This is normal publication of a real hook correction, without a seed run, dependency replacement or test/deadline waiver. It qualifies this source and selection; it does not prove the global one-tenth target.</p>
+<p><strong>Current independent-tool route: three execution jobs when its closed input contract is proven.</strong> The scope job selects one Linux release/tool consumer and one Windows tool consumer. Both run the existing applicable validators and complete current-source export/check; Linux retains shell/workflow syntax checks. ACP, Sudograph runtime and unrelated Dashboard journeys are omitted only for the closed regular-file tool diff with its exact qualified selector/output wiring and complete matrix recipe. Runtime, dependency, workflow, deleted, renamed, missing, mixed or unknown inputs retain their required runtime checks. The original selection qualification had no normal consumer timing; the later consumer above supplies actual evidence without a controlled speedup claim.</p><p>The mandatory CLI reports the checked merge composition, required scope and refusal reason. Real Git/process controls preserve index isolation, Git policy, source/environment drift, malformed/missing receipts and first-error propagation. Make and the original hook may reuse only an intact actual success with matching source, recipe, environment and installed tools; differing PATH correctly causes fresh checks. <a href="https://github.com/sudoprivacy/mosswork/pull/53">PR53</a> qualified this proof engine. The later <a href="https://github.com/sudoprivacy/mosswork/pull/56">PR56</a> bootstrap actually ran original Make and hook (216 passed/6 skipped per recorded run) and all seven required core CI jobs. The proof engine and full application fallback remain; no coverage/deadline waiver.</p>
+</td>
+      <td>No: independent validation tools; skipped matrices are not PTY passes.</td>
+      <td><a href="https://github.com/sudoprivacy/mosswork/pull/29">Mosswork PR #29</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/30">PR #30</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/36">metadata repair PR #36</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/pull/37">Linux tool route PR #37</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/actions/runs/43207578368">actual Windows tool run</a>;
+      <a href="https://github.com/sudoprivacy/mosswork/blob/bc12c917cfddf0d207ee534c30d204bded2eef6e/tests/unit/deployment/test_precommit.py"><code>test_precommit.py</code></a></td>
+    </tr>
+    <tr>
       <td>Acceptance executor guards</td>
       <td>Real Git/SSH, Cargo, nextest and Docker processes protect source
       selection, signatures, case/ignore inventories, fail-fast and artifact
-      identity. Both existing completion-order controls now start from a stale
+      identity. On Windows the shared nextest runner immediately terminates running
+      test jobs after the first failure, preserving the original failure and nonzero exit.
+      Unix retains waiting cleanup for independent process groups.
+      Its existing guard compares both Windows modes with a real PTY,
+      child/grandchild processes, a nested job and the pinned OpenConsole host;
+      Unix runs the original waiting mode with an independent process group.
+      original process identities must retire and aborted cases cannot pass.
+      Successful runs keep all cases, workers, retries and deadlines.
+      Workspace, resize and service dispatch verify the fixed nextest
+      archive and executable before compilation. Real proxy HTTP 504 and corrupt
+      private archives must fail before any Cargo command; the verified cached
+      native tool also runs offline. The original checksums, test cases, retries
+      and deadlines remain unchanged; preparation stays in total elapsed time.
+      Windows/macOS guard preparation checks the original protoc 3.20.2 before
+      the native matrix. Its actual cache bytes seed only the isolated cohost
+      tool directory; private HOME, Git and lease state remain isolated. The
+      real feature/stamp canary runs offline. Proxy 504 must refuse before
+      cohost Cargo or any full native guard command, with failed setup retained
+      in total timing.
+      Tool controls retain a short private HOME and exercise the real nested
+      policy/evidence layout, including Windows native executable path limits.
+      These infrastructure controls add no product journey coverage.
+      Both existing completion-order controls now start from a stale
       installed runner and require execution of protected new code. They verify
       original start/output, signer/key, hook and source preservation; refusal
       of nonmanaged candidate refresh; idempotent self-install; and a still-loaded
@@ -1601,6 +1915,29 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       <td><code>e2e/local-acceptance/</code>; <code>.github/scripts/ci_clippy.py</code></td>
     </tr>
     <tr>
+      <td>Native compiler-object reuse</td>
+      <td>Actual Cargo/nextest and native PTY processes keep independent output
+      directories, normal test priority and pinned Windows terminal sidecars.
+      Feature/environment invalidation, failed/repaired source, nested Cargo,
+      explicit caller wrappers, public dispatcher execution, cache capacity,
+      storage contention and owned-server cleanup are checked. Changes to the
+      cache implementation also run the actual three-platform native workspace.</td>
+      <td>No; compiler/executor checks do not add product journeys.</td>
+      <td><code>compiler_objects_acceptance.py</code> inside
+      <code>native_cache_acceptance.py</code></td>
+    </tr>
+    <tr>
+      <td>Execution-plan recipe compatibility</td>
+      <td>Real Git commits, SSH-signed original plans/receipts, HTTP metadata and
+      the actual finalizer cover both author/CI completion orders. Protected
+      exact recipe approvals preserve original signatures, logs and process
+      counts. Undeclared/malformed/wrong-profile pairs and changed workflow,
+      dispatcher, required checks, executor/image or signer remain refused.</td>
+      <td>No; scheduling and proof reuse add no product journeys.</td>
+      <td><code>parallel_acceptance.py</code> /
+      <code>profile_compat_acceptance.py</code></td>
+    </tr>
+    <tr>
       <td>SSE archive compressor reuse</td>
       <td>Real PTY checks six distinct responses and earlier-file integrity.
       A conditional PR check writes 42 real files, with six concurrent captures,
@@ -1617,6 +1954,8 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       sources use <code>native-examples</code>; original selection retains its
       existing behavior. Isolated individual CLI test changes omit the separate
       unchanged example build; shared/production/unknown inputs retain it.
+      Adjacent fresh author workspace/example profiles can share one FIFO
+      reservation while retaining both original signed results and commands.
       Entry points are not run by this check.</td>
       <td>No; compiler/linker coverage adds no product PTY journey credit.</td>
       <td><code>native-examples</code> / <code>examples_acceptance.py</code></td>
@@ -2207,6 +2546,19 @@ separate from the transcript; timeout/disconnect remains Unknown. Real stdio
 hook/allowlist cases and isolated TLS-daemon pause/withheld-reply cases are wired
 to CI; source preparation is not deployment or cross-host callback acceptance.
 See <a href="docs/acp.md#direct-a2a-requests">the wire contract and test limits</a>.</p>
+
+<p><strong>Durable Codex peer handoff (source in progress).</strong>
+Negotiated ACP peer-input v2 retains the mailbox cursor until the original
+client confirms durable custody. The SDK stores a bounded private inbox,
+recovers pending deliveries and reconnects its native proxy with the same
+delivery ID. Native <code>thread/queue/addOnce</code> requires a matching Codex
+build with persistent acceptance receipts; older servers refuse without an
+unsafe enqueue fallback. Runtime compaction health checks respect the session's
+tool allowlist. Real ACP stdio and CLI compaction cases cover receipt loss and
+restricted-session continuation; SDK proxy-process cases cover restart,
+backpressure and transport recovery. These are source/test changes, not a
+production deployment or a Box lifecycle acceptance. See the
+<a href="docs/design/codex-native-queue-callback.md">queue contract</a>.</p>
 
 <h4>2. Tool usage — file operations</h4>
 <table>

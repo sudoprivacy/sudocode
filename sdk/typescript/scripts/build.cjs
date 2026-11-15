@@ -12,7 +12,7 @@ if (Object.keys(library.metafile.inputs).some(name => /(?:node-pty|electron|grpc
 }
 await build({ ...shared, entryPoints: ['src/server.ts'], outfile: 'dist/server.cjs', plugins: [{
   name: 'reuse-library', setup(build) {
-    build.onResolve({ filter: /^\.\/(mcp|codexMcp|codexEnrollment|codexSetup|lifecycle)$/ }, args => args.importer === path.join(root, 'src/server.ts')
+    build.onResolve({ filter: /^\.\/(mcp|codexMcp|codexEnrollment|codexSetup|lifecycle|receiverOwner)$/ }, args => args.importer === path.join(root, 'src/server.ts')
       ? { path: './index.cjs', external: true } : undefined);
   },
 }] });

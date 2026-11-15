@@ -64,6 +64,7 @@ pub mod peer;
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
 pub mod managed_agent;
+pub mod managed_context;
 mod managed_session;
 pub mod runtime_build;
 
@@ -71,6 +72,7 @@ pub mod runtime_build;
 /// act on, so both hosts drive the engine through a kernel rather than one
 /// reaching the host disk directly.
 pub mod local_kernel;
+mod local_runtime;
 
 /// The `/context` figures: what the next request carries, by category, read
 /// from the live runtime so the report cannot disagree with the wire.

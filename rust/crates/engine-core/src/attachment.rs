@@ -95,12 +95,29 @@ impl EngineAttachment {
             if Arc::ptr_eq(previous, &delegate) {
                 return Ok(());
             }
+        }
+        let (read, previous_observation) = {
+            let mut observation = self
+                .delegate
+                .runtime_observation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (observation.read.clone(), observation.guard.take())
+        };
+        drop(previous_observation);
+        if let Some(previous) = current.as_ref() {
             // Session/load can replace configuration while retaining its
             // handle. Reap the previous model before publishing its successor.
             previous.close();
         }
         delegate.attach_completions(&self.completions)?;
+        let observation = read.and_then(|read| delegate.observe_runtime_status(read));
         *current = Some(delegate);
+        self.delegate
+            .runtime_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .guard = observation;
         self.completions.mark_live();
         Ok(())
     }
@@ -114,11 +131,23 @@ impl EngineAttachment {
     }
 
     pub fn release(&self) {
-        self.delegate
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        let (previous, observation) = {
+            let mut current = self
+                .delegate
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let observation = self
+                .delegate
+                .runtime_observation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .guard
+                .take();
+            (current.take(), observation)
+        };
+        drop(observation);
+        drop(previous);
         self.completions.release();
     }
 }
@@ -129,6 +158,7 @@ impl EngineSession {
         let delegate = Arc::new(DeferredDelegate {
             inner: Mutex::new(None),
             abort: HookAbortSignal::default(),
+            runtime_observation: Arc::default(),
         });
         let handle = Self::spawn_with_completions(delegate.clone(), completions.clone());
         (
@@ -144,6 +174,29 @@ impl EngineSession {
 struct DeferredDelegate {
     inner: Mutex<Option<Arc<dyn EngineDelegate>>>,
     abort: HookAbortSignal,
+    runtime_observation: Arc<Mutex<DeferredRuntimeObservation>>,
+}
+
+#[derive(Default)]
+struct DeferredRuntimeObservation {
+    read: Option<runtime::runtime_status::RuntimeStatusReader>,
+    guard: Option<Box<dyn Send>>,
+}
+
+struct RuntimeObservationLifetime(Arc<Mutex<DeferredRuntimeObservation>>);
+
+impl Drop for RuntimeObservationLifetime {
+    fn drop(&mut self) {
+        let guard = {
+            let mut observation = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            observation.read = None;
+            observation.guard.take()
+        };
+        drop(guard);
+    }
 }
 
 impl DeferredDelegate {
@@ -157,6 +210,40 @@ impl DeferredDelegate {
 }
 
 impl EngineDelegate for DeferredDelegate {
+    fn runtime_status_background(&self) -> Option<runtime::runtime_status::BackgroundTaskSummary> {
+        // Model replacement may close its predecessor while holding `inner`.
+        // Observation must neither wait for that close nor retain its storage.
+        self.inner
+            .try_lock()
+            .ok()?
+            .as_ref()?
+            .runtime_status_background()
+    }
+
+    fn observe_runtime_status(
+        &self,
+        read: runtime::runtime_status::RuntimeStatusReader,
+    ) -> Option<Box<dyn Send>> {
+        let current = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut observation = self
+            .runtime_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if observation.read.is_some() {
+            return None;
+        }
+        observation.guard = current
+            .as_ref()
+            .and_then(|delegate| delegate.observe_runtime_status(read.clone()));
+        observation.read = Some(read);
+        Some(Box::new(RuntimeObservationLifetime(Arc::clone(
+            &self.runtime_observation,
+        ))))
+    }
+
     fn requires_host_context(&self) -> bool {
         self.get()
             .is_ok_and(|delegate| delegate.requires_host_context())

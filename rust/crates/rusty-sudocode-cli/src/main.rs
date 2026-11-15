@@ -452,8 +452,7 @@ fn run_config_account(
     let known: Vec<&str> = config
         .auth_modes
         .get("proxy")
-        .map(|accounts| accounts.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|accounts| accounts.keys().map(String::as_str).collect());
     let candidates = || {
         if known.is_empty() {
             "<none configured under auth_modes.proxy>".to_string()
@@ -1540,16 +1539,14 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         let branch = session
             .branch_name
             .as_deref()
-            .map(|b| format!("  branch={b}"))
-            .unwrap_or_default();
+            .map_or_default(|b| format!("  branch={b}"));
         let latest = if i == 0 { "  (latest)" } else { "" };
         let summary = session
             .summary
             .as_deref()
             .map(cli::session::format_session_summary)
             .filter(|summary| !summary.is_empty())
-            .map(|summary| format!("  summary={summary}"))
-            .unwrap_or_default();
+            .map_or_default(|summary| format!("  summary={summary}"));
         println!(
             "  {id}  {msgs} msgs  {age}{branch}{summary}{latest}",
             id = session.id,
@@ -3361,6 +3358,31 @@ fn run_repl_iocraft_dispatch(
         })
     };
     let completions = Arc::new(Mutex::new(commands::CompletionContext::default()));
+    // Taken before `cli` moves into the shared lock, and used by the local
+    // mailbox poller below: reading it back through the lock would have the
+    // coordinator thread contend with every turn for a value that cannot change.
+    let session_agent_name = cli.lifecycle.agent_name();
+    // The session's one receiver, further down, runs on this peer namespace,
+    // the same one its `send` tool writes through.
+    //
+    // Keyed by the name the LIVE SESSION answers to rather than re-derived
+    // here: the session already resolved it (config `agentName`, else derived
+    // from its workspace) and signs outbound messages with it, and a second
+    // derivation from the process directory is how a peer's reply arrives at
+    // an inbox nothing is polling. `attach` reuses the session's selected
+    // mailbox, including a pending binding that this receiver retries.
+    let peer = engine_host::peer::attach(&session_agent_name);
+    // Scheduled jobs fire through this same mailbox, so a job this agent
+    // created comes back into this coordinator like a peer message. Started
+    // before the UI takes keys: its Scheduled tab runs a job now through this
+    // scheduler, and the startup work between here and the coordinator loop
+    // (git position, completions) can take seconds on a loaded machine. A fire
+    // before the receiver below starts waits in the mailbox like any message.
+    if !tools::cron_tools_disabled() {
+        runtime::cron_scheduler::start_once(|| {
+            runtime::cron_scheduler::Firing::new(peer.mailbox())
+        });
+    }
     let repl = repl_ui::spawn_repl_ui(
         &permission_label,
         &banner,
@@ -3368,13 +3390,13 @@ fn run_repl_iocraft_dispatch(
         input_history,
         Some(dequeue_hook),
         Arc::clone(&completions),
+        resume_status
+            .as_ref()
+            .map(|status| (status, cli.lifecycle.usage_snapshot().turns())),
     );
     cli.completions = Some(completions);
     cli.refresh_completions();
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
-    if let Some(status) = resume_status {
-        repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
-    }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
     repl_ui_cmd.set_workspace_position(workspace_position());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
@@ -3382,10 +3404,6 @@ fn run_repl_iocraft_dispatch(
     // Route LiveCli output through iocraft's OutputSender so it goes
     // through split_for_iocraft and renders correctly in raw mode.
     cli.iocraft_output = Some(repl_output.clone());
-    // Taken before `cli` moves into the shared lock, and used by the local
-    // mailbox poller below: reading it back through the lock would have the
-    // coordinator thread contend with every turn for a value that cannot change.
-    let session_agent_name = cli.lifecycle.agent_name();
     spawn_a2a_health_tip(session_agent_name.clone(), repl_ui_cmd.clone());
     // UI input, peer messages, sub-agent results and turn completion converge
     // on this channel so idle delivery needs no polling.
@@ -3493,24 +3511,9 @@ fn run_repl_iocraft_dispatch(
         })
         .expect("spawn input bridge");
 
-    // The session's one receiver, on the same peer namespace its `send` tool
-    // writes through, sharing the coordinator's delivery and shutdown boundary.
-    //
-    // Keyed by the name the LIVE SESSION answers to rather than re-derived
-    // here: the session already resolved it (config `agentName`, else derived
-    // from its workspace) and signs outbound messages with it, and a second
-    // derivation from the process directory is how a peer's reply arrives at
-    // an inbox nothing is polling. `attach` reuses the session's selected
-    // mailbox, including a pending binding that this receiver retries.
+    // The session's one receiver, sharing the coordinator's delivery and
+    // shutdown boundary.
     let mailbox_abort = runtime::HookAbortSignal::new();
-    let peer = engine_host::peer::attach(&session_agent_name);
-    // Scheduled jobs fire through this same mailbox, so a job this agent
-    // created comes back into this coordinator like a peer message.
-    if !tools::cron_tools_disabled() {
-        runtime::cron_scheduler::start_once(|| {
-            runtime::cron_scheduler::Firing::new(peer.mailbox())
-        });
-    }
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(
@@ -4717,8 +4720,7 @@ impl LiveCli {
         let endpoint =
             engine_core::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
                 .ok()
-                .map(|r| r.base_url)
-                .unwrap_or_default();
+                .map_or_default(|r| r.base_url);
 
         render::startup::banner(&[
             format!("  {DIM}Model{RESET}            {}", model),
@@ -5140,13 +5142,17 @@ impl LiveCli {
             return;
         };
         let active = self.lifecycle.session_handle().id;
+        // Evaluated on the input thread when Tab is pressed, so it must stay
+        // cheap: ids only, never the full listing, which parses every
+        // transcript and classifies the workspace with git and tmux.
         let sessions: commands::ValueList = Arc::new(move || {
             let mut ids = vec![active.clone()];
             ids.extend(
-                list_managed_sessions()
+                engine_host::session::current_session_store()
+                    .ok()
+                    .and_then(|store| store.recent_session_ids(21).ok())
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|session| session.id)
                     .filter(|id| *id != active)
                     .take(20),
             );
@@ -6331,7 +6337,7 @@ impl LiveCli {
                     manager
                         .list_installed_plugins()
                         .ok()
-                        .map(|plugins| {
+                        .map_or_default(|plugins| {
                             plugins
                                 .iter()
                                 .map(|plugin| {
@@ -6378,7 +6384,6 @@ impl LiveCli {
                                 })
                                 .collect::<Vec<_>>()
                         })
-                        .unwrap_or_default()
                 });
                 let mut envelope = json!({
                     "kind": "plugin",

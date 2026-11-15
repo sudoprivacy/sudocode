@@ -12,6 +12,15 @@ daemon=Path(os.environ['NEXUSD_BIN']).resolve()
 operator=Path(os.environ['NEXUS_OPERATOR_BIN']).resolve() if os.environ.get('NEXUS_OPERATOR_BIN') else None
 installed_command=os.environ.get('CODEX_ENROLLMENT_INSTALL_ENTRY','0')
 assert installed_command in ('0','1'),'CODEX_ENROLLMENT_INSTALL_ENTRY must be 0 or 1'
+resume_cold=os.environ.get('CODEX_ENROLLMENT_RESUME_COLD','0')
+assert resume_cold in ('0','1'),'CODEX_ENROLLMENT_RESUME_COLD must be 0 or 1'
+assert resume_cold!='1' or installed_command=='1','Cold history resume requires the installed entry'
+cross_workspace=os.environ.get('CODEX_ENROLLMENT_CROSS_WORKSPACE','0')
+assert cross_workspace in ('0','1'),'CODEX_ENROLLMENT_CROSS_WORKSPACE must be 0 or 1'
+assert cross_workspace!='1' or installed_command=='1','Cross-workspace acceptance requires the installed entry'
+installed_cold=os.environ.get('CODEX_ENROLLMENT_INSTALLED_COLD','0')
+assert installed_cold in ('0','1'),'CODEX_ENROLLMENT_INSTALLED_COLD must be 0 or 1'
+assert installed_cold!='1' or installed_command=='1','Cold installed acceptance requires the installed entry'
 if installed_command=='1':
  assert operator and os.environ.get('CODEX_ENROLLMENT_TEST_BIN') and os.environ.get('CODEX_ENROLLMENT_PACKAGE_ROOT'),'Installed-entry acceptance requires the real operator, native Codex and official managed package'
 scode_hash=hashlib.sha256(scode.read_bytes()).hexdigest()
@@ -75,6 +84,9 @@ try:
  if operator:config.update(operator=str(operator),operatorSha256=os.environ['NEXUS_OPERATOR_SHA256'].lower(),operatorSource=os.environ['NEXUS_OPERATOR_SOURCE'],dataDirectory=str(data),endpoint=f'https://127.0.0.1:{port}')
  if os.environ.get('CODEX_ENROLLMENT_TEST_BIN'):config.update(nativeCodex=os.environ['CODEX_ENROLLMENT_TEST_BIN'],nativePackageRoot=os.environ.get('CODEX_ENROLLMENT_PACKAGE_ROOT'),nativeDriver=json.loads(os.environ['CODEX_ENROLLMENT_DRIVER']) if os.environ.get('CODEX_ENROLLMENT_DRIVER') else None)
  if installed_command=='1':config['nativeInstalledCommand']=True
+ if installed_cold=='1':config['nativeInstalledCold']=True
+ if cross_workspace=='1':config['nativeCrossWorkspace']=True
+ if resume_cold=='1':config['nativeResumeCold']=True
  cfg=run/'driver.json';cfg.write_text(json.dumps(config))
  p=subprocess.run([str(node),str(sdk/('test/nativeEnrollment.cjs' if operator else 'test/nativeIntegration.cjs')),str(cfg)],env=env,capture_output=True,timeout=180)
  (run/'test.stdout').write_bytes(p.stdout);(run/'test.stderr').write_bytes(p.stderr)

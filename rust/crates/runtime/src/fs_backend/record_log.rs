@@ -332,7 +332,7 @@ pub(super) fn open_remote(
     path: &str,
     mode: RecordLogMode,
 ) -> io::Result<Arc<dyn RecordLog>> {
-    fs.authorize_target(path, super::ResourceAccessKind::Read)?;
+    let path = &fs.authorize_target(path, super::ResourceAccessKind::Read)?;
     fs.authorize_target(path, super::ResourceAccessKind::Write)?;
     let read_target = fs.inspect_target(path, super::ResourceAccessKind::Read)?;
     let target = fs.inspect_target(path, super::ResourceAccessKind::Write)?;

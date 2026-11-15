@@ -49,6 +49,42 @@ fn mailbox(ws: &std::path::Path, self_id: &str) -> Mailbox {
 }
 
 #[test]
+fn legacy_record_identity_survives_jsonl_batch_growth() {
+    use std::io::Write;
+    let ws = temp_workspace("legacy-record-position");
+    let sender = mailbox(&ws, "sender");
+    let receiver = mailbox(&ws, "receiver");
+    sender.ensure_conversation("receiver").unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(sender.transcript_path("receiver"))
+        .unwrap();
+    let raw = "  {\"from\":\"sender\",\"to\":\"receiver\",\"body\":\"相同消息\"}\r\n";
+    file.write_all(format!("\n{raw}").as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    let (first, cursor) = receiver.poll_conversation_records("sender", 0, 0).unwrap();
+    assert_eq!(first.len(), 1);
+    file.write_all(raw.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let (both, _) = receiver.poll_conversation_records("sender", 0, 0).unwrap();
+    assert_eq!(both.len(), 2);
+    assert_eq!(
+        first[0].delivery_id(),
+        both[0].delivery_id(),
+        "growth cannot change record identity"
+    );
+    assert_eq!(both[0].envelope(), both[1].envelope());
+    assert_ne!(both[0].delivery_id(), both[1].delivery_id());
+    let reopened = mailbox(&ws, "receiver");
+    let (last, _) = reopened
+        .poll_conversation_records("sender", cursor, 0)
+        .unwrap();
+    assert_eq!(last[0].delivery_id(), both[1].delivery_id());
+    fs::remove_dir_all(ws).unwrap();
+}
+
+#[test]
 fn send_creates_the_conversation_transcript() {
     let ws = temp_workspace("send-creates-transcript");
 

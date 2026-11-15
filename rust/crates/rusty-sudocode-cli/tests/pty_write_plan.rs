@@ -17,9 +17,11 @@ use runtime::{ContentBlock, Session, SessionStore};
 #[test]
 fn resumed_plan_uses_the_persisted_session_identity() {
     // An scode session exports its own plan path to the commands it runs, and
-    // scode keeps an inherited path. This test is about the default path, so
-    // the scode it launches must not inherit one from whoever runs the tests.
-    std::env::remove_var("SUDOCODE_PLAN_FILE");
+    // scode keeps an inherited path. The harness must not hand the session
+    // running the tests' plan file to the scode it launches.
+    let host = tempfile::tempdir().unwrap();
+    let host_plan = host.path().join("host-session.plan.md");
+    std::env::set_var("SUDOCODE_PLAN_FILE", &host_plan);
     let env = TestEnv::new("resumed-plan-identity");
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let session = Session::new().with_workspace_root(env.workspace_root().to_path_buf());
@@ -58,6 +60,10 @@ fn resumed_plan_uses_the_persisted_session_identity() {
                 |block| matches!(block, ContentBlock::ToolUse { name, .. } if name == "write_plan")
             )),
         "the model must invoke the plan tool"
+    );
+    assert!(
+        !host_plan.exists(),
+        "the launched scode wrote the plan of the session running the tests"
     );
     let plan = env
         .workspace_root()

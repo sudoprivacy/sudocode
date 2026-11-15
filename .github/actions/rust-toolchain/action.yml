@@ -1,0 +1,146 @@
+name: Install the pinned Rust toolchain
+description: >-
+  Install the Rust release named by rust-toolchain.toml and make it the rustup
+  default, so Cargo also uses it in steps that run outside the checkout.
+inputs:
+  toolchain-file:
+    description: >-
+      Toolchain file, relative to the workspace. List fallbacks one per line;
+      the first file that exists is used.
+    required: false
+    default: rust-toolchain.toml
+  targets:
+    description: Additional targets, separated by commas or whitespace.
+    required: false
+    default: ''
+  components:
+    description: >-
+      Additional components, separated by commas or whitespace. The file's
+      own components are always installed.
+    required: false
+    default: ''
+outputs:
+  toolchain:
+    description: The installed release, for example 1.99.1.
+    value: ${{ steps.install.outputs.toolchain }}
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        TOOLCHAIN_FILES: ${{ inputs.toolchain-file }}
+        EXTRA_TARGETS: ${{ inputs.targets }}
+        EXTRA_COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        set -f
+        file=
+        for candidate in $TOOLCHAIN_FILES; do
+          if [ -f "$candidate" ]; then file=$candidate; break; fi
+        done
+        if [ -z "$file" ]; then
+          echo "::error::No Rust toolchain file found among: $TOOLCHAIN_FILES"
+          exit 1
+        fi
+
+        # Read the file directly. rustup resolves a toolchain file from the
+        # current directory, and some jobs check the repository out below
+        # the workspace root.
+        read_key() {
+          awk -v key="$1" '
+            { sub(/\r$/, ""); sub(/#.*/, "") }
+            /^[[:space:]]*\[/ && !inside { table = $0; gsub(/[[:space:]]/, "", table); next }
+            inside { value = value " " $0; if ($0 ~ /\]/) { inside = 0; print clean(value); exit } next }
+            table == "[toolchain]" && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+              value = $0; sub(/^[^=]*=/, "", value)
+              if (value ~ /\[/ && value !~ /\]/) { inside = 1; next }
+              print clean(value); exit
+            }
+            function clean(text) {
+              gsub(/[][",\047]/, " ", text); gsub(/[[:space:]]+/, " ", text)
+              sub(/^ /, "", text); sub(/ $/, "", text); return text
+            }' "$file"
+        }
+        names() { printf '%s\n' "$@" | tr ',[:space:]' '\n' | awk 'NF && !seen[$0]++'; }
+
+        channel=$(read_key channel)
+        if ! [[ $channel =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error file=$file::[toolchain] channel must name an exact release such as 1.99.1; found '$channel'"
+          exit 1
+        fi
+        profile=$(read_key profile)
+        profile=${profile:-minimal}
+        components=$(names "$(read_key components)" "$EXTRA_COMPONENTS")
+        targets=$(names "$(read_key targets)" "$EXTRA_TARGETS")
+        for name in $profile $components $targets; do
+          if ! [[ $name =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error file=$file::Unexpected toolchain profile, component or target '$name'"
+            exit 1
+          fi
+        done
+
+        if [ "${RUNNER_OS:-}" = Windows ]; then
+          cargo_home=${CARGO_HOME:-$USERPROFILE\\.cargo}
+        else
+          cargo_home=${CARGO_HOME:-$HOME/.cargo}
+        fi
+        if ! command -v rustup >/dev/null 2>&1; then
+          if [ "${RUNNER_OS:-}" = Windows ]; then
+            init="$RUNNER_TEMP\\rustup-init.exe"
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail \
+              "https://win.rustup.rs/$([ "$RUNNER_ARCH" = ARM64 ] && echo aarch64 || echo x86_64)" --output "$init"
+            "$init" --default-toolchain none --no-modify-path -y
+            printf '%s\\bin\n' "$cargo_home" >> "$GITHUB_PATH"
+            PATH=$(cygpath -u "$cargo_home")/bin:$PATH
+          else
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail \
+              https://sh.rustup.rs | sh -s -- --default-toolchain none --no-modify-path -y
+            echo "$cargo_home/bin" >> "$GITHUB_PATH"
+            PATH=$cargo_home/bin:$PATH
+          fi
+        fi
+
+        install=(toolchain install "$channel" --profile "$profile" --no-self-update --force-non-host)
+        for component in $components; do install+=(--component "$component"); done
+        for target in $targets; do install+=(--target "$target"); done
+        echo "Installing Rust $channel from $file: profile $profile, components [${components//$'\n'/ }], targets [${targets//$'\n'/ }]"
+        log=$(mktemp)
+        trap 'rm -f "$log"' EXIT
+        # Retry only the checksum mismatch rustup reports while the release
+        # server is being updated; every other failure stops the job.
+        for attempt in 1 2 3 4 5; do
+          if RUSTUP_PERMIT_COPY_RENAME=1 rustup "${install[@]}" 2>&1 | tee "$log"; then
+            break
+          else
+            status=$?
+          fi
+          if [ "$attempt" = 5 ] || ! grep -Fq 'checksum failed for ' "$log" \
+              || ! grep -Fq 'this is likely due to an ongoing update of the official release server' "$log"; then
+            exit "$status"
+          fi
+          echo "Retrying rustup toolchain install in 30 seconds (retry $attempt of 4)" >&2
+          sleep 30
+        done
+        # The check below decides whether the default took effect.
+        rustup default "$channel" --force-non-host || echo "::warning::rustup default reported an error"
+
+        # Keep the environment the previous toolchain action exported:
+        # Swatinem/rust-cache hashes CARGO* variables into its cache keys.
+        echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
+        if [ -z "${CARGO_INCREMENTAL+set}" ]; then echo CARGO_INCREMENTAL=0 >> "$GITHUB_ENV"; fi
+        if [ -z "${CARGO_TERM_COLOR+set}" ]; then echo CARGO_TERM_COLOR=always >> "$GITHUB_ENV"; fi
+
+        # Both the checkout and directories outside it must resolve the pin.
+        outside=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+        if command -v cygpath >/dev/null 2>&1; then outside=$(cygpath -u "$outside"); fi
+        for directory in "$(dirname "$file")" "$outside"; do
+          version=$(cd "$directory" && rustc --version)
+          if [[ $version != "rustc $channel "* ]]; then
+            echo "::error::rustc in $directory reports '$version'; expected $channel"
+            exit 1
+          fi
+        done
+        rustc --version --verbose
+        echo "toolchain=$channel" >> "$GITHUB_OUTPUT"

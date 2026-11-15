@@ -471,10 +471,11 @@ fn platform_plugin_command(tool_dir: &Path, script: &Path) -> PathBuf {
         .expect("plugin script should have a file name")
         .to_string_lossy()
         .into_owned();
+    // Keep this fixture's child independent of host-installed shell utilities.
     fs::write(
         &shim,
         format!(
-            "@echo off\r\n\"{}\" \"%~dp0{script_name}\"\r\n",
+            "@echo off\r\nset \"PATH=%~dp0\"\r\n\"{}\" \"%~dp0{script_name}\"\r\n",
             shell::resolve_sh()
         ),
     )
@@ -493,9 +494,11 @@ fn prepare_plugin_fixture(workspace: &HarnessWorkspace) {
     fs::create_dir_all(&manifest_dir).expect("plugin manifest dir");
 
     let script_path = tool_dir.join("echo-json.sh");
+    // The host serializes one JSON line without a trailing newline. Read it
+    // with shell builtins; Windows need not have an external `cat` on PATH.
     fs::write(
         &script_path,
-        "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$SUDOCODE_PLUGIN_ID\" \"$SUDOCODE_TOOL_NAME\" \"$INPUT\"\n",
+        "#!/bin/sh\nIFS= read -r INPUT || [ -n \"$INPUT\" ] || exit 1\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$SUDOCODE_PLUGIN_ID\" \"$SUDOCODE_TOOL_NAME\" \"$INPUT\"\n",
     )
     .expect("plugin script should write");
 

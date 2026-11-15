@@ -41,8 +41,10 @@ it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
 The author hook and complementary Windows jobs also install that distribution's
-`conpty.dll` and `OpenConsole.exe` beside ordinary Rust test drivers. `portable-pty`
-loads those compatibility exports from the driver's directory. Both native PTY
+`conpty.dll` and `OpenConsole.exe` in the native target's `debug/deps`. Cargo
+builds each Rust test driver in its own unit directory, and nextest puts
+`debug/deps` on the drivers' library search path (`PATH` on Windows), where
+`portable-pty` loads those compatibility exports. Both native PTY
 paths therefore share this installer's commit and archive checksums. Preparation
 records `NATIVE_CONPTY_HOST`, including member hashes, architecture and
 the actual driver directory. Preparation verifies those installed bytes before
@@ -79,10 +81,10 @@ assertions.
 host. `performance-policy.json` is the source of truth for the fixed baseline,
 workloads, repetition counts and budgets. Run after compiling the release CLI
 and `cargo test --release -p rusty-sudocode-cli --test pty_render_performance --no-run`
-from `rust/`:
+from `rust/`, which prints the driver's path after `Executable`:
 
 ```sh
-python3 e2e/terminal-resize/benchmark.py --driver rust/target/release/deps/pty_render_performance-<hash> \
+python3 e2e/terminal-resize/benchmark.py --driver rust/<driver path printed by cargo> \
   --base /absolute/path/scode-base --candidate /absolute/path/scode-candidate --output /tmp/render-results
 ```
 

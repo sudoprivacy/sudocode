@@ -51,10 +51,13 @@ fn closed_engine_releases_native_writer_and_fences_retained_snapshots() {
         .unwrap(),
     ));
     let before = std::fs::read(&handle.path).unwrap();
-    assert!(engine_host::session::delete_managed_session(&handle.path)
-        .unwrap_err()
-        .to_string()
-        .contains("session_writer_busy"));
+    // Logical deletion may revoke an active runtime. Probe the actual legacy
+    // writer admission here so ordinary close retains its separate contract.
+    assert!(runtime::session_writer::SessionWriter::acquire(
+        std::sync::Arc::new(runtime::StdFsBackend),
+        &handle.path,
+    )
+    .is_err_and(|error| error == "session_writer_busy"));
     engine.close();
     engine.close();
     assert!(retained
@@ -63,6 +66,13 @@ fn closed_engine_releases_native_writer_and_fences_retained_snapshots() {
         .to_string()
         .contains("session_closed"));
     assert_eq!(std::fs::read(&handle.path).unwrap(), before);
+    drop(
+        runtime::session_writer::SessionWriter::acquire(
+            std::sync::Arc::new(runtime::StdFsBackend),
+            &handle.path,
+        )
+        .expect("closing releases the actual native writer despite retained observers"),
+    );
     engine_host::session::delete_managed_session(&handle.path).unwrap();
     assert!(!handle.path.exists());
     assert!(retained.save_to_path(&handle.path).is_err());

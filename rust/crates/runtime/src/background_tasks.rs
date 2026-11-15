@@ -100,15 +100,7 @@ pub enum BackgroundTaskEvent {
 }
 
 /// Lightweight work metadata, without cloning task output or installing a sink.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BackgroundTaskSummary {
-    pub terminals: usize,
-    pub agents: usize,
-    pub execution_unconfirmed: usize,
-    /// Actual workers, including work whose caller has already been cancelled.
-    /// This is independent of the number of background task records.
-    pub tool_operations: usize,
-}
+pub use crate::runtime_status::BackgroundTaskSummary;
 
 type TaskSink = Arc<dyn Fn(BackgroundTaskEvent) + Send + Sync>;
 struct Record {

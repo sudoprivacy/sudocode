@@ -106,6 +106,8 @@ def run(output):
     command("git", "config", "user.name", "VFS cache fixture", cwd=source)
     command("git", "config", "user.email", "cache@example.invalid", cwd=source)
     write(".gitignore", "/.ci-cache/\n")
+    # The driver's own toolchain pin, as nexus-vfs carries it; prepare() requires it to match.
+    write("rust-toolchain.toml", f'[toolchain]\nchannel = "{cache.DRIVER_TOOLCHAIN}"\n')
     write("Cargo.toml", '[workspace]\nmembers=["rust/*"]\nresolver="2"\n[profile.dev]\nopt-level=1\n'
           '[profile.dev.package."*"]\nopt-level=2\n')
     write("rust/plugin/Cargo.toml", '[package]\nname="nexus-search-plugin"\nversion="0.0.0"\nedition="2021"\n'
@@ -172,7 +174,8 @@ def run(output):
                      extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"})
     assert "Restored VFS compiler context differs" in refused.read_text()
     debug = source / ".ci-cache/target/debug"
-    outputs = [debug / "libnexus_search_plugin.so"] + [path for path in (debug / "deps").glob("user_runtime-*")
+    # The test executable sits wherever this Cargo's build-dir layout puts it.
+    outputs = [debug / "libnexus_search_plugin.so"] + [path for path in debug.rglob("user_runtime-*")
                                                      if path.is_file() and path.suffix == ""]
     assert len(outputs) == 2, outputs
     before = {str(path.relative_to(source)): (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)

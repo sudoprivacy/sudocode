@@ -5,8 +5,11 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
+      # A toolchain bump changes every key; publish its caches when it lands.
+      - 'rust-toolchain.toml'
+      - '.github/actions/rust-toolchain/**'
       # Other workflow edits change neither Cargo inputs nor this cache's
-      # environment. Rust pushes still warm a new toolchain/image key.
+      # environment. Rust pushes still warm a new runner image key.
       - '.github/workflows/ci-dependency-cache.yml'
       - '.github/local-acceptance/cache_layout.py'
   workflow_call:
@@ -49,7 +52,7 @@ jobs:
         os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - name: Resolve the shared native cache paths
         id: cache_layout
         run: python ../.github/local-acceptance/cache_layout.py --source rust --github-output

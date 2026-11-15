@@ -3,10 +3,11 @@ import { realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 import { identifier } from './codexBindings';
-import { CodexRequestError, validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
+import { CodexCleanupUnknownError, CodexRequestError, validateCodexConnectionConfig, type CodexConnectionConfig } from './codexConnection';
 import { codexPeerData } from './codexPeerData';
 import type { ScodePeerMessage } from './scodeAcp';
 import { timeout } from './timeout';
+import { requireDurableCodexQueue } from './codexCapabilities';
 
 export interface CodexNativeQueueConfig extends CodexConnectionConfig {
   /** Explicit existing native home; never inferred from the scode workspace. */
@@ -15,7 +16,7 @@ export interface CodexNativeQueueConfig extends CodexConnectionConfig {
 }
 
 export interface CodexNativeQueueReceipt {
-  method: 'thread/queue/add';
+  method: 'thread/queue/addOnce';
   transport: 'native-queue';
   outcome: 'queued';
   threadId: string;
@@ -42,7 +43,7 @@ export function validateCodexNativeQueueConfig(config: CodexNativeQueueConfig): 
 
 /** One bounded producer, with no public arbitrary-RPC seam or target loading.
  * A queue receipt confirms persistence, not an accepted native turn or read.
- * Once submission is possible every failure stays Unknown; nothing is replayed.
+ * Once submission is possible every failure stays Unknown; the durable callback can retry the same ID using addOnce.
  */
 export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfig, threadId: string,
   message: ScodePeerMessage, eventId: string): Promise<CodexNativeQueueReceipt> {
@@ -61,7 +62,7 @@ export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfi
     env: { ...(config.env ?? process.env), CODEX_HOME: home }, windowsHide: true, shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  const deadline = Date.now() + 15000;
+  const deadline = performance.now() + 15000;
   let failure: unknown, stderr = '', outputBytes = 0, serial = 0, submitted = false;
   let selected: string | undefined;
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
@@ -96,10 +97,11 @@ export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfi
     const id = ++serial;
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
     observe({ phase: 'request', pid: child.pid, id, method });
-    if (method === 'thread/queue/add') submitted = true;
+    if (performance.now() >= deadline) throw new Error('Native queue producer deadline expired before request');
+    if (method === 'thread/queue/addOnce') submitted = true;
     child.stdin.write(payload);
     for (;;) {
-      const item = await timeout(iterator.next(), Math.max(1, deadline - Date.now()), 'Native queue response');
+      const item = await timeout(iterator.next(), Math.max(1, deadline - performance.now()), 'Native queue response');
       if (failure) throw failure;
       if (item.done) throw new Error('Native queue producer closed before its response');
       const response = frame(item.value);
@@ -126,16 +128,21 @@ export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfi
     catch {
       child.kill('SIGTERM');
       try { await timeout(exited, ms, 'Native queue producer termination'); }
-      catch { child.kill('SIGKILL'); await timeout(exited, ms, 'Native queue producer forced exit'); }
+      catch {
+        child.kill('SIGKILL');
+        try { await timeout(exited, ms, 'Native queue producer forced exit'); }
+        catch (error) { throw new CodexCleanupUnknownError(`Native queue producer ${child.pid} cleanup unconfirmed: ${String(error)}`); }
+      }
       throw new Error('Native queue producer required forced termination');
     } finally { lines.close(); }
   })();
   observe({ phase: 'spawned', pid: child.pid });
   try {
-    await request('initialize', { clientInfo: { name: 'scode-native-queue', version: '1.0.0' }, capabilities: { experimentalApi: true } });
+    const initialized = await request('initialize', { clientInfo: { name: 'scode-native-queue', version: '1.0.0' }, capabilities: { experimentalApi: true } });
+    requireDurableCodexQueue(initialized);
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }) + '\n');
     await inventory('before');
-    const result = await request('thread/queue/add', { threadId, input: [{ type: 'text', text }], clientUserMessageId: eventId }) as {
+    const result = await request('thread/queue/addOnce', { threadId, input: [{ type: 'text', text }], clientUserMessageId: eventId }) as {
       queuedSubmission?: { id?: unknown; clientUserMessageId?: unknown; input?: Array<{ type?: unknown; text?: unknown }> };
     };
     const item = result?.queuedSubmission;
@@ -156,12 +163,14 @@ export async function enqueueCodexPeerNotification(config: CodexNativeQueueConfi
     };
     const [exit] = await Promise.all([close(), drain()]);
     if (exit.code !== 0 || exit.signal !== null || failure || !child.pid) throw new Error('Native queue producer did not exit normally');
-    return { method: 'thread/queue/add', transport: 'native-queue', outcome: 'queued', threadId,
+    return { method: 'thread/queue/addOnce', transport: 'native-queue', outcome: 'queued', threadId,
       clientUserMessageId: eventId, queueItemId: selected, producerPid: child.pid, producerExit: exit };
   } catch (error) {
-    await close().catch(() => {});
+    try { await close(); } catch (cleanupError) {
+      if (cleanupError instanceof CodexCleanupUnknownError) throw cleanupError;
+    }
     throw new CodexRequestError(submitted ? 'unknown' : 'not_sent',
-      `Native queue ${submitted ? 'outcome unknown; no replay' : 'not submitted'}: ${String(error)}${stderr ? `; ${stderr}` : ''}`,
+      `Native queue ${submitted ? 'outcome unknown; only this stable ID may be retried' : 'not submitted'}: ${String(error)}${stderr ? `; ${stderr}` : ''}`,
       { threadId, clientUserMessageId: eventId, producerPid: child.pid, queueItemId: selected }, error);
   }
 }

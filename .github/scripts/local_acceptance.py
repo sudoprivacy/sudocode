@@ -45,6 +45,13 @@ AUTHORIZATION_CONTEXT = "Acceptance contract authorization"
 CONTRACT_UPDATE_COMMAND = ('python "$(git rev-parse --path-format=absolute --git-common-dir)/'
                            'local-acceptance-hooks/local_acceptance.py" contract-update --remote origin')
 HOST_LEASE_ENV = "SUDOCODE_ACCEPTANCE_HOST_LEASE"
+# Carried origins verify recursively to at most this depth; a deeper origin is
+# not carried, so its profiles run again.
+MAX_CARRY_DEPTH = 32
+# Earlier envelopes one receipt references may total at most this many
+# canonical bytes, keeping the note well under read_note's 2 MB cap. A carry
+# that would exceed it runs its profile again instead.
+CARRY_STORE_BUDGET = 1_000_000
 ROOT = Path(__file__).resolve().parents[2]
 MSVC_ENV = None
 RUNNER_CODE = sys._getframe().f_code
@@ -139,6 +146,16 @@ def commands_hash(ref):
                           **{p: sha(tracked(ref, p)) for p in paths}}))
 
 
+def referenced_globals(table):
+    """Use Python's scope rules, including nested/comprehension scopes."""
+    result, pending = set(), [table]
+    while pending:
+        current = pending.pop()
+        result.update(symbol.get_name() for symbol in current.get_symbols() if symbol.is_global())
+        pending.extend(current.get_children())
+    return result
+
+
 def profile_ast_value(value):
     """Serialize semantic AST fields independently of Python's dump formatting."""
     if isinstance(value, ast.AST):
@@ -203,10 +220,10 @@ def profile_commands_hashes(ref, names):
     return result
 
 
-def reachable_profile_commands_hashes(ref, names):
+def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
     module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha(executor_source(ref).encode())
+    executor = sha((executor_source(ref) if executor_identity is None else executor_identity).encode())
     image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
     result = {}
     # Reflection can find a function without a static Name reference. Retain
@@ -328,6 +345,274 @@ def committed_test_groups(head):
         return True
 
 
+def resource_executor_identity(ref):
+    """Normalize only known compiler budgets and command-completion waits."""
+    import symtable
+
+    path = ".github/scripts/local_acceptance.py"
+    row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+    if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+        raise ValueError("Compiler resource identity requires a regular committed executor")
+    source = tracked(ref, path).decode("utf-8")
+    tree = ast.parse(source)
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    reserved = {"os", "psutil", "time", "subprocess", "max", "min", "str", "int", "RuntimeError"}
+    if any(node.name in reserved for node in functions):
+        raise ValueError("Compiler budget helper is shadowed by a module function")
+    if len({node.name for node in functions}) != len(functions):
+        raise ValueError("Duplicate executor function binding")
+    # New declarations must have no unknown import-time effects. The existing
+    # stdlib contextmanager wraps a function without running its body.
+    decorator = profile_ast_value(ast.parse("contextlib.contextmanager", mode="eval").body)
+    for function in functions:
+        if (any(profile_ast_value(node) != decorator for node in function.decorator_list)
+                or function.returns or getattr(function, "type_params", [])
+                or any(arg.annotation for arg in [*function.args.posonlyargs, *function.args.args,
+                    *function.args.kwonlyargs, *[arg for arg in [function.args.vararg, function.args.kwarg] if arg]])):
+            raise ValueError("Unknown executor import-time declaration")
+        for default in [*function.args.defaults, *function.args.kw_defaults]:
+            if default is not None and not isinstance(default, ast.Name):
+                ast.literal_eval(default)
+    contexts = [node for node in tree.body if not isinstance(node, ast.FunctionDef)]
+    for statement in contexts:
+        if any(isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store)
+               for node in ast.walk(statement)):
+            raise ValueError("Compiler budget namespace has a module assignment")
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(statement, ast.Import) and alias.name in {"os", "time", "subprocess"}
+                        and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown import")
+    imports = [node for node in contexts if isinstance(node, ast.Import)
+               and any(alias.name == "os" and alias.asname is None for alias in node.names)]
+    if len(imports) != 1 or any(isinstance(node, ast.Name) and node.id == "os" and isinstance(node.ctx, ast.Store)
+                                for statement in contexts for node in ast.walk(statement)):
+        raise ValueError("Unknown operating-system import binding")
+    function = copy.deepcopy(next(node for node in functions if node.name == "run_command"))
+    for node in ast.walk(function):
+        if ((isinstance(node, ast.Name) and node.id in reserved and isinstance(node.ctx, ast.Store))
+                or (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in reserved)
+                or (isinstance(node, (ast.Global, ast.Nonlocal)) and set(node.names) & reserved)):
+            raise ValueError("Compiler budget namespace has a local assignment")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                binding = alias.asname or alias.name.split(".")[0]
+                if alias.name == "*" or (binding in reserved and not (
+                        isinstance(node, ast.Import) and alias.name == "psutil" and alias.asname is None)):
+                    raise ValueError("Compiler budget namespace has an unknown local import")
+    updates = [node for node in function.body
+               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and profile_ast_value(node.value.func) == profile_ast_value(ast.parse("environment.update", mode="eval").body)
+               and len(node.value.args) == 1 and isinstance(node.value.args[0], ast.Dict)
+               and any(isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS" for key in node.value.args[0].keys)]
+    if len(updates) != 1:
+        raise ValueError("Unknown compiler environment declaration")
+    statement = updates[0]
+    settings = statement.value.args[0]
+    index = next(index for index, key in enumerate(settings.keys)
+                 if isinstance(key, ast.Constant) and key.value == "CARGO_BUILD_JOBS")
+    selected = settings.values[index]
+    if selected.lineno != selected.end_lineno:
+        raise ValueError("Unknown multiline compiler environment field")
+    lines = source.splitlines(keepends=True)[function.lineno - 1:function.end_lineno]
+    line = selected.lineno - function.lineno
+    lines[line] = lines[line][:selected.col_offset] + '"1"' + lines[line][selected.end_col_offset:]
+    budget_form = "serial"
+    if profile_ast_value(selected) == profile_ast_value(ast.parse("str(jobs)", mode="eval").body):
+        budget_form = "adaptive"
+        budget = ast.parse('''
+jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+if cap is not None:
+    if not cap.isdigit() or int(cap) < 1:
+        raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+    jobs = min(jobs, int(cap))
+''').body
+        at = function.body.index(statement)
+        if at < 3 or profile_ast_value(function.body[at - 3:at]) != profile_ast_value(budget):
+            raise ValueError("Unknown compiler budget calculation or effects")
+        del lines[function.body[at - 3].lineno - function.lineno:function.body[at - 1].end_lineno - function.lineno + 1]
+        del function.body[at - 3:at]
+        settings.values[index] = ast.Constant(value="1")
+    elif not isinstance(selected, ast.Constant) or selected.value != "1":
+        raise ValueError("Unknown serial compiler budget")
+    if any(isinstance(node, ast.Name) and node.id in {"jobs", "cap"} for node in ast.walk(function)):
+        raise ValueError("Compiler budget is observed outside its environment field")
+    text = "".join(lines)
+    budget_comment = """    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+"""
+    if text.count(budget_comment) > 1:
+        raise ValueError("Duplicate compiler budget explanation")
+    text = text.replace(budget_comment, "", 1)
+    poll = ast.parse("process.poll() is None", mode="eval").body
+    loops = [node for node in ast.walk(function)
+             if isinstance(node, ast.While) and profile_ast_value(node.test) == profile_ast_value(poll)]
+    if len(loops) != 1 or len(loops[0].body) != 2:
+        raise ValueError("Unknown command-completion supervision loop")
+    sleep = ast.parse("time.sleep(0.15)").body[0]
+    notify = ast.parse("""try:
+    process.wait(timeout=0.15)
+except subprocess.TimeoutExpired:
+    pass
+""").body[0]
+    wait = loops[0].body[-1]
+    wait_form = "sleep"
+    if profile_ast_value(wait) == profile_ast_value(notify):
+        wait_form = "completion"
+        original = "\n".join(source.splitlines()[wait.lineno - 1:wait.end_lineno])
+        if text.count(original) != 1:
+            raise ValueError("Unknown command-completion wait source")
+        text = text.replace(original, "                time.sleep(0.15)", 1)
+        loops[0].body[-1] = sleep
+    elif profile_ast_value(wait) != profile_ast_value(sleep):
+        raise ValueError("Unknown command-completion wait or effects")
+    # Equal unknown callbacks can observe a changed executor without changing
+    # their own source. Bind reviewed eager context AND command consumers after
+    # normalizing the two supported resource differences; never import it.
+    symbols = symtable.symtable(source, path, "exec")
+    definitions = {node.name: node for node in functions}
+    consumers, pending = {}, ["run_command", "selected", "opt_in_test_target_changes", "production_build_paths"]
+    while pending:
+        name = pending.pop()
+        if name in consumers:
+            continue
+        consumers[name] = profile_ast_value(function if name == "run_command" else definitions[name])
+        used = referenced_globals(symbols.lookup(name).get_namespace())
+        pending.extend(used & definitions.keys() - consumers.keys())
+    layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
+    reviewed = "32b51f2756d1ca52cec2f39f62ae50189878b2d31c44a7b8a4c3706c56251de6"
+    if layout != reviewed:
+        print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
+            "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
+            "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command. Unknown layouts grant no reuse or waiver.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed eager context or command consumer layout; full current checks remain required")
+    # Callers such as main/perform_check can observe the executor too. Keep
+    # complete reviewed program layouts, not only the command's callees. Erase
+    # only this literal allowlist from its own checksum to avoid a hash cycle.
+    program = copy.deepcopy(tree)
+    for index, node in enumerate(program.body):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_command":
+            program.body[index] = function
+        if isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+            declarations = [item for item in node.body if isinstance(item, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                                    for target in item.targets)]
+            if len(declarations) > 1:
+                raise ValueError("Duplicate reviewed source declaration")
+            for declaration in declarations:
+                values = ast.literal_eval(declaration.value)
+                if not isinstance(values, set) or not values or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in values):
+                    raise ValueError("Unknown reviewed source declaration")
+                declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
+    source_layout = sha(canonical(profile_ast_value(program)))
+    reviewed_sources = {
+        "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
+    }
+    if source_layout not in reviewed_sources:
+        print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
+            "ref": ref, "observed_source_layout": source_layout, "full_current_checks_required": True,
+            "next": "Use the supported original-author acceptance command; unreviewed callers grant no reuse.",
+        }).decode(), flush=True)
+        raise ValueError("Unreviewed complete executor program; full current checks remain required")
+    return (budget_form, wait_form), canonical({"mode": row[0], "context": profile_ast_value(contexts),
+                                                "executor": profile_ast_value(function), "executor_text": text}).decode()
+
+
+def resource_equivalent_profiles(before, after, names):
+    """Prove resource-only differences, without accepting a supplied hash pair."""
+    allowed = {"preflight", "native-workspace", "native-examples", "native-release",
+               "native-context", "native-services", "native-cohost"}
+    names = [name for name in names if name in allowed]
+    if not names:
+        return set()
+    try:
+        before = value("rev-parse", f"{before}^{{commit}}")
+        after = value("rev-parse", f"{after}^{{commit}}")
+        old_budget, old_executor = resource_executor_identity(before)
+        new_budget, new_executor = resource_executor_identity(after)
+        if old_budget == new_budget:
+            return set()
+        previous = reachable_profile_commands_hashes(before, names, executor_identity=old_executor)
+        current = reachable_profile_commands_hashes(after, names, executor_identity=new_executor)
+        return {name for name in names if previous[name] == current[name]}
+    except (ValueError, TypeError, KeyError, StopIteration, SyntaxError, RuntimeError, subprocess.CalledProcessError):
+        return set()
+
+
+def compatible_native_dispatcher(before, after):
+    """Retain exact dispatcher identity, allowing only its two known budget forms."""
+    path = ".github/local-acceptance/cross_platform.py"
+
+    def source(ref):
+        row = value("ls-tree", ref, "--", path).split("\t", 1)[0].split()
+        if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+            raise ValueError("Native dispatcher must be a regular committed file")
+        return row[0], tracked(ref, path)
+
+    try:
+        old, current = source(before), source(after)
+        if old == current:
+            return True
+        if old[0] != current[0]:
+            return False
+        forms = [ast.parse(text).body[0] for text in ['''
+def execute(command, cwd, log, env=None):
+    jobs = (os.cpu_count() or 1) if os.environ.get("GITHUB_ACTIONS") == "true" else 1
+    return helper.run_command(command, cwd, log, {**(env or {}), "CARGO_BUILD_JOBS": str(jobs)})
+''', '''
+def execute(command, cwd, log, env=None):
+    hosted = {"CARGO_BUILD_JOBS": str(os.cpu_count() or 1)} if os.environ.get("GITHUB_ACTIONS") == "true" else {}
+    return helper.run_command(command, cwd, log, {**(env or {}), **hosted})
+''']]
+
+        def identity(contents):
+            tree = ast.parse(contents.decode("utf-8"))
+            functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "execute"]
+            if len(functions) != 1 or profile_ast_value(functions[0]) not in [profile_ast_value(form) for form in forms]:
+                raise ValueError("Unknown native dispatch or environment effects")
+            function = functions[0]
+            form = [profile_ast_value(item) for item in forms].index(profile_ast_value(function))
+            # A changed dispatcher must actually switch known budget forms.
+            # All bytes outside that function, including comments, stay bound.
+            lines = contents.decode("utf-8").splitlines(keepends=True)
+            outside = "".join(lines[:function.lineno - 1] + lines[function.end_lineno:])
+            return form, outside
+
+        previous, updated = identity(old[1]), identity(current[1])
+        return previous[0] != updated[0] and previous[1] == updated[1]
+    except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
+        return False
+
+
+def approved_equivalent_profiles(before, current, policy_ref, names, head):
+    """Share protected exact recipe approvals between scheduling and completion."""
+    policy = load_policy(policy_ref)
+    equivalents = policy.get("equivalent_profile_commands", {})
+    ungrouped = policy.get("equivalent_profile_commands_without_test_groups", {})
+    accepted = {}
+    for name in names:
+        approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
+        predecessors = approved.get(current[name], []) if isinstance(approved, dict) else []
+        if isinstance(predecessors, list) and before[name] in predecessors:
+            accepted[name] = "declared"
+            continue
+        conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
+        predecessors = conditional.get(current[name], []) if isinstance(conditional, dict) else []
+        if (isinstance(predecessors, list) and before[name] in predecessors
+                and not committed_test_groups(head)):
+            accepted[name] = "without_test_groups"
+    return accepted
+
+
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
     try:
@@ -363,19 +648,21 @@ def compatible_profile_commands(receipt, policy_ref, required):
                 return False
         expected = (original_reachable if previous == policy_ref
                     else reachable_profile_commands_hashes(policy_ref, required))
-        equivalents = load_policy(policy_ref).get("equivalent_profile_commands", {})
-        ungrouped = load_policy(policy_ref).get("equivalent_profile_commands_without_test_groups", {})
+        differences = [name for name in required if original_reachable[name] != expected[name]]
+        resources = resource_equivalent_profiles(previous, policy_ref, differences)
+        if resources:
+            print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
+                "original_policy": previous, "current_policy": value("rev-parse", policy_ref),
+                "profiles": sorted(resources), "proof": "only_known_compiler_budget_or_completion_wait_forms",
+                "original_signed_maps_revalidated": True, "checks_executed_by_this_proof": False,
+            }).decode(), flush=True)
+        approved = approved_equivalent_profiles(original_reachable, expected, policy_ref, differences, receipt["head"])
         for name in required:
-            if original_reachable[name] == expected[name]:
+            if original_reachable[name] == expected[name] or name in resources:
                 continue
-            approved = equivalents.get(name, {}) if isinstance(equivalents, dict) else {}
-            predecessors = approved.get(expected[name], []) if isinstance(approved, dict) else []
-            if not isinstance(predecessors, list) or original_reachable[name] not in predecessors:
-                conditional = ungrouped.get(name, {}) if isinstance(ungrouped, dict) else {}
-                predecessors = conditional.get(expected[name], []) if isinstance(conditional, dict) else []
-                if (not isinstance(predecessors, list) or original_reachable[name] not in predecessors
-                        or committed_test_groups(receipt["head"])):
-                    return False
+            if name not in approved:
+                return False
+            if approved[name] == "without_test_groups":
                 print(f"Preserving exact-head {name} evidence for a committed source without test groups; "
                       "the exact protected recipe pair applies only to unchanged original target selection. "
                       "Grouped or unknown sources still need fresh validation.", flush=True)
@@ -802,9 +1089,12 @@ def report_plan(plan, current_environment=False):
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
-        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": 1,
+        rule = "half the logical CPUs, at most one per 3 GiB of memory"
+        concurrency = {"source": "current invocation environment", "compiler_jobs_per_cargo": rule,
+                       "compiler_jobs_setting": "SCODE_ACCEPTANCE_BUILD_JOBS",
                        "requested_test_worker_cap": cap, "cap_setting": "SCODE_ACCEPTANCE_TEST_THREADS"}
-        lines.append("Author-native Cargo compilation uses one job per command. Native test processes use "
+        lines.append(f"Author-native Cargo compilation uses {rule} per command (SCODE_ACCEPTANCE_BUILD_JOBS "
+                     "lowers it) at BelowNormal priority. Native test processes use "
                      + ("the protected profile default." if cap is None else
                         f"the requested SCODE_ACCEPTANCE_TEST_THREADS={cap} cap."))
         try:
@@ -816,7 +1106,7 @@ def report_plan(plan, current_environment=False):
                      else "unset SCODE_ACCEPTANCE_TEST_THREADS")
             lines.append("SCODE_ACCEPTANCE_TEST_THREADS=1 runs native test cases serially. "
                          f"To use the protected test-pool default, run `{clear}` before retrying this command. "
-                         "Cargo compilation keeps its independent one-job setting; the explicit test cap is honored.")
+                         "Cargo compilation keeps its independent job setting; the explicit test cap is honored.")
     performance = [name for name in ["rendering"] if name in plan["local_checks"]]
     lines.append("Statistical performance profiles: " + (", ".join(performance) if performance else
                  "none selected; release acceptance judges indirect performance effects with the stress matrix."))
@@ -999,12 +1289,29 @@ def run_command(command, cwd, log, env=None):
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
-    environment.update({"CARGO_BUILD_JOBS": "1", "CARGO_INCREMENTAL": "0",
+    # Compiler children run at BelowNormal priority (below), so foreground work
+    # keeps the CPU it needs; a serial build only lengthened every queued
+    # acceptance. Use half the logical CPUs and at most one job per 3 GiB of
+    # memory; SCODE_ACCEPTANCE_BUILD_JOBS lowers it and never raises it. An
+    # explicit env (hosted runners) still wins below.
+    jobs = max(1, min((os.cpu_count() or 1) // 2, psutil.virtual_memory().total // (3 * 1024 ** 3)))
+    cap = os.environ.get("SCODE_ACCEPTANCE_BUILD_JOBS")
+    if cap is not None:
+        if not cap.isdigit() or int(cap) < 1:
+            raise RuntimeError("SCODE_ACCEPTANCE_BUILD_JOBS must be a positive integer")
+        jobs = min(jobs, int(cap))
+    environment.update({"CARGO_BUILD_JOBS": str(jobs), "CARGO_INCREMENTAL": "0",
                         "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "PYTHONIOENCODING": "utf-8"})
     environment.update(env or {})
+    # Neither ambient credentials, SDK discovery nor per-command overrides may
+    # pass GitHub API authority to candidate builds, tests or product processes.
+    # Windows resolves environment names without regard to case, including
+    # explicit dictionary overrides that have not passed through os.environ.
+    environment = {key: value for key, value in environment.items()
+                   if key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     command = [shutil.which(str(command[0])) or str(command[0]), *map(str, command[1:])]
     started = time.monotonic()
-    priorities = {}
+    observed = {}
     log.parent.mkdir(parents=True, exist_ok=True)
     print("+ " + shlex.join(map(str, command)), flush=True)
     with log.open("wb") as stream:
@@ -1022,12 +1329,15 @@ def run_command(command, cwd, log, env=None):
                             if (name in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe", "rust-lld", "rust-lld.exe", "link.exe", "ld", "ld.lld", "ld64.lld", "cc", "cc1", "cc1plus", "clang-cl.exe", "cl.exe", "c1.exe", "c1xx.exe", "ml64.exe"}
                                     or re.fullmatch(r"(?:.*-)?(?:clang(?:\+\+)?|gcc|g\+\+)(?:-\d+(?:\.\d+)*)?(?:\.exe)?", name)):
                                 child.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10)
-                                priorities[f"{child.pid}:{name}"] = child.nice()
+                                observed[child.pid, name] = child.nice()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             continue
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                time.sleep(0.15)
+                try:
+                    process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    pass
         except BaseException:
             # Interrupting owned validation must not orphan compiler children.
             for child in psutil.Process(process.pid).children(recursive=True)[::-1]:
@@ -1038,6 +1348,12 @@ def run_command(command, cwd, log, env=None):
             process.terminate()
             process.wait()
             raise
+    # Sign how many distinct compiler children ran at each priority, by name.
+    # The summary stays bounded however many children a build spawns.
+    priorities = {}
+    for (_pid, name), priority in observed.items():
+        counts = priorities.setdefault(name, {})
+        counts[str(priority)] = counts.get(str(priority), 0) + 1
     result = {"command": list(map(str, command)), "exit_code": process.returncode,
               "elapsed_seconds": round(time.monotonic() - started, 3),
               "log_sha256": sha(log.read_bytes()), "compiler_priorities": priorities}
@@ -1055,9 +1371,84 @@ def read_note(head, ref=NOTE_REF):
     if len(result.stdout) > 2_000_000:
         raise RuntimeError("Acceptance note exceeds 2 MB")
     obj = json.loads(result.stdout)
-    if obj.get("version") != 1 or not isinstance(obj.get("attestations"), dict):
+    # "envelopes" stores each earlier signed envelope that a version 2 receipt
+    # carries from, once, keyed by envelope_identity. Notes without carried
+    # references omit it; older readers ignore it and refuse version 2 receipts.
+    if (obj.get("version") != 1 or not isinstance(obj.get("attestations"), dict)
+            or not isinstance(obj.get("envelopes", {}), dict)):
         raise RuntimeError("Invalid acceptance note")
     return obj
+
+
+def envelope_identity(envelope):
+    """Content address of one signed envelope: SHA-256 of its canonical JSON."""
+    return sha(canonical(envelope))
+
+
+def signed_envelope(envelope):
+    if (not isinstance(envelope, dict) or set(envelope) != {"signer", "payload", "signature"}
+            or not all(isinstance(field, str) for field in envelope.values())):
+        raise RuntimeError("Carried evidence is not a signed envelope")
+    return envelope
+
+
+def carried_envelope(group, store, version):
+    """Resolve the earlier envelope one signed carry group names.
+
+    Version 2 receipts name it by envelope_identity inside the signed payload,
+    and the note or local output stores its exact bytes once. Version 1
+    receipts, written before that store existed, embed it whole.
+    """
+    if version == 1:
+        if "envelope_sha256" in group:
+            raise RuntimeError("A version 1 receipt embeds its carried envelopes")
+        return signed_envelope(group.get("envelope"))
+    reference = group.get("envelope_sha256")
+    if "envelope" in group or not isinstance(reference, str) or not re.fullmatch(r"[a-f0-9]{64}", reference):
+        raise RuntimeError("Carried evidence must reference its origin envelope by SHA-256")
+    if reference not in store:
+        raise RuntimeError(f"Carried evidence {reference[:12]} is missing from its envelope store")
+    envelope = signed_envelope(store[reference])
+    if envelope_identity(envelope) != reference:
+        raise RuntimeError(f"Stored carried evidence {reference[:12]} differs from its signed SHA-256")
+    return envelope
+
+
+def carried_store(envelopes, store):
+    """Stored envelopes reachable through these envelopes' carry references."""
+    reachable, pending = {}, list(envelopes)
+    while pending:
+        try:
+            groups = json.loads(base64.b64decode(pending.pop()["payload"], validate=True)).get("carried", [])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                continue
+            reference = group.get("envelope_sha256")
+            if isinstance(reference, str) and reference in store and reference not in reachable:
+                reachable[reference] = store[reference]
+                pending.append(store[reference])
+            elif isinstance(group.get("envelope"), dict):
+                pending.append(group["envelope"])
+    return reachable
+
+
+def referenced_store(groups, store):
+    """The stored envelopes these carry groups reference, directly or through their origins."""
+    direct = {group["envelope_sha256"]: store[group["envelope_sha256"]] for group in groups}
+    return {**direct, **carried_store(direct.values(), store)}
+
+
+def local_envelope_store(proof):
+    """Earlier envelopes a local signed receipt references; runners before the store wrote none."""
+    path = proof / "envelopes.json"
+    if not path.exists():
+        return {}
+    store = json.loads(path.read_bytes())
+    if not isinstance(store, dict):
+        raise RuntimeError("Invalid local carried evidence store")
+    return store
 
 
 def verify_signed_payload(envelope, policy_ref, signers_ref=None, kind=None):
@@ -1085,7 +1476,10 @@ def verify_signed_payload(envelope, policy_ref, signers_ref=None, kind=None):
                                 input=payload, capture_output=True)
         if result.returncode:
             raise RuntimeError("Invalid SSH acceptance signature")
-    if receipt.get("version") != 1 or receipt.get("repository") != load_policy(policy_ref)["repository"]:
+    # Version 2 receipts reference carried envelopes by SHA-256; version 1
+    # receipts embed them. Every other version is unknown and refused.
+    if (receipt.get("version") not in (1, 2) or isinstance(receipt.get("version"), bool)
+            or receipt.get("repository") != load_policy(policy_ref)["repository"]):
         raise RuntimeError("Wrong acceptance schema or repository")
     return receipt, signer_id, signer
 
@@ -1118,14 +1512,41 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if not names or receipt.get("plan") != plan:
         raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
     if contract_hash(planned_policy) != contract_hash(protected):
-        dispatcher = ".github/local-acceptance/cross_platform.py"
-        if (tracked(planned_policy, dispatcher) != tracked(protected, dispatcher)
-                or reachable_profile_commands_hashes(planned_policy, names)
-                   != reachable_profile_commands_hashes(protected, names)):
+        before = reachable_profile_commands_hashes(planned_policy, names)
+        current = reachable_profile_commands_hashes(protected, names)
+        changed = [name for name in names if before[name] != current[name]]
+        resources = resource_equivalent_profiles(planned_policy, protected, changed)
+        approved = approved_equivalent_profiles(before, current, protected, changed, head)
+        dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
+        if set(changed) - resources - approved.keys() or not dispatcher_matches:
+            print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
+                "version": 1, "run_on": "original author native host", "head": head,
+                "original_policy": planned_policy, "current_policy": protected,
+                "changed_profiles": sorted(set(changed) - resources - approved.keys()),
+                "native_dispatcher_changed": not dispatcher_matches,
+                "same_head_start_pr_renewal_supported": False,
+                "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
+                        "use the supported fresh-source plan route when required. Do not overwrite or re-sign the old plan.",
+            }).decode(), file=sys.stderr, flush=True)
             raise RuntimeError("Execution plan commands or native dispatcher changed; this old plan cannot schedule current execution. "
                                "Publish a fresh source/plan from the original author host; all current checks remain required.")
+        if approved:
+            print("LOCAL_ACCEPTANCE_PLAN_DECLARED_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(approved),
+                "conditional_profiles": sorted(name for name, kind in approved.items() if kind == "without_test_groups"),
+                "original_plan_and_signatures_unchanged": True, "checks_executed_by_this_proof": False,
+                "full_acceptance_still_required": True,
+            }).decode(), flush=True)
+        if resources or tracked(planned_policy, ".github/local-acceptance/cross_platform.py") != tracked(protected, ".github/local-acceptance/cross_platform.py"):
+            print("LOCAL_ACCEPTANCE_PLAN_RESOURCE_EQUIVALENCE=" + canonical({
+                "head": head, "original_policy": planned_policy, "current_policy": protected,
+                "profiles": sorted(resources), "dispatcher": "unchanged_or_known_compiler_budget_forms",
+                "original_plan_and_signatures_unchanged": True, "full_acceptance_still_required": True,
+            }).decode(), flush=True)
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
-              "author/native responsibility, selected commands and native workflow/dispatcher verified unchanged.", flush=True)
+              "author/native responsibility, selected command effects and native workflow verified; "
+              "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
     return receipt
 
 
@@ -1144,7 +1565,13 @@ def read_execution_plan(head, base, policy_ref, signers_ref=None):
     raise RuntimeError("No current valid execution plan: " + ("; ".join(errors) or "signed plan missing"))
 
 
-def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, completed_only=False):
+def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store=None, depth=0, trail=(),
+                    completed_only=False):
+    """Verify one signed receipt and, recursively, every envelope it carries from.
+
+    `store` resolves version 2 carry references. `depth` and `trail` bound the
+    recursion: origins nest at most MAX_CARRY_DEPTH deep and never repeat.
+    """
     receipt, signer_id, signer = verify_signed_payload(
         envelope, policy_ref, signers_ref, kind="completed-profiles" if completed_only else None)
     if receipt.get("head") != head or receipt.get("tree") != value("rev-parse", f"{head}^{{tree}}"):
@@ -1201,8 +1628,10 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
     for name, group in carried_profiles(receipt).items():
         if name not in checks:
             raise RuntimeError(f"Carried {name} is missing from the signed checks")
+    carriers = (*trail, envelope_identity(envelope))
     for group in receipt.get("carried", []):
-        origin = verify_carried(group, head, receipt["base"], base, policy_ref, receipt["host"], signers_ref)
+        origin = verify_carried(group, head, receipt["base"], base, policy_ref, receipt["host"], signers_ref,
+                                store=store, version=receipt["version"], depth=depth + 1, trail=carriers)
         for name in group["profiles"]:
             if checks[name] != origin["checks"][name]:
                 raise RuntimeError(f"Carried {name} differs from its origin's signed execution")
@@ -1239,9 +1668,10 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, complete
 
 def verify(head, base, policy_ref, note_ref=NOTE_REF, signers_ref=None):
     errors = []
-    for envelope in read_note(head, note_ref)["attestations"].values():
+    note = read_note(head, note_ref)
+    for envelope in note["attestations"].values():
         try:
-            return verify_envelope(envelope, head, base, policy_ref, signers_ref)
+            return verify_envelope(envelope, head, base, policy_ref, signers_ref, store=note.get("envelopes", {}))
         except (RuntimeError, ValueError, KeyError) as error:
             errors.append(str(error))
     raise RuntimeError("No current valid local acceptance: " + ("; ".join(errors) or "signed note missing"))
@@ -1252,7 +1682,7 @@ def remote_note_tip(remote, note_ref=NOTE_REF):
     return existing[0] if existing else ""
 
 
-def publish(head, envelope, remote, note_ref=NOTE_REF):
+def publish(head, envelope, remote, note_ref=NOTE_REF, store=None):
     # Use a private temporary notes ref. Fetch+lease retries preserve evidence
     # another author publishes concurrently; never overwrite their notes tree.
     temporary = f"refs/notes/scode-publish-{os.getpid()}"
@@ -1268,6 +1698,13 @@ def publish(head, envelope, remote, note_ref=NOTE_REF):
                 git("update-ref", "-d", temporary)
             notes = read_note(head, temporary)
             notes["attestations"][envelope["signer"]] = envelope
+            # Store each earlier envelope any current attestation references
+            # exactly once; drop those only a replaced attestation used.
+            kept = carried_store(notes["attestations"].values(), {**notes.get("envelopes", {}), **(store or {})})
+            if kept:
+                notes["envelopes"] = kept
+            else:
+                notes.pop("envelopes", None)
             git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
             result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
                          f"{temporary}:{note_ref}", check=False)
@@ -1296,12 +1733,22 @@ def carried_change_paths(origin, origin_base, head, base):
     return sorted(since & (set(changed_paths(base, head)) | set(changed_paths(origin_base, origin))))
 
 
-def verify_carried(group, head, base, base_ref, policy_ref, host_info, signers_ref=None):
-    """Check candidate recipe compatibility under the publication authority's trust."""
-    origin, profiles, envelope = group.get("head"), group.get("profiles"), group.get("envelope")
+def verify_carried(group, head, base, base_ref, policy_ref, host_info, signers_ref=None, *,
+                   store=None, version=2, depth=1, trail=()):
+    """Check candidate recipe compatibility under the publication authority's trust.
+
+    `version` is the carrying receipt's; `depth` counts this origin's carrying
+    receipts and `trail` holds their envelope identities.
+    """
+    origin, profiles = (group.get("head"), group.get("profiles")) if isinstance(group, dict) else (None, None)
     if (not isinstance(origin, str) or origin == head or not isinstance(profiles, list) or not profiles
-            or "preflight" in profiles or not isinstance(envelope, dict)):
+            or "preflight" in profiles):
         raise RuntimeError("Carried evidence must name an earlier origin head and its non-preflight profiles")
+    if depth > MAX_CARRY_DEPTH:
+        raise RuntimeError(f"Carried evidence nests more than {MAX_CARRY_DEPTH} origins deep; run its profiles again")
+    envelope = carried_envelope(group, store or {}, version)
+    if envelope_identity(envelope) in trail:
+        raise RuntimeError("Carried evidence refers back to an envelope that carries it")
     if git("merge-base", "--is-ancestor", origin, head, check=False).returncode:
         raise RuntimeError("Carried evidence origin is not an ancestor of this head")
     payload = json.loads(base64.b64decode(envelope["payload"], validate=True))
@@ -1319,7 +1766,8 @@ def verify_carried(group, head, base, base_ref, policy_ref, host_info, signers_r
             "Preserve the original evidence; do not relax the ancestry check."
         )
     receipt = verify_envelope(envelope, origin, base_ref, origin_policy, signers_ref=authority_ref,
-                              completed_only=payload.get("kind") == "completed-profiles")
+                              completed_only=payload.get("kind") == "completed-profiles",
+                              store=store, depth=depth, trail=trail)
     if receipt["host"] != host_info:
         raise RuntimeError("Carried evidence belongs to a different native host")
     affected = set(selected(load_policy(policy_ref), carried_change_paths(origin, receipt["base"], head, base)))
@@ -1344,16 +1792,17 @@ def carried_profiles(receipt):
     return owners
 
 
-def carry_checks(head, base, base_ref, policy_ref, output, needed, signers_ref=None):
+def carry_checks(head, base, base_ref, policy_ref, output, needed, signers_ref=None, store=None):
     """Carry signed profiles from this branch's earlier heads when later changes do not select them.
 
-    Same-host evidence only. Each carried group keeps its origin's signed
-    envelope, so the verifier re-checks the origin, its ancestry and the change
-    set instead of trusting this receipt's copy. A candidate command policy
-    never substitutes for the protected authority used at publication.
+    Same-host evidence only. Each carried group references its origin's signed
+    envelope by SHA-256, and the returned store keeps those envelopes' exact
+    bytes once, so the verifier re-checks the origin, its ancestry and the
+    change set instead of trusting this receipt's copy. A candidate command
+    policy never substitutes for the protected authority used at publication.
     """
     remaining = [name for name in needed if name != "preflight"]
-    carried, groups, refused = {}, {}, set()
+    carried, groups, refused, store = {}, {}, set(), dict(store or {})
     for candidate in value("rev-list", "--topo-order", head, "--not", base_ref).splitlines()[1:200]:
         if not remaining:
             break
@@ -1365,20 +1814,32 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed, signers_ref=N
                 if receipt.get("head") != candidate or receipt.get("host") != host():
                     continue
                 owners = carried_profiles(receipt)
+                stored = local_envelope_store(proof)
             except (OSError, ValueError, KeyError, RuntimeError):
                 continue
             # The candidate's own executions, then the groups it carried itself.
             sources = [(candidate, envelope, [name for name in receipt.get("checks", {}) if name not in owners])]
-            sources += [(group["head"], group["envelope"], group["profiles"])
-                        for group in receipt.get("carried", [])]
+            for group in receipt.get("carried", []):
+                try:
+                    sources.append((group["head"], carried_envelope(group, stored, receipt.get("version")),
+                                    group["profiles"]))
+                except (RuntimeError, KeyError, TypeError) as error:
+                    print(f"Not carrying a group {candidate[:12]} carried: {error}", flush=True)
             for origin, origin_envelope, available in sources:
+                reference = envelope_identity(origin_envelope)
+                lookup = {**stored, reference: origin_envelope}
                 for name in [name for name in remaining if name in available]:
                     key = (origin, name)
                     if key in refused:
                         continue
                     try:
-                        origin_receipt = verify_carried({"head": origin, "profiles": [name], "envelope": origin_envelope},
-                                                        head, base, base_ref, policy_ref, host(), signers_ref)
+                        addition = {reference: origin_envelope, **carried_store([origin_envelope], lookup)}
+                        if len(canonical({**store, **addition})) > CARRY_STORE_BUDGET:
+                            raise RuntimeError(f"its earlier envelopes would exceed the {CARRY_STORE_BUDGET}-byte "
+                                               "carried evidence budget of one note")
+                        origin_receipt = verify_carried({"head": origin, "profiles": [name], "envelope_sha256": reference},
+                                                        head, base, base_ref, policy_ref, host(), signers_ref,
+                                                        store=lookup)
                         logs = verified_profile_logs(directory, origin_receipt, name, "Carried")
                     except (RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
                         refused.add(key)
@@ -1389,11 +1850,13 @@ def carry_checks(head, base, base_ref, policy_ref, output, needed, signers_ref=N
                     for filename, contents in logs.items():
                         (target / filename).write_bytes(contents)
                     carried[name] = origin_receipt["checks"][name]
-                    groups.setdefault(origin, {"head": origin, "envelope": origin_envelope, "profiles": []})["profiles"].append(name)
+                    store.update(addition)
+                    groups.setdefault((origin, reference), {"head": origin, "envelope_sha256": reference,
+                                                            "profiles": []})["profiles"].append(name)
                     remaining.remove(name)
             if not remaining:
                 break
-    return carried, [{**group, "profiles": sorted(group["profiles"])} for group in groups.values()]
+    return carried, [{**group, "profiles": sorted(group["profiles"])} for group in groups.values()], store
 
 
 def local_proof_directory(directory):
@@ -1497,7 +1960,8 @@ def index_existing_output(directory, policy_ref):
     if git("merge-base", "--is-ancestor", origin_policy, policy_ref, check=False).returncode:
         raise RuntimeError("Indexed policy is not an ancestor of the current protected policy")
     receipt = verify_envelope(envelope, previous["head"], previous["base"], origin_policy,
-                              signers_ref=policy_ref, completed_only=previous.get("kind") == "completed-profiles")
+                              signers_ref=policy_ref, completed_only=previous.get("kind") == "completed-profiles",
+                              store=local_envelope_store(proof))
     if receipt["host"] != host():
         raise RuntimeError("Indexed receipt belongs to a different native host")
     for name in receipt["checks"]:
@@ -1520,8 +1984,9 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
     previous_policy = value("rev-parse", previous["commands_ref"])
     if git("merge-base", "--is-ancestor", previous_policy, policy_ref, check=False).returncode:
         raise RuntimeError("Resume policy is not an ancestor of the current protected policy")
+    stored = local_envelope_store(proof)
     previous = verify_envelope(envelope, head, base, previous_policy, signers_ref=signers_ref or policy_ref,
-                               completed_only=completed_only)
+                               completed_only=completed_only, store=stored)
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
     reusable = {}
@@ -1535,16 +2000,21 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
         for filename, contents in logs.items():
             (target / filename).write_bytes(contents)
         reusable[name] = previous["checks"][name]
-    # A reused profile that the earlier attempt carried keeps its origin group.
-    groups = {}
+    # A reused profile that the earlier attempt carried keeps its origin,
+    # referenced by SHA-256 even when that attempt embedded the envelope.
+    groups, store = {}, {}
     for name in reusable:
         if name in owners:
             group = owners[name]
-            groups.setdefault(group["head"], {**group, "profiles": []})["profiles"].append(name)
+            origin = carried_envelope(group, stored, previous["version"])
+            reference = envelope_identity(origin)
+            store.update({reference: origin, **carried_store([origin], stored)})
+            groups.setdefault((group["head"], reference), {"head": group["head"], "envelope_sha256": reference,
+                                                           "profiles": []})["profiles"].append(name)
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
                       "timing": previous.get("timing"),
-                      "profiles": sorted(reusable)}, list(groups.values())
+                      "profiles": sorted(reusable)}, list(groups.values()), store
 
 
 def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
@@ -1558,14 +2028,16 @@ def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
             "signature": base64.b64encode(signature.read_bytes()).decode()}
 
 
-def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref=None):
+def save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref=None, store=None):
     """Publish complete signed files before atomically advertising their generation."""
     clean(head)
     checkpoint = {**receipt, "kind": "completed-profiles", "finished_at": int(time.time())}
     generation = str(time.time_ns())
     directory = output / "checkpoints" / generation
     envelope = sign_receipt(checkpoint, directory, identity, key, NAMESPACE + "-checkpoint")
-    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref=signers_ref, completed_only=True)
+    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref=signers_ref, completed_only=True, store=store)
+    if store:
+        (directory / "envelopes.json").write_bytes(canonical(store))
     (directory / "envelope.json").write_bytes(canonical(envelope))
     pointer = output / "checkpoint.next.json"
     pointer.write_bytes(canonical({"version": 1, "generation": generation}))
@@ -1712,13 +2184,14 @@ def verify_inherited_host_lease(claim, directory):
 
 @contextlib.contextmanager
 def host_acceptance_lease(attempt, head):
-    """Run one fresh profile at a time on this host, in arrival order.
+    """Run one fresh reservation at a time on this host, in arrival order.
 
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Each fresh profile rejoins the FIFO, so already waiting work
-    can run before this invocation's next profile. Processes
+    a memory kill. A complete workspace and its immediately following compile-only
+    examples can share one reservation. All other fresh work rejoins the FIFO,
+    so already waiting work runs before this invocation's next reservation. Processes
     started under the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
@@ -1751,7 +2224,8 @@ def host_acceptance_lease(attempt, head):
                     current = "an unrecorded process"
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
-                      "this invocation rejoins the FIFO between fresh profiles; each profile stays exclusive.", flush=True)
+                      "this invocation rejoins the FIFO between fresh reservations; "
+                      "only a workspace and its following compile-only examples may share one.", flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -1760,11 +2234,16 @@ def host_acceptance_lease(attempt, head):
         attempt.setdefault("host_lease_acquisitions", []).append({
             "profile": attempt.get("active_profile"), "wait_seconds": waited, "acquired_at": acquired,
         })
+        members = attempt.get("reservation_profiles", [])
+        if len(members) > 1:
+            attempt["host_lease_acquisitions"][-1]["profiles"] = list(members)
         import psutil
         record = {"version": 1, "active": True, "pid": os.getpid(),
                   "process_created_at": psutil.Process().create_time(),
                   "lease_id": secrets.token_hex(32), "head": head, "root": str(ROOT),
                   "acquired_at": acquired, "profile": attempt.get("active_profile")}
+        if len(members) > 1:
+            record["profiles"] = list(members)
         write_host_lease_record(descriptor, record)
         holder.write_bytes(canonical(record))
         print(f"Acquired this host's local acceptance lease after {waited:.3f}s; "
@@ -1833,9 +2312,37 @@ def scheduled_checks(needed):
     return ordered
 
 
-def perform_check(args, attempt):
+def profile_reservations(ordered, pending):
+    """Share only adjacent fresh workspace/example work; keep order and logical receipts."""
+    ordered, pending = list(ordered), set(pending)
+    reservations, index = [], 0
+    while index < len(ordered):
+        pair = ordered[index:index + 2]
+        if pair == ["native-workspace", "native-examples"] and set(pair) <= pending:
+            reservations.append(pair)
+            index += 2
+        else:
+            reservations.append([ordered[index]])
+            index += 1
+    return reservations
+
+
+def materialize_profile_module(policy_ref, output):
+    """Load protected profile code and its pinned companion from Git objects."""
     import importlib.util
 
+    profiles = output / "protected_profiles.py"
+    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
+    companion = ".github/local-acceptance/compiler_cache.py"
+    if git("ls-tree", "--name-only", policy_ref, "--", companion).stdout.strip():
+        (output / "compiler_cache.py").write_bytes(tracked(policy_ref, companion))
+    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def perform_check(args, attempt):
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
@@ -1870,23 +2377,20 @@ def perform_check(args, attempt):
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
-    profiles = output / "protected_profiles.py"
-    profiles.write_bytes(tracked(policy_ref, ".github/local-acceptance/checks.py"))
-    spec = importlib.util.spec_from_file_location("acceptance_checks", profiles)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = materialize_profile_module(policy_ref, output)
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
-    reusable, resumed, groups = {}, None, []
+    reusable, resumed, groups, store = {}, None, [], {}
     previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
     if previous:
-        reusable, resumed, groups = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
+        reusable, resumed, groups, store = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
     # Earlier heads of this branch lend profiles that later changes do not select.
-    carried, new_groups = carry_checks(head, base, base_ref, policy_ref, output,
-                                       [name for name in needed if name not in reusable], signers_ref)
+    carried, new_groups, store = carry_checks(head, base, base_ref, policy_ref, output,
+                                              [name for name in needed if name not in reusable], signers_ref, store)
     for group in new_groups:
-        existing = next((item for item in groups if item["head"] == group["head"]), None)
+        existing = next((item for item in groups if item["head"] == group["head"]
+                         and item["envelope_sha256"] == group["envelope_sha256"]), None)
         if existing:
             existing["profiles"] = sorted(existing["profiles"] + group["profiles"])
         else:
@@ -1917,12 +2421,15 @@ def perform_check(args, attempt):
 
     def sign_carried():
         # A checkpoint lists only the carried profiles it already contains.
+        # Version 2 marks carry groups that reference the envelope store.
         current = [{**group, "profiles": [name for name in group["profiles"] if name in results]} for group in groups]
         current = [group for group in current if group["profiles"]]
         if current:
-            receipt["carried"] = current
+            receipt["carried"], receipt["version"] = current, 2
         else:
             receipt.pop("carried", None)
+            receipt["version"] = 1
+        return referenced_store(current, store)
 
     def perform_profile(name):
         if name in reusable:
@@ -1936,8 +2443,7 @@ def perform_check(args, attempt):
             print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
             results[name] = module.run(name, ROOT, output / name, base, run_command)
         timing["checks_finished_at"] = time.time()
-        sign_carried()
-        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref)
+        save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
               "If this process exits, resume with: "
               f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
@@ -1945,6 +2451,7 @@ def perform_check(args, attempt):
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
+    reservations = profile_reservations(serialized, pending)
     prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
     lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
                         and serialized.index("guard-contract") < serialized.index("native-workspace"))
@@ -1955,7 +2462,8 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "one_fresh_profile_then_fifo_requeue",
+        "reservation": "adjacent_fresh_workspace_and_compile_only_examples_share_one;_others_requeue",
+        "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:
         if "preflight" in needed:
@@ -1974,25 +2482,31 @@ def perform_check(args, attempt):
                 module.run.prepared_workspace = prepare_lint(ROOT, output, base, run_command)
             print("NATIVE_LINT_PREPARATION: lint passed; workspace acceptance remains incomplete. "
                   "Rejoining the existing host FIFO before the contract matrix.", flush=True)
-        for name in serialized:
-            fresh = name in pending
-            attempt["active_profile"] = name
+        for members in reservations:
+            fresh = members[0] in pending
+            attempt["active_profile"] = members[0]
+            attempt["reservation_profiles"] = members
             lease = host_acceptance_lease(attempt, head) if fresh else contextlib.nullcontext()
-            with lease:
-                if fresh and not prepared:
-                    prepare = getattr(module, "prepare_native_checks", None)
-                    if prepare:
-                        module.run.prepared_native = prepare(pending, ROOT, output, run_command)
-                    prepared = True
-                perform_profile(name)
+            try:
+                with lease:
+                    for name in members:
+                        attempt["active_profile"] = name
+                        if name in pending and not prepared:
+                            prepare = getattr(module, "prepare_native_checks", None)
+                            if prepare:
+                                module.run.prepared_native = prepare(pending, ROOT, output, run_command)
+                            prepared = True
+                        perform_profile(name)
+            finally:
+                attempt.pop("reservation_profiles", None)
         attempt.pop("active_profile", None)
         clean(head)
     except BaseException:
         timing["checks_finished_at"] = time.time()
         if results:
             try:
-                sign_carried()
-                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref)
+                save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
+                                        sign_carried())
                 print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
                       f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
                       f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
@@ -2001,12 +2515,15 @@ def perform_check(args, attempt):
         raise
     timing["checks_finished_at"] = time.time()
     receipt["finished_at"] = int(time.time())
-    sign_carried()
+    referenced = sign_carried()
     envelope = sign_receipt(receipt, output, identity, key)
-    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref)
+    verify_envelope(envelope, head, base_ref, policy_ref, signers_ref, store=referenced)
+    # envelope.json marks a complete output, so its store is written first.
+    if referenced:
+        (output / "envelopes.json").write_bytes(canonical(referenced))
     (output / "envelope.json").write_bytes(canonical(envelope))
     if args.publish:
-        publish(head, envelope, args.remote)
+        publish(head, envelope, args.remote, store=referenced)
     print(f"Local acceptance complete: {output / 'receipt.json'}")
 
 

@@ -1,0 +1,94 @@
+name: Rust toolchain freshness
+
+# rust-toolchain.toml pins the one Rust release that CI, release builds and
+# the local acceptance images compile with, so a new stable release cannot
+# break an unrelated PR. A new release reaches the pin through a maintainer:
+# every bump changes the protected acceptance contract and may need code
+# fixes, so it lands as an ordinary PR finished with `contract-update`. This
+# workflow makes sure that happens, every Monday:
+#
+#   * the pin is current: the tracking issue, if open, is closed;
+#   * stable is newer: one tracking issue, labelled rust-toolchain, names the
+#     release and the steps (opened, or updated in place);
+#   * the pin trails stable by more than ALLOWED_RELEASES_BEHIND minor
+#     releases (scripts/bump_rust_toolchain.py): the issue is labelled
+#     overdue and this run fails, which notifies the CI owners.
+#
+# It never blocks a PR and needs no credential beyond the workflow token.
+# See CONTRIBUTING.md#rust-toolchain.
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Mondays 02:00 UTC (10:00 CST)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: rust-toolchain-freshness
+  cancel-in-progress: false
+
+jobs:
+  freshness:
+    if: github.repository == 'sudoprivacy/sudocode'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare the pin with stable Rust
+        id: status
+        run: python scripts/bump_rust_toolchain.py --status --github-output "$GITHUB_OUTPUT"
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.status.outputs.pinned }}
+          STABLE: ${{ steps.status.outputs.stable }}
+          BEHIND: ${{ steps.status.outputs.behind }}
+          ALLOWED: ${{ steps.status.outputs.allowed }}
+          STATE: ${{ steps.status.outputs.state }}
+        run: |
+          set -euo pipefail
+          gh label create rust-toolchain --color 0E8A16 \
+            --description 'The pinned Rust toolchain trails stable' 2>/dev/null || true
+          gh label create overdue --color B60205 \
+            --description 'Past its staleness budget' 2>/dev/null || true
+          number=$(gh issue list --label rust-toolchain --state open --json number --jq '.[0].number // empty')
+
+          if [ "$STATE" = current ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Rust $PINNED is pinned and is the current stable release."
+            fi
+            exit 0
+          fi
+
+          body="$RUNNER_TEMP/rust-toolchain-issue.md"
+          cat > "$body" <<EOF
+          Rust $STABLE is the current stable release; \`rust-toolchain.toml\` pins $PINNED, $BEHIND minor release(s) behind. The pin may trail stable by $ALLOWED; past that this issue is marked overdue.
+
+          To bump (a maintainer, see CONTRIBUTING.md#rust-toolchain):
+
+          1. On a branch from \`main\`, run \`python3 scripts/bump_rust_toolchain.py\`. It moves the pin, the acceptance image digests and the contract pins that hash them.
+          2. Fix what the new release reports, such as new lints, on the same branch.
+          3. Run \`contract-update\` (CONTRIBUTING.md#acceptance-contract-changes); it runs and signs the full local acceptance.
+          4. Land the PR. The next weekly run closes this issue.
+
+          Maintained by \`.github/workflows/rust-toolchain-bump.yml\`.
+          EOF
+          title="Bump the pinned Rust toolchain from $PINNED to $STABLE"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --title "$title" --body-file "$body"
+          else
+            url=$(gh issue create --title "$title" --body-file "$body" --label rust-toolchain)
+            number=${url##*/}
+          fi
+          if [ "$STATE" = overdue ]; then
+            gh issue edit "$number" --add-label overdue
+            echo "::error::Rust $PINNED trails stable $STABLE by $BEHIND minor releases ($ALLOWED allowed); see issue #$number."
+            exit 1
+          fi
+          echo "::notice::Rust $STABLE is available; the pin is $PINNED. Tracking issue #$number."

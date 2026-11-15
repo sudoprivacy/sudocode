@@ -2170,14 +2170,13 @@ fn parse_responses_reasoning_signature(signature: &str) -> Option<Value> {
 fn responses_reasoning_summary_text(item: &Value) -> String {
     item.get("summary")
         .and_then(Value::as_array)
-        .map(|parts| {
+        .map_or_default(|parts| {
             parts
                 .iter()
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("\n\n")
         })
-        .unwrap_or_default()
 }
 
 fn flush_responses_text(buf: &mut String, role: &str, input: &mut Vec<Value>) {

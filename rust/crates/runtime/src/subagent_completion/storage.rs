@@ -120,49 +120,6 @@ pub(super) fn probe(
     )
 }
 
-/// The SID transaction excludes new context admission while every other owner
-/// lock is checked. A tombstone then fences every subsequent transcript write.
-pub(super) fn purge(
-    fs: &dyn FsBackend,
-    transcript: &Path,
-    deletion: &Deletion<'_>,
-    own_context: Option<&str>,
-) -> Result<(), String> {
-    let current = probe(fs, transcript, deletion.session_id, deletion.cwd)?;
-    if current["storageRef"] != deletion.storage_ref {
-        return Err("completion_storage_mismatch".into());
-    }
-    if current["deleted"] == true {
-        return Ok(());
-    }
-    let _responses = crate::response_archive::ResponseArchiveWriter::acquire(fs, transcript)?;
-    let directory = context_dir(transcript);
-    let mut owners = Vec::new();
-    if fs
-        .exists(&directory.to_string_lossy())
-        .map_err(|error| error.to_string())?
-    {
-        for entry in fs
-            .readdir(&directory.to_string_lossy())
-            .map_err(|error| error.to_string())?
-        {
-            if !is_context_entry(&entry) {
-                continue;
-            }
-            let path = directory.join(entry.name);
-            if own_context == Some(path.to_string_lossy().as_ref()) {
-                continue;
-            }
-            owners.push(
-                fs.try_lock(&path.with_extension("owner.lock").to_string_lossy(), 30_000)
-                    .map_err(|error| error.to_string())?
-                    .ok_or("session_writer_busy")?,
-            );
-        }
-    }
-    mark_deleted(fs, transcript, deletion)
-}
-
 /// The caller holds the native SID commit barrier. Record-history clients all
 /// check this binding inside that barrier before protocol writes and ACKs.
 pub(super) fn mark_deleted(
@@ -263,10 +220,7 @@ pub(crate) fn reclaim_deleted(fs: &dyn FsBackend, transcript: &Path) -> Result<b
     if !deleted_storage(fs, transcript)? {
         return Ok(true);
     }
-    let Some(_writers) = crate::session_writer::SessionWriter::try_purge_lock(fs, transcript)?
-    else {
-        return Ok(false);
-    };
+    // The tombstone is immutable once written, so it can be read before exclusion.
     let binding = read_binding(fs, transcript)?;
     let session_id = binding
         .session_id
@@ -279,6 +233,19 @@ pub(crate) fn reclaim_deleted(fs: &dyn FsBackend, transcript: &Path) -> Result<b
     {
         return Err("invalid deleted Session identity".into());
     }
+    // A reclaimed Session keeps only its tombstone. Its exclusion locks protect
+    // payload deletion; taking them again would only recreate their files, so a
+    // Session with nothing left to delete is done without touching storage.
+    if !owned_storage_remains(fs, transcript, session_id)? {
+        if let Some(reference) = binding.cleanup_reference {
+            crate::session_cleanup::forget(fs, transcript, &reference)?;
+        }
+        return Ok(true);
+    }
+    let Some(_writers) = crate::session_writer::SessionWriter::try_purge_lock(fs, transcript)?
+    else {
+        return Ok(false);
+    };
     let backups = crate::session_backup::paths(fs, transcript)?;
     let mut backup_guards = Vec::new();
     let mut locked = std::collections::BTreeSet::from([transcript.with_extension("writer.lock")]);
@@ -353,8 +320,9 @@ pub(crate) fn reclaim_deleted(fs: &dyn FsBackend, transcript: &Path) -> Result<b
     Ok(true)
 }
 
-fn remove_payloads(fs: &dyn FsBackend, transcript: &Path, session_id: &str) -> Result<(), String> {
-    for path in [
+/// The directories a transcript's Session owns beside the transcript itself.
+fn payload_dirs(transcript: &Path, session_id: &str) -> impl Iterator<Item = PathBuf> {
+    [
         Session::tool_results_dir_for(transcript, session_id),
         Session::response_captures_dir_for(transcript, session_id),
         Some(context_dir(transcript)),
@@ -362,7 +330,35 @@ fn remove_payloads(fs: &dyn FsBackend, transcript: &Path, session_id: &str) -> R
     ]
     .into_iter()
     .flatten()
+}
+
+/// Whether reclamation still has anything to delete: a transcript (source or
+/// backup) or one of their payload directories.
+fn owned_storage_remains(
+    fs: &dyn FsBackend,
+    transcript: &Path,
+    session_id: &str,
+) -> Result<bool, String> {
+    let backups = crate::session_backup::paths(fs, transcript)?;
+    for path in backups
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(transcript))
     {
+        for owned in std::iter::once(path.to_path_buf()).chain(payload_dirs(path, session_id)) {
+            if fs
+                .exists(&owned.to_string_lossy())
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn remove_payloads(fs: &dyn FsBackend, transcript: &Path, session_id: &str) -> Result<(), String> {
+    for path in payload_dirs(transcript, session_id) {
         match fs.remove_dir_all(&path.to_string_lossy()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -646,4 +642,55 @@ fn bind_context(
         .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_backend::StdFsBackend;
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A reclaimed Session keeps only its tombstone. Every watcher of the deleted
+    /// Session asks for reclamation again, and none of them may recreate storage:
+    /// taking the exclusion locks would leave their files behind.
+    #[test]
+    fn reclaiming_a_reclaimed_session_touches_no_storage() {
+        let dir = std::env::temp_dir().join(format!("scode-reclaimed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let transcript = dir.join("history.jsonl");
+        let tombstone = Binding {
+            version: SHARED_VERSION,
+            session_id: Some("session-1".into()),
+            cwd: Some(dir.clone()),
+            storage_ref: Some("storage-1".into()),
+            deleted: Some("cleanup-1".into()),
+            cleanup_reference: None,
+        };
+        std::fs::write(
+            binding_path(&transcript),
+            serde_json::to_vec(&tombstone).unwrap(),
+        )
+        .unwrap();
+        let before = listing(&dir);
+        for _ in 0..3 {
+            assert!(
+                reclaim_deleted(&StdFsBackend, &transcript).unwrap(),
+                "nothing is left to reclaim"
+            );
+        }
+        assert_eq!(
+            listing(&dir),
+            before,
+            "reclaiming a reclaimed Session created storage"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -177,12 +177,12 @@ def main():
         raise RuntimeError("Keep nextest acceptance outputs outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
     helper = load("acceptance_executor", SOURCE / ".github/scripts/local_acceptance.py")
+    profiles = load("acceptance_profiles", SOURCE / ".github/local-acceptance/checks.py")
     # Toolchain discovery must read the candidate repository configuration.
     helper.ROOT = repository
     if args.executable is None:
         if args.source_receipt is not None or args.options is not None:
             raise RuntimeError("Supply the executable, source receipt and options together")
-        profiles = load("acceptance_profiles", SOURCE / ".github/local-acceptance/checks.py")
         executable = profiles.nextest_binary(output)
         source_path = output / "nextest-source.json"
         options = profiles.nextest_options(output)
@@ -252,11 +252,14 @@ fn ignored_case_is_never_executed() { panic!("ignored negative guard executed");
             result = json.loads((output / f"{name}.command.json").read_text())
             assert result["exit_code"] == expected, result
             checks.append({"scenario": name, "status": "expected refusal", "command": result})
+    failure_stop = load("failure_stop_control", SOURCE / "e2e/local-acceptance/nextest_failure_stop.py")
+    cancellation = failure_stop.run(helper, profiles, executable, output / "failure-stop")
     (output / "receipt.json").write_text(json.dumps({
         "version": version, "repository": str(repository), "checks": checks,
         "git_environment": git_environment,
         "unsafe_process_name_fallback_forbidden_during_real_commands": True,
         "macos_process_observation": observation,
+        "pty_failure_cancellation": cancellation,
     }, indent=2))
     print(f"nextest executor E2E passed: {len(checks)} real execution/refusal scenarios; {output}")
 

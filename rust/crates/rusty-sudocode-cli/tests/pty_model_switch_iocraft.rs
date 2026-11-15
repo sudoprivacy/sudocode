@@ -65,14 +65,13 @@ fn model_switch_changes_active_model() {
     let screen = sess.render(common::screen_contents);
     let reply = screen
         .rsplit_once("nothing else.")
-        .map(|(_, below)| {
+        .map_or_default(|(_, below)| {
             below
                 .lines()
                 .take_while(|line| !line.contains("· turn "))
                 .collect::<Vec<_>>()
                 .join("\n")
-        })
-        .unwrap_or_default();
+        });
     assert!(
         reply.to_lowercase().contains("sonnet"),
         "model should identify as sonnet after switch\nPTY:\n{screen}"

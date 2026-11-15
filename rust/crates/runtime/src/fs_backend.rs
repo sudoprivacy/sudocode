@@ -157,6 +157,29 @@ pub enum ManagedRoot {
 const SUBAGENTS_SEGMENT: &str = "/subagents";
 const MEMORY_SEGMENT: &str = "/memory";
 
+/// Where a managed agent's state of each concern lives in the VFS namespace.
+/// One definition for every backend that hosts managed agents, so a session
+/// is found at the same path whichever host serves it.
+fn managed_vfs_root(agent: Option<&str>, concern: ManagedRoot) -> Option<String> {
+    // Under the agent. Keyed by the agent rather than by a workspace path,
+    // which is what stops two agents on one daemon from colliding — the host
+    // paths these replace are derived from the daemon's own directory, which
+    // every co-hosted agent shares.
+    let subtree =
+        |segment: &str| agent.map(|agent| format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE));
+    match concern {
+        // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
+        // because isolation here is policy plus `owner`, not path.
+        ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
+        ManagedRoot::SubAgents => subtree(SUBAGENTS_SEGMENT),
+        ManagedRoot::Memory => subtree(MEMORY_SEGMENT),
+        // Beside the agent's other state rather than in a subtree of its own:
+        // a todo list is one small file, and a directory per file is a
+        // namespace nobody browses.
+        ManagedRoot::Todos => subtree(""),
+    }
+}
+
 /// Unified filesystem abstraction.
 ///
 /// Every method mirrors a common `std::fs` operation. Implementations must be
@@ -1468,11 +1491,6 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// `None` when the context names no agent: a subtree keyed by an agent that
     /// does not exist would be one directory every anonymous caller shared,
     /// which is the bug this shape exists to prevent.
-    fn agent_subtree(&self, segment: &str) -> Option<String> {
-        let agent = self.ctx.agent_id.as_deref()?;
-        Some(format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE))
-    }
-
     /// A VFS path in the spelling this backend ANSWERS in.
     ///
     /// The inverse of [`Self::to_kernel`], needed by the one method that returns
@@ -1835,22 +1853,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         if matches!(&self.path_view, KernelPathView::HostRoot(_)) {
             return None;
         }
-        let root = match concern {
-            // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
-            // because isolation here is policy plus `owner`, not path.
-            ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
-            // Under the spawning agent. Keyed by the agent rather than by a
-            // workspace path, which is what stops two agents on one daemon from
-            // colliding — the host paths these replace are derived from the
-            // daemon's own directory, which every co-hosted agent shares.
-            ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
-            ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
-            // Beside the agent's other state rather than in a subtree of its
-            // own: a todo list is one small file, and a directory per file is a
-            // namespace nobody browses.
-            ManagedRoot::Todos => self.agent_subtree(""),
-        };
-        root.map(|path| self.to_host(&path))
+        managed_vfs_root(self.ctx.agent_id.as_deref(), concern).map(|path| self.to_host(&path))
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
@@ -2194,6 +2197,15 @@ pub struct NexusVfsFsBackend {
     client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
     auth_token: String,
     zone_context: HostZoneContext,
+    /// Set for a managed agent: its workspace and managed roots. `None`
+    /// passes every path through as given, the mailbox/peer shape.
+    workspace: Option<ManagedWorkspace>,
+}
+
+/// The managed agent a [`NexusVfsFsBackend`] serves.
+struct ManagedWorkspace {
+    agent: String,
+    root: String,
 }
 
 impl NexusVfsFsBackend {
@@ -2203,6 +2215,7 @@ impl NexusVfsFsBackend {
             client: std::sync::Arc::new(client),
             auth_token,
             zone_context: HostZoneContext::from_host_env(),
+            workspace: None,
         }
     }
 
@@ -2223,6 +2236,7 @@ impl NexusVfsFsBackend {
             client,
             auth_token,
             zone_context: HostZoneContext::from_host_env(),
+            workspace: None,
         }
     }
 
@@ -2241,6 +2255,7 @@ impl NexusVfsFsBackend {
             client,
             auth_token,
             zone_context: HostZoneContext::from_verified_transport(zone_id),
+            workspace: None,
         }
     }
 
@@ -2262,11 +2277,39 @@ impl NexusVfsFsBackend {
                 Some(scope_json),
                 ContextSource::TrustedLocal,
             ),
+            workspace: None,
         }
     }
 
-    fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<()> {
-        let normalized = lexical_join("/", path)?.replace('\\', "/");
+    /// A managed agent's backend over its authenticated connection, the same
+    /// transport [`Self::from_arc_mtls`] trusts. Relative paths resolve in
+    /// `workspace_root`, and sessions, sub-agents, memory and todos live under
+    /// the managed roots the in-process kernel uses for the same agent, so a
+    /// managed session reads and writes the same VFS objects on either host.
+    #[must_use]
+    pub fn for_managed_workspace(
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        zone_id: &str,
+        agent: &str,
+        workspace_root: &str,
+    ) -> Self {
+        Self {
+            workspace: Some(ManagedWorkspace {
+                agent: agent.to_owned(),
+                root: workspace_root.to_owned(),
+            }),
+            ..Self::from_arc_mtls(client, String::new(), zone_id)
+        }
+    }
+
+    /// Admit `path` and return the VFS path to operate on: resolved in the
+    /// managed workspace when there is one, otherwise exactly as given.
+    fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<String> {
+        let path = match &self.workspace {
+            Some(workspace) => lexical_join(&workspace.root, path)?,
+            None => path.to_owned(),
+        };
+        let normalized = lexical_join("/", &path)?.replace('\\', "/");
         admit_scope(&self.zone_context, &normalized, access_kind)?;
         // Descriptor/env metadata alone cannot authenticate a remote request.
         if !matches!(self.zone_context.source(), ContextSource::TrustedLocal) {
@@ -2279,7 +2322,7 @@ impl NexusVfsFsBackend {
             let target = self.inspect_target(&normalized, access_kind)?;
             admit_scope(&self.zone_context, &target.path, access_kind)?;
         }
-        Ok(())
+        Ok(path)
     }
 
     fn inspect_target(
@@ -2320,9 +2363,134 @@ impl NexusVfsFsBackend {
     }
 }
 
+/// How long an idempotent write keeps trying through failures that leave its outcome
+/// open. Long enough to ride out a leader restart or a network blip between nodes
+/// (observed: about 20 s), short enough that a caller still hears about an outage.
+const IDEMPOTENT_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Apply an idempotent write whose failure can leave its outcome open.
+///
+/// A write sent without an answer may have landed, and one refused before it applied
+/// did not; [`nexus_vfs_client::MutationOutcome`] says which. Either open outcome is
+/// settled by reading the state back (`landed`, which reports a missing entry as
+/// `Ok(false)`): the write is there, or it is sent again with backoff, for at most
+/// `budget`. An error that carries no open outcome is a definite answer and returns
+/// at once.
+///
+/// The read-back also asks whether the node still answers, and it retries only
+/// while it does. The open outcomes worth riding out come from behind a live node:
+/// its zone leader restarting, a blip between the two. A read-back that cannot
+/// reach the node says the failure is local — the node is down or unreachable, or
+/// this client's worker is gone — so the caller hears that at once, not after the
+/// budget.
+///
+/// Only for writes whose repetition is harmless — a directory, a link to a fixed
+/// target. An append or a message send must never come through here: a second copy
+/// is a duplicate, not a no-op.
+fn apply_idempotent<T>(
+    what: &str,
+    budget: std::time::Duration,
+    mut apply: impl FnMut() -> io::Result<T>,
+    mut landed: impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
+    use nexus_vfs_client::MutationOutcome;
+    let deadline = std::time::Instant::now() + budget;
+    let mut delay = std::time::Duration::from_millis(100);
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let Err(error) = apply() else {
+            return Ok(());
+        };
+        let Some(outcome) = MutationOutcome::of(&error) else {
+            return Err(error);
+        };
+        match landed() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(unreachable) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{what}: the node did not answer a read-back ({unreachable}): {error}"),
+                ))
+            }
+        }
+        if std::time::Instant::now() + delay > deadline {
+            let state = match outcome {
+                MutationOutcome::Unknown => "its outcome is still unknown",
+                MutationOutcome::NotCommitted => "the node applied none of them",
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{what}: {attempts} attempt(s) over {budget:?} failed and {state}: {error}"
+                ),
+            ));
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(2));
+    }
+}
+
+/// How long a link written through a zone leader may take to become visible on this
+/// node before the replica is reported as lagging.
+const LINK_VISIBILITY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read a link back after `Setattr`. Two different things can stand between the
+/// write and a usable link, and only one of them is permanent:
+/// - a daemon that predates the wire field drops the target silently (an unknown
+///   proto field is ignored by design), so the entry exists as a link to NOWHERE and
+///   the index would name a conversation nobody can follow;
+/// - a node that forwarded the write to its zone's leader shows the entry only once
+///   its own replica applies it, so a stat right after can miss it.
+///
+/// Retries only while the entry is not visible yet, for at most `wait`.
+fn verify_link(
+    alias: &str,
+    target: &str,
+    wait: std::time::Duration,
+    mut stat: impl FnMut() -> io::Result<nexus_vfs_client::VfsStat>,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut delay = std::time::Duration::from_millis(50);
+    loop {
+        match stat() {
+            Ok(found) => {
+                return match found.link_target {
+                    Some(got) if got == target => Ok(()),
+                    Some(got) => Err(io::Error::other(format!(
+                        "{alias}: link target came back as {got:?}, expected {target:?}"
+                    ))),
+                    None => Err(io::Error::other(format!(
+                        "{alias}: the daemon stored the link without a target — it is older \
+                         than the `Setattr` link_target field, so the index would name a \
+                         conversation nobody can follow"
+                    ))),
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "{alias}: the node accepted the link but still does not show it \
+                             after {wait:?}: this node's replica of the zone is behind its \
+                             leader (replica lag), so the conversation is indexed only once \
+                             it catches up"
+                        ),
+                    ));
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 impl FsBackend for NexusVfsFsBackend {
     fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         conditional_content::read(self.client.read_versioned(path, &self.auth_token))
     }
 
@@ -2332,7 +2500,7 @@ impl FsBackend for NexusVfsFsBackend {
         expected: Option<&VersionToken>,
         data: &[u8],
     ) -> io::Result<WriteOutcome> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         conditional_content::write(self.client.write_if_version(
             path,
             expected.map(|token| token.0.as_slice()),
@@ -2345,8 +2513,20 @@ impl FsBackend for NexusVfsFsBackend {
         record_log::open_remote(self, path, mode)
     }
 
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        let workspace = self.workspace.as_ref()?;
+        managed_vfs_root(Some(&workspace.agent), concern)
+    }
+
+    fn working_root(&self) -> io::Result<String> {
+        Ok(self
+            .workspace
+            .as_ref()
+            .map_or_else(|| String::from("/"), |workspace| workspace.root.clone()))
+    }
+
     fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         let Some(id) = self.client.lock(path, "", ttl_ms, &self.auth_token)? else {
             return Ok(None);
         };
@@ -2369,7 +2549,7 @@ impl FsBackend for NexusVfsFsBackend {
         })))
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         read_complete_contents(|offset| {
             let result = self.client.read_entry(path, offset, &self.auth_token)?;
             Ok(EntryRead {
@@ -2381,12 +2561,12 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client.write(path, data.to_vec(), &self.auth_token)
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         // Stream identity comes from the server's entry type and uses its
         // atomic frame append. Ordinary files retain their byte append path.
         if self.entry_type(path, ResourceAccessKind::Write)? == Some(i32::from(DT_STREAM)) {
@@ -2405,25 +2585,25 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client
             .ensure_stream(path, "wal,memory", retention, &self.auth_token)
             .map(|_| ())
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         self.entry_type(path, ResourceAccessKind::Read)
             .map(|entry_type| entry_type == Some(i32::from(DT_STREAM)))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         self.client.delete(path, &self.auth_token)
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         let stat = self.remote_stat(path)?;
         Ok(FsMetadata {
             len: stat.size,
@@ -2437,7 +2617,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         let entries = self.client.readdir(path, &self.auth_token)?;
         Ok(entries
             .into_iter()
@@ -2466,7 +2646,7 @@ impl FsBackend for NexusVfsFsBackend {
         // Beyond that, existence must not leak: the server normalizes an
         // authentication refusal to absence and the client reads any stat
         // failure the same way, so an unauthenticated prober learns nothing.
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         Ok(self.remote_stat(path).is_ok())
     }
 
@@ -2482,29 +2662,24 @@ impl FsBackend for NexusVfsFsBackend {
     /// the same shared `link()` call: a `DT_LINK` here and on the in-process kernel, a
     /// pointer file on the host FS where no privilege-free symlink exists.
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
-        self.authorize_target(alias, ResourceAccessKind::Write)?;
-        self.authorize_target(target, ResourceAccessKind::Write)?;
+        let alias = &self.authorize_target(alias, ResourceAccessKind::Write)?;
+        let target = &self.authorize_target(target, ResourceAccessKind::Write)?;
         if let Some(parent) = std::path::Path::new(alias).parent() {
-            let _ = self.create_dir_all(&parent.to_string_lossy());
+            self.create_dir_all(&parent.to_string_lossy())?;
         }
-        self.client.ensure_link(alias, target, &self.auth_token)?;
-        // Read the target back, because a daemon that predates the wire field ignores
-        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
-        // the chat-list index would list a peer whose conversation cannot be found.
-        // An unknown proto field is dropped silently by design, so the only way to know
-        // it landed is to ask. One stat, on a provisioning path that runs once per
-        // conversation.
-        match self.read_link(alias) {
-            Ok(got) if got == target => Ok(()),
-            Ok(got) => Err(io::Error::other(format!(
-                "{alias}: link target came back as {got:?}, expected {target:?}"
-            ))),
-            Err(e) => Err(io::Error::other(format!(
-                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
-                 is older than the `Setattr` link_target field, so the index would name \
-                 a conversation nobody can follow"
-            ))),
-        }
+        apply_idempotent(
+            alias,
+            IDEMPOTENT_WRITE_BUDGET,
+            || self.client.ensure_link(alias, target, &self.auth_token),
+            || match self.remote_stat(alias) {
+                Ok(found) => Ok(found.link_target.as_deref() == Some(target.as_str())),
+                Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(unreachable) => Err(unreachable),
+            },
+        )?;
+        verify_link(alias, target, LINK_VISIBILITY_WAIT, || {
+            self.remote_stat(alias)
+        })
     }
 
     /// Follow a link planted by [`Self::link`] — the target out of its metadata.
@@ -2513,7 +2688,7 @@ impl FsBackend for NexusVfsFsBackend {
     /// unreadable on a mount that keeps metadata and drops bytes, which is the mount
     /// shape federation uses.
     fn read_link(&self, alias: &str) -> io::Result<String> {
-        self.authorize_target(alias, ResourceAccessKind::Read)?;
+        let alias = &self.authorize_target(alias, ResourceAccessKind::Read)?;
         let stat = self.remote_stat(alias)?;
         let target = stat.link_target.ok_or_else(|| {
             io::Error::new(
@@ -2544,7 +2719,7 @@ impl FsBackend for NexusVfsFsBackend {
     /// `setattr` round trips on a path that is already provisioned. A write does
     /// plant its own rows, so the cost this adds to a write is that one `stat`.
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
-        self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Write)?;
         if self.exists(path)? {
             return Ok(());
         }
@@ -2552,14 +2727,23 @@ impl FsBackend for NexusVfsFsBackend {
         for component in path.split('/').filter(|c| !c.is_empty()) {
             prefix.push('/');
             prefix.push_str(component);
-            self.client.ensure_dir(&prefix, &self.auth_token)?;
+            apply_idempotent(
+                &prefix,
+                IDEMPOTENT_WRITE_BUDGET,
+                || self.client.ensure_dir(&prefix, &self.auth_token),
+                || match self.remote_stat(&prefix) {
+                    Ok(found) => Ok(found.is_directory),
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(unreachable) => Err(unreachable),
+                },
+            )?;
         }
         Ok(())
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        self.authorize_target(from, ResourceAccessKind::Write)?;
-        self.authorize_target(to, ResourceAccessKind::Write)?;
+        let from = &self.authorize_target(from, ResourceAccessKind::Write)?;
+        let to = &self.authorize_target(to, ResourceAccessKind::Write)?;
         self.client.rename(from, to, &self.auth_token)
     }
 
@@ -2569,9 +2753,9 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = self.authorize_target(path, ResourceAccessKind::Read)?;
         // VFS paths are already canonical over gRPC — no host symlinks.
-        Ok(path.to_string())
+        Ok(path)
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
@@ -2588,7 +2772,7 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         read_tail_with(cursor, block_ms, |wait_ms| {
             let result = match self
                 .client
@@ -2617,6 +2801,203 @@ impl FsBackend for NexusVfsFsBackend {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// An idempotent write settles an open outcome: by reading it back when it may
+    /// have landed, by sending it again when it did not, and never past a definite
+    /// refusal.
+    #[test]
+    fn an_idempotent_write_settles_an_open_outcome() {
+        use nexus_vfs_client::MutationOutcome::{NotCommitted, Unknown};
+        use std::cell::Cell;
+        use std::time::Duration;
+        let open = |outcome: nexus_vfs_client::MutationOutcome| {
+            outcome.error(io::ErrorKind::Other, "connection lost")
+        };
+        let budget = Duration::from_secs(5);
+
+        // Sent, no answer, and it is there: no second write.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Ok(true),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 1);
+
+        // Sent, no answer, not there: sent again, and the second one answers.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(Unknown))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // Refused with nothing applied: the read-back finds nothing, so it is sent again.
+        let sent = Cell::new(0);
+        apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                if sent.get() == 1 {
+                    Err(open(NotCommitted))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(sent.get(), 2);
+
+        // A definite answer returns at once, untouched.
+        let sent = Cell::new(0);
+        let denied = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            || Ok(true),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (sent.get(), denied.kind()),
+            (1, io::ErrorKind::PermissionDenied)
+        );
+
+        // A node that cannot answer the read-back is down: no further attempt.
+        let sent = Cell::new(0);
+        let down = apply_idempotent(
+            "/a",
+            budget,
+            || {
+                sent.set(sent.get() + 1);
+                Err::<(), _>(open(Unknown))
+            },
+            || Err(io::Error::from(io::ErrorKind::ConnectionRefused)),
+        )
+        .unwrap_err();
+        assert_eq!(sent.get(), 1);
+        assert!(
+            down.to_string().contains("did not answer a read-back"),
+            "{down}"
+        );
+
+        // An outcome that stays open is reported as such once the budget is spent.
+        let lost = apply_idempotent(
+            "/a",
+            Duration::from_millis(250),
+            || Err::<(), _>(open(Unknown)),
+            || Ok(false),
+        )
+        .unwrap_err();
+        let message = lost.to_string();
+        assert!(
+            message.contains("its outcome is still unknown"),
+            "{message}"
+        );
+        assert!(message.contains("attempt(s)"), "{message}");
+    }
+
+    fn link_stat(target: Option<&str>) -> nexus_vfs_client::VfsStat {
+        nexus_vfs_client::VfsStat {
+            size: 0,
+            is_directory: false,
+            entry_type: 6,
+            zone_id: "sharedzone".into(),
+            modified_at_ms: None,
+            link_target: target.map(str::to_owned),
+        }
+    }
+
+    fn not_found() -> io::Error {
+        io::Error::new(io::ErrorKind::NotFound, ": not found")
+    }
+
+    /// A link the local replica has not applied yet appears without an error.
+    #[test]
+    fn a_link_that_appears_after_replica_lag_is_accepted() {
+        let mut calls = 0;
+        verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_secs(2),
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(not_found())
+                } else {
+                    Ok(link_stat(Some("/conversations/c")))
+                }
+            },
+        )
+        .expect("a link that becomes visible is accepted");
+        assert_eq!(calls, 3);
+    }
+
+    /// A link that never becomes visible is replica lag, never an old daemon.
+    #[test]
+    fn a_link_that_stays_invisible_reports_replica_lag() {
+        let error = verify_link(
+            "/agents/a/conversations/b",
+            "/conversations/c",
+            std::time::Duration::from_millis(120),
+            || Err(not_found()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("replica lag"), "{error}");
+        assert!(!error.to_string().contains("older than"), "{error}");
+    }
+
+    /// Only an entry stored without its target means the daemon dropped the field.
+    #[test]
+    fn a_link_stored_without_target_reports_an_old_daemon() {
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(None))
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("older than the `Setattr` link_target field"),
+            "{error}"
+        );
+        let wrong = verify_link("/a", "/t", std::time::Duration::from_secs(1), || {
+            Ok(link_stat(Some("/u")))
+        })
+        .unwrap_err();
+        assert!(wrong.to_string().contains("came back as"), "{wrong}");
+    }
+
+    /// Any other stat failure is returned as is, without waiting.
+    #[test]
+    fn a_failed_stat_is_returned_unchanged() {
+        let started = std::time::Instant::now();
+        let error = verify_link("/a", "/t", std::time::Duration::from_secs(5), || {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     fn temp_path(label: &str) -> String {
         let nanos = SystemTime::now()

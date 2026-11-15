@@ -1440,7 +1440,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n",
                 "- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n",
                 "- Send the full list each call; it replaces the previous one.\n",
-                "- Keep one item `in_progress` at a time and mark it `completed` when done."
+                "- Keep one item `in_progress` at a time and mark it `completed` when done.\n",
+                "- Keep each item to one short line naming the work; put details, evidence and status in your messages, not in the list."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1451,12 +1452,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": { "type": "string", "description": "Imperative description of the work" },
+                                "content": { "type": "string", "description": "Imperative description of the work, in one short line" },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"]
                                 },
-                                "activeForm": { "type": "string", "description": "Present-continuous label shown while in_progress" }
+                                "activeForm": { "type": "string", "description": "Present-continuous label shown while in_progress, in one short line" }
                             },
                             "required": ["content", "status", "activeForm"],
                             "additionalProperties": false
@@ -1553,6 +1554,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "messages durably, including while that peer is offline. ",
                 "A subagent address selects that task; `task_id` is its task handle. ",
                 "An omitted `active` means runtime liveness is unknown. ",
+                "A supported `runtime` row reports one host-scoped instance, presence, ",
+                "freshness, foreground/input reason and independent background counts. ",
+                "Several rows can share an Agent or SID. Check `runtime_discovery` ",
+                "scope and coverage before interpreting a missing row. ",
                 "Read-only discovery; it starts nothing."
             ),
             input_schema: json!({
@@ -1560,7 +1565,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "active_only": {
                         "type": "boolean",
-                        "description": "When true, list only agents that are currently running (have a live pid)."
+                        "description": "When true, list observed online instances and running subagent tasks; omit unknown peers. An idle foreground can still be online."
                     }
                 },
                 "additionalProperties": false
@@ -1932,7 +1937,11 @@ fn execute_tool_with_enforcer(
         "pid_kill" => call.kill_pid(),
         "pid_status" => call.pid_status(),
         "pid_output" => call.pid_output(),
-        "agent_list" => run_agent_list(input, fs.as_ref()),
+        "agent_list" => run_agent_list(
+            input,
+            fs.as_ref(),
+            ctx.and_then(|ctx| ctx.runtime_observation.as_deref()),
+        ),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
@@ -2137,11 +2146,14 @@ pub fn list_agent_snapshots_from_store_with(
 /// task liveness comes from the current process's runtime registry.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentListRow {
+    /// Facts belong to this incarnation, never to the durable peer identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<runtime::runtime_status::RuntimeObservation>,
     pub name: String,
     /// Exact address accepted by `send.to`.
     pub send_to: String,
-    /// `Some(true)`/`Some(false)` when known (a spawned worker); omitted when
-    /// liveness is unknowable (a peer discovered through the mailbox namespace).
+    /// True for observed online instances or running workers; false for a known
+    /// stopped worker. Mailbox-only and unavailable instance liveness is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
     /// `peer` = an addressable identity in the mailbox namespace (another
@@ -2232,6 +2244,7 @@ pub fn merge_agent_list(
         }
         rows.entry(("peer".into(), name.clone()))
             .or_insert_with(|| AgentListRow {
+                runtime: None,
                 name: name.clone(),
                 send_to: name.clone(),
                 active: None,
@@ -2252,6 +2265,7 @@ pub fn merge_agent_list(
             .or_else(|| (!snap.description.is_empty()).then(|| snap.description.clone()));
         rows.entry(("subagent".into(), snap.agent_id.clone()))
             .or_insert_with(|| AgentListRow {
+                runtime: None,
                 name: snap.name.clone(),
                 send_to: snap.agent_id.clone(),
                 active: Some(active),
@@ -2280,15 +2294,90 @@ pub fn merge_agent_list(
     out
 }
 
-fn run_agent_list(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
+fn run_agent_list(
+    input: &Value,
+    fs: &dyn FsBackend,
+    host: Option<&dyn runtime::runtime_status::RuntimeObservationHost>,
+) -> Result<String, String> {
     let active_only = input
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = collect_agent_list(active_only, fs)?;
+    // Apply active_only after observation enrichment: a mailbox identity alone
+    // is unknown, while a fresh idle instance is still online.
+    let mut agents = collect_agent_list(false, fs)?;
+    let discovery = match host {
+        Some(host) => match host.discover() {
+            Ok(directory) => {
+                let own_instance = host.instance();
+                let mut runtime_rows = Vec::new();
+                let mut covered_names = std::collections::HashSet::new();
+                let mut scopes = Vec::new();
+                let mut unknown_instances = 0;
+                for inventory in directory.inventories {
+                    scopes.push(inventory.scope);
+                    for observation in inventory.instances {
+                        if own_instance.as_ref() == Some(&observation.instance) {
+                            continue;
+                        }
+                        if observation.presence == runtime::runtime_status::RuntimePresence::Unknown
+                        {
+                            unknown_instances += 1;
+                        }
+                        let mut row = agents
+                            .iter()
+                            .find(|row| row.kind == "peer" && row.name == observation.agent_id)
+                            .cloned()
+                            .unwrap_or_else(|| AgentListRow {
+                                runtime: None,
+                                name: observation.agent_id.clone(),
+                                send_to: observation.agent_id.clone(),
+                                active: None,
+                                kind: "peer".into(),
+                                task_id: None,
+                                role: None,
+                                description: None,
+                                description_updated_at: None,
+                            });
+                        covered_names.insert(row.name.clone());
+                        row.active = (observation.presence
+                            == runtime::runtime_status::RuntimePresence::Online)
+                            .then_some(true);
+                        row.runtime = Some(observation);
+                        runtime_rows.push(row);
+                    }
+                }
+                agents.retain(|row| row.kind != "peer" || !covered_names.contains(&row.name));
+                agents.extend(runtime_rows);
+                json!({"scopes": scopes, "unavailable": directory.unavailable, "unknown_instances": unknown_instances})
+            }
+            Err(error) => json!({"unavailable": [{"reason": error}]}),
+        },
+        None => json!({"unsupported": true}),
+    };
+    if active_only {
+        agents.retain(|row| row.active == Some(true));
+    }
+    agents.sort_by(|left, right| {
+        right
+            .active
+            .cmp(&left.active)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| {
+                left.runtime
+                    .as_ref()
+                    .map(|observation| {
+                        (&observation.instance.registry_id, &observation.instance.pid)
+                    })
+                    .cmp(&right.runtime.as_ref().map(|observation| {
+                        (&observation.instance.registry_id, &observation.instance.pid)
+                    }))
+            })
+    });
     to_pretty_json(json!({
         "agents": agents,
         "count": agents.len(),
+        "runtime_discovery": discovery,
     }))
 }
 
@@ -2939,8 +3028,7 @@ fn write_envelope(
 fn generate_request_id(prefix: &str, target: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
+        .map_or_default(|d| d.as_secs());
     let target_slug = sanitize_recipient(target);
     format!("{prefix}_{target_slug}_{ts:x}")
 }
@@ -3166,11 +3254,30 @@ fn run_monitor(
         tasks,
     )
     .map_err(|error| format!("failed to start monitor: {error}"))?;
-    Ok(format!(
-        "Monitor started (task {id}, output {output_path}). You will be notified \
+    Ok(monitor_started(&id, &output_path))
+}
+
+/// How a successful `Monitor` result begins, spelled once for the tool that
+/// writes it and [`monitor_task_from_tool_result`] that reads it back.
+const MONITOR_STARTED: &str = "Monitor started (task ";
+
+/// The result of a started `Monitor`: the task it launched, then what the
+/// model should do while it waits.
+fn monitor_started(id: &str, output_path: &str) -> String {
+    format!(
+        "{MONITOR_STARTED}{id}, output {output_path}). You will be notified \
          when it finishes or fires. Keep working — do not poll or sleep. An event \
          may arrive while you are waiting for the user; it is not their reply."
-    ))
+    )
+}
+
+/// The background task a successful `Monitor` result names, if it is one.
+#[must_use]
+pub fn monitor_task_from_tool_result(output: &str) -> Option<&str> {
+    output
+        .strip_prefix(MONITOR_STARTED)?
+        .split_once(", output ")
+        .map(|(task, _)| task)
 }
 
 fn classify_bash_permission(command: &str) -> PermissionMode {
@@ -7505,8 +7612,7 @@ impl ApiClient for ProviderRuntimeClient {
         let route = self
             .chain
             .first()
-            .map(|entry| format!("{}|{}", entry.client.route_identity(), entry.model))
-            .unwrap_or_default();
+            .map_or_default(|entry| format!("{}|{}", entry.client.route_identity(), entry.model));
         format!(
             "{}|{}|{:?}|{}",
             route,
@@ -7993,7 +8099,7 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
         })
-        .map(|message| {
+        .map_or_default(|message| {
             message
                 .blocks
                 .iter()
@@ -8004,7 +8110,6 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
                 .collect::<Vec<_>>()
                 .join("")
         })
-        .unwrap_or_default()
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -8400,7 +8505,7 @@ fn slugify_agent_name(description: &str) -> String {
 }
 
 fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
-    let trimmed = subagent_type.map(str::trim).unwrap_or_default();
+    let trimmed = subagent_type.map_or_default(str::trim);
     if trimmed.is_empty() {
         return String::from("general-purpose");
     }
@@ -9348,6 +9453,19 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_monitor_result_names_the_task_it_started() {
+        let output = super::monitor_started("shell-7f3a", "/tmp/out.log");
+        assert_eq!(
+            super::monitor_task_from_tool_result(&output),
+            Some("shell-7f3a")
+        );
+        assert_eq!(
+            super::monitor_task_from_tool_result("failed to start monitor"),
+            None
+        );
+    }
     /// A sub-agent never resumes a session, so the retired `fresh` field is not
     /// in the schema. A caller that still sends it must not break: `AgentInput`
     /// ignores unknown fields, so the input still deserializes.
@@ -9595,10 +9713,59 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        env_lock()
+    /// Serialise a test that changes the process environment, and point the
+    /// home directory at an empty scratch one while it holds the lock.
+    /// Without that, a test that builds an agent's prompt or a session loads
+    /// the developer's own settings, and a key those still carry fails it on
+    /// that machine only. A test that needs a fixture home sets its own.
+    fn env_guard() -> EnvGuard {
+        let lock = env_lock()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = ENV_GUARD_KEYS.map(|key| (key, std::env::var_os(key)));
+        let home = scratch_home();
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+        std::env::remove_var(runtime::config::GLOBAL_CONFIG_DIR_ENV);
+        EnvGuard { saved, _lock: lock }
+    }
+
+    const ENV_GUARD_KEYS: [&str; 4] = [
+        "HOME",
+        "USERPROFILE",
+        "SUDO_CODE_CONFIG_HOME",
+        runtime::config::GLOBAL_CONFIG_DIR_ENV,
+    ];
+
+    /// One per test process, so a test that runs without the lock and reads
+    /// the home while another holds it never sees a directory that is gone.
+    fn scratch_home() -> &'static Path {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let home =
+                std::env::temp_dir().join(format!("sudocode-tools-home-{}", std::process::id()));
+            fs::create_dir_all(&home).expect("scratch home");
+            home
+        })
+    }
+
+    /// Restores the environment before releasing the lock: `drop` runs before
+    /// the fields are dropped.
+    struct EnvGuard {
+        saved: [(&'static str, Option<std::ffi::OsString>); 4],
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -9788,7 +9955,7 @@ mod tests {
     /// cannot "schedule" a task that would persist but never fire — an orphan.
     #[test]
     fn cron_create_delivers_back_to_this_agent_by_default() {
-        let _guard = env_lock();
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!("cron-tool-default-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
@@ -9822,9 +9989,7 @@ mod tests {
 
     #[test]
     fn cron_tools_hidden_when_host_owns_scheduling() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
         let default_names: Vec<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
         assert!(
@@ -10302,9 +10467,7 @@ mod tests {
         // sets SUDOCODE_WEB_SEARCH_BASE_URL. Without the lock, parallel test
         // runners can interleave the set/remove calls and cause assertion
         // failures on the wrong port.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -10351,9 +10514,7 @@ mod tests {
 
     #[test]
     fn web_search_handles_generic_links_and_invalid_base_url() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /fallback?q=generic+links "));
             HttpResponse::html(
@@ -10406,9 +10567,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_returns_results_with_snippets() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|_request_line: &str| {
             HttpResponse::json(
                 200,
@@ -10473,9 +10632,7 @@ mod tests {
 
     #[test]
     fn web_search_tavily_missing_api_key_returns_error() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
 
         std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "tavily");
         std::env::set_var("SUDOCODE_TAVILY_API_KEY", "<PLACEHOLDER>");
@@ -10611,9 +10768,7 @@ mod tests {
 
     #[test]
     fn todo_write_replaces_the_whole_list() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("todos-write.json");
         std::env::set_var("SUDOCODE_TODO_STORE", &path);
 
@@ -11377,9 +11532,7 @@ mod tests {
         // on a missing definition — a race that shows up on one runner and not
         // another. The mutating test already takes this lock; a reader that
         // depends on what it changes has to take it too.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = GlobalToolRegistry::builtin();
 
         // Nothing searched for yet: core on, the rest deferred.
@@ -11424,9 +11577,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn agent_persists_handoff_metadata() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-store");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
@@ -11515,9 +11666,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn agent_fake_runner_can_persist_completion_and_failure() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-runner");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         // Cron is now persistent; point its dedicated store env at this temp
@@ -12245,9 +12394,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn subagent_runtime_executes_tool_loop_with_isolated_session() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("subagent-input.txt");
         std::fs::write(&path, "hello from child").expect("write input file");
 
@@ -13172,9 +13319,7 @@ mod tests {
 
     #[test]
     fn bash_workspace_tests_are_blocked_when_branch_is_behind_main() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-test-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13224,9 +13369,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bash_targeted_tests_skip_branch_preflight() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("targeted-test-no-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -13258,9 +13401,7 @@ mod tests {
 
     #[test]
     fn file_tools_cover_read_write_and_edit_behaviors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("fs-suite");
         fs::create_dir_all(&root).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13369,9 +13510,7 @@ mod tests {
 
     #[test]
     fn glob_and_grep_tools_cover_success_and_errors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("search-suite");
         fs::create_dir_all(root.join("nested")).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -13512,9 +13651,7 @@ mod tests {
 
     #[test]
     fn config_reads_and_writes_supported_values() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "sudocode-config-{}",
             std::time::SystemTime::now()
@@ -13641,9 +13778,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn powershell_runs_via_stub_shell() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "sudocode-pwsh-bin-{}",
             std::time::SystemTime::now()
@@ -13882,9 +14017,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn powershell_errors_when_shell_is_missing() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_path = std::env::var("PATH").unwrap_or_default();
         let empty_dir = std::env::temp_dir().join(format!(
             "sudocode-empty-bin-{}",
@@ -13963,9 +14096,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn given_read_only_enforcer_when_read_file_then_not_permission_denied() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("perm-read");
         fs::create_dir_all(&root).expect("create root");
         let file = root.join("readable.txt");
@@ -13992,9 +14123,7 @@ printf 'pwsh:%s' "$1"
     #[cfg(unix)]
     #[test]
     fn given_no_enforcer_when_bash_then_executes_normally() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = super::GlobalToolRegistry::builtin();
         let result = registry
             .execute("bash", &json!({ "command": "printf 'ok'" }))
@@ -14196,12 +14325,11 @@ printf 'pwsh:%s' "$1"
     fn required_names(spec: &super::ToolSpec) -> Vec<String> {
         spec.input_schema["required"]
             .as_array()
-            .map(|a| {
+            .map_or_default(|a| {
                 a.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     #[test]

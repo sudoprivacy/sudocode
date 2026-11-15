@@ -11,7 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CodexAutojoin, CodexAgentClaim } from '../src/codexAutojoin';
 const root = path.resolve(__dirname,'../..');
-const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(path.join(root,'dist/index.cjs')) as typeof import('../src/index');
+const {connectCodexAutojoin,sendScodeMessage,CodexEnrollmentError} = require(process.env.SCODE_AUTOJOIN_TEST_LIBRARY
+  ?? path.join(root,'dist/index.cjs')) as typeof import('../src/index');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(),process.platform==='win32'
   ? "codex-owner ' & 🧪-" : 'codex-autojoin-'));
 const workspaceAlias = path.join(directory,'workspace-alias');
@@ -29,6 +30,9 @@ let mcpOwnerPid: number | undefined;
 let auditFailureOwner: ChildProcess | undefined;
 let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
+let initialNativeOffline = true;
+let dropQueueOnce = false;
+let nativeDurableQueue = false;
 let retiringRead: {id: string; absent: boolean} | undefined;
 const pendingReads: Array<()=>void> = [];
 const server = new WebSocketServer({host:'127.0.0.1',port:0});
@@ -37,6 +41,8 @@ for(const [key,value] of Object.entries(process.env))if(value!==undefined && key
 server.on('connection',socket=>socket.on('message',bytes=>{
   const call=JSON.parse(bytes.toString());calls.push(call);
   if(call.id===undefined)return;
+  if(initialNativeOffline) { socket.terminate(); return; }
+  if(dropQueueOnce && call.method==='thread/queue/addOnce') { dropQueueOnce=false;socket.terminate();return; }
   const retiring=retiringRead;
   if(call.method==='thread/read'&&retiring&&call.params.threadId===retiring.id){
     if(retiring.absent)loaded=loaded.filter(id=>id!==retiring.id);
@@ -47,9 +53,9 @@ server.on('connection',socket=>socket.on('message',bytes=>{
     parentThreadId:null as string|null,threadSource:'user',ephemeral:false,canAcceptDirectInput:true};
   if(thread.id===ids[2]){thread.threadSource='subagent';thread.parentThreadId=ids[0];}
   if(thread.id===ids[3])thread.threadSource='guardian_review';
-  const result=call.method==='initialize'?{userAgent:'fixture'}:call.method==='thread/loaded/list'
+  const result=call.method==='initialize'?{userAgent:'fixture',...(nativeDurableQueue?{serverCapabilities:{durableQueueAddOnce:1}}:{})}:call.method==='thread/loaded/list'
     ?{data:loaded,nextCursor:null}:call.method==='thread/read'?{thread}
-      :call.method==='turn/start'?{turn:{id:'peer-turn'}}:{};
+      :call.method==='thread/queue/addOnce'?{queuedSubmission:{id:call.params.clientUserMessageId,clientUserMessageId:call.params.clientUserMessageId,input:call.params.input}}:{};
   const reply = () => {if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id:call.id,result}));};
   if(holdReads&&call.method==='thread/read')pendingReads.push(reply);else reply();
 }));
@@ -72,6 +78,17 @@ async function main() {
     },
   };
   owner=await connectCodexAutojoin(config);
+  assert.equal(owner.canRetire, false, 'startup connection failure is not an empty-root observation');
+  assert.equal(enrollments.length, 0, 'offline startup cannot invent a new agent');
+  assert.throws(()=>owner!.connectionFor(ids[0]), /inventory unavailable/);
+  initialNativeOffline=false;
+  await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
+  assert.equal(enrollments.length,0,'a reachable old native daemon cannot enroll or acknowledge peer input');
+  assert.equal(owner.canRetire,false,'unsupported ingress is not an empty native inventory');
+  assert.equal(rows().length,0,'unsupported native starts no Scode receiver');
+  assert.throws(()=>owner!.connectionFor(ids[0]),/did not negotiate durable/);
+  nativeDurableQueue=true;
+  await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
   assert.equal(owner.status().length,2,'subagents and feature workers never become root Agents');
   const first=owner.status();assert.equal(new Set(first.map(row=>row.actor)).size,2);
   assert.throws(()=>owner!.connectionFor(undefined),/metadata/);
@@ -81,6 +98,17 @@ async function main() {
     assert.equal(JSON.parse(result.content).routing.sender,row.actor);
   }
   const originalSession=owner.connectionFor(ids[0]).sessionId;
+  const originalReceiver = owner.connectionFor(ids[0]);
+  process.kill(originalReceiver.pid, 'SIGTERM');
+  await originalReceiver.exited;
+  await new Promise(resolve=>setTimeout(resolve,5100)); await owner.refresh();
+  assert.notEqual(owner.connectionFor(ids[0]).pid, originalReceiver.pid);
+  assert.equal(owner.connectionFor(ids[0]).sessionId, originalSession);
+  assert.equal(enrollments.length, 2, 'transport recovery never re-enrolls the original actor');
+  for(const socket of server.clients) socket.terminate();
+  await new Promise(resolve=>setTimeout(resolve,100)); await owner.refresh();
+  assert.equal(owner.connectionFor(ids[0]).sessionId, originalSession, 'native proxy recovery retains ACP ownership');
+
   // A real proxy round trip retires another root between list and read. Its
   // confirmed absence must not invalidate a still-loaded root or resend tools.
   retiringRead={id:ids[1],absent:true};await owner.refresh();
@@ -292,11 +320,19 @@ async function main() {
   const deliveryCalls=calls.length,deliveryRows=rows().length;
   owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:path.join(directory,'delivery-bindings')});
   const peerSession=owner.connectionFor(ids[0]);
+  await peerSession.request('_fixture/input-state',{update:{kind:'error',message:'old model health probe failure'}});
+  await peerSession.request('_fixture/input-state',{update:{kind:'state',state:{revision:1,paused:true,running:false,pending:[]}}});
+  const paused=owner.status()[0];
+  assert.equal(paused.receiver?.input.state,'paused');
+  assert.equal(paused.receiver?.input.inputOwner,'client');
+  assert.equal(paused.state,'connected','client-owned peer delivery is independent of a paused model queue');
+  assert.equal(paused.receiver?.sessionId,peerSession.sessionId);
+  assert.equal(paused.receiver?.pid,peerSession.pid);
   await peerSession.request('_fixture/peer',{from:'stranger',text:'the allowlist must refuse'});
-  await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true});
+  await assert.rejects(peerSession.request('_fixture/peer',{from:'fixture-peer',text:'another session must refuse',wrongSession:true}));
   await peerSession.request('_fixture/peer',{from:'fixture-peer',text:'peer data 零 🧪'});
-  type TurnStart={method:string;params:{threadId:string;toolOutput:{output:string}}};
-  const turnStarts=()=>calls.slice(deliveryCalls).filter(call=>call.method==='turn/start') as TurnStart[];
+  type TurnStart={method:string;params:{threadId:string;input:Array<{type:string;text:string}>}};
+  const turnStarts=()=>calls.slice(deliveryCalls).filter(call=>call.method==='thread/queue/addOnce') as TurnStart[];
   const deliveryDeadline=Date.now()+5000;
   while(!turnStarts().length){
     assert.ok(Date.now()<deliveryDeadline,'peer message did not reach the Codex thread');
@@ -304,14 +340,114 @@ async function main() {
   }
   await new Promise(resolve=>setTimeout(resolve,200));
   assert.equal(turnStarts().length,1,'only the allowlisted peer on the original session is admitted');
+  assert.equal(owner.status()[0].delivery?.state,'idle');
+  assert.equal(owner.status()[0].delivery?.pendingCount,0);
+  assert.ok(owner.status()[0].delivery?.lastQueuedAt,'actual durable queue acceptance is reported separately');
   assert.equal(turnStarts()[0].params.threadId,ids[0]);
-  const delivered=JSON.parse(turnStarts()[0].params.toolOutput.output);
+  const delivered=JSON.parse(turnStarts()[0].params.input[0].text.split('\n').slice(1).join('\n'));
   assert.equal(delivered.message.sudocode.a2a.from,'fixture-peer');
   assert.equal(delivered.message.body,'peer data 零 🧪');
   const deliveryJournal=rows().slice(deliveryRows);
   assert.ok(deliveryJournal.some(row=>row.method==='initialize'&&row.peerOwned),'the owned scode hands peer input over');
   assert.ok(!deliveryJournal.some(row=>row.method==='session/prompt'),'no scode model turn for a peer');
   await owner.close();owner=undefined;loaded=[legacyId];
+
+  // Initial agent_list can fail with a VALID native audit. It must preserve
+  // its operation error and recover the ready binding, never re-enroll it.
+  for (const cleanupUnknown of process.platform==='win32' ? [false] : [false,true]) {
+    loaded=[ids[0]];
+    const tag=cleanupUnknown?'initial-query-cleanup-unknown':'initial-query-recovery';
+    const stateDirectory=path.join(directory,tag);
+    const failureFile=path.join(directory,tag+'.first-failure');
+    const beforeRows=rows().length,beforeCalls=calls.length;
+    const beforeEnrollments: number=enrollments.length;
+    const errors: unknown[]=[];
+    owner=await connectCodexAutojoin({...config,stateDirectory,onError:error=>errors.push(error),
+      async resolveAgent(claim) {
+        const resolved=await config.resolveAgent(claim);
+        const profile=JSON.parse(fs.readFileSync(resolved.configFile,'utf8'));
+        profile.scodeArgv.push('initial-list-unavailable'+(cleanupUnknown?'-cleanup-unknown':''));
+        profile.env.SCODE_DIRECT_FIXTURE_INITIAL_LIST_FAILURE=failureFile;
+        fs.writeFileSync(resolved.configFile,JSON.stringify(profile));
+        return resolved;
+      }});
+    const failed=owner.status()[0];
+    assert.equal(failed.state,'disconnected');
+    assert.match(failed.error!,/Owned Node identity query failed:.*Unavailable.*tcp connect error/);
+    assert.doesNotMatch(failed.error!,/does not match/);
+    const originalError=errors.find(error=>error instanceof Error&&error.message.startsWith('Owned Node identity query failed:')) as Error;
+    assert.ok(originalError?.cause,'retain the authenticated original result');
+    const originalResult=originalError.cause as {isError:boolean;content:string};
+    assert.equal(originalResult.isError,true);
+    assert.match(originalResult.content,/Unavailable/);
+    const bindingFile=path.join(stateDirectory,ids[0]+'.json');
+    const originalBinding=fs.readFileSync(bindingFile);
+    const binding=JSON.parse(originalBinding.toString());
+    const originalProfile=fs.readFileSync(binding.configFile);
+    const profile=JSON.parse(originalProfile.toString());
+    const firstLoad=rows().slice(beforeRows).find(row=>row.method==='session/load');
+    assert.equal(firstLoad.sessionId,profile.acpSessionId);
+    assert.ok(rows().slice(beforeRows).some(row=>row.pid===firstLoad.pid&&row.method==='session/close'));
+    await new Promise(resolve=>setTimeout(resolve,5100));await owner.refresh();
+    assert.equal(enrollments.length,beforeEnrollments+1,'recovery never calls the issuer again');
+    assert.deepEqual(fs.readFileSync(bindingFile),originalBinding);
+    assert.deepEqual(fs.readFileSync(binding.configFile),originalProfile);
+    const afterRows=rows().slice(beforeRows);
+    assert.ok(!afterRows.some(row=>['session/new','session/prompt','_sudocode/a2a/send'].includes(row.method)));
+    assert.ok(!calls.slice(beforeCalls).some(call=>call.method==='thread/queue/addOnce'));
+    assert.throws(()=>process.kill(firstLoad.pid,0),{code:'ESRCH'},'the original owned ACP actually exited');
+    if(cleanupUnknown) {
+      assert.ok(fs.existsSync(failureFile+'.drained'),'bounded stderr holder ended naturally');
+      assert.equal(afterRows.filter(row=>row.method==='session/load').length,1,'unknown cleanup never grants a replacement');
+      assert.equal(owner.status()[0].state,'disconnected');
+      assert.throws(()=>owner!.connectionFor(ids[0]),/Owned Node identity query failed/);
+      await assert.rejects(owner.close());owner=undefined;
+    } else {
+      const reconnected=owner.connectionFor(ids[0]);
+      assert.notEqual(reconnected.pid,firstLoad.pid);
+      assert.equal(reconnected.sessionId,profile.acpSessionId);
+      assert.equal(owner.status()[0].actor,failed.actor);
+      assert.equal(afterRows.filter(row=>row.method==='session/load').length,2);
+      await owner.close();owner=undefined;
+    }
+    loaded=[legacyId];
+  }
+
+  if(process.platform!=='win32') {
+    // Real POSIX proxy stderr keeps a failed reconnect's close unconfirmed.
+    // Even when its callback refuses cleanup, the sibling ACP must be closed.
+    loaded=[ids[0]];
+    const failureDirectory=path.join(directory,'cleanup-bindings');
+    const reconnectJournal=path.join(directory,'autojoin-reconnect.jsonl');
+    owner=await connectCodexAutojoin({...config,peers:['fixture-peer'],stateDirectory:failureDirectory,
+      native:{...config.native,codexArgv:[...config.native.codexArgv.slice(0,-1),'fail-reconnect-close'],
+        closeTimeoutMs:300,env:{...proxyEnv,SCODE_FIXTURE_RECONNECT_JOURNAL:reconnectJournal}}});
+    const sibling=owner.connectionFor(ids[0]);
+    dropQueueOnce=true;
+    await sibling.request('_fixture/peer',{from:'fixture-peer',text:'cleanup propagation regression'});
+    const callbackLog=path.join(failureDirectory,`${ids[0]}.callback.jsonl`);
+    const cleanupDeadline=Date.now()+5000;
+    while(!fs.readFileSync(callbackLog,'utf8').includes('cleanup unconfirmed')) {
+      assert.ok(Date.now()<cleanupDeadline,'callback did not retain failed-reconnect cleanup');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    let originalCleanup: unknown;
+    assert.equal(owner.status()[0].state,'cleanup_unknown','a connected receiver must expose unjoined downstream cleanup');
+    assert.equal(owner.status()[0].delivery?.pendingCount,1);
+    await assert.rejects(owner.close(),error=>{
+      originalCleanup=error;return /cleanup unconfirmed/.test(String(error));
+    });
+    assert.equal(sibling.closed,true,'callback failure must not skip sibling ACP cleanup');
+    assert.equal(owner.status()[0].state,'cleanup_unknown','closed ACP does not erase unjoined downstream custody');
+    assert.equal((await sibling.exited).code,0);
+    await assert.rejects(owner.close(),error=>error===originalCleanup);
+    owner=undefined;
+    while(!fs.existsSync(reconnectJournal+'.drained')) {
+      assert.ok(Date.now()<cleanupDeadline,'bounded fixture pipe holder did not finish');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    loaded=[legacyId];
+  }
 
   // A directory at the log path deterministically refuses append on every OS,
   // including elevated test users. Startup must still fail before admission.
@@ -357,6 +493,70 @@ async function main() {
   assert.throws(()=>process.kill(acpStarted.pid,0),{code:'ESRCH'},'shutdown must close its ACP child');
   const released=createServer();released.listen(reserved.port,'127.0.0.1');await once(released,'listening');
   await new Promise<void>(resolve=>released.close(()=>resolve()));
+  if (process.platform === 'win32') {
+    // Reproduce an actual post-enrollment Windows rename refusal with another
+    // process's native file handle, not a mocked fs or a longer PTY deadline.
+    for (const transient of [true,false]) {
+      const threadId=randomUUID();loaded=[threadId];nativeWorkspace=fs.realpathSync.native(directory);
+      const stateDirectory=path.join(directory,transient?'transient-publication':'held-publication');
+      const bindingFile=path.join(stateDirectory,threadId+'.json');
+      const submitted: CodexAgentClaim[]=[];
+      let holder: ChildProcess | undefined;
+      let holderExit: Promise<unknown> | undefined;
+      const publicationConfig={...config,stateDirectory,async resolveAgent(claim:CodexAgentClaim){
+        submitted.push(claim);
+        const profile=await config.resolveAgent(claim);
+        const powershell=path.join(process.env.SystemRoot!,'System32/WindowsPowerShell/v1.0/powershell.exe');
+        holder=spawn(powershell,['-NoLogo','-NoProfile','-NonInteractive','-File',
+          path.join(root,'test/fixtures/windowsBindingHold.ps1'),bindingFile],
+        {stdio:['pipe','pipe','pipe'],windowsHide:true});
+        holderExit=once(holder,'close');
+        let output='',error='';holder.stdout!.on('data',bytes=>{output+=String(bytes);});
+        holder.stderr!.on('data',bytes=>{error+=String(bytes);});
+        const end=Date.now()+5000;
+        while(!output.includes('held')) {
+          assert.equal(holder.exitCode,null,error);assert.ok(Date.now()<end,'Windows binding holder did not become ready');
+          await new Promise(resolve=>setTimeout(resolve,10));
+        }
+        if(transient)holder.stdin!.end('delayed\n');
+        return profile;
+      }};
+      try {
+        owner=await connectCodexAutojoin(publicationConfig);
+        assert.equal(submitted.length,1,'local publication must never resubmit enrollment');
+        if(transient) {
+          assert.equal(owner.status()[0].state,'connected','transient Windows binding replacement must retain the original enrollment');
+          const binding=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
+          assert.equal(binding.state,'ready');assert.equal(binding.actor,submitted[0].actor);
+          assert.equal(binding.operationId,submitted[0].operationId);
+          assert.equal(owner.connectionFor(threadId).sessionId,'fixture-'+submitted[0].operationId);
+          await owner.close();owner=undefined;
+          owner=await connectCodexAutojoin(publicationConfig);
+          assert.equal(submitted.length,1,'restart uses the committed original profile');
+          assert.equal(owner.connectionFor(threadId).sessionId,'fixture-'+submitted[0].operationId);
+        } else {
+          assert.equal(owner.status()[0].state,'recovery_required');
+          assert.throws(()=>owner!.connectionFor(threadId));
+          const original=fs.readFileSync(bindingFile,'utf8');
+          assert.equal(JSON.parse(original).state,'provisioning','failed replacement must retain the previous durable record');
+          await owner.refresh();assert.equal(submitted.length,1);
+          holder!.stdin!.end('release\n');await holderExit;
+          await owner.close();owner=undefined;
+          owner=await connectCodexAutojoin(publicationConfig);
+          assert.equal(submitted.length,1,'persistent write failure and restart cannot invent another identity');
+          assert.equal(owner.status()[0].state,'recovery_required');
+          const retained=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
+          assert.equal(retained.actor,submitted[0].actor);assert.equal(retained.operationId,submitted[0].operationId);
+        }
+        console.log('PASS Windows binding publication '+(transient?'temporary hold preserves original enrollment and restart':'persistent hold retains Unknown without re-enrollment'));
+      } finally {
+        if(holder?.exitCode===null && !holder.stdin!.writableEnded)holder.stdin!.end('release\n');
+        if(holderExit)await holderExit;
+        await owner?.close();owner=undefined;
+      }
+    }
+    loaded=[];
+  }
   console.log('PASS native autojoin processes: root filtering, distinct identities, original SID pinning, independent frozen workspaces, exclusive offline import, original actor/session restart, owner retention/unload retirement, single-respondent peer delivery, initial audit refusal, audit-failure cleanup, first-MCP readiness and no inference/replay');
 }
 void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

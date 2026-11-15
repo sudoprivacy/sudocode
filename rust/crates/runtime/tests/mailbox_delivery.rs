@@ -1,7 +1,7 @@
 //! Delivery receipts against the actual kernel and host filesystem adapters.
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
-use runtime::mailbox::Mailbox;
+use runtime::mailbox::{CommitOutcome, CommitRefusalReason, Mailbox};
 use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
 use runtime::FsBackend;
 use runtime::KernelFsBackend;
@@ -186,4 +186,115 @@ fn legacy_record_identity_uses_committed_kernel_positions() {
         .unwrap();
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0].delivery_id(), both[1].delivery_id());
+}
+
+/// One stream append is one frame, however many records it holds: it is
+/// offered whole, both records keep distinct identities, and one commit to the
+/// frame's end acknowledges both.
+#[test]
+fn a_multi_record_stream_frame_is_offered_and_committed_whole() {
+    let kernel = Arc::new(Kernel::new());
+    kernel.vfs_router_arc().add_mount(
+        "/",
+        "root",
+        Some(Arc::new(runtime::test_support::MemObjectStore::default())),
+        false,
+    );
+    let backend = Arc::new(KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &planted("sender"),
+        "/",
+    ));
+    let sender = Mailbox::daemon_absolute(backend.clone(), "sender".into());
+    let receiver = Mailbox::daemon_absolute(backend.clone(), "receiver".into());
+    let path = sender.transcript_path("receiver");
+    backend
+        .create_dir_all(
+            std::path::Path::new(&path)
+                .parent()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+    kernel.create_stream(&path, 1 << 20).unwrap();
+    sender.ensure_conversation("receiver").unwrap();
+    assert!(
+        backend.is_append_stream(&path).unwrap(),
+        "exercise real DT_STREAM"
+    );
+    let two = b"{\"from\":\"sender\",\"to\":\"receiver\",\"body\":\"one\"}\n\
+{\"from\":\"sender\",\"to\":\"receiver\",\"body\":\"two\"}\n";
+    backend.append(&path, two).unwrap();
+    let single = br#"{"from":"sender","to":"receiver","body":"three"}"#;
+    backend.append(&path, single).unwrap();
+
+    let unread = receiver.unread_frames("sender").unwrap();
+    assert_eq!(unread.start(), 0);
+    let frames = unread.frames();
+    assert_eq!(frames.len(), 2);
+    let bodies: Vec<_> = frames[0]
+        .records()
+        .iter()
+        .map(|record| record.envelope().body.clone())
+        .collect();
+    assert_eq!(bodies, ["one", "two"]);
+    assert_ne!(
+        frames[0].records()[0].delivery_id(),
+        frames[0].records()[1].delivery_id()
+    );
+    assert_eq!(frames[0].end(), frames[1].start());
+    assert_eq!(frames[1].records().len(), 1);
+
+    assert_eq!(
+        receiver
+            .commit_through("sender", unread.start(), frames[0].end())
+            .unwrap(),
+        CommitOutcome::Committed
+    );
+    let rest = receiver.unread_frames("sender").unwrap();
+    assert_eq!(rest.start(), frames[0].end());
+    assert_eq!(rest.frames().len(), 1);
+    assert_eq!(rest.frames()[0].records()[0].envelope().body, "three");
+    assert_eq!(
+        receiver
+            .commit_through("sender", unread.start(), frames[1].end())
+            .unwrap(),
+        CommitOutcome::Refused(CommitRefusalReason::PositionMoved)
+    );
+    assert_eq!(
+        receiver
+            .commit_through("sender", rest.start(), frames[1].end())
+            .unwrap(),
+        CommitOutcome::Committed
+    );
+    assert!(receiver
+        .unread_frames("sender")
+        .unwrap()
+        .frames()
+        .is_empty());
+    assert_eq!(
+        receiver
+            .commit_through("sender", rest.start(), frames[1].end())
+            .unwrap(),
+        CommitOutcome::Already
+    );
+}
+
+/// On the kernel backend too, a held reader refuses a commit.
+#[test]
+fn a_kernel_commit_is_refused_while_the_reader_is_held() {
+    let (_sender, receiver) = pair();
+    let end = receiver.unread_frames("sender").unwrap().frames()[0].end();
+    let held = receiver.read_unread("sender").unwrap().unwrap();
+    assert_eq!(
+        receiver.commit_through("sender", 0, end).unwrap(),
+        CommitOutcome::Refused(CommitRefusalReason::LeaseLost)
+    );
+    drop(held);
+    assert_eq!(
+        receiver.commit_through("sender", 0, end).unwrap(),
+        CommitOutcome::Committed
+    );
+    assert_eq!(receiver.read_position("sender").unwrap(), Some(end));
 }

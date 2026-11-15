@@ -95,6 +95,37 @@ resolved account with `scode doctor` (see [Verifying credentials](#verifying-cre
 
 ## Verifying credentials
 
+### macOS setup wizard
+
+The macOS installer preview includes `scode-setup`; the stable CLI archive does
+not yet bundle this helper. From a source checkout, run
+`bash packaging/macos/scode-setup.sh`. It needs only Bash and curl, and accepts
+`--base-url`, `--model MODEL_ID` and `--config-dir DIR` (see `--help`). Enter the
+key at its hidden prompt, never as a command argument. Remote endpoints require
+HTTPS; loopback HTTP is available for local acceptance.
+
+The wizard validates access to the model list, requires an explicit model
+choice unless the requested default is available, and writes the named
+`sudorouter` account plus its default model. The runtime owns model discovery,
+capabilities and protocol selection; the wizard does not pin every model to
+Chat Completions. Search is an optional, separately authorized service and is
+disabled unless selected.
+
+Existing account and settings files require confirmation before replacement.
+The wizard keeps private timestamped backups; choose No or an isolated config
+directory to preserve existing accounts and preferences. Authentication failure
+or an invalid selection writes no configuration. A successful model-list probe
+is not inference or tool acceptance: follow it with a real file-tool task using
+`scode --auth proxy --account sudorouter --permission-mode workspace-write`.
+
+`python3 e2e/macos-setup/run.py --scode /absolute/path/to/scode` exercises the
+real wizard in a Unix PTY, generated-account Claude/GPT protocol selection
+through the release CLI, cancellation, authentication failure and backups.
+It uses a local scripted provider, not a live-provider compatibility claim.
+Windows can add supplementary process coverage with Git Bash via `--bash`.
+
+### Inspect the resolved account
+
 ```bash
 scode doctor
 ```

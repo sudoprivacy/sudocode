@@ -334,6 +334,17 @@ when the notification is written to the transport, with no durable downstream
 acceptance guarantee. The Codex bridge requires v2 and does not silently fall
 back. Hosted sessions do not offer client-owned peer input.
 
+Version 3 has the client read the mailbox itself. scode sends
+`_sudocode/session/peer_unread` with the session's unread count whenever it
+changes, and the client calls `_sudocode/session/peer_offer` to commit the
+tokens its model acknowledged and read the next offer: the text the model
+reads, rendered by scode within the request's `maxBytes`, with each
+conversation's unread frames in UTF-8 windows and a token bound to each
+frame's exact content. A frame stays unread until its token comes back, and a
+large frame is read in further windows. The Claude Code bridge requires version
+3. [Peer reception](design/peer-mailbox-delivery.md#scode-peerinput-version-3)
+is the contract.
+
 ### Direct A2A requests
 
 Hosts check `initialize.result._meta.sudocode.directA2a.version == 1`. Two

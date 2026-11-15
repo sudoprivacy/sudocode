@@ -424,9 +424,10 @@ async function checkClaudeAutojoin(): Promise<void> {
   assert.deepEqual(await claude.hook('--claude-deliver', changed, 'sdk-cli'), { code: 0, stdout: '', stderr: '' },
     'a session without an Agent hands nothing over');
   const woke = await claude.hook('--claude-deliver', changed);
-  assert.equal(woke.code, 2);
-  assert.equal(woke.stderr.split(CODEX_MAILBOX_DELIVERY_PROVENANCE).length - 1, 2,
-    'both deliveries to this session wake it, and none of another session\'s');
+  const deliveries = claude.deliveries(first);
+  assert.equal(deliveries.length, 2);
+  assert.deepEqual(woke, { code: 2, stdout: '', stderr: deliveries[1].text + '\n' },
+    'the newer of this session\'s two deliveries wakes it, and none of another session\'s');
 }
 
 async function main(): Promise<void> {

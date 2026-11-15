@@ -1,5 +1,6 @@
 export * from './scodeAcp';
 export * from './scodeA2a';
+export * from './scodeMailbox';
 export * from './mcp';
 export { connectCodex, CodexRequestError, CodexCleanupUnknownError } from './codexConnection';
 export type { CodexConnection, CodexConnectionConfig, CodexNotification, CodexRequestOutcome } from './codexConnection';

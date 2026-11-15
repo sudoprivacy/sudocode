@@ -268,6 +268,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
         // before tool admission; this never retries an actual task or send.
         await network.refresh();
         return {connection:network.connectionFor(extra._meta?.threadId),nativeThreadId:extra._meta?.threadId as string,
+          mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
         state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}));

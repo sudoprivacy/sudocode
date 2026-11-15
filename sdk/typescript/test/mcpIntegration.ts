@@ -257,11 +257,14 @@ async function checkClaudeHooks(): Promise<void> {
   assert.deepEqual(await deliver(changed('unlink')), nothing, 'a removal hands nothing over');
   assert.deepEqual(await deliver(changed('change', spool + '.cursor')), nothing, 'another path hands nothing over');
   assert.deepEqual(await deliver(changed(), 'sdk-cli'), nothing, 'a session without an Agent hands nothing over');
-  assert.deepEqual(await deliver(changed('add')), { code: 2, stdout: '', stderr: 'second\n\nthird\n' },
-    'every complete new entry, and no entry still being written');
+  assert.deepEqual(await deliver(changed('add')), { code: 2, stdout: '', stderr: 'third\n' },
+    'the newest complete new entry, which supersedes the others, and no entry still being written');
   fs.appendFileSync(spool, ':1","heads":[],"text":"completed"}\n');
   assert.deepEqual(await deliver(), { code: 2, stdout: '', stderr: 'completed\n' });
   assert.deepEqual(await deliver(), nothing);
+  // Entries of a full text budget, claimed by one run, stay within Claude Code's hook output cap.
+  entry('a'.repeat(9_900)); entry('b'.repeat(9_900));
+  assert.deepEqual(await deliver(), { code: 2, stdout: '', stderr: 'b'.repeat(9_900) + '\n' });
   // Mailbox offers are not filtered by sender: an allowlist is refused.
   const allowlist = path.join(directory, 'claude-allowlist.json');
   fs.writeFileSync(allowlist, JSON.stringify({ ...JSON.parse(fs.readFileSync(claude.config, 'utf8')), peerPolicy: 'allowlist',

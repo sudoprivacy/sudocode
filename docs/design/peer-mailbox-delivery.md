@@ -171,7 +171,9 @@ is one entry appended to the session's private spool, carrying
 `SessionStart` hook names the spool in `watchPaths`. On each change Claude Code
 runs the session's `FileChanged` hook (`asyncRewake`), which claims the
 complete entries no earlier run claimed, each exactly once, and exits 2 with
-their text: Claude reads it within the current turn, or the session wakes.
+the newest one's text: Claude reads it within the current turn, or the session
+wakes. Each entry is the whole offer at its time, so the newest supersedes the
+others; one entry fits Claude Code's 10,000-character hook output cap.
 
 A delivery submitted twice presents the same frames twice, with the same
 tokens; acknowledging a frame twice is a no-op success.

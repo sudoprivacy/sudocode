@@ -114,9 +114,11 @@ Two hooks in the user settings hand the deliveries to Claude:
 `--claude-watch` reads the session from the hook input, creates its spool if
 needed and prints the `watchPaths` that name it, using local files only.
 Claude Code then runs `--claude-deliver` on each change to the spool. It claims
-the complete entries no earlier run claimed, each exactly once, prints them on
-stderr and exits 2, which hands them to Claude within the current turn or
-wakes an idle session. A change to any other path, a removal, or a change with
+the complete entries no earlier run claimed, each exactly once, prints the
+newest on stderr and exits 2, which hands it to Claude within the current turn
+or wakes an idle session. Each entry is the whole offer at its time, so the
+newest supersedes the others and stays within Claude Code's 10,000-character
+hook output cap. A change to any other path, a removal, or a change with
 no new entry exits 0. Register the entry with
 `claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`.
 The operator's `scode` must support client-owned peer input version 3.

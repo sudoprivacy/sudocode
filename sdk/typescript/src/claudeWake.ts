@@ -12,7 +12,7 @@ import type { ScodeMailboxHead } from './scodeMailbox';
  * The bridge appends each mailbox delivery to the session's private,
  * append-only spool. The `SessionStart` hook names the spool in `watchPaths`,
  * and Claude Code runs the `FileChanged` hook on each change to it. That hook
- * claims the complete entries no earlier run claimed and prints them.
+ * claims the complete entries no earlier run claimed and prints the newest.
  */
 export interface ClaudeDeliveryEntry {
   /** `<hash of the budget key>:<n>`, the delivery's number in the bridge's log. */
@@ -80,19 +80,38 @@ function undelivered(spool: string): number {
   }
 }
 
-/** Complete lines after `offset`, and the offset after the last complete one. */
+/** Complete lines after `offset`, and the offset after the last complete one.
+ * Reads only what follows `offset`, so a run costs the new entries alone. */
 function pending(spool: string, offset: number): { entries: ClaudeDeliveryEntry[]; next: number } {
-  const bytes = fs.existsSync(spool) ? fs.readFileSync(spool) : Buffer.alloc(0);
-  if (offset > bytes.length) throw new Error('The delivery spool is shorter than what was delivered from it; it was replaced');
-  const end = bytes.lastIndexOf(0x0a) + 1;
-  if (end <= offset) return { entries: [], next: offset };
-  const entries = bytes.subarray(offset, end).toString('utf8').split('\n').filter(Boolean)
-    .map(line => JSON.parse(line) as ClaudeDeliveryEntry);
-  return { entries, next: end };
+  const replaced = () => new Error('The delivery spool is shorter than what was delivered from it; it was replaced');
+  let fd: number;
+  try { fd = fs.openSync(spool, 'r'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (offset > 0) throw replaced();
+    return { entries: [], next: offset };
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (offset > size) throw replaced();
+    const bytes = Buffer.alloc(size - offset);
+    let length = 0;
+    while (length < bytes.length) {
+      const read = fs.readSync(fd, bytes, length, bytes.length - length, offset + length);
+      if (!read) break;
+      length += read;
+    }
+    const end = bytes.subarray(0, length).lastIndexOf(0x0a) + 1;
+    if (!end) return { entries: [], next: offset };
+    const entries = bytes.subarray(0, end).toString('utf8').split('\n').filter(Boolean)
+      .map(line => JSON.parse(line) as ClaudeDeliveryEntry);
+    return { entries, next: offset + end };
+  } finally { fs.closeSync(fd); }
 }
 
-/** Claim every unclaimed complete entry and return their text for Claude, or
- * nothing when no entry is new. */
+/** Claim every unclaimed complete entry and return the newest one's text for
+ * Claude, or nothing when no entry is new. Each entry is the whole offer at
+ * its time, so the newest supersedes the others, and one entry is within
+ * Claude Code's hook output cap where several together may not be. */
 export function takeClaudeDeliveries(spool: string): string | undefined {
   if (!path.isAbsolute(spool)) throw new Error('The delivery spool must be an absolute path');
   fs.mkdirSync(spool + '.delivered', { recursive: true, mode: 0o700 });
@@ -107,7 +126,7 @@ export function takeClaudeDeliveries(spool: string): string | undefined {
         fs.writeFileSync(temporary, String(next), { flag: 'wx', mode: 0o600 });
         replace(temporary, spool + '.cursor');
       } catch { /* the claims stay authoritative */ }
-      return entries.map(entry => entry.text).join('\n\n') + '\n';
+      return entries[entries.length - 1].text + '\n';
     }
     // A concurrent run claimed that range; continue after it.
   }

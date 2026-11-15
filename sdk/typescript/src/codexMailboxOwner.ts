@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs';
 import type { CodexConnection } from './codexConnection';
 import { openCodexMailboxMigration } from './codexMailboxMigration';
-import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnapshot, type CodexMailboxHead } from './codexMailboxWake';
-import { mailboxTextBudget, openScodeMailbox, type ScodeMailbox, type ScodeMailboxOffer } from './scodeMailbox';
+import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnapshot } from './codexMailboxWake';
+import { mailboxTextBudget, openScodeMailbox, scodeMailboxHeads, type ScodeMailbox } from './scodeMailbox';
 import type { ScodeConnection } from './scodeAcp';
 
 /** Operator-provided admission, not a serializable "qualified" switch. The
@@ -12,21 +12,6 @@ export interface CodexMailboxAdmission {
   encodedResultBytes: number;
   encodedSubmissionBytes: number;
   qualified(native: CodexConnection, threadId: string): Promise<boolean>;
-}
-
-function frameHeads(offer: ScodeMailboxOffer): CodexMailboxHead[] {
-  const heads = new Map<string, CodexMailboxHead>();
-  for (const frame of offer.frames) {
-    if (!frame.frameId.startsWith(frame.conversation + ':')) throw new Error('Mailbox frame conversation differs');
-    const offsets = /^:(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$/.exec(frame.frameId.slice(frame.conversation.length));
-    const start = Number(offsets?.[1]), end = Number(offsets?.[2]);
-    if (!offsets || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start
-        || !frame.deliveryIds.length) throw new Error('Mailbox frame lacks its original range or delivery identity');
-    const previous = heads.get(frame.conversation);
-    if (!previous || start < previous.start) heads.set(frame.conversation,
-      { conversation: frame.conversation, start, deliveryId: frame.deliveryIds[0] });
-  }
-  return [...heads.values()];
 }
 
 /** Compose one already verified v3 receiver under the shared owner's lifetime
@@ -76,7 +61,7 @@ export async function openCodexMailboxOwner(options: {
         // Legacy receipts have no mailbox offset. Their immutable event IDs
         // form separate keys until the scode commit closes their ledger rows.
         const legacy = offer.legacyHead;
-        const heads = frameHeads(offer);
+        const heads = scodeMailboxHeads(offer);
         if (legacy) heads.unshift({ conversation: `legacy:${legacy.eventId}`, start: 0, deliveryId: legacy.deliveryId });
         if (offer.unread && !heads.length) throw new Error('Unread mailbox has no offered head');
         return { heads, text: offer.text };

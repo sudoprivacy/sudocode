@@ -309,6 +309,14 @@ fn no_color_keeps_the_editor_plain() {
             ),
             "Default"
         );
+        // With no shade to mark the editor, its separator lines must stay.
+        let rows: Vec<String> = raw.rows(0, raw.size().1).collect();
+        let is_separator = |line: &str| line.trim_end().chars().filter(|c| *c == '─').count() >= 40;
+        assert!(
+            row > 0 && is_separator(&rows[row - 1]) && is_separator(&rows[row + 1]),
+            "the uncolored editor keeps its boundary:\n{}",
+            rows.join("\n")
+        );
     });
     finish(&mut session, &env);
 }

@@ -5,6 +5,9 @@ import { connectScode, ScodeCleanupUnknownError, type ScodeConnection, type Scod
 import { listScodeAgents, requireScodeNodeIdentity, ScodeA2aError } from './scodeA2a';
 import type { ScodeReceiveHealth } from './scodeReceiveHealth';
 import type { CodexDeliveryStatus } from './codexInbox';
+import { openCodexMailboxOwner, type CodexMailboxAdmission } from './codexMailboxOwner';
+import type { ScodeMailbox } from './scodeMailbox';
+import type { CodexMailboxWakeStatus } from './codexMailboxWake';
 import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
   settleInterruptedBindings, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
@@ -48,6 +51,9 @@ export interface CodexAutojoinConfig {
   peers: string[];
   /** Explicitly admit peer data from the verified Node namespace; default is the fixed allowlist. */
   peerPolicy?: 'allowlist' | 'node-namespace';
+  /** Explicit v3 composition. Requires an operator's actual-server admission
+   * provider; JSON runtime configuration does not enable this draft path. */
+  mailbox?: CodexMailboxAdmission;
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
@@ -69,6 +75,7 @@ interface Owner {
   binding: Binding;
   connection?: ScodeConnection;
   callback?: CodexCallback;
+  mailbox?: Awaited<ReturnType<typeof openCodexMailboxOwner>>;
   error?: string;
   retryAt?: number;
   verified?: boolean;
@@ -78,8 +85,10 @@ export interface CodexAutojoin {
   readonly canRetire: boolean;
   /** Host-supplied MCP metadata selects an already loaded root, never arguments. */
   connectionFor(threadId: unknown): ScodeConnection;
+  mailboxFor(threadId: unknown): ScodeMailbox | undefined;
   status(): Array<{threadId: string; actor: string; state: string; error?: string;
-    receiver?: {pid:number; executable:string; sessionId:string; input:ScodeReceiveHealth}; delivery?:CodexDeliveryStatus}>;
+    receiver?: {pid:number; executable:string; sessionId:string; input:ScodeReceiveHealth}; delivery?:CodexDeliveryStatus;
+    mailbox?:CodexMailboxWakeStatus}>;
   refresh(): Promise<void>;
   close(): Promise<void>;
 }
@@ -101,6 +110,11 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   if (!path.isAbsolute(config.stateDirectory) || !Array.isArray(config.peers)
       || config.peers.some(peer => typeof peer !== 'string' || !peer)
       || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
+      || (config.mailbox && (typeof config.mailbox.qualified !== 'function'
+        || !Number.isSafeInteger(config.mailbox.encodedResultBytes) || config.mailbox.encodedResultBytes < 4096
+        || config.mailbox.encodedResultBytes > 65536
+        || !Number.isSafeInteger(config.mailbox.encodedSubmissionBytes) || config.mailbox.encodedSubmissionBytes < 4096
+        || config.mailbox.encodedSubmissionBytes > 65536 || config.peerPolicy !== 'node-namespace'))
       || typeof config.resolveAgent !== 'function'
       || (config.pollIntervalMs !== undefined && (!Number.isFinite(config.pollIntervalMs) || config.pollIntervalMs < 100))) {
     throw new Error('Invalid Codex autojoin configuration');
@@ -116,7 +130,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   const save = (binding: Binding, create = false) => writeBinding(config.stateDirectory, binding, create);
   await settleInterruptedBindings(config.stateDirectory, bindings);
   const stopOwner = async (owner: Owner) => {
-    const results = await Promise.allSettled([owner.callback?.close(), owner.connection?.close()]);
+    // An ACK already sent to scode must settle before its transport closes.
+    // Join the child even when a delivery owner reports a drain failure.
+    const results = await Promise.allSettled([owner.callback?.close(), owner.mailbox?.close()]);
+    results.push(...await Promise.allSettled([owner.connection?.close()]));
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
   };
@@ -126,6 +143,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     owners.set(thread.id, owner);
     const pending: Array<{ message: ScodePeerMessage; resolve(): void; reject(error: unknown): void }> = [];
     try {
+      if (config.mailbox && !await config.mailbox.qualified(native, thread.id)) {
+        throw new Error('native_unqualified: actual owning server and queue/tool presentation settings require qualification');
+      }
       try {
         await provisionBinding(config.stateDirectory, binding, thread.cwd, claim => {
           if (closed) throw new CodexEnrollmentError('not_submitted', 'Owner closed before enrollment submission');
@@ -141,12 +161,14 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
 
       // Codex is the agent its peers address: the owned scode hands each peer
       // message over instead of answering it with its own model.
-      const connection = await connectScode({ ...profile, onPeerMessage: message => {
+      const connection = await connectScode({ ...profile, ...(config.mailbox ? {
+        peerInputVersion: 3 as const, onPeerUnread: () => { void owner.mailbox?.evaluate(); },
+      } : { onPeerMessage: (message: ScodePeerMessage) => {
         if (!native.connected) throw new Error('Native durable ingress unavailable; retain delivery upstream');
         if(callback) { callback.receive(message); return; }
         if(pending.length>=64) throw new Error('ACP identity verification pending; retain delivery upstream');
         return new Promise<void>((resolve,reject) => pending.push({message,resolve,reject}));
-      } });
+      } }) });
       owner.connection = connection;
       // Native audit proves which Agent was actually loaded. A copied profile
       // cannot quietly attach every root to the same credential/receiver.
@@ -154,14 +176,20 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       requireScodeNodeIdentity(connection,result,binding.actor);
       const callbackConfig={threadId:thread.id,peers:config.peers,
         log:path.join(config.stateDirectory,`${thread.id}.callback.jsonl`)};
-      callback = config.peerPolicy==='node-namespace'
-        ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
-        : createCodexCallback(native.request,callbackConfig,connection.sessionId);
-      owner.callback = callback;
+      if (config.mailbox) {
+        owner.mailbox = await openCodexMailboxOwner({ actor: binding.actor, threadId: thread.id,
+          connection, native, callbackLog: callbackConfig.log, admission: config.mailbox });
+      } else {
+        callback = config.peerPolicy==='node-namespace'
+          ? createCodexNodeCallback(native.request,callbackConfig,connection,result)
+          : createCodexCallback(native.request,callbackConfig,connection.sessionId);
+        owner.callback = callback;
+      }
       for(const item of pending.splice(0)) {
-        try { callback.receive(item.message); item.resolve(); } catch(error) { item.reject(error); }
+        try { callback!.receive(item.message); item.resolve(); } catch(error) { item.reject(error); }
       }
       owner.verified = true;
+      if (owner.mailbox) void owner.mailbox.evaluate();
       void connection.exited.then(exit => {
         if (closed || owners.get(thread.id) !== owner) return;
         owner.error ??= `Owned scode exited ${exit.code}/${exit.signal}; recovering the same session`;
@@ -173,7 +201,9 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       for(const item of pending.splice(0)) item.reject(error);
       let cleanupKnown = !(error instanceof ScodeCleanupUnknownError);
       try { await stopOwner(owner); } catch (cleanupError) { cleanupKnown = false; report(cleanupError); }
-      if (cleanupKnown && binding.state === 'ready') owner.retryAt = performance.now() + 5000;
+      if (cleanupKnown && (binding.state === 'ready' || owner.error.includes('native_unqualified:'))) {
+        owner.retryAt = performance.now() + 5000;
+      }
       report(error);
     }
   };
@@ -234,10 +264,17 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
           if (owner) {await stopOwner(owner);owners.delete(id);}
         } else if (owner) {
           try {
+            if (config.mailbox && !await config.mailbox.qualified(native, id)) {
+              throw new Error('native_unqualified: actual owning server or tool settings changed');
+            }
             assertWorkspace(owner.binding,thread.cwd);
             if (owner.binding.state === 'ready') boundProfile(owner.binding);
           }
-          catch (error) {owner.error=String(error);await stopOwner(owner);report(error);}
+          catch (error) {
+            owner.error=String(error);await stopOwner(owner);
+            if (owner.error.includes('native_unqualified:')) owner.retryAt = performance.now() + 5000;
+            report(error);
+          }
         } else await open(thread);
       }
       inventoryError = undefined;
@@ -249,7 +286,8 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     refreshing = chain.finally(() => { refreshing = undefined; });
     return refreshing;
   };
-  native = await connectRecoveringCodex({...config.native, requireDurableQueue:true}, notification => {
+  native = await connectRecoveringCodex({...config.native, requireDurableQueue:!config.mailbox}, notification => {
+    for (const owner of owners.values()) owner.mailbox?.notify(notification);
     if (['thread/started', 'thread/closed'].includes(notification.method)) void refresh();
   });
   const timer = setInterval(() => { void refresh(); }, config.pollIntervalMs ?? 1000);
@@ -270,30 +308,37 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     }
   })();
 
+  const connectionFor = (threadId: unknown): ScodeConnection => {
+    if (!identifier(threadId)) throw new ScodeA2aError('Native MCP threadId metadata is required; no sender argument or cwd inference', 'not_submitted');
+    if(inventoryError)throw new ScodeA2aError(`Native root inventory unavailable: ${inventoryError}`,'not_submitted');
+    const owner = owners.get(threadId);
+    if (closed || !owner?.verified || !owner.connection || owner.connection.closed || owner.error) {
+      throw new ScodeA2aError(owner?.error ?? 'No authenticated Agent is attached to this loaded root', 'not_submitted');
+    }
+    return owner.connection;
+  };
   return {
     get canRetire() {return closed || (!inventoryError && owners.size === 0);},
     refresh,
-    connectionFor(threadId) {
-      if (!identifier(threadId)) throw new ScodeA2aError('Native MCP threadId metadata is required; no sender argument or cwd inference', 'not_submitted');
-      if(inventoryError)throw new ScodeA2aError(`Native root inventory unavailable: ${inventoryError}`,'not_submitted');
-      const owner = owners.get(threadId);
-      if (closed || !owner?.verified || !owner.connection || owner.connection.closed || owner.error) {
-        throw new ScodeA2aError(owner?.error ?? 'No authenticated Agent is attached to this loaded root', 'not_submitted');
-      }
-      return owner.connection;
+    connectionFor,
+    mailboxFor(threadId) {
+      connectionFor(threadId);
+      return owners.get(threadId as string)?.mailbox?.mailbox;
     },
     status: () => [...owners.values()].map(owner => {
-      const input=owner.connection?.receiveHealth, delivery=owner.callback?.status();
+      const input=owner.connection?.receiveHealth, delivery=owner.callback?.status(), mailbox=owner.mailbox?.status();
       return {threadId:owner.binding.threadId,actor:owner.binding.actor,
-        state:owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
+        state:owner.error?.includes('native_unqualified:') || mailbox?.state==='native_unqualified' ? 'native_unqualified'
+          : owner.error ? owner.binding.state === 'pending' ? 'waiting_for_identity'
           : owner.binding.state === 'recovery_required' ? 'recovery_required' : 'disconnected'
           : delivery?.state==='cleanup_unknown' ? 'cleanup_unknown' : owner.connection?.closed ? 'disconnected'
-          : delivery?.state==='blocked' ? 'delivery_blocked'
+          : delivery?.state==='blocked' || mailbox?.state==='blocked' ? 'delivery_blocked'
+          : mailbox?.state==='delivery_exhausted' ? 'delivery_exhausted'
           : !native.connected || inventoryError ? 'native_unavailable'
           : input?.inputOwner==='session' && ['paused','error'].includes(input.state) ? 'input_blocked'
           : owner.verified ? 'connected' : 'connecting',error:owner.error,
         ...(owner.connection&&input?{receiver:{pid:owner.connection.pid,executable:owner.connection.executable,
-          sessionId:owner.connection.sessionId,input}}:{}),...(delivery?{delivery}:{})};
+          sessionId:owner.connection.sessionId,input}}:{}),...(delivery?{delivery}:{}),...(mailbox?{mailbox}:{})};
     }),
     close,
   };

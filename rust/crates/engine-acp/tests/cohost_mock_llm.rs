@@ -747,35 +747,39 @@ fn wait_idle(kernel: &Kernel, pid: &serde_json::Value) {
 }
 
 /// Cancel is a stop request: the original host keeps custody until its own
-/// teardown has joined, and the service reports that cleanup as pending
-/// meanwhile. Wait for the retirement the host publishes.
+/// teardown has joined, and the service reports the session as `stopping`
+/// meanwhile. Wait for the retirement the host publishes. Any other error is a
+/// failed stop, never a retirement.
 fn stop_session(kernel: &Kernel, pid: &serde_json::Value) {
-    if let Err(error) = managed_call(
+    let cancelled = managed_call(
         kernel,
         "cancel_v1",
         &serde_json::json!({"session_id":pid,"mode":"session"}),
-    ) {
-        assert!(
-            error.contains("host cleanup unconfirmed") && error.contains("Pending"),
-            "cancel failed for a reason other than pending cleanup: {error}"
-        );
-    }
+    )
+    .expect("cancel of a hosted session is accepted");
+    assert_eq!(
+        cancelled["cancelled"], true,
+        "cancel reached the session: {cancelled}"
+    );
     let deadline = std::time::Instant::now() + Duration::from_mins(1);
     loop {
-        let state = managed_call(
+        match managed_call(
             kernel,
             "get_session_v1",
             &serde_json::json!({"session_id":pid}),
-        );
-        if state
-            .as_ref()
-            .map_or(true, |state| state["state"] == "terminated")
-        {
-            return;
+        ) {
+            Ok(state) if state["state"] == "terminated" => return,
+            Ok(state) => assert_eq!(
+                state["state"], "stopping",
+                "a cancelled session reports its stop: {state}"
+            ),
+            // Retirement released the pid.
+            Err(error) if error.contains("unknown session_id") => return,
+            Err(error) => panic!("the stop failed instead of retiring: {error}"),
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the cancelled host did not retire: {state:?}"
+            "the cancelled host did not retire"
         );
         std::thread::sleep(Duration::from_millis(20));
     }

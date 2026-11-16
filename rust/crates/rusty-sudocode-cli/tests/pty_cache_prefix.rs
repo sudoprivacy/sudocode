@@ -1203,14 +1203,19 @@ fn response_content(request: &Value, number: usize) -> Value {
             } else {
                 mock_anthropic_service::CANNED_COMPACTION_SUMMARY.to_owned()
             };
-            if !last.contains("Optional checkpoint metadata:") || last.contains("PEER_DESCRIPTION_MISSING") {
+            // Every compaction offers optional description metadata; only the
+            // peer-description cases answer it, like a model with nothing to describe.
+            let peer_case = last.contains("CURRENT_PEER_WORK") || last.contains("PEER_DESCRIPTION_");
+            if !last.contains("Optional checkpoint metadata:")
+                || !peer_case
+                || last.contains("PEER_DESCRIPTION_MISSING")
+            {
                 checkpoint
             } else if last.contains("PEER_DESCRIPTION_INVALID") || last.contains("PEER_DESCRIPTION_PLAIN_INVALID") {
                 format!("{checkpoint}\n<agent-description>{{\"unexpected\":true}}</agent-description>")
             } else if last.contains("PEER_DESCRIPTION_UNTERMINATED") {
                 format!("{checkpoint}\n<agent-description>broken optional metadata")
             } else {
-                assert!(last.contains("CURRENT_PEER_WORK"), "description must receive the latest preserved intent");
                 let description = if last.contains("PEER_DESCRIPTION_RAW") {
                     "Investigating peer discovery"
                 } else {

@@ -392,6 +392,8 @@ def performance_scope_acceptance(directory):
     command("git", "commit", "-m", "Protected performance selection", cwd=repository)
     policy = command("git", "rev-parse", "HEAD", cwd=repository)
     helper = repository / ".github/scripts/local_acceptance.py"
+    rules = json.loads((repository / "spec/local_acceptance.json").read_text())
+    workspace_periodic = rules["checks"]["native-workspace"].get("complementary") == "periodic"
 
     def expect(base, expected, *, native=True, guard=None, resize=None, release=None, context=None):
         text = command(sys.executable, helper, "plan", "--base", base, "--policy-ref", policy,
@@ -415,10 +417,11 @@ def performance_scope_acceptance(directory):
             assert "RELEASE_ACCEPTANCE_SCOPE=" in text, text
         if context is not None:
             assert ("native-context" in names) == context, text
-        native_checks = {name for name in names if name.startswith("native-")}
-        assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if native_checks else set()), text
+        complementary_checks = {name for name in names if name.startswith("native-")
+                                and not (workspace_periodic and name == "native-workspace")}
+        assert {job["os"] for job in plan["ci"]} == ({"ubuntu-latest", "macos-latest"} if complementary_checks else set()), text
         for job in plan["ci"]:
-            assert set(job["checks"]) == {name for name in names if name.startswith("native-")}, text
+            assert set(job["checks"]) == complementary_checks, text
 
     both = ["rendering", "browser"]
     measurement_inputs = ["e2e/terminal-resize/benchmark.py", "e2e/terminal-resize/performance-policy.json",
@@ -619,8 +622,8 @@ def plan_acceptance(directory):
     command("git", "add", ".", cwd=repository)
     command("git", "commit", "-m", "SDK inputs", cwd=repository)
 
-    def preview(system, architecture, success=True, error=None):
-        output = command(sys.executable, helper, "plan", "--base", "main", "--policy-ref", "main",
+    def preview(system, architecture, success=True, error=None, policy_ref="main"):
+        output = command(sys.executable, helper, "plan", "--base", "main", "--policy-ref", policy_ref,
                          "--host", system, "--architecture", architecture, cwd=repository,
                          success=success, error=error)
         if success:
@@ -652,7 +655,32 @@ def plan_acceptance(directory):
     assert {job["os"] for job in native} == {"ubuntu-latest", "windows-latest"}
     assert all(job["name"] == f"Complement local host ({job['os']})" for job in native)
     expected = {name for name in plan["local_checks"] if name.startswith("native-")} - {"native-sdk"}
+    if rules["checks"]["native-workspace"].get("complementary") == "periodic":
+        expected.remove("native-workspace")
     assert all(set(job["checks"]) == expected for job in native)
+    assert "native-workspace" in plan["local_checks"], plan
+    assert {"check": "native-workspace", "targets": ["macos"]} in plan["local_targets"], plan
+    if rules["checks"]["native-workspace"].get("complementary") == "periodic":
+        # Exercise both declared responsibilities on the same real Git input.
+        # The SDK targets and complete author checks must remain identical.
+        former = json.loads(json.dumps(rules))
+        del former["checks"]["native-workspace"]["complementary"]
+        policy.write_text(json.dumps(former))
+        command("git", "add", "spec/local_acceptance.json", cwd=repository)
+        command("git", "commit", "-m", "Preview original full complementary responsibility", cwd=repository)
+        command("git", "branch", "former-full-policy", "HEAD", cwd=repository)
+        current = preview("macos", "x86_64")
+        legacy = preview("macos", "x86_64", policy_ref="former-full-policy")
+        assert current["local_checks"] == legacy["local_checks"], (current, legacy)
+        assert current["local_targets"] == legacy["local_targets"], (current, legacy)
+        assert [job for job in current["ci"] if job["family"] == "sdk"] == [
+            job for job in legacy["ci"] if job["family"] == "sdk"], (current, legacy)
+        current_native = {job["os"]: set(job["checks"]) for job in current["ci"] if job["family"] == "native"}
+        legacy_native = {job["os"]: set(job["checks"]) for job in legacy["ci"] if job["family"] == "native"}
+        assert current_native.keys() == legacy_native.keys(), (current, legacy)
+        assert all("native-workspace" not in checks for checks in current_native.values()), current
+        assert all(legacy_native[host] == checks | {"native-workspace"}
+                   for host, checks in current_native.items()), (current, legacy)
     print("PASS: CLI plans expose four author-host splits, Linux architectures and mixed SDK/native coverage")
 
 

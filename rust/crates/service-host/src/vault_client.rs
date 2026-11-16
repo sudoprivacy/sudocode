@@ -6,6 +6,8 @@ use crate::Result;
 use nexus_vfs_client::NexusVfsClient;
 use prost::Message;
 use std::collections::BTreeSet;
+use std::io;
+use std::time::Duration;
 
 /// The upstream `nexus.secrets.v1` protocol.
 #[allow(
@@ -22,12 +24,30 @@ pub fn call<I: Message, O: Message + Default>(
     method: &str,
     input: &I,
 ) -> Result<O> {
-    let bytes = client.call(
+    decode(client.call(
         &format!("password-vault.{method}"),
         &input.encode_to_vec(),
         "",
-    )?;
-    Ok(O::decode(bytes.as_slice())?)
+    ))
+}
+
+/// [`call`] that gives up after `timeout`, connection included.
+fn call_within<I: Message, O: Message + Default>(
+    client: &NexusVfsClient,
+    method: &str,
+    input: &I,
+    timeout: Duration,
+) -> Result<O> {
+    decode(client.call_with_deadline(
+        &format!("password-vault.{method}"),
+        &input.encode_to_vec(),
+        "",
+        timeout,
+    ))
+}
+
+fn decode<O: Message + Default>(reply: io::Result<Vec<u8>>) -> Result<O> {
+    Ok(O::decode(reply?.as_slice())?)
 }
 
 /// Version metadata for exactly `namespace`/`key`; never the secret value.
@@ -47,18 +67,23 @@ pub fn secret_versions(
     Ok(response.versions)
 }
 
-/// The keys in `namespace` that hold a live (not deleted) secret. Metadata
-/// only, never a value. Absence is read from the listing rather than from an
-/// error, because a generic `Call` reports every plugin error, not-found
-/// included, as one internal error.
-pub fn live_keys(client: &NexusVfsClient, namespace: &str) -> Result<BTreeSet<String>> {
-    let response: proto::ListSecretsResponse = call(
+/// The keys in `namespace` that hold a live (not deleted) secret, answered
+/// within `timeout`. Metadata only, never a value. Absence is read from the
+/// listing rather than from an error, because a generic `Call` reports every
+/// plugin error, not-found included, as one internal error.
+pub fn live_keys(
+    client: &NexusVfsClient,
+    namespace: &str,
+    timeout: Duration,
+) -> Result<BTreeSet<String>> {
+    let response: proto::ListSecretsResponse = call_within(
         client,
         "secret_list",
         &proto::ListSecretsRequest {
             namespace: Some(namespace.to_owned()),
             include_deleted: false,
         },
+        timeout,
     )?;
     Ok(response
         .secrets

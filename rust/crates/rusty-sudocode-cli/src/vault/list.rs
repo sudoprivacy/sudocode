@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use nexus_vfs_client::NexusVfsClient;
 use serde_json::{json, Map, Value};
@@ -15,6 +16,11 @@ use super::Refusal;
 
 const NOTE: &str = "operations are configured locally, not authorized by the backend; \
                     per-agent grants: https://github.com/nexi-lab/nexus-vfs/issues/579";
+
+/// How long the whole listing may take, connection included. A runtime that
+/// answers at all answers in well under a second; an endpoint that accepts and
+/// never answers must not hold the agent's turn.
+const LIST_BUDGET: Duration = Duration::from_secs(10);
 
 pub(super) fn run(
     cwd: &Path,
@@ -48,9 +54,11 @@ fn describe(operation: &Operation, availability: &str) -> Value {
 }
 
 /// One credential snapshot and one connection, then one metadata listing per
-/// configured namespace. Only whether each configured key is live leaves this
-/// process; the rest of a listing is discarded.
+/// configured namespace, all within [`LIST_BUDGET`]. Only whether each
+/// configured key is live leaves this process; the rest of a listing is
+/// discarded.
 fn availability(settings: &VaultSettings) -> Vec<&'static str> {
+    let deadline = Instant::now() + LIST_BUDGET;
     let client = match connect(settings) {
         Ok(client) => client,
         Err(code) => return vec![code; settings.operations.len()],
@@ -63,7 +71,7 @@ fn availability(settings: &VaultSettings) -> Vec<&'static str> {
             let secret_ref = &operation.secret_ref;
             let listing = listings
                 .entry(secret_ref.namespace.as_str())
-                .or_insert_with(|| live_keys(&client, &secret_ref.namespace));
+                .or_insert_with(|| live_keys(&client, &secret_ref.namespace, deadline));
             match listing {
                 Ok(keys) if keys.contains(&secret_ref.key) => "available",
                 Ok(_) => "secret_absent",
@@ -91,8 +99,16 @@ fn connect(settings: &VaultSettings) -> Result<NexusVfsClient, &'static str> {
 /// backend errors alike, so this does not claim which one it was.
 const VAULT_UNAVAILABLE: &str = "vault_unavailable";
 
-fn live_keys(client: &NexusVfsClient, namespace: &str) -> Result<BTreeSet<String>, &'static str> {
-    vault_client::live_keys(client, namespace).map_err(|error| {
+fn live_keys(
+    client: &NexusVfsClient,
+    namespace: &str,
+    deadline: Instant,
+) -> Result<BTreeSet<String>, &'static str> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(VAULT_UNAVAILABLE);
+    }
+    vault_client::live_keys(client, namespace, remaining).map_err(|error| {
         match error.downcast_ref::<io::Error>().map(io::Error::kind) {
             Some(io::ErrorKind::PermissionDenied) => "access_denied",
             _ => VAULT_UNAVAILABLE,

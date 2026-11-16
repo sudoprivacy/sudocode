@@ -7,7 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nexus_raft::transport::{
     generate_session_agent_cert, generate_zone_ca, user_runtime_server_name, AgentCredential,
@@ -658,7 +658,23 @@ fn link(target: &Path, link: &Path) {
     }
 }
 
-
+/// An endpoint that accepts connections and never answers must not hold the
+/// agent's turn: the connection and every listing share one budget.
+#[test]
+fn a_silent_endpoint_is_vault_unavailable_within_the_list_budget() {
+    let env = Env::new();
+    let (listener, endpoint) = listener();
+    env.write_user_vault(&env.vault(&endpoint));
+    write_bundle(&env.credentials(), &mint(OWNER, 300), &runtime_name());
+    let started = Instant::now();
+    assert_eq!(env.list_availability(), ["vault_unavailable"; 2]);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(18),
+        "the listing took {elapsed:?}"
+    );
+    drop(listener);
+}
 
 #[test]
 fn an_expired_certificate_is_credential_expired() {

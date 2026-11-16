@@ -13,10 +13,12 @@ mod vault_live;
 #[path = "support/vault_tool.rs"]
 mod vault_tool;
 
+use std::path::PathBuf;
+
 use serde_json::json;
 use vault_live::{
-    canary, closed_endpoint, command_lines_containing, contacted, files_containing, section,
-    target, Live, Runtime,
+    canary, closed_endpoint, command_lines_containing, contacted, files_containing, record,
+    section, target, Live, Runtime,
 };
 
 const OWNER: &str = "alice";
@@ -96,7 +98,7 @@ fn a_seeded_secret_is_available_an_unseeded_ref_absent_and_use_touches_nothing()
 
     assert_unseen(&runtime, &[&list.stdout, &used.stdout], &secret);
     let stored = files_containing(&data, &secret);
-    live.record(
+    record(
         "b_list_and_use",
         &json!({
             "list": list.result, "use": used.result,
@@ -129,7 +131,7 @@ fn the_runtime_itself_refuses_an_agent_that_is_its_own_owner() {
         &[PRESENT],
     ));
     let list = home.run("list", "{}");
-    live.record("c_owner_as_agent", &list.result);
+    record("c_owner_as_agent", &list.result);
     assert_eq!(
         list.result["operations"][0]["availability"], "access_denied",
         "{}",
@@ -155,7 +157,7 @@ fn another_owners_agent_never_reaches_this_owners_vault() {
         &[PRESENT],
     ));
     let list = home.run("list", "{}");
-    live.record("c_other_owner", &list.result);
+    record("c_other_owner", &list.result);
     // Bob's settings expect bob's runtime; alice's runtime cannot prove that
     // name, so the connection fails before any Vault call.
     assert_eq!(
@@ -189,7 +191,7 @@ fn a_runtime_without_the_vault_plugin_or_no_runtime_is_vault_unavailable() {
         &[PRESENT],
     ));
     let without_runtime = home.run("list", "{}");
-    live.record(
+    record(
         "d_service_missing",
         &json!({"without_plugin": without_plugin.result, "without_runtime": without_runtime.result}),
     );
@@ -228,7 +230,7 @@ fn a_replaced_bundle_is_read_again_on_the_next_call() {
     let foreign = home.availability();
     live.agent(&dir, "generation-3", OWNER, 300);
     let renewed = home.availability();
-    live.record(
+    record(
         "e_replaced_bundle",
         &json!({"first": first, "foreign_generation": foreign, "renewed": renewed}),
     );
@@ -267,9 +269,9 @@ fn a_restarted_runtime_still_holds_the_secret() {
         &[PRESENT],
     ));
     let after = home.availability();
-    live.record("h_restart", &json!({"before": before, "after": after}));
+    record("h_restart", &json!({"before": before, "after": after}));
     assert_eq!(before, ["available"]);
     assert_eq!(after, ["available"]);
     assert_unseen(&runtime, &[], &secret);
-    assert!(files_containing(&data, &secret).is_empty());
+    assert_eq!(files_containing(&data, &secret), Vec::<PathBuf>::new());
 }

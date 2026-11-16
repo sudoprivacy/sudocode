@@ -158,16 +158,6 @@ impl Live {
         Home { dir }
     }
 
-    /// Record one case's observed result for the evidence report.
-    pub fn record(&self, case: &str, observed: &Value) {
-        if let Some(out) = std::env::var_os("SUDOCODE_VAULT_LIVE_EVIDENCE") {
-            let out = PathBuf::from(out);
-            fs::create_dir_all(&out).expect("evidence directory");
-            fs::write(out.join(format!("{case}.json")), observed.to_string())
-                .expect("evidence file");
-        }
-    }
-
     fn write_bundle(&self, dir: &Path, subject: &str, owner: &str, cert: &[u8], key: &[u8]) {
         fs::create_dir_all(dir).expect("bundle directory");
         let mut manifest = AgentCredential::for_bundle(subject);
@@ -275,6 +265,15 @@ pub fn section(
         "credentialDir": credentials,
         "operations": operations,
     })
+}
+
+/// Record one case's observed result for the evidence report.
+pub fn record(case: &str, observed: &Value) {
+    if let Some(out) = std::env::var_os("SUDOCODE_VAULT_LIVE_EVIDENCE") {
+        let out = PathBuf::from(out);
+        fs::create_dir_all(&out).expect("evidence directory");
+        fs::write(out.join(format!("{case}.json")), observed.to_string()).expect("evidence file");
+    }
 }
 
 /// A random canary value, unique to this run.

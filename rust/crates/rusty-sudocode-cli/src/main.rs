@@ -4868,7 +4868,7 @@ impl LiveCli {
     /// per path).
     fn drive_turn(
         &self,
-        request: TurnRequest<'_>,
+        request: &TurnRequest<'_>,
         presentation: TurnPresentation<'_>,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
@@ -5159,7 +5159,7 @@ impl LiveCli {
         let cancel_monitor = interactive_cancel
             .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
-            TurnRequest::Prompt { input, shown: &[] },
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: None,
@@ -5339,7 +5339,7 @@ impl LiveCli {
         let mut permission_prompter = question_prompter.clone();
 
         let outcome = self.drive_turn(
-            request,
+            &request,
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: Some(output),
@@ -5414,7 +5414,7 @@ impl LiveCli {
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
-            TurnRequest::Prompt { input, shown: &[] },
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: None,
                 output: None,

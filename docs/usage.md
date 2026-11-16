@@ -344,6 +344,13 @@ remain live. Final turn statistics retain their precise duration.
 Foreground tools use the same row and show available progress first. Quiet
 tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
+Manual and automatic context compaction use this same foreground row:
+`Compacting context…` and elapsed time, without a guessed percentage or ETA.
+Queued messages remain visible above it. With no pending input the footer
+shows `Esc/Ctrl+C cancel`; with pending input it shows `Esc flush` and
+`Ctrl+C cancel` separately. Flushing requests delivery of pending input;
+compaction finishes before that input can reach a model request. Cancellation
+keeps unapplied queued input available for explicit continuation.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described

@@ -438,6 +438,7 @@ mod tests {
 
     fn transport(addr: std::net::SocketAddr) -> McpRemoteTransport {
         McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("http://{addr}/mcp"),
             headers: BTreeMap::new(),
             headers_helper: None,

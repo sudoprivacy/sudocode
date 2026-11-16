@@ -31,6 +31,7 @@ pub struct McpRemoteTransport {
     pub headers: BTreeMap<String, String>,
     pub headers_helper: Option<String>,
     pub auth: McpClientAuth,
+    pub tool_call_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,18 +89,21 @@ impl McpClientTransport {
                 headers: config.headers.clone(),
                 headers_helper: config.headers_helper.clone(),
                 auth: McpClientAuth::from_oauth(config.oauth.clone()),
+                tool_call_timeout_ms: config.tool_call_timeout_ms,
             }),
             McpServerConfig::Http(config) => Self::Http(McpRemoteTransport {
                 url: config.url.clone(),
                 headers: config.headers.clone(),
                 headers_helper: config.headers_helper.clone(),
                 auth: McpClientAuth::from_oauth(config.oauth.clone()),
+                tool_call_timeout_ms: config.tool_call_timeout_ms,
             }),
             McpServerConfig::Ws(config) => Self::WebSocket(McpRemoteTransport {
                 url: config.url.clone(),
                 headers: config.headers.clone(),
                 headers_helper: config.headers_helper.clone(),
                 auth: McpClientAuth::None,
+                tool_call_timeout_ms: None,
             }),
             McpServerConfig::Sdk(config) => Self::Sdk(McpSdkTransport {
                 name: config.name.clone(),
@@ -183,6 +187,7 @@ mod tests {
         let config = ScopedMcpServerConfig {
             scope: ConfigSource::Project,
             config: McpServerConfig::Http(McpRemoteServerConfig {
+                tool_call_timeout_ms: None,
                 url: "https://vendor.example/mcp".to_string(),
                 headers: BTreeMap::from([("X-Test".to_string(), "1".to_string())]),
                 headers_helper: Some("helper.sh".to_string()),

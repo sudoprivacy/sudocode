@@ -439,7 +439,7 @@ impl Drop for SessionSubagents {
 fn acp_mcp_servers_to_scoped(
     acp_servers: &[McpServer],
     cwd: &std::path::Path,
-) -> BTreeMap<String, ScopedMcpServerConfig> {
+) -> Result<BTreeMap<String, ScopedMcpServerConfig>, AcpError> {
     let mut out = BTreeMap::new();
     for server in acp_servers {
         match server {
@@ -454,7 +454,7 @@ fn acp_mcp_servers_to_scoped(
                     args: stdio.args.clone(),
                     env,
                     current_dir: Some(cwd.to_path_buf()),
-                    tool_call_timeout_ms: None,
+                    tool_call_timeout_ms: mcp_tool_timeout_from_meta(stdio.meta.as_ref())?,
                 });
                 out.insert(
                     stdio.name.clone(),
@@ -478,6 +478,7 @@ fn acp_mcp_servers_to_scoped(
                                 .collect(),
                             headers_helper: None,
                             oauth: None,
+                            tool_call_timeout_ms: mcp_tool_timeout_from_meta(http.meta.as_ref())?,
                         }),
                     },
                 );
@@ -496,6 +497,7 @@ fn acp_mcp_servers_to_scoped(
                                 .collect(),
                             headers_helper: None,
                             oauth: None,
+                            tool_call_timeout_ms: mcp_tool_timeout_from_meta(sse.meta.as_ref())?,
                         }),
                     },
                 );
@@ -503,7 +505,29 @@ fn acp_mcp_servers_to_scoped(
             _ => {}
         }
     }
-    out
+    Ok(out)
+}
+
+/// A host may grant one MCP server a bounded tool-call budget, including its
+/// lazy setup. This never changes discovery, other servers, or cancellation.
+fn mcp_tool_timeout_from_meta(
+    meta: Option<&Map<String, serde_json::Value>>,
+) -> Result<Option<u64>, AcpError> {
+    let Some(value) = meta
+        .and_then(|meta| meta.get("sudocode"))
+        .and_then(|namespace| namespace.get("toolCallTimeoutMs"))
+    else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            AcpError::invalid_params(
+                "McpServer._meta.sudocode.toolCallTimeoutMs must be a positive integer",
+            )
+        })
 }
 
 /// Sniff the MIME type of a base64-encoded image from its leading bytes.
@@ -1687,6 +1711,7 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("mcpToolCallTimeout".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
@@ -2058,7 +2083,8 @@ mod tests {
 
     #[test]
     fn acp_mcp_servers_empty() {
-        let out = acp_mcp_servers_to_scoped(&[], Path::new("/tmp"));
+        let out =
+            acp_mcp_servers_to_scoped(&[], Path::new("/tmp")).expect("valid MCP configuration");
         assert!(out.is_empty());
     }
 
@@ -2070,7 +2096,7 @@ mod tests {
                 .args(vec!["a".to_string(), "b".to_string()])
                 .env(vec![EnvVariable::new("K", "v")]),
         );
-        let out = acp_mcp_servers_to_scoped(&[server], cwd);
+        let out = acp_mcp_servers_to_scoped(&[server], cwd).expect("valid MCP configuration");
         assert_eq!(out.len(), 1);
         let scoped = &out["srv"];
         assert_eq!(scoped.scope, ConfigSource::Local);
@@ -2093,7 +2119,8 @@ mod tests {
                 EnvVariable::new("C", "3"),
             ],
         ));
-        let out = acp_mcp_servers_to_scoped(&[server], Path::new("/tmp"));
+        let out = acp_mcp_servers_to_scoped(&[server], Path::new("/tmp"))
+            .expect("valid MCP configuration");
         let McpServerConfig::Stdio(stdio) = &out["srv"].config else {
             panic!("expected stdio");
         };
@@ -2107,7 +2134,8 @@ mod tests {
     fn acp_mcp_servers_preserves_http_sse() {
         let http = McpServer::Http(McpServerHttp::new("h", "https://e"));
         let sse = McpServer::Sse(McpServerSse::new("s", "https://e"));
-        let out = acp_mcp_servers_to_scoped(&[http, sse], Path::new("/tmp"));
+        let out = acp_mcp_servers_to_scoped(&[http, sse], Path::new("/tmp"))
+            .expect("valid MCP configuration");
         assert!(
             matches!(&out["h"].config, McpServerConfig::Http(remote) if remote.url == "https://e")
         );
@@ -2120,7 +2148,8 @@ mod tests {
     fn acp_mcp_servers_mixed() {
         let stdio = McpServer::Stdio(McpServerStdio::new("keep", PathBuf::from("/bin/k")));
         let http = McpServer::Http(McpServerHttp::new("remote", "https://e"));
-        let out = acp_mcp_servers_to_scoped(&[stdio, http], Path::new("/tmp"));
+        let out = acp_mcp_servers_to_scoped(&[stdio, http], Path::new("/tmp"))
+            .expect("valid MCP configuration");
         assert_eq!(out.len(), 2);
         assert!(out.contains_key("keep"));
         assert!(out.contains_key("remote"));
@@ -3290,7 +3319,7 @@ pub(crate) async fn run_acp_on_transport(
                                     ));
                                 }
                                 let mcp_servers =
-                                    acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
+                                    acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd)?;
                                 let (engine, cwd) =
                                     factory.open(None, mcp_servers, prompt_overrides, memory)?;
                                 let session_id = engine.session_handle().id;
@@ -3305,7 +3334,8 @@ pub(crate) async fn run_acp_on_transport(
                                 AcpError::internal(format!("failed to enter cwd: {e}"))
                             })?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
-                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
+                            let mcp_servers =
+                                acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd)?;
                             let (engine, cwd) = match fork_source {
                                 Some(source) => session_ops::open_forked_session(
                                     &config,
@@ -3671,7 +3701,8 @@ pub(crate) async fn run_acp_on_transport(
                                 return Ok((engine, sid, cwd));
                             }
                             if let Some(factory) = factory {
-                                let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
+                                let mcp_servers =
+                                    acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd)?;
                                 let (engine, cwd) = factory.open(
                                     Some(&sid),
                                     mcp_servers,
@@ -3686,7 +3717,7 @@ pub(crate) async fn run_acp_on_transport(
                                 AcpError::internal(format!("failed to enter cwd: {e}"))
                             })?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
-                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
+                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd)?;
                             let (engine, cwd) = session_ops::open_loaded_session(
                                 &config,
                                 &load_registry,

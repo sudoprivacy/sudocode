@@ -1140,8 +1140,11 @@ impl McpServerManager {
                 })?;
         match &server.bootstrap.transport {
             McpClientTransport::Stdio(transport) => Ok(transport.resolved_tool_call_timeout_ms()),
-            // Remote transports (SSE today; HTTP/WS/SDK remain unimplemented)
-            // are not configurable per-server yet — fall back to the default.
+            McpClientTransport::Http(transport) | McpClientTransport::Sse(transport) => {
+                Ok(transport
+                    .tool_call_timeout_ms
+                    .unwrap_or(DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS))
+            }
             _ => Ok(DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS),
         }
     }

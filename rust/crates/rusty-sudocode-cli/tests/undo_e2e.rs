@@ -351,11 +351,21 @@ fn run_scode(current_dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
     command
         .current_dir(current_dir)
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
         .env(
             "SUDO_CODE_CONFIG_HOME",
             common::throwaway_config_home(current_dir),
         )
         .args(args);
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "PROXY_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        command.env_remove(key);
+    }
     command.output().expect("scode should launch")
 }
 

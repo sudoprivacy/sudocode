@@ -525,8 +525,24 @@ fn assert_json_command_with_env(current_dir: &Path, args: &[&str], envs: &[(&str
 }
 
 fn run_scode(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let config = current_dir.join("default-config-home");
+    fs::create_dir_all(&config).expect("isolated default config should exist");
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
-    command.current_dir(current_dir).args(args);
+    command
+        .current_dir(current_dir)
+        .args(args)
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
+        .env("SUDO_CODE_CONFIG_HOME", config);
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "PROXY_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        command.env_remove(key);
+    }
+    // Explicit fixture roots and credentials below still override these defaults.
     for (key, value) in envs {
         command.env(key, value);
     }

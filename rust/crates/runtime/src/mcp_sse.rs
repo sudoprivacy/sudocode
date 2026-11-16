@@ -439,6 +439,7 @@ mod tests {
         .await;
 
         let transport = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("http://{addr}/sse"),
             headers: BTreeMap::new(),
             headers_helper: None,
@@ -508,6 +509,7 @@ mod tests {
         });
 
         let transport = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("http://{addr}/sse"),
             headers: BTreeMap::new(),
             headers_helper: None,
@@ -544,6 +546,7 @@ mod tests {
         });
 
         let transport = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("http://{addr}/sse"),
             headers: BTreeMap::new(),
             headers_helper: None,
@@ -584,6 +587,7 @@ mod tests {
         });
 
         let transport = McpRemoteTransport {
+            tool_call_timeout_ms: None,
             url: format!("http://{addr}/sse"),
             headers: BTreeMap::new(),
             headers_helper: None,

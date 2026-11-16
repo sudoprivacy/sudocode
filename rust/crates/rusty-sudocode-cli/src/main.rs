@@ -21,6 +21,7 @@ mod render_engine;
 mod repl_ui;
 mod startup;
 mod stderr_capture;
+mod vault;
 mod windows_console;
 
 use crate::render::TextRole;
@@ -533,6 +534,12 @@ fn run_config_account(
 }
 
 fn main() {
+    // The builtin vault plugin's tools answer before anything else runs: argument
+    // parsing and config loading can write to stderr, and a tool never may.
+    if let Some(tool) = vault::requested_tool(&env::args().skip(1).collect::<Vec<_>>()) {
+        vault::run(tool);
+        return;
+    }
     startup::initialize();
     // Must run before any output so early raw ANSI escapes render correctly on
     // the Windows console, and so the color-tier detection that reads the same

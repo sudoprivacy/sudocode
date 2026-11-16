@@ -97,7 +97,8 @@ fn read(dir: &Path) -> Result<(AgentCredential, Credential), CredentialError> {
 }
 
 /// A bundle file: one name directly in the bundle directory, opened without
-/// following a link, so it is inside the bundle on disk and not only by name.
+/// following a symbolic link or reparse point. A hard link is not detected:
+/// the directory belongs to the writer that publishes the bundle.
 fn read_file(dir: &Path, name: &str) -> Result<Vec<u8>, CredentialError> {
     let mut components = Path::new(name).components();
     let (Some(Component::Normal(_)), None) = (components.next(), components.next()) else {

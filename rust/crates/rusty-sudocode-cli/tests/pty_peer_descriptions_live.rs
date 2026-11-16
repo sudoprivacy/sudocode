@@ -15,87 +15,75 @@ fn live_peer_description_reuses_compaction_and_retains_provider_cache_observatio
     if env.is_mock() {
         return;
     }
-    let mut observations = Vec::new();
-    for enabled in [false, true] {
-        let settings_path = env.config_home().join("settings.json");
-        let mut settings: Value = std::fs::read(&settings_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| json!({}));
-        settings["agentName"] = json!("peercompass-author");
-        settings["experimental"]["peerDescriptions"] = json!(enabled);
-        settings["experimental"]["mcpConfigServers"] = json!(false);
-        settings["experimental"]["coordinatorMode"] = json!(false);
-        std::fs::write(settings_path, settings.to_string()).unwrap();
-        let path = live_history(&env, enabled);
-        let mut cli = env.spawn(&[
-            "--resume",
-            path.to_str().unwrap(),
-            "--permission-mode",
-            "read-only",
-        ]);
-        common::expect_input_line_cleared(&cli, WAIT, "live peer ready");
-        let marker = common::turn_status_marker(&cli);
-        cli.send("This agent's ongoing task is peer description discovery for the PeerCompass project. We have changed focus from the old benchmark work. Reply with READY only; do not use tools.\r").unwrap();
-        common::expect_turn_complete_after(&cli, &marker, WAIT, "live prefix warmup completed");
-        cli.send("/compact\r").unwrap();
-        cli.expect("Messages removed").unwrap();
-        common::expect_input_line_cleared(&cli, WAIT, "live description checkpoint committed");
-        cli.send("/exit\r").unwrap();
-        assert_eq!(cli.expect_eof().unwrap(), 0);
-        let session = Session::load_from_path(&path).unwrap();
-        let report = session.last_compaction_report.as_ref().unwrap();
-        assert_eq!(
-            report.completed_responses, 1,
-            "metadata requires no separate model response"
-        );
-        let metadata_path = runtime::mailbox::local_pair_root_in(env.config_home())
-            .join("agents/peercompass-author/description.json");
-        let description = std::fs::read(metadata_path)
-            .ok()
-            .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap());
-        let usage: Vec<_> = session.maintenance_usage.iter().map(|receipt| json!({
-            "attempt_id": receipt.attempt_id,
-            "input_tokens": receipt.usage.map(|usage| usage.input_tokens),
-            "output_tokens": receipt.usage.map(|usage| usage.output_tokens),
-            "cache_read_input_tokens": receipt.usage.map(|usage| usage.cache_read_input_tokens),
-            "cache_creation_input_tokens": receipt.usage.map(|usage| usage.cache_creation_input_tokens),
-        })).collect();
-        observations.push(json!({"enabled":enabled, "model":session.model,
-            "description":description, "maintenance_usage":usage,
-            "attempts":report.attempts, "completed_responses":report.completed_responses,
-            "checkpoint":session.compaction.as_ref().map(|value| &value.summary),
-            "live_discovery_verified":false}));
-        write_observations(&observations);
-        if enabled {
-            let description =
-                description.expect("the live model emits the requested peer metadata");
-            assert!(
-                description["description"]
-                    .as_str()
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("peer"),
-                "description must reflect the latest preserved assignment: {description}"
-            );
-            assert_eq!(description["source_session_id"], session.session_id);
-            verify_live_peer_discovery(&env, &description);
-            observations.last_mut().unwrap()["live_discovery_verified"] = json!(true);
-        } else {
-            assert!(
-                description.is_none(),
-                "disabled experiment retains production behavior"
-            );
-        }
-        write_observations(&observations);
-    }
+    let settings_path = env.config_home().join("settings.json");
+    let mut settings: Value = std::fs::read(&settings_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+    settings["agentName"] = json!("peercompass-author");
+    settings["experimental"]["mcpConfigServers"] = json!(false);
+    settings["experimental"]["coordinatorMode"] = json!(false);
+    std::fs::write(settings_path, settings.to_string()).unwrap();
+    let path = live_history(&env);
+    let mut cli = env.spawn(&[
+        "--resume",
+        path.to_str().unwrap(),
+        "--permission-mode",
+        "read-only",
+    ]);
+    common::expect_input_line_cleared(&cli, WAIT, "live peer ready");
+    let marker = common::turn_status_marker(&cli);
+    cli.send("This agent's ongoing task is peer description discovery for the PeerCompass project. We have changed focus from the old benchmark work. Reply with READY only; do not use tools.\r").unwrap();
+    common::expect_turn_complete_after(&cli, &marker, WAIT, "live prefix warmup completed");
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "live description checkpoint committed");
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let session = Session::load_from_path(&path).unwrap();
+    let report = session.last_compaction_report.as_ref().unwrap();
+    assert_eq!(
+        report.completed_responses, 1,
+        "metadata requires no separate model response"
+    );
+    let metadata_path = runtime::mailbox::local_pair_root_in(env.config_home())
+        .join("agents/peercompass-author/description.json");
+    let description = std::fs::read(metadata_path)
+        .ok()
+        .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap());
+    let usage: Vec<_> = session.maintenance_usage.iter().map(|receipt| json!({
+        "attempt_id": receipt.attempt_id,
+        "input_tokens": receipt.usage.map(|usage| usage.input_tokens),
+        "output_tokens": receipt.usage.map(|usage| usage.output_tokens),
+        "cache_read_input_tokens": receipt.usage.map(|usage| usage.cache_read_input_tokens),
+        "cache_creation_input_tokens": receipt.usage.map(|usage| usage.cache_creation_input_tokens),
+    })).collect();
+    let mut observation = json!({"model":session.model,
+        "description":description, "maintenance_usage":usage,
+        "attempts":report.attempts, "completed_responses":report.completed_responses,
+        "checkpoint":session.compaction.as_ref().map(|value| &value.summary),
+        "live_discovery_verified":false});
+    write_observation(&observation);
+    let description = description.expect("the live model emits the requested peer metadata");
+    assert!(
+        description["description"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("peer"),
+        "description must reflect the latest preserved assignment: {description}"
+    );
+    assert_eq!(description["source_session_id"], session.session_id);
+    verify_live_peer_discovery(&env, &description);
+    observation["live_discovery_verified"] = json!(true);
+    write_observation(&observation);
 }
 
-fn write_observations(observations: &[Value]) {
+fn write_observation(observation: &Value) {
     if let Ok(destination) = std::env::var("SCODE_PEER_DESCRIPTION_REPORT") {
         std::fs::write(destination, serde_json::to_vec_pretty(&json!({
-            "observations":observations,
-            "scope":"Two live samples of synthetic tasks; provider-reported usage is not a statistical cache-efficiency comparison.",
+            "observations":[observation],
+            "scope":"One live sample of a synthetic task; provider-reported usage is an observation, not a cache-efficiency benchmark.",
         })).unwrap()).unwrap();
     }
 }
@@ -153,7 +141,7 @@ fn verify_live_peer_discovery(env: &TestEnv, description: &Value) {
     assert_eq!(author["description_updated_at"], description["updated_at"]);
 }
 
-fn live_history(env: &TestEnv, enabled: bool) -> std::path::PathBuf {
+fn live_history(env: &TestEnv) -> std::path::PathBuf {
     let mut session = Session::new().with_workspace_root(env.workspace_root());
     session.model = Some(common::live_model());
     for index in 0..12 {
@@ -171,9 +159,7 @@ fn live_history(env: &TestEnv, enabled: bool) -> std::path::PathBuf {
             ]))
             .unwrap();
     }
-    let path = env
-        .workspace_root()
-        .join(format!("live-description-{enabled}.jsonl"));
+    let path = env.workspace_root().join("live-description.jsonl");
     session.save_to_path(&path).unwrap();
     path
 }

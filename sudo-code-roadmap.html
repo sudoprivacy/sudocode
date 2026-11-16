@@ -4290,7 +4290,7 @@ also stamps modification time and session provenance. Five executions of its
 exact extracted age helper confirm its two-day freshness note. Those findings
 support runtime timestamps and provenance; they do not establish a per-file
 expiry policy or a peer-description feature in Claude Code.</p>
-<p>The <code>peerDescriptions</code> experiment is off by default. The existing
+<p>Peer descriptions graduated from the <code>peerDescriptions</code> experiment and are always on. The existing
 model-backed compaction call may return a short description after its checkpoint.
 The runtime strips metadata from continuation context and publishes it only
 after the checkpoint commits. Discovery reads the same persistent agent file.

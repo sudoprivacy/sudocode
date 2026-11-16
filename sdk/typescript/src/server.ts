@@ -72,7 +72,7 @@ async function main(): Promise<void> {
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
-      + 'scode-acp-bridge --claude-watch --config FILE  (Claude Code SessionStart hook: watch the session\'s delivery spool)\n'
+      + 'scode-acp-bridge --claude-watch --config FILE  (Claude Code SessionStart and CwdChanged hook: watch the session\'s delivery spool)\n'
       + 'scode-acp-bridge --claude-deliver --config FILE  (Claude Code FileChanged asyncRewake hook: exit 2 with new deliveries)\n'
       + 'scode-acp-bridge --launch-codex --config FILE -- NATIVE_ARGS  (ordinary foreground launch; preserves configured user review)\n'
       + 'scode-acp-bridge --install-codex --config FILE --command-entry PUBLIC_CODEX  (one-time installation of a prepared authorized machine)\n'

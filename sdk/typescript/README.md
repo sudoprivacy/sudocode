@@ -100,11 +100,13 @@ the windows of a large frame; a frame stays unread until it is acknowledged.
 `scode_status` reports the delivery state, including `standby` in a second
 Claude Code process on the same session while the first one delivers.
 
-Two hooks in the user settings hand the deliveries to Claude:
+Three hooks in the user settings hand the deliveries to Claude:
 
 ```json
 "hooks": {
   "SessionStart": [{ "hooks": [{ "type": "command",
+    "command": "node /abs/server.cjs --claude-watch --config /abs/private/claude/autojoin.json" }] }],
+  "CwdChanged": [{ "hooks": [{ "type": "command",
     "command": "node /abs/server.cjs --claude-watch --config /abs/private/claude/autojoin.json" }] }],
   "FileChanged": [{ "hooks": [{ "type": "command", "asyncRewake": true, "timeout": 60,
     "command": "node /abs/server.cjs --claude-deliver --config /abs/private/claude/autojoin.json" }] }]
@@ -112,7 +114,11 @@ Two hooks in the user settings hand the deliveries to Claude:
 ```
 
 `--claude-watch` reads the session from the hook input, creates its spool if
-needed and prints the `watchPaths` that name it, using local files only.
+needed and prints the `watchPaths` that name it, using local files only. It
+serves both `SessionStart` and `CwdChanged`: on every working-directory change,
+including a shell returning to the project after a command ran elsewhere,
+Claude Code rebuilds its watch list from the `CwdChanged` output alone, so
+without that hook the first such change stops every later delivery.
 Claude Code then runs `--claude-deliver` on each change to the spool. It claims
 the complete entries no earlier run claimed, each exactly once, prints the
 newest on stderr and exits 2, which hands it to Claude within the current turn

@@ -169,6 +169,13 @@ def run(args, root):
         return {zone: grpc('GetClusterInfo', {'zone_id': zone}, True)
                 for zone in ['root', 'sharedzone', '__control__']}
 
+    def member_ids(config):
+        # Membership is which node holds each role. A member's address is a
+        # separate record the node publishes, so it may appear after a restart
+        # without any membership change.
+        return {role: sorted(member['id'] for member in config.get(role, []))
+                for role in ('voters', 'learners', 'witnesses')}
+
     def bootstrap_ready():
         current = membership()
         # Wait for the original single-voter leaders and actual VFS reads;
@@ -328,7 +335,7 @@ def run(args, root):
         after = wait_until(membership)
         for zone, old in before.items():
             assert after[zone]['nodeId'] == old['nodeId']
-            assert after[zone]['config'] == old['config'], (zone, old, after[zone])
+            assert member_ids(after[zone]['config']) == member_ids(old['config']), (zone, old, after[zone])
         assert setup()['service']['instance'] == discovery['instance']
         assert record.read_bytes() == original_record
         assert sentinel.read_bytes() == b'keep-existing-frontend-state'

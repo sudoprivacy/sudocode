@@ -1647,10 +1647,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "send",
             description: concat!(
                 "Send a message to an agent by name or pid. ",
-                "Delivery is chosen by the host, not by you: on an agent-to-agent ",
-                "network the message is delivered to the peer over the network and the ",
-                "result reads `message delivered to <name>`; otherwise it is appended to ",
-                "your conversation with the recipient in this workspace's mailbox. ",
+                "Delivery is chosen by the host, not by you: on an agent-to-agent \
+                 network the message is delivered to the peer over the network; \
+                 otherwise it is appended to your conversation with the recipient in \
+                 this workspace's mailbox. The result confirms the hand-off, not a \
+                 reply: a reply, if the recipient sends one, arrives later as a new \
+                 message in this conversation. ",
                 "When `to` is a pid it is routed to the running process. ",
                 "A pid that has already exited is an error — its message cannot be \
                  delivered, so use `agent_list` to find a live agent (or a name, \

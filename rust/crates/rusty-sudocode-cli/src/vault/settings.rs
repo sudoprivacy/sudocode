@@ -87,6 +87,7 @@ impl fmt::Display for SecretRef {
 pub(super) enum SettingsError {
     NotConfigured { settings: PathBuf },
     ProjectConfigRefused { path: PathBuf },
+    UserConfigInWorkspace { path: PathBuf },
     Invalid(String),
 }
 
@@ -104,6 +105,15 @@ impl From<SettingsError> for Refusal {
                 "project_config_refused",
                 format!(
                     "`vault` is read only from user settings; remove it from {}",
+                    path.display()
+                ),
+            ),
+            SettingsError::UserConfigInWorkspace { path } => Refusal::new(
+                "project_config_refused",
+                format!(
+                    "`vault` is read only from user settings outside the workspace, where \
+                     tools cannot rewrite them; {} is inside it. Start scode in a directory \
+                     that does not contain it",
                     path.display()
                 ),
             ),
@@ -177,10 +187,11 @@ struct Shape {
 }
 
 /// Load the `vault` section for `cwd` from the settings files scode discovers
-/// there. A project or local file that carries one is refused by path; between
-/// user files, the later one wins, as in the merged configuration. Files are
-/// read directly rather than through `ConfigLoader::load`, which reports
-/// warnings on stderr.
+/// there. A project or local file that carries one is refused by path, and so
+/// is a user file inside the workspace (scode run in the directory holding the
+/// config home), since workspace tools can rewrite it. Between user files, the
+/// later one wins, as in the merged configuration. Files are read directly
+/// rather than through `ConfigLoader::load`, which reports warnings on stderr.
 pub(super) fn load(cwd: &Path) -> Result<VaultSettings, SettingsError> {
     let loader = ConfigLoader::default_for(cwd);
     let entries = loader.discover();
@@ -199,6 +210,11 @@ pub(super) fn load(cwd: &Path) -> Result<VaultSettings, SettingsError> {
     let mut section = None;
     for path in user_files {
         if let Some(value) = vault_section(path)? {
+            if in_workspace(cwd, path) {
+                return Err(SettingsError::UserConfigInWorkspace {
+                    path: path.to_path_buf(),
+                });
+            }
             section = Some((path, value));
         }
     }
@@ -211,6 +227,15 @@ pub(super) fn load(cwd: &Path) -> Result<VaultSettings, SettingsError> {
         .map_err(|error| error.to_string())
         .and_then(validate)
         .map_err(|message| SettingsError::Invalid(format!("{}: vault: {message}", path.display())))
+}
+
+/// Whether `path` lies inside the workspace `cwd`, where workspace-write tools
+/// can rewrite it. A path that cannot be resolved counts as inside.
+fn in_workspace(cwd: &Path, path: &Path) -> bool {
+    match (std::fs::canonicalize(cwd), std::fs::canonicalize(path)) {
+        (Ok(workspace), Ok(path)) => path.starts_with(workspace),
+        _ => true,
+    }
 }
 
 fn vault_section(path: &Path) -> Result<Option<Value>, SettingsError> {

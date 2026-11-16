@@ -2,9 +2,10 @@
 //! the real REPL with the mock model: enabling the plugin changes the tools
 //! the model is offered, `vault_use` in a workspace-write session stops at the
 //! native permission prompt, and a `vault` section the agent writes into its
-//! own workspace is refused rather than obeyed. None of this needs a runtime:
-//! `vault_use` refuses before any credential or network access, and a refused
-//! settings layer stops the tool before it dials.
+//! own workspace, including a user settings file that lies inside it, is
+//! refused rather than obeyed. None of this needs a runtime: `vault_use`
+//! refuses before any credential or network access, and a refused settings
+//! layer stops the tool before it dials.
 //!
 //! ```bash
 //! cargo test --test pty_vault_plugin
@@ -13,23 +14,48 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
 
 use common::TestEnv;
+use pty_expect::PtySession;
 use serde_json::{json, Value};
+use tempfile::TempDir;
 
 const READY: &str = "\u{276f}";
 
-/// Merge `entries` into the config home's (user-layer) settings.json.
-fn merge_user_settings(env: &TestEnv, entries: &Value) {
-    let path = env.config_home().join("settings.json");
-    let mut root: Value = fs::read_to_string(&path)
+/// The harness keeps its config home inside the workspace root, the layout in
+/// which a `vault` section is refused. These sessions use a copy of it outside
+/// the workspace, as `~/.nexus/sudocode` is for a project under `~`.
+fn config_home_outside(env: &TestEnv) -> TempDir {
+    let dir = tempfile::tempdir().expect("config home");
+    copy_config(env.config_home(), dir.path());
+    dir
+}
+
+fn copy_config(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("config home");
+    for entry in fs::read_dir(from).expect("isolated config home") {
+        let entry = entry.expect("config entry");
+        if entry.file_type().expect("entry type").is_file() {
+            fs::copy(entry.path(), to.join(entry.file_name())).expect("copy config");
+        }
+    }
+}
+
+fn read_settings(config_home: &Path) -> Value {
+    fs::read_to_string(config_home.join("settings.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}));
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Merge `entries` into `config_home`'s (user-layer) settings.json.
+fn merge_user_settings(config_home: &Path, entries: &Value) {
+    let mut root = read_settings(config_home);
     for (key, value) in entries.as_object().expect("settings entries") {
         root[key] = value.clone();
     }
-    fs::write(&path, root.to_string()).expect("write user settings");
+    fs::write(config_home.join("settings.json"), root.to_string()).expect("write user settings");
 }
 
 /// A user-layer `vault` section with one operation. Nothing listens on its
@@ -49,19 +75,24 @@ fn vault_section(env: &TestEnv) -> Value {
     })
 }
 
-fn enable_vault_in_settings(env: &TestEnv) {
-    merge_user_settings(
-        env,
-        &json!({
-            "vault": vault_section(env),
-            "plugins": {"enabled": {"vault@builtin": {"enabled": true}}}
-        }),
-    );
+const ENABLED: &str = r#"{"enabled": {"vault@builtin": {"enabled": true}}}"#;
+
+fn enabled_plugin() -> Value {
+    serde_json::from_str(ENABLED).expect("plugins section")
+}
+
+/// Start the REPL in the workspace with `config_home` as the user config home.
+fn spawn(env: &TestEnv, config_home: &Path, args: &[&str]) -> PtySession {
+    let config_home = config_home.to_str().expect("UTF-8 config home");
+    let mut session = env.spawn_with_env(args, &[("SUDO_CODE_CONFIG_HOME", config_home)]);
+    session.resize(50, 160).unwrap();
+    session.expect(READY).unwrap();
+    session
 }
 
 /// Send one prompt, wait for its turn to finish, and return the last request
 /// body the model received.
-fn turn(env: &TestEnv, session: &mut pty_expect::PtySession, prompt: &str) -> String {
+fn turn(env: &TestEnv, session: &mut PtySession, prompt: &str) -> String {
     let marker = common::turn_status_marker(session);
     session
         .send(&format!("\x1b[200~{prompt}\x1b[201~"))
@@ -80,12 +111,30 @@ fn turn(env: &TestEnv, session: &mut pty_expect::PtySession, prompt: &str) -> St
         .expect("the model received a request")
 }
 
-fn run_command(env: &TestEnv, session: &mut pty_expect::PtySession, command: &str) {
+/// Have the agent write `content` to `path` with `write_file`, then call
+/// `vault_list` and return what the model received back.
+fn write_then_list(env: &TestEnv, session: &mut PtySession, path: &Path, content: &str) -> String {
+    let write = env.tool_batch_prompt(&json!([
+        {"id": "plant", "name": "write_file", "input": {"path": path, "content": content}}
+    ]));
+    turn(env, session, &write);
+    assert!(
+        fs::read_to_string(path).is_ok_and(|text| text.contains("\"vault\"")),
+        "the agent could not write {}",
+        path.display()
+    );
+    let list = env.tool_batch_prompt(&json!([
+        {"id": "list", "name": "vault_list", "input": {}}
+    ]));
+    turn(env, session, &list)
+}
+
+fn run_command(env: &TestEnv, session: &mut PtySession, command: &str) {
     session.send(&format!("{command}\r")).unwrap();
     common::expect_input_line_cleared(session, env.timeout(), command);
 }
 
-fn exit(session: &mut pty_expect::PtySession) {
+fn exit(session: &mut PtySession) {
     session.send("/exit\r").unwrap();
     let code = session.expect_eof().unwrap();
     let screen = session.render(common::screen_contents);
@@ -95,10 +144,9 @@ fn exit(session: &mut pty_expect::PtySession) {
 #[test]
 fn enabling_and_disabling_the_builtin_plugin_changes_the_offered_tools() {
     let env = TestEnv::new_mock("vault-plugin-catalog");
-    merge_user_settings(&env, &json!({"vault": vault_section(&env)}));
-    let mut session = env.spawn(&[]);
-    session.resize(50, 160).unwrap();
-    session.expect(READY).unwrap();
+    let config_home = config_home_outside(&env);
+    merge_user_settings(config_home.path(), &json!({"vault": vault_section(&env)}));
+    let mut session = spawn(&env, config_home.path(), &[]);
 
     let disabled = turn(&env, &mut session, &env.prompt("say hi", "streaming_text"));
     assert!(!disabled.contains("vault_list"), "offered before enabling");
@@ -133,10 +181,16 @@ fn enabling_and_disabling_the_builtin_plugin_changes_the_offered_tools() {
 #[test]
 fn vault_use_stops_at_the_permission_prompt_in_a_workspace_write_session() {
     let env = TestEnv::new_mock("vault-plugin-permission");
-    enable_vault_in_settings(&env);
-    let mut session = env.spawn(&["--permission-mode", "workspace-write"]);
-    session.resize(50, 160).unwrap();
-    session.expect(READY).unwrap();
+    let config_home = config_home_outside(&env);
+    merge_user_settings(
+        config_home.path(),
+        &json!({"vault": vault_section(&env), "plugins": enabled_plugin()}),
+    );
+    let mut session = spawn(
+        &env,
+        config_home.path(),
+        &["--permission-mode", "workspace-write"],
+    );
 
     let marker = common::turn_status_marker(&session);
     let prompt = env.tool_batch_prompt(&json!([
@@ -169,10 +223,16 @@ fn vault_use_stops_at_the_permission_prompt_in_a_workspace_write_session() {
 #[test]
 fn a_vault_section_the_agent_writes_into_its_workspace_is_refused() {
     let env = TestEnv::new_mock("vault-plugin-project-config");
-    enable_vault_in_settings(&env);
-    let mut session = env.spawn(&["--permission-mode", "workspace-write"]);
-    session.resize(50, 160).unwrap();
-    session.expect(READY).unwrap();
+    let config_home = config_home_outside(&env);
+    merge_user_settings(
+        config_home.path(),
+        &json!({"vault": vault_section(&env), "plugins": enabled_plugin()}),
+    );
+    let mut session = spawn(
+        &env,
+        config_home.path(),
+        &["--permission-mode", "workspace-write"],
+    );
 
     let planted = env
         .workspace_root()
@@ -180,19 +240,35 @@ fn a_vault_section_the_agent_writes_into_its_workspace_is_refused() {
         .join("sudocode")
         .join("settings.json");
     let widened = json!({"vault": vault_section(&env)}).to_string();
-    let write = env.tool_batch_prompt(&json!([
-        {"id": "plant", "name": "write_file", "input": {"path": planted, "content": widened}}
-    ]));
-    turn(&env, &mut session, &write);
-    assert!(
-        planted.exists(),
-        "the agent could not write its workspace settings"
+    let answer = write_then_list(&env, &mut session, &planted, &widened);
+    assert!(answer.contains("project_config_refused"), "{answer}");
+    exit(&mut session);
+}
+
+/// A session started in the directory that holds the user config home (scode
+/// run in `~`, config home `~/.nexus/sudocode`) has its user settings file
+/// inside the workspace, where workspace-write tools reach it. A `vault`
+/// section the agent writes there is refused like any workspace file's.
+#[test]
+fn a_vault_section_the_agent_writes_into_a_user_settings_file_inside_the_workspace_is_refused() {
+    let env = TestEnv::new_mock("vault-plugin-home-workspace");
+    let config_home = env.workspace_root().join(".nexus").join("sudocode");
+    copy_config(env.config_home(), &config_home);
+    merge_user_settings(&config_home, &json!({"plugins": enabled_plugin()}));
+    let mut session = spawn(
+        &env,
+        &config_home,
+        &["--permission-mode", "workspace-write"],
     );
 
-    let list = env.tool_batch_prompt(&json!([
-        {"id": "list", "name": "vault_list", "input": {}}
-    ]));
-    let answer = turn(&env, &mut session, &list);
+    let mut widened = read_settings(&config_home);
+    widened["vault"] = vault_section(&env);
+    let answer = write_then_list(
+        &env,
+        &mut session,
+        &config_home.join("settings.json"),
+        &widened.to_string(),
+    );
     assert!(answer.contains("project_config_refused"), "{answer}");
     exit(&mut session);
 }

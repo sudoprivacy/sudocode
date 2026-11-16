@@ -81,6 +81,39 @@ jobs:
           ACCEPTANCE_NATIVE_CHECKS: native-examples native-resize native-services native-context native-cohost
           ACCEPTANCE_OUTPUT: ${{ runner.temp }}/periodic-workspace/complementary-first
         run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
+      - name: Qualify the candidate service-tool result with the real native client
+        if: github.event_name == 'pull_request'
+        shell: python
+        env:
+          EXPECTED_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha }}
+          SERVICE_TOOL_OUTPUT: ${{ runner.temp }}/periodic-workspace/candidate-service-tool
+        run: |
+          import hashlib, importlib.util, json, os, subprocess
+          from pathlib import Path
+          if any(name.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'} for name in os.environ):
+              raise RuntimeError('Candidate tool qualification must not receive GitHub credentials')
+          root = Path.cwd()
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if head != os.environ['EXPECTED_CANDIDATE_HEAD']:
+              raise RuntimeError('Tool qualification source differs from the actual candidate head')
+          def load(name, path):
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+          trusted = root.parent / '.trusted-acceptance'
+          helper = load('trusted_tool_commands', trusted / '.github/scripts/local_acceptance.py')
+          helper.ROOT = root
+          source = root / '.github/local-acceptance/checks.py'
+          profiles = load('candidate_tool_result', source)
+          output = Path(os.environ['SERVICE_TOOL_OUTPUT'])
+          result = profiles.native_services_tool(root, output, helper.run_command)
+          receipt = {'candidate_head': head, 'candidate_checks_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                     'tool': result['tool'], 'command': result['command'],
+                     'raw_log_sha256': hashlib.sha256(Path(result['log']).read_bytes()).hexdigest(),
+                     'scope': 'Real native client version/result only; original service journeys run separately'}
+          (output / 'candidate-result.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(receipt))
       - name: Qualify complementary native profiles without workspace
         if: github.event_name == 'pull_request'
         env:

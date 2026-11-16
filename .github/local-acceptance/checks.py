@@ -607,6 +607,24 @@ def git_for_windows_bash(path=None):
     return None
 
 
+def native_service_tool_result(log):
+    """Read one explicit result while retaining unrelated raw diagnostics."""
+    prefix = b"NATIVE_SERVICE_TOOL="
+    records = [line[len(prefix):] for line in log.read_bytes().splitlines() if line.startswith(prefix)]
+    if len(records) != 1:
+        raise RuntimeError("NATIVE_SERVICE_TOOL_RESULT_REFUSED: expected exactly one tool result; "
+                           f"found {len(records)}. Original diagnostics: {log}")
+    try:
+        tool = json.loads(records[0])
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError(f"NATIVE_SERVICE_TOOL_RESULT_REFUSED: malformed tool result in {log}") from error
+    if (not isinstance(tool, dict) or set(tool) != {"executable", "version", "sha256"}
+            or not all(isinstance(value, str) and value for value in tool.values())
+            or not re.fullmatch(r"[a-f0-9]{64}", tool["sha256"])):
+        raise RuntimeError(f"NATIVE_SERVICE_TOOL_RESULT_REFUSED: invalid tool result fields in {log}")
+    return tool
+
+
 def native_services_tool(root, output, execute):
     """Resolve the existing service client before compilation, retaining its bytes."""
     bash = git_for_windows_bash() if os.name == "nt" else shutil.which("bash")
@@ -617,8 +635,8 @@ from pathlib import Path
 binary = Path(sys.argv[1]).resolve(strict=True)
 version = subprocess.check_output([str(binary), "--version"], stderr=subprocess.STDOUT,
                                   text=True, timeout=5).strip()
-print(json.dumps({"executable": str(binary), "version": version,
-                  "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
+print("NATIVE_SERVICE_TOOL=" + json.dumps({"executable": str(binary), "version": version,
+                                        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
 '''
     # Git for Windows can check shell helpers out as CRLF. Its Bash provides
     # igncr; keep the original helper's location and normal Unix invocation.
@@ -628,7 +646,7 @@ print(json.dumps({"executable": str(binary), "version": version,
                  sys.executable.replace("\\", "/"), probe]
     log = output / "000.log"
     result = execute(arguments, root, log)
-    tool = json.loads(log.read_text(encoding="utf-8"))
+    tool = native_service_tool_result(log)
     return {"root": str(root.resolve()), "command": result, "tool": tool, "log": str(log)}
 
 
@@ -1154,7 +1172,7 @@ def native_guard_files():
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",
-        ".github/workflows/local-acceptance-workspace.yml": "fa84471f997bb845616c604b58217c0fa21e814350aac509093a3dc78493fbd9",
+        ".github/workflows/local-acceptance-workspace.yml": "c501c66c31ba758329fbf2424e85834b741d2cb5c15807fa900c98171e4a9418",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
@@ -1172,7 +1190,7 @@ def native_guard_files():
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
-        "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
+        "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "cc1ff8e34a12ebcac284330497a26c4ea5af336cd208e1ab2a8531e83180eeb0",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "0769c75cbc199c29facf6418effeb9af325bc5b4d4aaafebef480cdf4c6faee4",
@@ -1232,11 +1250,12 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '91a0c3502c2006d5de4fa18df1cac4f8fc1e502ea4505b1972d7edc1543fc8a9', 'native-context': '0f16d4130ec57729a848a57728a02b4162d8bb40c69989bb81b1ce4f24a40520'}
+    expected = {'native-release': '91a0c3502c2006d5de4fa18df1cac4f8fc1e502ea4505b1972d7edc1543fc8a9', 'native-context': '0f16d4130ec57729a848a57728a02b4162d8bb40c69989bb81b1ce4f24a40520', 'native-services': '96ce6a9e1094fca1b86f63ac3e9c57dae46c0a28c6d1e0701caa89a69caf3f65'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
-            label = "Native release" if name == "native-release" else "Native compiler-context"
+            label = {"native-release": "Native release", "native-context": "Native compiler-context",
+                     "native-services": "Native service tool"}[name]
             raise RuntimeError(f"{label} guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))

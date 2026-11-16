@@ -643,6 +643,18 @@ text, and further arrow presses use normal cursor navigation. Enter steers with
 the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
 
+Slash commands typed while a turn runs never reach the model:
+
+- `/help` and `/tasks` run at once.
+- `/model` and `/effort` (with or without an argument) choose the setting now.
+  The running turn keeps its model and effort; the choice applies when it
+  ends, before any queued message is sent.
+- Every other command waits in the staging area as `queued: /compact` and runs
+  as a command when the turn ends, in order with queued messages. Esc steers
+  queued messages into the turn but leaves queued commands for its end; ↑
+  brings a queued command back for editing like a queued message.
+- An unknown command is reported at once.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 

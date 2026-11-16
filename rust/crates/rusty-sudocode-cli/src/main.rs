@@ -4893,7 +4893,7 @@ impl LiveCli {
             is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
         let command = match request {
             TurnRequest::Prompt { input, shown } => EngineCommand::Prompt {
-                blocks: runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?,
+                blocks: runtime::image_input::prompt_blocks(*input, &runtime::StdFsBackend)?,
                 context: None,
                 shown: shown.iter().map(engine_events::InputView::echo).collect(),
             },

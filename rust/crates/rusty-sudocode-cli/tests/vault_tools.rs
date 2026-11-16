@@ -605,6 +605,18 @@ fn a_malformed_manifest_or_certificate_is_credential_invalid() {
         fs::write(dir.join("agent.pem"), "not a certificate").expect("certificate");
     });
     assert_eq!(certificate, ["credential_invalid"; 2]);
+    let outside = credential_availability(|dir| {
+        let elsewhere = dir.with_file_name("elsewhere");
+        write_bundle(&elsewhere, &mint(OWNER, 300), &runtime_name());
+        fs::create_dir_all(dir).expect("bundle directory");
+        let mut manifest = AgentCredential::for_bundle("vault-agent");
+        manifest.server_name = runtime_name();
+        manifest.ca = "../elsewhere/ca.pem".to_string();
+        manifest.cert = "../elsewhere/agent.pem".to_string();
+        manifest.key = "../elsewhere/agent-key.pem".to_string();
+        manifest.write_to(dir).expect("manifest");
+    });
+    assert_eq!(outside, ["credential_invalid"; 2]);
 }
 
 #[test]
@@ -641,11 +653,11 @@ fn a_bundle_naming_another_server_is_server_name_mismatch() {
 }
 
 #[test]
-fn a_closed_endpoint_is_unreachable_rather_than_a_credential_problem() {
+fn a_closed_endpoint_is_vault_unavailable_rather_than_a_credential_problem() {
     let env = Env::new();
     env.write_user_vault(&env.vault(&closed_endpoint()));
     write_bundle(&env.credentials(), &mint(OWNER, 300), &runtime_name());
-    assert_eq!(env.list_availability(), ["endpoint_unreachable"; 2]);
+    assert_eq!(env.list_availability(), ["vault_unavailable"; 2]);
 }
 
 #[test]
@@ -663,12 +675,12 @@ fn list_labels_every_operation_unqualified_and_prints_no_key_or_cert_material() 
             {
                 "id": "deploy-api", "kind": "http", "ref": "deploy/api-token",
                 "target": "POST https://127.0.0.1:8443/v1/exact",
-                "availability": "endpoint_unreachable"
+                "availability": "vault_unavailable"
             },
             {
                 "id": "db-migrate", "kind": "exec", "ref": "db/migrator",
                 "target": env.path("tools").join("db-tool"),
-                "availability": "endpoint_unreachable"
+                "availability": "vault_unavailable"
             }
         ])
     );

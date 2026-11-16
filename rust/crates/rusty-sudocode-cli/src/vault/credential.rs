@@ -2,7 +2,7 @@
 //! the owner's nexus `serve-user` runtime, checked before anything is dialled.
 
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lib::transport_primitives::authorship::owner_from_x509;
@@ -76,10 +76,13 @@ fn read_consistent(dir: &Path) -> Result<(AgentCredential, Credential), Credenti
     Err(CredentialError::Replaced)
 }
 
-/// A file the manifest names, relative to the bundle directory.
+/// A file the manifest names, inside the bundle directory.
 fn read_named(dir: &Path, name: &str) -> Result<Vec<u8>, CredentialError> {
     let relative = Path::new(name);
-    if relative.is_absolute() || relative.has_root() {
+    if !relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
         return Err(CredentialError::Invalid);
     }
     read(&dir.join(relative))

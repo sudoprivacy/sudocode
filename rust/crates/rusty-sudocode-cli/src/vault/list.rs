@@ -69,8 +69,13 @@ fn connect(settings: &VaultSettings) -> Result<NexusVfsClient, &'static str> {
         bundle.key_pem,
         &bundle.server_name,
     )
-    .map_err(|_| "endpoint_unreachable")
+    .map_err(|_| VAULT_UNAVAILABLE)
 }
+
+/// The endpoint could not be reached, or the Vault service on it gave no
+/// usable answer. The client reports transport failures and unclassified
+/// backend errors alike, so this does not claim which one it was.
+const VAULT_UNAVAILABLE: &str = "vault_unavailable";
 
 fn secret_state(client: &NexusVfsClient, secret_ref: &SecretRef) -> &'static str {
     match vault_client::secret_versions(client, &secret_ref.namespace, &secret_ref.key) {
@@ -79,7 +84,7 @@ fn secret_state(client: &NexusVfsClient, secret_ref: &SecretRef) -> &'static str
         Err(error) => match error.downcast_ref::<io::Error>().map(io::Error::kind) {
             Some(io::ErrorKind::NotFound) => "secret_absent",
             Some(io::ErrorKind::PermissionDenied) => "access_denied",
-            _ => "endpoint_unreachable",
+            _ => VAULT_UNAVAILABLE,
         },
     }
 }

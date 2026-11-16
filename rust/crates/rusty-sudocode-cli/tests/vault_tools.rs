@@ -1,7 +1,7 @@
 //! The builtin Vault tools through the real `scode` binary: settings refusals,
 //! input checks, the unconditional `vault_use` refusal, and credential checks
-//! on bundles minted by nexus's own certgen. Every run must leave stderr empty
-//! and print exactly one JSON object.
+//! on bundles with nexus's agent certificate profile. Every run must leave
+//! stderr empty and print exactly one JSON object.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -9,10 +9,10 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nexus_raft::transport::{
-    generate_session_agent_cert, generate_zone_ca, user_runtime_server_name, AgentCredential,
+use lib::transport_primitives::{user_runtime_server_name, AgentCredential};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
-use rcgen::{CertificateParams, Issuer, KeyPair, SanType};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use vault_tool::ToolRun;
@@ -112,36 +112,43 @@ struct Bundle {
     key: Vec<u8>,
 }
 
-/// A session agent credential for `owner`, from nexus's own certgen.
-fn mint(owner: &str, validity_secs: u64) -> Bundle {
-    let (ca, ca_key) = generate_zone_ca("vault-test").expect("zone CA");
-    let (cert, key) =
-        generate_session_agent_cert("vault-agent", owner, validity_secs, &ca, &ca_key)
-            .expect("session agent certificate");
-    Bundle { ca, cert, key }
+/// A session agent credential for `owner`, valid throughout this century.
+fn mint(owner: &str) -> Bundle {
+    mint_between(owner, 2000, 2099)
 }
 
-/// A certificate that starts in 2099. Nexus certgen always starts at the time
-/// of minting, so this one is signed with rcgen by a nexus zone CA, carrying
-/// the same owner SAN.
-fn mint_not_yet_valid(owner: &str) -> Bundle {
-    let (ca, ca_key) = generate_zone_ca("vault-test").expect("zone CA");
-    let ca_key_pair =
-        KeyPair::from_pem(std::str::from_utf8(&ca_key).expect("PEM")).expect("CA key");
-    let issuer = Issuer::from_ca_cert_pem(std::str::from_utf8(&ca).expect("PEM"), ca_key_pair)
-        .expect("issuer");
+/// A zone CA and a session agent certificate for `owner` that it signed, valid
+/// from `from_year` to `to_year`, with the agent and owner identity SANs nexus
+/// issues. Built with rcgen: nexus's certgen crate needs `protoc`, so it is a
+/// Linux-only dev-dependency, and these cases run on every platform.
+fn mint_between(owner: &str, from_year: i32, to_year: i32) -> Bundle {
+    let ca_key = KeyPair::generate().expect("CA key");
+    let mut ca = CertificateParams::default();
+    ca.distinguished_name
+        .push(DnType::CommonName, "vault-test zone CA");
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca_pem = ca.self_signed(&ca_key).expect("CA certificate").pem();
+    let issuer = Issuer::from_ca_cert_pem(&ca_pem, ca_key).expect("issuer");
     let key = KeyPair::generate().expect("agent key");
     let mut params = CertificateParams::default();
-    params.subject_alt_names = vec![SanType::URI(
-        lib::agent_identity::owner_uri(owner)
-            .try_into()
-            .expect("owner URI"),
-    )];
-    params.not_before = rcgen::date_time_ymd(2099, 1, 1);
-    params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+    params.subject_alt_names = vec![
+        SanType::URI(
+            lib::agent_identity::agent_identity_uri("vault-agent")
+                .try_into()
+                .expect("agent URI"),
+        ),
+        SanType::URI(
+            lib::agent_identity::owner_uri(owner)
+                .try_into()
+                .expect("owner URI"),
+        ),
+    ];
+    params.not_before = rcgen::date_time_ymd(from_year, 1, 1);
+    params.not_after = rcgen::date_time_ymd(to_year, 1, 1);
     let cert = params.signed_by(&key, &issuer).expect("certificate");
     Bundle {
-        ca,
+        ca: ca_pem.into_bytes(),
         cert: cert.pem().into_bytes(),
         key: key.serialize_pem().into_bytes(),
     }
@@ -555,7 +562,7 @@ fn credential_availability(prepare: impl FnOnce(&Path)) -> Vec<String> {
 fn a_missing_credential_directory_or_file_is_credential_missing() {
     assert_eq!(credential_availability(|_| {}), ["credential_missing"; 2]);
     let missing_key = credential_availability(|dir| {
-        write_bundle(dir, &mint(OWNER, 300), &runtime_name());
+        write_bundle(dir, &mint(OWNER), &runtime_name());
         fs::remove_file(dir.join("agent-key.pem")).expect("remove key");
     });
     assert_eq!(missing_key, ["credential_missing"; 2]);
@@ -564,18 +571,18 @@ fn a_missing_credential_directory_or_file_is_credential_missing() {
 #[test]
 fn a_malformed_manifest_or_certificate_is_credential_invalid() {
     let manifest = credential_availability(|dir| {
-        write_bundle(dir, &mint(OWNER, 300), &runtime_name());
+        write_bundle(dir, &mint(OWNER), &runtime_name());
         fs::write(dir.join("credential.json"), "{not json").expect("manifest");
     });
     assert_eq!(manifest, ["credential_invalid"; 2]);
     let certificate = credential_availability(|dir| {
-        write_bundle(dir, &mint(OWNER, 300), &runtime_name());
+        write_bundle(dir, &mint(OWNER), &runtime_name());
         fs::write(dir.join("agent.pem"), "not a certificate").expect("certificate");
     });
     assert_eq!(certificate, ["credential_invalid"; 2]);
     let outside = credential_availability(|dir| {
         let elsewhere = dir.with_file_name("elsewhere");
-        write_bundle(&elsewhere, &mint(OWNER, 300), &runtime_name());
+        write_bundle(&elsewhere, &mint(OWNER), &runtime_name());
         fs::create_dir_all(dir).expect("bundle directory");
         let mut manifest = AgentCredential::for_bundle("vault-agent");
         manifest.server_name = runtime_name();
@@ -586,7 +593,7 @@ fn a_malformed_manifest_or_certificate_is_credential_invalid() {
     });
     assert_eq!(outside, ["credential_invalid"; 2]);
     let nested = credential_availability(|dir| {
-        write_bundle(&dir.join("generation"), &mint(OWNER, 300), &runtime_name());
+        write_bundle(&dir.join("generation"), &mint(OWNER), &runtime_name());
         let mut manifest = AgentCredential::for_bundle("vault-agent");
         manifest.server_name = runtime_name();
         manifest.ca = "generation/ca.pem".to_string();
@@ -602,7 +609,7 @@ fn a_malformed_manifest_or_certificate_is_credential_invalid() {
 /// that straddles the rewrite can see; none of them may be dialled with.
 #[test]
 fn every_mix_of_two_generations_is_credential_inconsistent() {
-    let generations = [mint(OWNER, 300), mint(OWNER, 300)];
+    let generations = [mint(OWNER), mint(OWNER)];
     for mix in 0..8_usize {
         let pick = |file: usize| &generations[(mix >> file) & 1];
         let bundle = Bundle {
@@ -630,7 +637,7 @@ fn every_mix_of_two_generations_is_credential_inconsistent() {
 fn a_linked_bundle_file_is_refused_and_a_linked_bundle_directory_is_followed() {
     let env = Env::new();
     let generation = env.path("generation-1");
-    write_bundle(&generation, &mint(OWNER, 300), &runtime_name());
+    write_bundle(&generation, &mint(OWNER), &runtime_name());
     let mut vault = env.vault(&closed_endpoint());
     link(&generation, &env.credentials());
     env.write_user_vault(&vault);
@@ -665,7 +672,7 @@ fn a_silent_endpoint_is_vault_unavailable_within_the_list_budget() {
     let env = Env::new();
     let (listener, endpoint) = listener();
     env.write_user_vault(&env.vault(&endpoint));
-    write_bundle(&env.credentials(), &mint(OWNER, 300), &runtime_name());
+    write_bundle(&env.credentials(), &mint(OWNER), &runtime_name());
     let started = Instant::now();
     assert_eq!(env.list_availability(), ["vault_unavailable"; 2]);
     let elapsed = started.elapsed();
@@ -679,8 +686,7 @@ fn a_silent_endpoint_is_vault_unavailable_within_the_list_budget() {
 #[test]
 fn an_expired_certificate_is_credential_expired() {
     let expired = credential_availability(|dir| {
-        write_bundle(dir, &mint(OWNER, 1), &runtime_name());
-        std::thread::sleep(Duration::from_millis(2_500));
+        write_bundle(dir, &mint_between(OWNER, 2000, 2001), &runtime_name());
     });
     assert_eq!(expired, ["credential_expired"; 2]);
 }
@@ -688,7 +694,7 @@ fn an_expired_certificate_is_credential_expired() {
 #[test]
 fn a_future_certificate_is_credential_not_yet_valid() {
     let future = credential_availability(|dir| {
-        write_bundle(dir, &mint_not_yet_valid(OWNER), &runtime_name());
+        write_bundle(dir, &mint_between(OWNER, 2099, 2100), &runtime_name());
     });
     assert_eq!(future, ["credential_not_yet_valid"; 2]);
 }
@@ -696,7 +702,7 @@ fn a_future_certificate_is_credential_not_yet_valid() {
 #[test]
 fn another_owners_certificate_is_owner_mismatch() {
     let other = credential_availability(|dir| {
-        write_bundle(dir, &mint("someone-else", 300), &runtime_name());
+        write_bundle(dir, &mint("someone-else"), &runtime_name());
     });
     assert_eq!(other, ["owner_mismatch"; 2]);
 }
@@ -704,7 +710,7 @@ fn another_owners_certificate_is_owner_mismatch() {
 #[test]
 fn a_bundle_naming_another_server_is_server_name_mismatch() {
     let cluster = credential_availability(|dir| {
-        write_bundle(dir, &mint(OWNER, 300), "nexus-node");
+        write_bundle(dir, &mint(OWNER), "nexus-node");
     });
     assert_eq!(cluster, ["server_name_mismatch"; 2]);
 }
@@ -713,7 +719,7 @@ fn a_bundle_naming_another_server_is_server_name_mismatch() {
 fn a_closed_endpoint_is_vault_unavailable_rather_than_a_credential_problem() {
     let env = Env::new();
     env.write_user_vault(&env.vault(&closed_endpoint()));
-    write_bundle(&env.credentials(), &mint(OWNER, 300), &runtime_name());
+    write_bundle(&env.credentials(), &mint(OWNER), &runtime_name());
     assert_eq!(env.list_availability(), ["vault_unavailable"; 2]);
 }
 
@@ -721,7 +727,7 @@ fn a_closed_endpoint_is_vault_unavailable_rather_than_a_credential_problem() {
 fn list_labels_every_operation_unqualified_and_prints_no_key_or_cert_material() {
     let env = Env::new();
     env.write_user_vault(&env.vault(&closed_endpoint()));
-    let bundle = mint(OWNER, 300);
+    let bundle = mint(OWNER);
     write_bundle(&env.credentials(), &bundle, &runtime_name());
     let run = env.run("list", "{}");
     assert_eq!(run.result["status"], "configured-unqualified");

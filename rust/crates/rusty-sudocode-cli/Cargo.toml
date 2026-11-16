@@ -75,8 +75,6 @@ scode-test-support.workspace = true
 flate2 = "1"
 futures-util = "0.3"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
-# Vault tool tests mint credentials with nexus's own certgen.
-nexus-raft = { workspace = true }
 pty-expect.workspace = true
 rcgen = { version = "0.14", features = ["x509-parser"] }
 serde_json.workspace = true
@@ -136,3 +134,8 @@ test = false
 name = "acceptance_cli_08"
 path = "tests/acceptance_groups/acceptance_cli_08.rs"
 test = false
+
+# The live Vault acceptance mints with nexus's certgen. Its crate needs protoc,
+# so it is a Linux-only dev-dependency, as in runtime and nexusd-cohost.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nexus-raft = { workspace = true }

@@ -987,7 +987,7 @@ jobs:
           retention-days: 30
 
   fixture-vfs-cache-audit:
-    name: Fixed VFS compiler fingerprint diagnostic
+    name: Fixed VFS original-environment compiler diagnostic
     if: github.event_name == 'workflow_dispatch' && inputs.vfs_cache_audit && github.ref_name == 'ci/vfs-cache-input-audit-20261116'
     needs: one-nexus-vfs-pin
     runs-on: ubuntu-latest
@@ -1007,47 +1007,24 @@ jobs:
         persist-credentials: false
     - name: Diagnostic install the original compiler
       uses: ./.github/actions/rust-toolchain
-    - name: Diagnostic select observer interpreter
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Diagnostic install original compiler observer
-      run: python3 -m pip install psutil==7.2.2
+    - name: Diagnostic isolate the observer without changing compiler environment
+      run: 'python3 -m venv "$RUNNER_TEMP/fixed-vfs-observer"
+
+        "$RUNNER_TEMP/fixed-vfs-observer/bin/python" -m pip install psutil==7.2.2
+
+        '
     - name: Diagnostic restore original fixed-driver cache
       uses: ./.github/actions/vfs-search-cache
       with:
         publish: 'false'
     - name: Diagnostic execute original fixed-driver producer
-      shell: python
-      run: "import hashlib, importlib.util, json, os, subprocess, sys\nfrom pathlib import Path\n\nroot = Path(os.environ[\"\
-        GITHUB_WORKSPACE\"])\nout = Path(os.environ[\"RUNNER_TEMP\"]) / \"fixed-vfs-fingerprint-audit\"\nout.mkdir(exist_ok=False)\n\
-        \ndef digest(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\ndef load(name, path):\n    spec =\
-        \ importlib.util.spec_from_file_location(name, path)\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n\
-        \    return module\n\ndef snapshot(label):\n    selected = (\"aws-lc-sys-\", \"ring-\", \"cc-\", \"nexus-cluster-\"\
-        , \"nexus-search-plugin-\")\n    fingerprints = root / \".native-vfs/.ci-cache/target/debug/.fingerprint\"\n    rows\
-        \ = []\n    for directory in sorted(fingerprints.iterdir()) if fingerprints.exists() else []:\n        if not directory.name.startswith(selected)\
-        \ or not directory.is_dir():\n            continue\n        for path in sorted(directory.glob(\"*.json\")):\n    \
-        \        raw = path.read_bytes()\n            value = json.loads(raw)\n            row = {\"path\": str(path.relative_to(root)),\
-        \ \"sha256\": hashlib.sha256(raw).hexdigest(), \"bytes\": len(raw), \"mtimeNanos\": path.stat().st_mtime_ns, \"environment\"\
-        : []}\n            for local in value.get(\"local\", []):\n                item = local.get(\"RerunIfEnvChanged\"\
-        )\n                if item:\n                    original = item.get(\"val\")\n                    row[\"environment\"\
-        ].append({\"name\": item[\"var\"], \"present\": original is not None, \"valueSHA256\": hashlib.sha256(json.dumps(original,\
-        \ sort_keys=True).encode()).hexdigest()})\n            rows.append(row)\n    (out / (label + \"-fingerprints.json\"\
-        )).write_text(json.dumps(rows, indent=2) + \"\\n\")\n\npaths = [\".github/scripts/vfs_search_cache.py\", \".github/actions/vfs-search-cache/action.yml\"\
-        , \".github/scripts/local_acceptance.py\", \"rust/Cargo.lock\"]\nstate = {\"head\": subprocess.check_output([\"git\"\
-        , \"rev-parse\", \"HEAD\"], cwd=root).decode().strip(), \"cpus\": os.cpu_count(), \"compilerCap\": os.environ[\"SCODE_ACCEPTANCE_BUILD_JOBS\"\
-        ], \"source\": {p: digest(root/p) for p in paths}, \"knownCallerCompilerEnvironment\": {name: os.environ.get(name)\
-        \ for name in [\"CARGO_BUILD_JOBS\", \"CARGO_INCREMENTAL\", \"CARGO_PROFILE_DEV_DEBUG\", \"CARGO_PROFILE_TEST_DEBUG\"\
-        , \"ImageOS\", \"ImageVersion\"]}, \"scope\": \"Original cache producer compilation only; no current-runtime test\
-        \ or production acceptance\", \"cargoFingerprintLogging\": \"cargo::core::compiler::fingerprint=info\", \"passed\"\
-        : False}\nsnapshot(\"before\")\nhelper = load(\"original_compiler_priority_observer\", root / \".github/scripts/local_acceptance.py\"\
-        )\nhelper.ROOT = root\ntry:\n    helper.run_command([sys.executable, str(root / \".github/scripts/vfs_search_cache.py\"\
-        ), \"build\", \"--output\", str(out / \"original-producer\")], root, out / \"producer.log\", env={\"CARGO_LOG\": state[\"\
-        cargoFingerprintLogging\"]})\n    producer = load(\"original_fixed_driver\", root / \".github/scripts/vfs_search_cache.py\"\
-        )\n    state[\"fixedTrackedFilesVerifiedAfterBuild\"] = producer.verify(root / \".native-vfs\", producer.pin(root))\n\
-        \    state[\"passed\"] = True\nfinally:\n    snapshot(\"after\")\n    state[\"sourceAfter\"] = {p: digest(root/p)\
-        \ for p in paths}\n    (out / \"source-and-resources.json\").write_text(json.dumps(state, indent=2) + \"\\n\")\n \
-        \   assert state[\"sourceAfter\"] == state[\"source\"], \"Diagnostic source changed; retain original field\"\n"
+      shell: bash
+      run: 'printf ''%s'' ''aW1wb3J0IGhhc2hsaWIsIGltcG9ydGxpYi51dGlsLCBqc29uLCBvcywgc3VicHJvY2Vzcywgc3lzCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKcm9vdCA9IFBhdGgob3MuZW52aXJvblsiR0lUSFVCX1dPUktTUEFDRSJdKQpvdXQgPSBQYXRoKG9zLmVudmlyb25bIlJVTk5FUl9URU1QIl0pIC8gImZpeGVkLXZmcy1maW5nZXJwcmludC1hdWRpdCIKb3V0Lm1rZGlyKGV4aXN0X29rPUZhbHNlKQoKZGVmIGRpZ2VzdChwYXRoKToKICAgIHJldHVybiBoYXNobGliLnNoYTI1NihwYXRoLnJlYWRfYnl0ZXMoKSkuaGV4ZGlnZXN0KCkKCmRlZiBsb2FkKG5hbWUsIHBhdGgpOgogICAgc3BlYyA9IGltcG9ydGxpYi51dGlsLnNwZWNfZnJvbV9maWxlX2xvY2F0aW9uKG5hbWUsIHBhdGgpCiAgICBtb2R1bGUgPSBpbXBvcnRsaWIudXRpbC5tb2R1bGVfZnJvbV9zcGVjKHNwZWMpCiAgICBzcGVjLmxvYWRlci5leGVjX21vZHVsZShtb2R1bGUpCiAgICByZXR1cm4gbW9kdWxlCgpkZWYgc25hcHNob3QobGFiZWwpOgogICAgc2VsZWN0ZWQgPSAoImF3cy1sYy1zeXMtIiwgInJpbmctIiwgImNjLSIsICJuZXh1cy1jbHVzdGVyLSIsICJuZXh1cy1zZWFyY2gtcGx1Z2luLSIpCiAgICBmaW5nZXJwcmludHMgPSByb290IC8gIi5uYXRpdmUtdmZzLy5jaS1jYWNoZS90YXJnZXQvZGVidWcvLmZpbmdlcnByaW50IgogICAgcm93cyA9IFtdCiAgICBmb3IgZGlyZWN0b3J5IGluIHNvcnRlZChmaW5nZXJwcmludHMuaXRlcmRpcigpKSBpZiBmaW5nZXJwcmludHMuZXhpc3RzKCkgZWxzZSBbXToKICAgICAgICBpZiBub3QgZGlyZWN0b3J5Lm5hbWUuc3RhcnRzd2l0aChzZWxlY3RlZCkgb3Igbm90IGRpcmVjdG9yeS5pc19kaXIoKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgcGF0aCBpbiBzb3J0ZWQoZGlyZWN0b3J5Lmdsb2IoIiouanNvbiIpKToKICAgICAgICAgICAgcmF3ID0gcGF0aC5yZWFkX2J5dGVzKCkKICAgICAgICAgICAgdmFsdWUgPSBqc29uLmxvYWRzKHJhdykKICAgICAgICAgICAgcm93ID0geyJwYXRoIjogc3RyKHBhdGgucmVsYXRpdmVfdG8ocm9vdCkpLCAic2hhMjU2IjogaGFzaGxpYi5zaGEyNTYocmF3KS5oZXhkaWdlc3QoKSwgImJ5dGVzIjogbGVuKHJhdyksICJtdGltZU5hbm9zIjogcGF0aC5zdGF0KCkuc3RfbXRpbWVfbnMsICJlbnZpcm9ubWVudCI6IFtdfQogICAgICAgICAgICBmb3IgbG9jYWwgaW4gdmFsdWUuZ2V0KCJsb2NhbCIsIFtdKToKICAgICAgICAgICAgICAgIGl0ZW0gPSBsb2NhbC5nZXQoIlJlcnVuSWZFbnZDaGFuZ2VkIikKICAgICAgICAgICAgICAgIGlmIGl0ZW06CiAgICAgICAgICAgICAgICAgICAgb3JpZ2luYWwgPSBpdGVtLmdldCgidmFsIikKICAgICAgICAgICAgICAgICAgICByb3dbImVudmlyb25tZW50Il0uYXBwZW5kKHsibmFtZSI6IGl0ZW1bInZhciJdLCAicHJlc2VudCI6IG9yaWdpbmFsIGlzIG5vdCBOb25lLCAidmFsdWVTSEEyNTYiOiBoYXNobGliLnNoYTI1Nihqc29uLmR1bXBzKG9yaWdpbmFsLCBzb3J0X2tleXM9VHJ1ZSkuZW5jb2RlKCkpLmhleGRpZ2VzdCgpfSkKICAgICAgICAgICAgcm93cy5hcHBlbmQocm93KQogICAgKG91dCAvIChsYWJlbCArICItZmluZ2VycHJpbnRzLmpzb24iKSkud3JpdGVfdGV4dChqc29uLmR1bXBzKHJvd3MsIGluZGVudD0yKSArICJcbiIpCgpwYXRocyA9IFsiLmdpdGh1Yi9zY3JpcHRzL3Zmc19zZWFyY2hfY2FjaGUucHkiLCAiLmdpdGh1Yi9hY3Rpb25zL3Zmcy1zZWFyY2gtY2FjaGUvYWN0aW9uLnltbCIsICIuZ2l0aHViL3NjcmlwdHMvbG9jYWxfYWNjZXB0YW5jZS5weSIsICJydXN0L0NhcmdvLmxvY2siXQpzdGF0ZSA9IHsiaGVhZCI6IHN1YnByb2Nlc3MuY2hlY2tfb3V0cHV0KFsiZ2l0IiwgInJldi1wYXJzZSIsICJIRUFEIl0sIGN3ZD1yb290KS5kZWNvZGUoKS5zdHJpcCgpLCAiY3B1cyI6IG9zLmNwdV9jb3VudCgpLCAiY29tcGlsZXJDYXAiOiBvcy5lbnZpcm9uWyJTQ09ERV9BQ0NFUFRBTkNFX0JVSUxEX0pPQlMiXSwgInNvdXJjZSI6IHtwOiBkaWdlc3Qocm9vdC9wKSBmb3IgcCBpbiBwYXRoc30sICJrbm93bkNhbGxlckNvbXBpbGVyRW52aXJvbm1lbnQiOiB7bmFtZTogb3MuZW52aXJvbi5nZXQobmFtZSkgZm9yIG5hbWUgaW4gWyJDQVJHT19CVUlMRF9KT0JTIiwgIkNBUkdPX0lOQ1JFTUVOVEFMIiwgIkNBUkdPX1BST0ZJTEVfREVWX0RFQlVHIiwgIkNBUkdPX1BST0ZJTEVfVEVTVF9ERUJVRyIsICJJbWFnZU9TIiwgIkltYWdlVmVyc2lvbiIsICJQS0dfQ09ORklHX1BBVEgiXX0sICJzY29wZSI6ICJPcmlnaW5hbCBjYWNoZSBwcm9kdWNlciBjb21waWxhdGlvbiBvbmx5OyBubyBjdXJyZW50LXJ1bnRpbWUgdGVzdCBvciBwcm9kdWN0aW9uIGFjY2VwdGFuY2UiLCAiY2FyZ29GaW5nZXJwcmludExvZ2dpbmciOiAiY2FyZ286OmNvbXBpbGVyOjpmaW5nZXJwcmludD10cmFjZSIsICJwYXNzZWQiOiBGYWxzZX0KcHJvZHVjZXJfa2V5ID0gbG9hZCgib3JpZ2luYWxfY2FjaGVfa2V5Iiwgcm9vdCAvICIuZ2l0aHViL3NjcmlwdHMvdmZzX3NlYXJjaF9jYWNoZS5weSIpCmV4cGVjdGVkX2tleSwgX2lucHV0cyA9IHByb2R1Y2VyX2tleS5jYWNoZV9rZXkocm9vdCkKYXNzZXJ0IG9zLmVudmlyb24uZ2V0KCJTQ09ERV9WRlNfUkVTVE9SRURfQ0FDSEVfS0VZIikgPT0gZXhwZWN0ZWRfa2V5LCAiQSBmdWxsIG9yaWdpbmFsIGNhY2hlIGhpdCBpcyByZXF1aXJlZCBiZWZvcmUgdGhpcyBjb250cm9sOyBkbyBub3QgYnVpbGQgYSBjb2xkIHN1YnN0aXR1dGUiCnN0YXRlWyJyZXN0b3JlZENhY2hlS2V5Il0gPSBleHBlY3RlZF9rZXkKc3RhdGVbIm9ic2VydmVyRW52aXJvbm1lbnQiXSA9ICJPcmlnaW5hbCBydW5uZXIgcHl0aG9uMyB3aXRoIGEgcHJvY2Vzcy1sb2NhbCB2ZW52OyBubyBzZXR1cC1weXRob24gZXhwb3J0cyIKc25hcHNob3QoImJlZm9yZSIpCmhlbHBlciA9IGxvYWQoIm9yaWdpbmFsX2NvbXBpbGVyX3ByaW9yaXR5X29ic2VydmVyIiwgcm9vdCAvICIuZ2l0aHViL3NjcmlwdHMvbG9jYWxfYWNjZXB0YW5jZS5weSIpCmhlbHBlci5ST09UID0gcm9vdAp0cnk6CiAgICBoZWxwZXIucnVuX2NvbW1hbmQoW3N5cy5leGVjdXRhYmxlLCBzdHIocm9vdCAvICIuZ2l0aHViL3NjcmlwdHMvdmZzX3NlYXJjaF9jYWNoZS5weSIpLCAiYnVpbGQiLCAiLS1vdXRwdXQiLCBzdHIob3V0IC8gIm9yaWdpbmFsLXByb2R1Y2VyIildLCByb290LCBvdXQgLyAicHJvZHVjZXIubG9nIiwgZW52PXsiQ0FSR09fTE9HIjogc3RhdGVbImNhcmdvRmluZ2VycHJpbnRMb2dnaW5nIl19KQogICAgcHJvZHVjZXIgPSBsb2FkKCJvcmlnaW5hbF9maXhlZF9kcml2ZXIiLCByb290IC8gIi5naXRodWIvc2NyaXB0cy92ZnNfc2VhcmNoX2NhY2hlLnB5IikKICAgIHN0YXRlWyJmaXhlZFRyYWNrZWRGaWxlc1ZlcmlmaWVkQWZ0ZXJCdWlsZCJdID0gcHJvZHVjZXIudmVyaWZ5KHJvb3QgLyAiLm5hdGl2ZS12ZnMiLCBwcm9kdWNlci5waW4ocm9vdCkpCiAgICBjb21tYW5kcyA9IGpzb24ubG9hZHMoKG91dCAvICJvcmlnaW5hbC1wcm9kdWNlci9jb21tYW5kcy5qc29uIikucmVhZF9ieXRlcygpKQogICAgc3RhdGVbImFsbE9yaWdpbmFsQ29tcGlsZXJBcnRpZmFjdHNGcmVzaCJdID0gYWxsKGNvbW1hbmRbImNvbXBpbGVyX2FydGlmYWN0cyJdIGFuZCBhbGwoaXRlbVsiZnJlc2giXSBmb3IgaXRlbSBpbiBjb21tYW5kWyJjb21waWxlcl9hcnRpZmFjdHMiXSkgZm9yIGNvbW1hbmQgaW4gY29tbWFuZHMpCiAgICBhc3NlcnQgc3RhdGVbImFsbE9yaWdpbmFsQ29tcGlsZXJBcnRpZmFjdHNGcmVzaCJdLCAiT3JpZ2luYWwtZW52aXJvbm1lbnQgY29udHJvbCBzdGlsbCByZWJ1aWx0OyByZXRhaW4gaXRzIHJlYWwgcmVhc29ucyByYXRoZXIgdGhhbiBhc3N1bWluZyBhIGNhdXNlIgogICAgc3RhdGVbInBhc3NlZCJdID0gVHJ1ZQpmaW5hbGx5OgogICAgc25hcHNob3QoImFmdGVyIikKICAgIHN0YXRlWyJzb3VyY2VBZnRlciJdID0ge3A6IGRpZ2VzdChyb290L3ApIGZvciBwIGluIHBhdGhzfQogICAgKG91dCAvICJzb3VyY2UtYW5kLXJlc291cmNlcy5qc29uIikud3JpdGVfdGV4dChqc29uLmR1bXBzKHN0YXRlLCBpbmRlbnQ9MikgKyAiXG4iKQogICAgYXNzZXJ0IHN0YXRlWyJzb3VyY2VBZnRlciJdID09IHN0YXRlWyJzb3VyY2UiXSwgIkRpYWdub3N0aWMgc291cmNlIGNoYW5nZWQ7IHJldGFpbiBvcmlnaW5hbCBmaWVsZCIK''
+        | base64 --decode > "$RUNNER_TEMP/fixed-vfs-audit.py"
+
+        "$RUNNER_TEMP/fixed-vfs-observer/bin/python" "$RUNNER_TEMP/fixed-vfs-audit.py"
+
+        '
     - name: Diagnostic retain original invalidation logs
       if: always()
       uses: actions/upload-artifact@v4

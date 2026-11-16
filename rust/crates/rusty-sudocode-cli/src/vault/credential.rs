@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lib::transport_primitives::authorship::owner_from_x509;
+use lib::transport_primitives::authorship::{cert_signed_by, owner_from_x509};
 use lib::transport_primitives::{user_runtime_server_name, AgentCredential, CREDENTIAL_MANIFEST};
 use rcgen::{KeyPair, PublicKeyData};
 use x509_parser::certificate::X509Certificate;
@@ -181,9 +181,7 @@ fn check(
         .ok_or(CredentialError::Invalid)?;
     let ca = ca.parse_x509().map_err(|_| CredentialError::Invalid)?;
     let cert = cert.parse_x509().map_err(|_| CredentialError::Invalid)?;
-    if cert.public_key().raw != key.subject_public_key_info()
-        || cert.verify_signature(Some(ca.public_key())).is_err()
-    {
+    if cert.public_key().raw != key.subject_public_key_info() || !cert_signed_by(&cert, &ca) {
         return Err(CredentialError::Inconsistent);
     }
     current(&cert)?;

@@ -124,6 +124,44 @@ fn nested_cargo_and_explicit_target() {
             (workspace / "nested/src/main.rs").write_text(
                 'fn main() {println!("NESTED:{}", env!("CACHE_COMPILE_INPUT"));}\n', encoding="utf-8")
             shutil.copyfile(Path(__file__).with_name("compiler-objects.Cargo.lock"), workspace / "Cargo.lock")
+        # Build scripts use the same wrapper for information and feature probes.
+        # These are real compiler commands, with output/status compared to the
+        # direct compiler before cacheable Cargo units are built below.
+        probe_build = r'''use std::process::Command;
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let compiler=std::env::var_os("RUSTC").unwrap();
+    let wrapper=std::env::var_os("RUSTC_WRAPPER").unwrap();
+    for arguments in [vec!["--version"], vec!["-vV"], vec!["--print", "cfg"],
+                      vec!["--help"], vec!["--print", "deliberately-invalid-query"]] {
+        let direct=Command::new(&compiler).args(&arguments).output().unwrap();
+        let wrapped=Command::new(&wrapper).arg(&compiler).args(&arguments).output().unwrap();
+        assert_eq!(direct.status.code(), wrapped.status.code(), "probe exit: {arguments:?}");
+        assert_eq!(direct.stdout, wrapped.stdout, "probe stdout: {arguments:?}");
+        assert_eq!(direct.stderr, wrapped.stderr, "probe stderr: {arguments:?}");
+    }
+    let root=std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let source=root.join("probe.rs");
+    std::fs::write(&source, "pub fn probe() -> u8 {42}\n").unwrap();
+    // Metadata-only compilation is also a real, non-cacheable compiler probe.
+    let args=[std::ffi::OsString::from("--crate-name"), "feature_probe".into(),
+        "--crate-type=rlib".into(), "--emit=metadata".into(), "--out-dir".into(),
+        root.as_os_str().to_owned(), source.as_os_str().to_owned()];
+    let direct=Command::new(&compiler).args(&args).output().unwrap();
+    assert!(direct.status.success(), "{}", String::from_utf8_lossy(&direct.stderr));
+    let metadata=root.join("libfeature_probe.rmeta");
+    let bytes=std::fs::read(&metadata).unwrap();
+    std::fs::remove_file(&metadata).unwrap();
+    let wrapped=Command::new(&wrapper).arg(&compiler).args(&args).output().unwrap();
+    assert_eq!(direct.status.code(), wrapped.status.code());
+    assert_eq!(direct.stdout, wrapped.stdout);
+    assert_eq!(direct.stderr, wrapped.stderr);
+    assert_eq!(std::fs::read(&metadata).unwrap(), bytes);
+    eprintln!("WRAPPED_QUERY_AND_METADATA_PROBES_PASSED");
+}
+'''
+        for workspace in workspaces:
+            (workspace / "build.rs").write_text(probe_build, encoding="utf-8")
         rows, sessions = [], []
 
         def command(label, argv, cwd, env=None, execute=None, expected=0):
@@ -138,6 +176,27 @@ fn nested_cargo_and_explicit_target() {
             rows.append({"label": label, "log": str(log), "exit_code": receipt["exit_code"]})
             return log.read_text(encoding="utf-8")
 
+        # An unavailable cache must never break a compiler information query.
+        # Compile both the candidate and the restored old routing against the
+        # same deliberately missing cache path; no real cache/tool is replaced.
+        probe = output / "query-routing"
+        probe.mkdir()
+        (probe / "cache-tool").write_text(str(probe / "unavailable-cache"), encoding="utf-8")
+        gate = "    if !cacheable_compilation(&arguments) {\n        finish(&compiler, Command::new(&compiler).args(&arguments).status());\n    }\n"
+        assert cache.WRAPPER_SOURCE.count(gate) == 1
+        direct = command("direct-compiler-query", ["rustc", "--version"], SOURCE)
+        for kind, text, expected in [("candidate", cache.WRAPPER_SOURCE, 0),
+                                     ("old-routing", cache.WRAPPER_SOURCE.replace(gate, "", 1), 101)]:
+            source = probe / (kind + ".rs")
+            source.write_text(text, encoding="utf-8")
+            wrapper = probe / (kind + (".exe" if os.name == "nt" else ""))
+            command(kind + "-query-wrapper", ["rustc", "--edition=2021", str(source), "-o", str(wrapper)], SOURCE)
+            result = command(kind + "-unavailable-cache-query", [str(wrapper), shutil.which("rustc"), "--version"],
+                             SOURCE, expected=expected)
+            if expected == 0:
+                assert result == direct, result
+            else:
+                assert "cannot start" in result and "unavailable-cache" in result, result
         for index, workspace in enumerate(workspaces):
             target = output / f"target-{index}"
             with cache.session(tool, output / f"server-{index}", helper.run_command, output / "objects") as active:

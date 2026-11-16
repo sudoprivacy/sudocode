@@ -34,8 +34,9 @@ WRAPPER_SOURCE = r"""//! Cargo's RUSTC_WRAPPER for the local compiler-object cac
 //! operating system refused the arguments inline. sccache 0.17 and later reads
 //! that file and starts rustc with every argument inline again, which Windows
 //! refuses past 32,767 characters (mozilla/sccache#2787). Arguments that do not
-//! fit inline therefore reach the compiler in a file, uncached; every other
-//! unit goes through sccache.
+//! fit inline therefore reach the compiler in a file, uncached. Compiler
+//! queries and other non-cacheable probes also keep the direct compiler path;
+//! only Cargo-style link emissions go through sccache.
 use std::env::{args_os, current_exe};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -52,14 +53,58 @@ fn main() {
         fail("Cargo passes the compiler as the first argument");
     }
     let compiler = arguments.remove(0);
-    if arguments.iter().any(|argument| argument.as_encoded_bytes().starts_with(b"@")) {
+    if arguments
+        .iter()
+        .any(|argument| argument.as_encoded_bytes().starts_with(b"@"))
+    {
         record("cargo");
+        finish(&compiler, Command::new(&compiler).args(&arguments).status());
+    }
+    // Compiler queries and non-cacheable probes must keep rustc's direct path.
+    if !cacheable_compilation(&arguments) {
         finish(&compiler, Command::new(&compiler).args(&arguments).status());
     }
     match Command::new(CACHE).arg(&compiler).args(&arguments).status() {
         Err(error) if too_long(&error) => direct(&compiler, &arguments, &error),
         result => finish(CACHE.as_ref(), result),
     }
+}
+
+/// Forward only Cargo-style link emissions to the compiler-object cache.
+fn cacheable_compilation(arguments: &[OsString]) -> bool {
+    let mut crate_name = false;
+    let mut output_directory = false;
+    let mut link = false;
+    let mut iter = arguments.iter();
+    while let Some(argument) = iter.next() {
+        let Some(text) = argument.to_str() else {
+            return false;
+        };
+        if matches!(
+            text,
+            "-" | "-o" | "-V" | "-vV" | "-Vv" | "--version" | "-h" | "--help" | "--print"
+        ) || text.starts_with("--print=")
+        {
+            return false;
+        }
+        if text == "--crate-name" {
+            crate_name = iter.next().is_some();
+        } else if text.starts_with("--crate-name=") {
+            crate_name = text.len() > 13;
+        } else if text == "--out-dir" {
+            output_directory = iter.next().is_some();
+        } else if text.starts_with("--out-dir=") {
+            output_directory = text.len() > 10;
+        } else if text == "--emit" {
+            link = iter
+                .next()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.split(',').any(|item| item == "link"));
+        } else if let Some(value) = text.strip_prefix("--emit=") {
+            link = value.split(',').any(|item| item == "link");
+        }
+    }
+    crate_name && output_directory && link
 }
 
 /// ERROR_FILENAME_EXCED_RANGE on Windows and E2BIG elsewhere, the errors on
@@ -81,7 +126,9 @@ fn direct(compiler: &OsStr, arguments: &[OsString], error: &io::Error) -> ! {
                 contents.push_str(text);
                 contents.push('\n');
             }
-            _ => fail(&format!("cannot start {CACHE}: {error}; an argument has no argument-file form")),
+            _ => fail(&format!(
+                "cannot start {CACHE}: {error}; an argument has no argument-file form"
+            )),
         }
     }
     let file = directory().join(format!("{}.args", unique()));
@@ -124,7 +171,10 @@ fn unique() -> String {
 fn finish(program: &OsStr, result: io::Result<ExitStatus>) -> ! {
     match result {
         Ok(status) => exit(status.code().unwrap_or(101)),
-        Err(error) => fail(&format!("cannot start {}: {error}", program.to_string_lossy())),
+        Err(error) => fail(&format!(
+            "cannot start {}: {error}",
+            program.to_string_lossy()
+        )),
     }
 }
 

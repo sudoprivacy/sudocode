@@ -1455,6 +1455,14 @@ when they do not fit on a command line, which Cargo 1.100's per-dependency
 expand that file onto one command line again (mozilla/sccache#2787), so the
 wrapper gives such units to rustc with the file, uncached, and records how many
 in the session's `argument_file_units`.
+Compiler information queries (including version/configuration), metadata-only
+probes and commands without Cargo's cacheable link-emission shape run directly
+through the original compiler. They retain arguments, output and exit status
+without depending on cache availability. Actual cacheable compilation errors
+still fail normally. The real-process guard compares direct/wrapped build-script
+queries and metadata bytes, and restores the old query routing as a negative
+control against an unavailable cache. The original cache-hit, invalidation,
+argument-file, native PTY and ownership controls remain required.
 Each profile owns a private server and stops it on success or failure. A retained
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned

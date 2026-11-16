@@ -2246,6 +2246,31 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
         .collect()
 }
 
+/// When the REPL may run a slash command while a turn is in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnPolicy {
+    /// Local UI that reads no session state: it runs during a turn as it does
+    /// when idle.
+    Now,
+    /// A setting: chosen during the turn and applied when the turn ends, so a
+    /// running turn never changes model or effort midway.
+    NextTurn,
+    /// Needs the session the turn is using, so it runs only between turns.
+    AfterTurn,
+}
+
+/// Whether `command` can run while a turn is in progress. A command not listed
+/// waits for the turn, so a new one never runs against the session the turn
+/// is using until someone decides it is safe.
+#[must_use]
+pub fn slash_command_turn_policy(command: &SlashCommand) -> TurnPolicy {
+    match command {
+        SlashCommand::Help | SlashCommand::Tasks { args: None } => TurnPolicy::Now,
+        SlashCommand::Model { .. } | SlashCommand::Effort { .. } => TurnPolicy::NextTurn,
+        _ => TurnPolicy::AfterTurn,
+    }
+}
+
 fn slash_command_category(name: &str) -> &'static str {
     match name {
         "help" | "status" | "cost" | "resume" | "session" | "version" | "usage" | "stats"
@@ -5129,6 +5154,7 @@ mod tests {
         slash_command_specs, suggest_slash_commands, validate_slash_command_input,
         DefinitionSource, SkillRoot, SkillSlashDispatch, SlashCommand,
     };
+    use super::{slash_command_turn_policy, TurnPolicy};
     use plugins::{
         LoadedPlugin, MarketplaceDiscoveryError, PluginCapabilityMetadata, PluginCapabilitySummary,
         PluginError, PluginKind, PluginLoadFailure, PluginLoadOutcome, PluginManager,
@@ -5140,6 +5166,29 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn only_local_ui_and_settings_run_during_a_turn() {
+        let policy =
+            |input: &str| slash_command_turn_policy(&SlashCommand::parse(input).unwrap().unwrap());
+        assert_eq!(policy("/help"), TurnPolicy::Now);
+        assert_eq!(policy("/tasks"), TurnPolicy::Now);
+        assert_eq!(policy("/model"), TurnPolicy::NextTurn);
+        assert_eq!(policy("/model opus"), TurnPolicy::NextTurn);
+        assert_eq!(policy("/effort high"), TurnPolicy::NextTurn);
+        // A task action needs the session; only the bare panel is local.
+        assert_eq!(policy("/tasks stop 1"), TurnPolicy::AfterTurn);
+        for input in [
+            "/compact", "/clear", "/resume", "/status", "/rewind", "/init",
+        ] {
+            assert_eq!(policy(input), TurnPolicy::AfterTurn, "{input}");
+        }
+        // Anything not listed waits for the turn.
+        assert_eq!(
+            slash_command_turn_policy(&SlashCommand::Unknown("not-a-command".into())),
+            TurnPolicy::AfterTurn
+        );
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()

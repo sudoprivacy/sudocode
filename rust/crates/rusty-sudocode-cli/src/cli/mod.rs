@@ -14,6 +14,7 @@ pub(crate) mod session;
 pub(crate) mod session_ui;
 pub(crate) mod setup;
 pub(crate) mod status;
+pub(crate) mod turn_settings;
 pub(crate) mod undo;
 pub(crate) mod unified_diff;
 pub(crate) mod update;

@@ -449,9 +449,10 @@ fn ctrl_c_cancels_with_queued_input_and_busy_management_cannot_block_it() {
     let (env, mut session, _release) = start("hard-cancel-queue", false);
     submit(&mut session, "RETAIN_AFTER_CANCEL", "\t");
     submit(&mut session, "/model", "\r");
+    // The picker opens over the running turn without taking the session.
     common::expect_screen(
         &session,
-        |view| view.contains("before changing session settings"),
+        |view| view.contains("Select model"),
         common::DEFAULT_TIMEOUT,
         "busy slash command returns without locking the dispatcher",
     );

@@ -334,8 +334,9 @@ pub enum UiCommand {
         name: String,
         input: String,
     },
-    ShowQuestion(QuestionPromptView),
-    ClearQuestion,
+    ShowQuestion(QuestionPromptView, QuestionOwner),
+    /// Clear the question on screen; with an owner, only that owner's.
+    ClearQuestion(Option<QuestionOwner>),
     SetTurnResult {
         text: Arc<StyledText>,
         turn: u32,
@@ -379,6 +380,16 @@ pub struct UiCommandSender {
     tx: SyncSender<UiCommand>,
 }
 
+/// Who opened the question on screen. A question the turn asks always takes
+/// the slot over one the REPL opened (a slash-command picker), and the REPL is
+/// told with [`InputEvent::QuestionSuperseded`], so an answer always reaches
+/// the owner of what was on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuestionOwner {
+    Turn,
+    Repl,
+}
+
 impl UiCommandSender {
     pub fn open_tasks(&self) {
         let _ = self.tx.send(UiCommand::OpenTasks);
@@ -398,11 +409,27 @@ impl UiCommandSender {
         });
     }
     pub fn show_question(&self, question: QuestionPromptView) {
-        let _ = self.tx.send(UiCommand::ShowQuestion(question));
+        let _ = self
+            .tx
+            .send(UiCommand::ShowQuestion(question, QuestionOwner::Repl));
+    }
+
+    /// Show a question the running turn asks.
+    pub fn show_turn_question(&self, question: QuestionPromptView) {
+        let _ = self
+            .tx
+            .send(UiCommand::ShowQuestion(question, QuestionOwner::Turn));
     }
 
     pub fn clear_question(&self) {
-        let _ = self.tx.send(UiCommand::ClearQuestion);
+        let _ = self.tx.send(UiCommand::ClearQuestion(None));
+    }
+
+    /// Clear the turn's question, leaving a REPL picker on screen.
+    pub fn clear_turn_question(&self) {
+        let _ = self
+            .tx
+            .send(UiCommand::ClearQuestion(Some(QuestionOwner::Turn)));
     }
 
     pub(crate) fn set_turn_result(&self, text: &crate::render::StyledLine, turn: u32) {
@@ -924,6 +951,10 @@ pub enum InputEvent {
     /// An option value, literal custom text, or QUESTION_BACK. The input view
     /// already resolves digit shortcuts; consumers must preserve this value.
     QuestionAnswer(String),
+    /// A question the turn asks took the slot from a REPL picker, or arrived
+    /// first and turned one away: the picker is no longer on screen. Sent in
+    /// screen order with answers, so an answer before it was for the picker.
+    QuestionSuperseded,
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
     BackgroundTask(engine_events::BackgroundTaskAction),
@@ -939,7 +970,7 @@ pub enum InputEvent {
     Exit,
 }
 
-/// Share the active input controls between the footer and scrollback notices.
+/// The footer's keys while a turn runs.
 #[must_use]
 #[inline]
 pub(crate) const fn running_input_controls(has_pending_input: bool) -> &'static str {
@@ -1215,6 +1246,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut turn_result = hooks.use_state(move || initial_turn_result);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
+    let mut question_owner = hooks.use_state(|| QuestionOwner::Repl);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
     let history = hooks.use_state(|| input_history.to_vec());
@@ -1686,6 +1718,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let output_rx_for_future = Arc::clone(&output_rx);
     let ui_rx_for_future = Arc::clone(&ui_rx);
     let stderr_redir_for_future = Arc::clone(&stderr_redir);
+    let input_tx_for_future = input_tx.clone();
 
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
@@ -1772,7 +1805,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             footer_hint
                                 .set(Some((message, Instant::now() + Duration::from_secs(3))));
                         }
-                        Ok(UiCommand::ShowQuestion(question)) => {
+                        Ok(UiCommand::ShowQuestion(question, owner)) => {
+                            // A turn's question always wins the slot over a REPL
+                            // picker; the REPL is told its picker is gone.
+                            let is_question_shown =
+                                !matches!(*input_slot.read(), InputSlot::TextInput);
+                            if is_question_shown && owner != question_owner.get() {
+                                let _ = input_tx_for_future.send(InputEvent::QuestionSuperseded);
+                                if owner == QuestionOwner::Repl {
+                                    continue;
+                                }
+                            }
+                            question_owner.set(owner);
                             // A request's immutable description belongs to
                             // history. Only its first field presents it; the
                             // live slot owns the current field's controls.
@@ -1809,9 +1853,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_slot.set(slot);
                             input_value.set(String::new());
                         }
-                        Ok(UiCommand::ClearQuestion) => {
+                        Ok(UiCommand::ClearQuestion(only)) => {
                             let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
-                            if !is_plain_input {
+                            if !is_plain_input && only.is_none_or(|owner| owner == question_owner.get()) {
                                 input_slot.set(InputSlot::TextInput);
                                 input_value.set(String::new());
                             }

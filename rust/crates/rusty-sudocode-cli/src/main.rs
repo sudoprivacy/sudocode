@@ -82,7 +82,8 @@ use commands::{
     handle_agents_slash_command_json, handle_mcp_slash_command_json_with_plugins,
     handle_mcp_slash_command_with_plugins, handle_plugins_slash_command,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    resolve_skill_invocation_with_plugins, SkillSlashDispatch, SlashCommand,
+    resolve_skill_invocation_with_plugins, slash_command_turn_policy, SkillSlashDispatch,
+    SlashCommand, TurnPolicy,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
@@ -2548,42 +2549,15 @@ fn show_effort_selection(
     if levels.is_empty() {
         return None;
     }
-    let items: Vec<String> = std::iter::once("auto")
-        .chain(levels.iter().map(String::as_str))
-        .map(str::to_string)
-        .collect();
-    let options = items
-        .iter()
-        .map(|level| repl_ui::QuestionOptionView {
-            label: level.clone(),
-            value: level.clone(),
-            description: (level == "max").then(|| "Current session only".to_string()),
-            recommended: preference.as_deref().unwrap_or("auto") == level,
-            is_navigable: false,
-        })
-        .collect();
     Some(show_slash_selection(
         ui,
-        repl_ui::QuestionPromptView {
-            presentation: runtime::QuestionPresentation::Question,
-            title: Some("Reasoning effort".to_string()),
-            description: Some(
-                format!(
-                    "Model: {resolved} · Current: {}",
-                    effective.as_deref().unwrap_or("auto")
-                )
-                .into(),
-            ),
-            index: usize::from(model.is_some()),
-            total: if model.is_some() { 2 } else { 1 },
-            prompt: "Select effort".to_string(),
-            options,
-            allow_custom_input: false,
-            custom_input_hint: None,
-            force_fuzzy_select: true,
-            back_value: None,
-            initial_value: None,
-        },
+        cli::turn_settings::effort_question(
+            &resolved,
+            effective.as_deref(),
+            preference.as_deref(),
+            &levels,
+            model.is_some(),
+        ),
         move |level, cli, out| {
             let mut current = cli.lock().expect("LiveCli mutex poisoned");
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -2642,7 +2616,7 @@ impl IocraftQuestionPrompter {
         earlier: Option<&runtime::QuestionPromptAnswer>,
     ) {
         let field = &request.fields[index];
-        self.ui.show_question(repl_ui::QuestionPromptView {
+        self.ui.show_turn_question(repl_ui::QuestionPromptView {
             presentation: request.presentation.clone(),
             title: request.title.clone(),
             description: request.description.clone(),
@@ -2710,7 +2684,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         cancel_pending_question_answer(&self.pending_answer);
-        self.ui.clear_question();
+        self.ui.clear_turn_question();
     }
 
     fn ask(
@@ -2735,7 +2709,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
                 let rx = this.prepare_answer_receiver()?;
                 this.show_field(&request, index, answers[index].as_ref());
                 let Ok(raw) = rx.await else {
-                    this.ui.clear_question();
+                    this.ui.clear_turn_question();
                     return Err("question prompt cancelled".into());
                 };
                 if raw == repl_ui::QUESTION_BACK {
@@ -2745,7 +2719,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
                 answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
                 index += 1;
             }
-            this.ui.clear_question();
+            this.ui.clear_turn_question();
             Ok(answers.into_iter().flatten().collect())
         })
     }
@@ -3533,6 +3507,16 @@ fn run_repl_iocraft_dispatch(
     // loop routes the QuestionAnswer to this closure instead of the
     // tool-question path.
     let mut pending_slash_selection: Option<SlashSelectionHandler> = None;
+    // A settings picker opened while a turn runs. It answers without the
+    // session; the choice waits in `pending_settings` until the turn ends.
+    let mut mid_turn_selection: Option<SlashSelectionHandler> = None;
+    let pending_settings = cli::turn_settings::SharedPendingSettings::default();
+    // Filled by the runner when each turn starts, while it holds the session.
+    let settings_view = cli::turn_settings::SharedSettingsView::default();
+    cli_shared
+        .lock()
+        .expect("LiveCli mutex poisoned")
+        .turn_settings_view = Some(Arc::clone(&settings_view));
 
     loop {
         let Ok(event) = coord_rx.recv() else {
@@ -3605,6 +3589,21 @@ fn run_repl_iocraft_dispatch(
                     }
                     continue;
                 }
+                // Between turns: a picker still open holds the queue, so what
+                // follows runs with the settings it chooses; then settings chosen
+                // during the turn apply; then queued messages start a turn.
+                if mid_turn_selection.is_some() || pending_slash_selection.is_some() {
+                    continue;
+                }
+                pending_slash_selection = cli::turn_settings::apply_pending(
+                    &pending_settings,
+                    &cli_shared,
+                    &repl_ui_cmd,
+                    &repl_output,
+                );
+                if pending_slash_selection.is_some() {
+                    continue;
+                }
                 let next = coord.lock().unwrap().drain_next();
                 if let Some(next) = next {
                     // Echo the queued items to scrollback now, as they actually
@@ -3660,7 +3659,12 @@ fn run_repl_iocraft_dispatch(
                     _ => unreachable!(),
                 };
                 if coord.lock().unwrap().can_start() {
-                    if coord.lock().unwrap().has_idle_queue() {
+                    // A picker on screen holds the queue: this waits behind it
+                    // and runs with the settings it chooses.
+                    if coord.lock().unwrap().has_idle_queue()
+                        || mid_turn_selection.is_some()
+                        || pending_slash_selection.is_some()
+                    {
                         stage_turn_input(
                             &coord,
                             input_queue::QueuedInput::new(prompt, display.clone(), kind, ack),
@@ -3721,6 +3725,29 @@ fn run_repl_iocraft_dispatch(
                     // The shutdown below reports a failed final save.
                     break;
                 }
+                // Esc closes a settings picker opened during the turn and leaves
+                // the turn running.
+                repl_ui::InputEvent::Abort if mid_turn_selection.is_some() => {
+                    mid_turn_selection = None;
+                    repl_ui_cmd.clear_question();
+                    if !coord.lock().unwrap().is_running() {
+                        let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
+                    }
+                }
+                // The turn asked a question, so the picker that was on screen
+                // is gone. Its choice was not made; a queue held for it goes on.
+                repl_ui::InputEvent::QuestionSuperseded => {
+                    if pending_slash_selection.take().is_some()
+                        | mid_turn_selection.take().is_some()
+                    {
+                        repl_output.println(&format!(
+                            "{DIM}(picker closed: the turn asked a question){RESET}"
+                        ));
+                        if !coord.lock().unwrap().is_running() {
+                            let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
+                        }
+                    }
+                }
                 repl_ui::InputEvent::Abort if coord.lock().unwrap().has_pending_input() => {
                     coord.lock().unwrap().resume();
                     if coord.lock().unwrap().is_running() {
@@ -3731,12 +3758,16 @@ fn run_repl_iocraft_dispatch(
                     }
                 }
                 repl_ui::InputEvent::Abort | repl_ui::InputEvent::Cancel => {
-                    pending_slash_selection = None;
+                    let closed_picker = pending_slash_selection.take().is_some()
+                        | mid_turn_selection.take().is_some();
                     cancel_pending_question_answer(&pending_question_answer);
                     repl_ui_cmd.clear_question();
                     if runner_handle.is_some() {
                         coord.lock().unwrap().cancel_turn();
                         let _ = commands.send(EngineCommand::Cancel);
+                    } else if closed_picker {
+                        // A queue held for the picker goes on.
+                        let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     }
                 }
                 repl_ui::InputEvent::BackgroundTask(action) => {
@@ -3807,6 +3838,7 @@ fn run_repl_iocraft_dispatch(
                     // turn. Keep the input/control dispatcher nonblocking.
                     let trimmed = text.trim();
                     let parsed = SlashCommand::parse(trimmed);
+                    let is_running = coord.lock().unwrap().is_running();
                     // A command's report follows its own `❯` line in
                     // scrollback, as a prompt's turn does. Text that is not a
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
@@ -3819,28 +3851,40 @@ fn run_repl_iocraft_dispatch(
                         repl_ui_cmd.open_tasks();
                         continue;
                     }
-                    if coord.lock().unwrap().is_running() && trimmed.starts_with('/') {
-                        let controls = repl_ui::running_input_controls(
-                            coord.lock().unwrap().has_pending_input(),
-                        );
-                        repl_output.println(&format!(
-                            "{}A turn is running; finish or cancel before changing session settings.\n{controls}{RESET}",
-                            theme().fg_seq(TextRole::Secondary),
-                        ));
-                        continue;
+                    if let (true, Ok(Some(command))) = (is_running, &parsed) {
+                        match slash_command_turn_policy(command) {
+                            TurnPolicy::Now => {}
+                            TurnPolicy::NextTurn => {
+                                mid_turn_selection = cli::turn_settings::handle_during_turn(
+                                    command,
+                                    &settings_view
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .clone(),
+                                    &pending_settings,
+                                    &repl_ui_cmd,
+                                    &repl_output,
+                                );
+                                continue;
+                            }
+                            TurnPolicy::AfterTurn => {
+                                let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
+                                repl_output.println(&format!(
+                                    "{}'{name}' can't run while a turn is running.{RESET}",
+                                    theme().fg_seq(TextRole::Secondary),
+                                ));
+                                continue;
+                            }
+                        }
                     }
                     // Try slash command dispatch.
                     let is_slash = match parsed {
                         Ok(Some(SlashCommand::Memory)) => {
-                            if coord.lock().unwrap().is_running() {
-                                repl_output.println("A turn is running; wait for it to finish before editing memory.");
-                            } else {
-                                pending_slash_selection = cli::memory_ui::select_memory(
-                                    &repl_ui_cmd,
-                                    &cli_shared,
-                                    &repl_output,
-                                );
-                            }
+                            pending_slash_selection = cli::memory_ui::select_memory(
+                                &repl_ui_cmd,
+                                &cli_shared,
+                                &repl_output,
+                            );
                             true
                         }
                         Ok(Some(SlashCommand::Config { section: None })) => {
@@ -3864,33 +3908,10 @@ fn run_repl_iocraft_dispatch(
                             let current = cli_lock.lifecycle.current_model();
                             drop(cli_lock);
 
-                            let options = models
-                                .iter()
-                                .map(|m| repl_ui::QuestionOptionView {
-                                    label: m.clone(),
-                                    value: m.clone(),
-                                    description: None,
-                                    recommended: *m == current,
-                                    is_navigable: false,
-                                })
-                                .collect();
                             let effort_ui = repl_ui_cmd.clone();
                             pending_slash_selection = Some(show_slash_selection(
                                 &repl_ui_cmd,
-                                repl_ui::QuestionPromptView {
-                                    presentation: runtime::QuestionPresentation::Question,
-                                    title: Some("Model".to_string()),
-                                    description: Some(format!("Current: {current}").into()),
-                                    index: 0,
-                                    total: 1,
-                                    prompt: "Select model".to_string(),
-                                    options,
-                                    allow_custom_input: true,
-                                    custom_input_hint: Some("or type a model name".to_string()),
-                                    force_fuzzy_select: false,
-                                    back_value: None,
-                                    initial_value: None,
-                                },
+                                cli::turn_settings::model_question(&models, &current),
                                 move |model_name, cli, out| {
                                     if let Some(selection) = show_effort_selection(
                                         &effort_ui,
@@ -3934,82 +3955,41 @@ fn run_repl_iocraft_dispatch(
                             true
                         }
                         Ok(Some(SlashCommand::Resume { session_path: None })) => {
-                            if coord.lock().unwrap().is_running() {
-                                repl_output.println("A turn is running; wait for it to finish before selecting a session.");
-                            } else {
-                                pending_slash_selection = cli::session_ui::select_session(
-                                    &repl_ui_cmd,
-                                    &cli_shared,
-                                    &repl_output,
-                                );
-                            }
+                            pending_slash_selection = cli::session_ui::select_session(
+                                &repl_ui_cmd,
+                                &cli_shared,
+                                &repl_output,
+                            );
                             true
                         }
                         Ok(Some(SlashCommand::Session { action, target }))
                             if matches!(action.as_deref(), None | Some("list"))
                                 || (action.as_deref() == Some("delete") && target.is_some()) =>
                         {
-                            if coord.lock().unwrap().is_running() {
-                                repl_output.println("A turn is running; wait for it to finish before selecting or deleting a session.");
-                            } else if action.as_deref() == Some("delete") {
-                                pending_slash_selection = cli::session_ui::confirm_delete(
+                            pending_slash_selection = if action.as_deref() == Some("delete") {
+                                cli::session_ui::confirm_delete(
                                     &repl_ui_cmd,
                                     &cli_shared,
                                     &repl_output,
                                     target.as_deref().unwrap(),
-                                );
+                                )
                             } else {
-                                pending_slash_selection = cli::session_ui::select_session(
+                                cli::session_ui::select_session(
                                     &repl_ui_cmd,
                                     &cli_shared,
                                     &repl_output,
-                                );
-                            }
+                                )
+                            };
+                            true
+                        }
+                        Ok(Some(SlashCommand::Help)) => {
+                            // Static text, so it needs no session and also runs
+                            // during a turn.
+                            repl_output.println(&render_repl_help());
                             true
                         }
                         Ok(Some(command)) => {
-                            let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                            let refresh_context = matches!(command, SlashCommand::Compact);
-                            let prior_context = (
-                                cli_lock.lifecycle.session_handle().id,
-                                cli_lock.lifecycle.current_model(),
-                            );
-                            match cli_lock.handle_repl_command(command) {
-                                Ok(true) => {
-                                    if let Err(e) = cli_lock.persist_session() {
-                                        repl_output.println(&format!(
-                                            "{}{e}{}",
-                                            theme().fg_seq(TextRole::Error),
-                                            RESET
-                                        ));
-                                    }
-                                }
-                                Ok(false) => {}
-                                Err(e) => repl_output.println(&format!(
-                                    "{}{e}{}",
-                                    theme().fg_seq(TextRole::Error),
-                                    RESET
-                                )),
-                            }
-                            if refresh_context {
-                                if let Some(status) = cli_lock.resume_status_line() {
-                                    repl_ui_cmd.set_turn_result(
-                                        &status,
-                                        cli_lock.lifecycle.usage_snapshot().turns(),
-                                    );
-                                }
-                            }
-                            if refresh_context
-                                || prior_context
-                                    != (
-                                        cli_lock.lifecycle.session_handle().id,
-                                        cli_lock.lifecycle.current_model(),
-                                    )
-                            {
-                                repl_ui_cmd.begin_turn();
-                                cli_lock.refresh_completions();
-                            }
-                            repl_ui_cmd.set_cache_tip(cli_lock.cache_ttl_tip());
+                            run_session_command(&cli_shared, command, &repl_ui_cmd, &repl_output);
                             true
                         }
                         Ok(None) => false,
@@ -4080,7 +4060,15 @@ fn run_repl_iocraft_dispatch(
                     }
                 }
                 repl_ui::InputEvent::QuestionAnswer(text) => {
-                    if let Some(handler) = pending_slash_selection.take() {
+                    // Answers arrive in screen order with `QuestionSuperseded`,
+                    // so a picker still recorded here is the one that was shown.
+                    if let Some(handler) = mid_turn_selection.take() {
+                        // Recorded without the session; applied when the turn ends.
+                        mid_turn_selection = (handler.0)(&text, &cli_shared, &repl_output);
+                        if mid_turn_selection.is_none() && !coord.lock().unwrap().is_running() {
+                            let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
+                        }
+                    } else if let Some(handler) = pending_slash_selection.take() {
                         let prior = {
                             let cli = cli_shared.lock().expect("LiveCli mutex poisoned");
                             (
@@ -4099,6 +4087,11 @@ fn run_repl_iocraft_dispatch(
                             repl_ui_cmd.begin_turn();
                         }
                         repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
+                        // A queue held for this picker goes on once it closes.
+                        if pending_slash_selection.is_none() && !coord.lock().unwrap().is_running()
+                        {
+                            let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
+                        }
                     } else if !consume_pending_question_answer(&pending_question_answer, text) {
                         repl_output.println(&format!(
                             "{DIM}(no question is waiting for an answer){RESET}"
@@ -4199,6 +4192,48 @@ fn stage_turn_input(
     }
 }
 
+/// Run a slash command against the session, as the REPL does when no turn is
+/// running: report errors, persist a changed session, and refresh the chrome
+/// when the session, model or context changed.
+fn run_session_command(
+    cli_shared: &Arc<Mutex<LiveCli>>,
+    command: SlashCommand,
+    ui: &repl_ui::UiCommandSender,
+    out: &repl_ui::OutputSender,
+) {
+    let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+    let refresh_context = matches!(command, SlashCommand::Compact);
+    let prior_context = (
+        cli_lock.lifecycle.session_handle().id,
+        cli_lock.lifecycle.current_model(),
+    );
+    match cli_lock.handle_repl_command(command) {
+        Ok(true) => {
+            if let Err(e) = cli_lock.persist_session() {
+                out.println(&format!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET));
+            }
+        }
+        Ok(false) => {}
+        Err(e) => out.println(&format!("{}{e}{}", theme().fg_seq(TextRole::Error), RESET)),
+    }
+    if refresh_context {
+        if let Some(status) = cli_lock.resume_status_line() {
+            ui.set_turn_result(&status, cli_lock.lifecycle.usage_snapshot().turns());
+        }
+    }
+    if refresh_context
+        || prior_context
+            != (
+                cli_lock.lifecycle.session_handle().id,
+                cli_lock.lifecycle.current_model(),
+            )
+    {
+        ui.begin_turn();
+        cli_lock.refresh_completions();
+    }
+    ui.set_cache_tip(cli_lock.cache_ttl_tip());
+}
+
 fn deliver_steering_inputs(
     coord: &Arc<Mutex<input_queue::TurnInputCoordinator<mpsc::Sender<()>>>>,
     inputs: Vec<engine_events::TurnInput>,
@@ -4242,6 +4277,14 @@ fn spawn_iocraft_turn(
         .spawn(move || {
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
             cli.record_prompt_history();
+            // Settings pickers opened during this turn read this; the turn
+            // holds the session until it ends.
+            if let Some(view) = &cli.turn_settings_view {
+                let captured = cli::turn_settings::SettingsView::capture(&cli);
+                *view
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
+            }
             match cli.run_turn_iocraft(
                 &next.prompt,
                 &next.echoes,
@@ -4326,6 +4369,9 @@ struct LiveCli {
     iocraft_output: Option<repl_ui::OutputSender>,
     /// What the iocraft REPL's Tab offers for slash-command arguments.
     completions: Option<Arc<Mutex<commands::CompletionContext>>>,
+    /// Where each turn leaves the settings the iocraft REPL's pickers show
+    /// while it runs. `Some` ⇔ the iocraft REPL is active.
+    turn_settings_view: Option<cli::turn_settings::SharedSettingsView>,
 }
 
 fn run_acp_server(
@@ -4680,6 +4726,7 @@ impl LiveCli {
             is_repl: false,
             iocraft_output: None,
             completions: None,
+            turn_settings_view: None,
         })
     }
 
@@ -5859,15 +5906,9 @@ impl LiveCli {
 
     fn print_effort(&self) {
         let (preference, effective) = self.lifecycle.current_effort();
-        let scope = if preference.as_deref() == Some("max") {
-            " (this session only)"
-        } else {
-            ""
-        };
-        self.out_println(format!(
-            "Effort: {} · Effective: {}{scope}",
-            preference.as_deref().unwrap_or("auto"),
-            effective.as_deref().unwrap_or("model default")
+        self.out_println(cli::turn_settings::format_effort_line(
+            preference.as_deref(),
+            effective.as_deref(),
         ));
     }
 

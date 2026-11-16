@@ -52,6 +52,10 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      daemon_pipeline_fixture:
+        description: 'Isolated real-daemon runner-cost field; NEVER merge this branch'
+        type: string
+        default: ''
       live_only:
         description: 'Explicit paid company-key acceptance; ordinary PR/queue/main runs never call models'
         type: boolean
@@ -981,3 +985,826 @@ jobs:
           name: release-native-${{ matrix.os }}
           path: ${{ runner.temp }}/release-native
           retention-days: 30
+
+  fixture-split-a2a:
+    if: github.event_name == 'workflow_dispatch' && inputs.daemon_pipeline_fixture == 'split' && github.ref_name == 'ci/daemon-runner-pair-20261116'
+    needs: one-nexus-vfs-pin
+    name: Fixture split a2a
+    runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_ACCEPTANCE_BUILD_JOBS: '1'
+      FIXTURE_A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+      FIXTURE_COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+    - uses: actions/checkout@v4
+      name: Fixture a2a 0
+    - name: Fixture a2a Explain selected daemon acceptance
+      env:
+        A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+        COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+      run: "for selected in \"$A2A_REQUIRED\" \"$COHOST_REQUIRED\"; do\n  case \"$selected\" in\n    true|false) ;;\n    *)\
+        \ echo \"::error::Missing CLI A2A or co-host input decision; no daemon build started\"; exit 1 ;;\n  esac\ndone\n\
+        echo \"DAEMON_ACCEPTANCE_SCOPE: CLI_A2A=$A2A_REQUIRED cohost_search=$COHOST_REQUIRED\"\nif [ \"$A2A_REQUIRED\" = false\
+        \ ]; then\n  echo \"Fixed VFS cache helpers changed; independent CLI A2A journeys are skipped. Current co-host, search\
+        \ authorization/restart and driver feature checks remain required.\"\nfi\nif [ \"$COHOST_REQUIRED\" = false ]; then\n\
+        \  echo \"CLI source does not build the independent co-host/search fixture; those unchanged components are skipped.\"\
+        \nfi\n"
+    - uses: ./.github/actions/rust-toolchain
+      name: Fixture a2a 2
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust -> target
+        shared-key: ci-dependencies
+        env-vars: ImageOS
+        save-if: false
+      name: Fixture a2a 3
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+      name: Fixture a2a 4
+    - name: Fixture a2a Install the shared CLI and mailbox process supervisor
+      run: python3 -m pip install psutil==7.2.2
+    - name: Fixture a2a Install native durability fault injector
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: "if ! command -v strace >/dev/null; then\n  sudo apt-get update -qq\n  sudo apt-get install -y --no-install-recommends\
+        \ strace\nfi\n"
+    - name: Fixture select the same observer interpreter
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Fixture install the existing process observer
+      run: python3 -m pip install psutil==7.2.2
+    - name: Fixture record original source and explicit compiler budget
+      shell: python
+      run: 'import hashlib, json, os, subprocess
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        assert os.environ["FIXTURE_A2A_REQUIRED"] == "true" and os.environ["FIXTURE_COHOST_REQUIRED"] == "true", "Original
+        scope must require BOTH real daemon lanes; no skipped case can qualify this field"
+
+        data = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip(), "cpus": os.cpu_count(),
+        "compilerCap": os.environ["SCODE_ACCEPTANCE_BUILD_JOBS"], "testPriority": "Normal; original executor lowers only compiler/linker
+        children", "callerCargoVariables": {k: os.environ.get(k) for k in ["CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG"]}, "source": {p: hashlib.sha256((root/p).read_bytes()).hexdigest() for p in ["e2e/nexus-a2a/run.sh",
+        "e2e/nexus-a2a/run-cli.sh", "e2e/nexus-a2a/run-cohost.sh", "e2e/nexus-a2a/run-managed-subprocess.sh", ".github/scripts/local_acceptance.py",
+        "rust/Cargo.lock"]}}
+
+        (out / "source-and-resources.json").write_text(json.dumps(data, indent=2)+"\n")
+
+        '
+    - name: Fixture a2a A2A round-trip against the pinned daemon
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      env:
+        NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-07.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4uc2g="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-07.log")
+
+        '
+      shell: python
+    - name: Fixture a2a Retain mailbox fault inventory and exact case results
+      if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: mailbox-fault-cases
+        path: ${{ runner.temp }}/mailbox-faults
+        if-no-files-found: ignore
+        retention-days: 7
+    - name: Fixture a2a Retain native syscall fault evidence
+      if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-session-durability
+        path: '/tmp/scode-shared-records-*
+
+          /tmp/scode-shared-runtime-*
+
+          '
+        if-no-files-found: ignore
+    - name: Fixture a2a Cross-node A2A against two nodes
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-10.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tY3Jvc3Mtbm9kZS5zaA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-10.log")
+
+        '
+      shell: python
+    - name: "Fixture a2a Auth-on A2A \u2014 the node decides who a message is from"
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-11.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tYXV0aC1vbi5zaA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-11.log")
+
+        '
+      shell: python
+    - name: Fixture retain all original command logs and compiler observations
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: daemon-pair-a2a
+        path: ${{ runner.temp }}/daemon-runner-pair
+        if-no-files-found: error
+        retention-days: 7
+  fixture-split-cohost:
+    if: github.event_name == 'workflow_dispatch' && inputs.daemon_pipeline_fixture == 'split' && github.ref_name == 'ci/daemon-runner-pair-20261116'
+    needs: one-nexus-vfs-pin
+    name: Fixture split cohost
+    runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_ACCEPTANCE_BUILD_JOBS: '1'
+      FIXTURE_A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+      FIXTURE_COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+    - uses: actions/checkout@v4
+      name: Fixture cohost 0
+    - name: Fixture cohost Explain selected co-host acceptance
+      env:
+        COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+      run: 'set -eu
+
+        test "$COHOST_REQUIRED" = true
+
+        echo ''DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.''
+
+        '
+    - uses: ./.github/actions/rust-toolchain
+      name: Fixture cohost 2
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust -> target
+        shared-key: ci-dependencies
+        env-vars: ImageOS
+        save-if: false
+      name: Fixture cohost 3
+    - name: Fixture select the same observer interpreter
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Fixture install the existing process observer
+      run: python3 -m pip install psutil==7.2.2
+    - name: Fixture record original source and explicit compiler budget
+      shell: python
+      run: 'import hashlib, json, os, subprocess
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        assert os.environ["FIXTURE_A2A_REQUIRED"] == "true" and os.environ["FIXTURE_COHOST_REQUIRED"] == "true", "Original
+        scope must require BOTH real daemon lanes; no skipped case can qualify this field"
+
+        data = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip(), "cpus": os.cpu_count(),
+        "compilerCap": os.environ["SCODE_ACCEPTANCE_BUILD_JOBS"], "testPriority": "Normal; original executor lowers only compiler/linker
+        children", "callerCargoVariables": {k: os.environ.get(k) for k in ["CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG"]}, "source": {p: hashlib.sha256((root/p).read_bytes()).hexdigest() for p in ["e2e/nexus-a2a/run.sh",
+        "e2e/nexus-a2a/run-cli.sh", "e2e/nexus-a2a/run-cohost.sh", "e2e/nexus-a2a/run-managed-subprocess.sh", ".github/scripts/local_acceptance.py",
+        "rust/Cargo.lock"]}}
+
+        (out / "source-and-resources.json").write_text(json.dumps(data, indent=2)+"\n")
+
+        '
+    - name: Fixture cohost Co-host duet against a daemon built from this checkout
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-04.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tY29ob3N0LnNo"))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-04.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Managed scode against the public nexusd-cluster
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-05.sh"
+
+        script.write_bytes(base64.b64decode("c2V0IC1ldQpjYXNlICIkQTJBX1JFUVVJUkVEIiBpbgogIHRydWUpIGVjaG8gJ01hbmFnZWQgc2NvZGUgaXMgcmVxdWlyZWQgYnkgQ0xJIEEyQSBydW4uc2g7IHRoZSBpbnRlZ3JhdGVkIGdhdGUgcmVxdWlyZXMgdGhhdCBqb2IgdG8gcGFzcy4nIDs7CiAgZmFsc2UpIGUyZS9uZXh1cy1hMmEvcnVuLW1hbmFnZWQtc3VicHJvY2Vzcy5zaCA7OwogICopIGVjaG8gJzo6ZXJyb3I6Ok1pc3NpbmcgQ0xJIEEyQSBpbnB1dCBkZWNpc2lvbjsgbm8gbWFuYWdlZCBkYWVtb24gc3RhcnRlZCc7IGV4aXQgMSA7Owplc2FjCg=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-05.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Conditional owner content survives a co-host process restart
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      working-directory: rust
+      env:
+        NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-06.sh"
+
+        script.write_bytes(base64.b64decode("Y2FyZ28gLS1jb25maWcgIiRORVhVU19BMkFfQ09IT1NUX0NBUkdPX0NPTkZJRyIgdGVzdCAtLWxvY2tlZCAtcCBuZXh1c2QtY29ob3N0IC0tZmVhdHVyZXMgZGFlbW9uLGRyaXZlci1haSAtLXRlc3QgY29uZGl0aW9uYWxfY29udGVudCAtLSAtLW5vY2FwdHVyZQ=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-06.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Checkout the VFS contract used by the co-host
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      uses: ./.github/actions/vfs-search-cache
+    - name: Fixture cohost Search authorization and restart under the confined co-host owner
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-08.sh"
+
+        script.write_bytes(base64.b64decode("aWYgWyAtZSAiJFJVTk5FUl9URU1QL3Zmcy1zZWFyY2gtYnVpbGQiIF07IHRoZW4KICBlY2hvICI6OmVycm9yOjpUaGUgVkZTIGNvbnN1bWVyIHJhbiBhIHJlZHVuZGFudCBwcmUtdGVzdCBidWlsZC4gS2VlcCBmaXhlZC1kcml2ZXIgcHJld2FybWluZyBpbiB0aGUgbWFpbiBwdWJsaXNoZXI7IG5vcm1hbCBjYXJnbyB0ZXN0IGJ1aWxkcyBhbmQgZXhlY3V0ZXMgdGhpcyBjYXNlLiIKICBleGl0IDEKZmkKcHl0aG9uMyAuZ2l0aHViL3NjcmlwdHMvdmZzX3NlYXJjaF9jYWNoZS5weSB0ZXN0IC0tb3V0cHV0ICIkUlVOTkVSX1RFTVAvdmZzLXNlYXJjaC1qb3VybmV5Igo="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-08.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Retain fixed-driver build and current-runtime evidence
+      if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: vfs-search-commands
+        path: '${{ runner.temp }}/vfs-search-build
+
+          ${{ runner.temp }}/vfs-search-journey
+
+          '
+        if-no-files-found: error
+    - name: Fixture cohost The driver-ai co-host still resolves
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      working-directory: rust
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-10.sh"
+
+        script.write_bytes(base64.b64decode("Y2FyZ28gY2hlY2sgLXAgbmV4dXNkLWNvaG9zdCAtLWZlYXR1cmVzIGRhZW1vbixkcml2ZXItYWksZWdyZXNzLWdhdGUtcHJlc2lkaW8gLS1iaW4gbmV4dXNkLWNvaG9zdCAtLWxvY2tlZA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-10.log")
+
+        '
+      shell: python
+    - name: Fixture retain all original command logs and compiler observations
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: daemon-pair-cohost
+        path: ${{ runner.temp }}/daemon-runner-pair
+        if-no-files-found: error
+        retention-days: 7
+  fixture-shared-daemons:
+    if: github.event_name == 'workflow_dispatch' && inputs.daemon_pipeline_fixture == 'shared' && github.ref_name == 'ci/daemon-runner-pair-20261116'
+    needs: one-nexus-vfs-pin
+    name: Fixture shared sequential daemon journeys
+    runs-on: ubuntu-latest
+    env:
+      SCODE_TEST_BACKEND: mock
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_ACCEPTANCE_BUILD_JOBS: '1'
+      FIXTURE_A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+      FIXTURE_COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+    - uses: actions/checkout@v4
+      name: Fixture a2a 0
+    - name: Fixture a2a Explain selected daemon acceptance
+      env:
+        A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+        COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+      run: "for selected in \"$A2A_REQUIRED\" \"$COHOST_REQUIRED\"; do\n  case \"$selected\" in\n    true|false) ;;\n    *)\
+        \ echo \"::error::Missing CLI A2A or co-host input decision; no daemon build started\"; exit 1 ;;\n  esac\ndone\n\
+        echo \"DAEMON_ACCEPTANCE_SCOPE: CLI_A2A=$A2A_REQUIRED cohost_search=$COHOST_REQUIRED\"\nif [ \"$A2A_REQUIRED\" = false\
+        \ ]; then\n  echo \"Fixed VFS cache helpers changed; independent CLI A2A journeys are skipped. Current co-host, search\
+        \ authorization/restart and driver feature checks remain required.\"\nfi\nif [ \"$COHOST_REQUIRED\" = false ]; then\n\
+        \  echo \"CLI source does not build the independent co-host/search fixture; those unchanged components are skipped.\"\
+        \nfi\n"
+    - uses: ./.github/actions/rust-toolchain
+      name: Fixture a2a 2
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust -> target
+        shared-key: ci-dependencies
+        env-vars: ImageOS
+        save-if: false
+      name: Fixture a2a 3
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+      name: Fixture a2a 4
+    - name: Fixture a2a Install the shared CLI and mailbox process supervisor
+      run: python3 -m pip install psutil==7.2.2
+    - name: Fixture a2a Install native durability fault injector
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: "if ! command -v strace >/dev/null; then\n  sudo apt-get update -qq\n  sudo apt-get install -y --no-install-recommends\
+        \ strace\nfi\n"
+    - name: Fixture select the same observer interpreter
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Fixture install the existing process observer
+      run: python3 -m pip install psutil==7.2.2
+    - name: Fixture record original source and explicit compiler budget
+      shell: python
+      run: 'import hashlib, json, os, subprocess
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        assert os.environ["FIXTURE_A2A_REQUIRED"] == "true" and os.environ["FIXTURE_COHOST_REQUIRED"] == "true", "Original
+        scope must require BOTH real daemon lanes; no skipped case can qualify this field"
+
+        data = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip(), "cpus": os.cpu_count(),
+        "compilerCap": os.environ["SCODE_ACCEPTANCE_BUILD_JOBS"], "testPriority": "Normal; original executor lowers only compiler/linker
+        children", "callerCargoVariables": {k: os.environ.get(k) for k in ["CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG"]}, "source": {p: hashlib.sha256((root/p).read_bytes()).hexdigest() for p in ["e2e/nexus-a2a/run.sh",
+        "e2e/nexus-a2a/run-cli.sh", "e2e/nexus-a2a/run-cohost.sh", "e2e/nexus-a2a/run-managed-subprocess.sh", ".github/scripts/local_acceptance.py",
+        "rust/Cargo.lock"]}}
+
+        (out / "source-and-resources.json").write_text(json.dumps(data, indent=2)+"\n")
+
+        '
+    - name: Fixture a2a A2A round-trip against the pinned daemon
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      env:
+        NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-07.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4uc2g="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-07.log")
+
+        '
+      shell: python
+    - name: Fixture a2a Retain mailbox fault inventory and exact case results
+      if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: mailbox-fault-cases
+        path: ${{ runner.temp }}/mailbox-faults
+        if-no-files-found: ignore
+        retention-days: 7
+    - name: Fixture a2a Retain native syscall fault evidence
+      if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-session-durability
+        path: '/tmp/scode-shared-records-*
+
+          /tmp/scode-shared-runtime-*
+
+          '
+        if-no-files-found: ignore
+    - name: Fixture a2a Cross-node A2A against two nodes
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-10.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tY3Jvc3Mtbm9kZS5zaA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-10.log")
+
+        '
+      shell: python
+    - name: "Fixture a2a Auth-on A2A \u2014 the node decides who a message is from"
+      if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "a2a-11.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tYXV0aC1vbi5zaA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "a2a-11.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Explain selected co-host acceptance
+      env:
+        COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}
+      run: 'set -eu
+
+        test "$COHOST_REQUIRED" = true
+
+        echo ''DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.''
+
+        '
+    - name: Fixture cohost Co-host duet against a daemon built from this checkout
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-04.sh"
+
+        script.write_bytes(base64.b64decode("ZTJlL25leHVzLWEyYS9ydW4tY29ob3N0LnNo"))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-04.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Managed scode against the public nexusd-cluster
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-05.sh"
+
+        script.write_bytes(base64.b64decode("c2V0IC1ldQpjYXNlICIkQTJBX1JFUVVJUkVEIiBpbgogIHRydWUpIGVjaG8gJ01hbmFnZWQgc2NvZGUgaXMgcmVxdWlyZWQgYnkgQ0xJIEEyQSBydW4uc2g7IHRoZSBpbnRlZ3JhdGVkIGdhdGUgcmVxdWlyZXMgdGhhdCBqb2IgdG8gcGFzcy4nIDs7CiAgZmFsc2UpIGUyZS9uZXh1cy1hMmEvcnVuLW1hbmFnZWQtc3VicHJvY2Vzcy5zaCA7OwogICopIGVjaG8gJzo6ZXJyb3I6Ok1pc3NpbmcgQ0xJIEEyQSBpbnB1dCBkZWNpc2lvbjsgbm8gbWFuYWdlZCBkYWVtb24gc3RhcnRlZCc7IGV4aXQgMSA7Owplc2FjCg=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-05.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Conditional owner content survives a co-host process restart
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      working-directory: rust
+      env:
+        NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-06.sh"
+
+        script.write_bytes(base64.b64decode("Y2FyZ28gLS1jb25maWcgIiRORVhVU19BMkFfQ09IT1NUX0NBUkdPX0NPTkZJRyIgdGVzdCAtLWxvY2tlZCAtcCBuZXh1c2QtY29ob3N0IC0tZmVhdHVyZXMgZGFlbW9uLGRyaXZlci1haSAtLXRlc3QgY29uZGl0aW9uYWxfY29udGVudCAtLSAtLW5vY2FwdHVyZQ=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-06.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Checkout the VFS contract used by the co-host
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      uses: ./.github/actions/vfs-search-cache
+    - name: Fixture cohost Search authorization and restart under the confined co-host owner
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      env:
+        NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-08.sh"
+
+        script.write_bytes(base64.b64decode("aWYgWyAtZSAiJFJVTk5FUl9URU1QL3Zmcy1zZWFyY2gtYnVpbGQiIF07IHRoZW4KICBlY2hvICI6OmVycm9yOjpUaGUgVkZTIGNvbnN1bWVyIHJhbiBhIHJlZHVuZGFudCBwcmUtdGVzdCBidWlsZC4gS2VlcCBmaXhlZC1kcml2ZXIgcHJld2FybWluZyBpbiB0aGUgbWFpbiBwdWJsaXNoZXI7IG5vcm1hbCBjYXJnbyB0ZXN0IGJ1aWxkcyBhbmQgZXhlY3V0ZXMgdGhpcyBjYXNlLiIKICBleGl0IDEKZmkKcHl0aG9uMyAuZ2l0aHViL3NjcmlwdHMvdmZzX3NlYXJjaF9jYWNoZS5weSB0ZXN0IC0tb3V0cHV0ICIkUlVOTkVSX1RFTVAvdmZzLXNlYXJjaC1qb3VybmV5Igo="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-08.log")
+
+        '
+      shell: python
+    - name: Fixture cohost Retain fixed-driver build and current-runtime evidence
+      if: always() && needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: vfs-search-commands
+        path: '${{ runner.temp }}/vfs-search-build
+
+          ${{ runner.temp }}/vfs-search-journey
+
+          '
+        if-no-files-found: error
+    - name: Fixture cohost The driver-ai co-host still resolves
+      if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
+      working-directory: rust
+      run: 'import base64, importlib.util, os
+
+        from pathlib import Path
+
+        root = Path(os.environ["GITHUB_WORKSPACE"])
+
+        out = Path(os.environ["RUNNER_TEMP"]) / "daemon-runner-pair"
+
+        out.mkdir(exist_ok=True)
+
+        script = out / "cohost-10.sh"
+
+        script.write_bytes(base64.b64decode("Y2FyZ28gY2hlY2sgLXAgbmV4dXNkLWNvaG9zdCAtLWZlYXR1cmVzIGRhZW1vbixkcml2ZXItYWksZWdyZXNzLWdhdGUtcHJlc2lkaW8gLS1iaW4gbmV4dXNkLWNvaG9zdCAtLWxvY2tlZA=="))
+
+        spec = importlib.util.spec_from_file_location("original_command_executor", root / ".github/scripts/local_acceptance.py")
+
+        helper = importlib.util.module_from_spec(spec)
+
+        spec.loader.exec_module(helper)
+
+        helper.ROOT = root
+
+        helper.run_command(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], Path.cwd(), out / "cohost-10.log")
+
+        '
+      shell: python
+    - name: Fixture retain all original command logs and compiler observations
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: daemon-pair-shared
+        path: ${{ runner.temp }}/daemon-runner-pair
+        if-no-files-found: error
+        retention-days: 7
+  fixture-stop-after-a2a-failure:
+    if: always() && github.event_name == 'workflow_dispatch' && needs.fixture-split-a2a.result == 'failure'
+    needs: fixture-split-a2a
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Owned daemon-pair a2a fixture
+  fixture-stop-after-cohost-failure:
+    if: always() && github.event_name == 'workflow_dispatch' && needs.fixture-split-cohost.result == 'failure'
+    needs: fixture-split-cohost
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Owned daemon-pair cohost fixture
+  fixture-stop-after-shared-failure:
+    if: always() && github.event_name == 'workflow_dispatch' && needs.fixture-shared-daemons.result == 'failure'
+    needs: fixture-shared-daemons
+    permissions:
+      actions: write
+    uses: ./.github/workflows/ci-cancel-failed-run.yml
+    with:
+      failed-job: Owned daemon-pair shared fixture

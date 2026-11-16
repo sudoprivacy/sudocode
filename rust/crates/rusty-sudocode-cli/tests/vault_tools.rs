@@ -585,7 +585,80 @@ fn a_malformed_manifest_or_certificate_is_credential_invalid() {
         manifest.write_to(dir).expect("manifest");
     });
     assert_eq!(outside, ["credential_invalid"; 2]);
+    let nested = credential_availability(|dir| {
+        write_bundle(&dir.join("generation"), &mint(OWNER, 300), &runtime_name());
+        let mut manifest = AgentCredential::for_bundle("vault-agent");
+        manifest.server_name = runtime_name();
+        manifest.ca = "generation/ca.pem".to_string();
+        manifest.cert = "generation/agent.pem".to_string();
+        manifest.key = "generation/agent-key.pem".to_string();
+        manifest.write_to(dir).expect("manifest");
+    });
+    assert_eq!(nested, ["credential_invalid"; 2]);
 }
+
+/// Two generations of one agent's bundle, each with its own CA and key, as an
+/// in-place rewrite produces them. Every mix of their files is what a read
+/// that straddles the rewrite can see; none of them may be dialled with.
+#[test]
+fn every_mix_of_two_generations_is_credential_inconsistent() {
+    let generations = [mint(OWNER, 300), mint(OWNER, 300)];
+    for mix in 0..8_usize {
+        let pick = |file: usize| &generations[(mix >> file) & 1];
+        let bundle = Bundle {
+            ca: pick(0).ca.clone(),
+            cert: pick(1).cert.clone(),
+            key: pick(2).key.clone(),
+        };
+        let env = Env::new();
+        env.write_user_vault(&env.vault(&closed_endpoint()));
+        write_bundle(&env.credentials(), &bundle, &runtime_name());
+        let expected = if mix == 0 || mix == 7 {
+            "vault_unavailable"
+        } else {
+            "credential_inconsistent"
+        };
+        assert_eq!(env.list_availability(), [expected; 2], "mix {mix:03b}");
+    }
+}
+
+/// A bundle file that is a link is refused even when it points at a valid
+/// bundle, so "inside the bundle" holds on disk and not only in the name. The
+/// credential directory itself may be a link, as a `current` link switched
+/// between generation directories is.
+#[test]
+fn a_linked_bundle_file_is_refused_and_a_linked_bundle_directory_is_followed() {
+    let env = Env::new();
+    let generation = env.path("generation-1");
+    write_bundle(&generation, &mint(OWNER, 300), &runtime_name());
+    let mut vault = env.vault(&closed_endpoint());
+    link(&generation, &env.credentials());
+    env.write_user_vault(&vault);
+    assert_eq!(env.list_availability(), ["vault_unavailable"; 2]);
+
+    let linked = env.path("linked-certificate");
+    fs::create_dir_all(&linked).expect("bundle directory");
+    for name in ["credential.json", "ca.pem", "agent-key.pem"] {
+        fs::copy(generation.join(name), linked.join(name)).expect("bundle file");
+    }
+    link(&generation.join("agent.pem"), &linked.join("agent.pem"));
+    set(&mut vault, "/credentialDir", json!(linked));
+    env.write_user_vault(&vault);
+    assert_eq!(env.list_availability(), ["credential_invalid"; 2]);
+}
+
+fn link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("link");
+    #[cfg(windows)]
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link).expect("directory link");
+    } else {
+        std::os::windows::fs::symlink_file(target, link).expect("file link");
+    }
+}
+
+
 
 #[test]
 fn an_expired_certificate_is_credential_expired() {

@@ -18,9 +18,10 @@ import { takeClaudeDeliveries } from './claudeWake';
  * enrolls `claude-<32 hex>` through the operator's adapter, later starts reuse
  * the original Agent and ACP session. The bridge owns the session's mailbox
  * (peerInput v3) and appends budgeted deliveries to the session's spool; the
- * `--claude-watch` SessionStart hook has Claude Code watch the spool and the
- * `--claude-deliver` FileChanged hook (asyncRewake) hands each new delivery to
- * Claude, the counterpart of the `thread/queue/add` a Codex attachment uses.
+ * `--claude-watch` SessionStart and CwdChanged hook has Claude Code watch the
+ * spool and the `--claude-deliver` FileChanged hook (asyncRewake) hands each
+ * new delivery to Claude, the counterpart of the `thread/queue/add` a Codex
+ * attachment uses.
  */
 export interface ClaudeAutojoinConfig {
   version: 1;
@@ -92,8 +93,8 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
   } finally { await delivery.close(); }
 }
 
-/** Claude Code's JSON hook input names the session, and for FileChanged the path and event. */
-function hookInput(text: string): { session_id?: unknown; file_path?: unknown; event?: unknown } {
+/** Claude Code's JSON hook input names the session and the hook event, and for FileChanged the path and event. */
+function hookInput(text: string): { session_id?: unknown; hook_event_name?: unknown; file_path?: unknown; event?: unknown } {
   const value = JSON.parse(text || '{}') as unknown;
   return value && typeof value === 'object' ? value : {};
 }
@@ -103,16 +104,28 @@ const samePath = (left: string, right: string) => {
   try { return fs.realpathSync(left) === fs.realpathSync(right); } catch { return false; }
 };
 
-/** SessionStart: the JSON that has Claude Code watch this session's spool, or
- * nothing for a session without an Agent. Local files only: no network, no scode. */
+/** The hook events whose output names the spool in `watchPaths`. On every
+ * working-directory change, including a shell that returns to the project
+ * after a command ran elsewhere, Claude Code rebuilds the dynamic watch list
+ * from the CwdChanged hooks' output alone and drops what SessionStart named. */
+const WATCH_EVENTS = new Set(['SessionStart', 'CwdChanged']);
+
+/** SessionStart and CwdChanged: the JSON that has Claude Code watch this
+ * session's spool, or nothing for a session without an Agent. Local files
+ * only: no network, no scode. */
 export function claudeWatch(file: string, input: string, environment: NodeJS.ProcessEnv = process.env): string | undefined {
   const config = readClaudeAutojoinConfig(file);
   if (!joinsAgentNetwork(environment)) return undefined;
-  const spool = claudeWakeSpool(config, String(hookInput(input).session_id ?? ''));
+  const hook = hookInput(input);
+  const event = hook.hook_event_name;
+  if (typeof event !== 'string' || !WATCH_EVENTS.has(event)) {
+    throw new Error('--claude-watch serves the SessionStart and CwdChanged hooks');
+  }
+  const spool = claudeWakeSpool(config, String(hook.session_id ?? ''));
   // The watched path exists before the bridge's first delivery.
   fs.mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
   fs.writeFileSync(spool, '', { flag: 'a', mode: 0o600 });
-  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', watchPaths: [spool] } });
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: event, watchPaths: [spool] } });
 }
 
 /** FileChanged: the text of this session's new deliveries, each claimed by

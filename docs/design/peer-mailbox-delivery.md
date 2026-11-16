@@ -168,7 +168,9 @@ On Codex it is a queued input with
 `clientUserMessageId = scode-wake:<actor>:<hash of k>:<n>`. On Claude Code it
 is one entry appended to the session's private spool, carrying
 `delivery = <hash of k>:<n>` and the offer's heads. The session's
-`SessionStart` hook names the spool in `watchPaths`. On each change Claude Code
+`SessionStart` and `CwdChanged` hooks name the spool in `watchPaths`; Claude
+Code rebuilds the watch list from the `CwdChanged` output on every
+working-directory change, so both register it. On each change Claude Code
 runs the session's `FileChanged` hook (`asyncRewake`), which claims the
 complete entries no earlier run claimed, each exactly once, and exits 2 with
 the newest one's text: Claude reads it within the current turn, or the session
@@ -415,13 +417,14 @@ runs for the new binary, and reception resumes when it passes.
 
 Model-endpoint requests, native turns and delivery turns are counted separately.
 
-Claude Code adds two cases, run in an interactive session with the bridge's
-`SessionStart` and `FileChanged` hooks:
+Claude Code adds three cases, run in an interactive session with the bridge's
+`SessionStart`, `CwdChanged` and `FileChanged` hooks:
 
 | Case | Expected |
 |---|---|
 | delivery while busy | A frame arriving mid-turn is presented within that turn; the time from arrival to presentation is recorded |
 | hooks not installed | A session without the hooks receives no delivery; the frame stays unread and its spool entry stays unclaimed |
+| working directory changed | After a command changes the working directory, including one the shell resets, a later frame is still presented |
 The model endpoint is deterministic, so these cases prove the protocol
 branches and the request bytes under one configuration, not that a real model
 follows the read-alone instruction. Each qualification stands on its own runs.

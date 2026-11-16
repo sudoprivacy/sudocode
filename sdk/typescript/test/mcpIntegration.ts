@@ -238,6 +238,14 @@ async function checkClaudeHooks(): Promise<void> {
     { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', watchPaths: [spool] } }) + '\n', stderr: '' });
   assert.equal(fs.readFileSync(spool, 'utf8'), '', 'the watched spool exists before the first delivery');
   if (process.platform !== 'win32') assert.equal(fs.statSync(spool).mode & 0o777, 0o600, 'the spool is private');
+  // Claude Code rebuilds its watch list from CwdChanged output on every working-directory change.
+  assert.deepEqual(await claude.hook('--claude-watch', { session_id: sessionId, hook_event_name: 'CwdChanged',
+    old_cwd: directory, new_cwd: root }),
+    { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'CwdChanged', watchPaths: [spool] } }) + '\n', stderr: '' },
+    'a working-directory change names the same spool again');
+  const misplaced = await claude.hook('--claude-watch', { session_id: sessionId, hook_event_name: 'FileChanged' });
+  assert.equal(misplaced.code, 1, 'another event gets no watch list it would misread');
+  assert.match(misplaced.stderr, /serves the SessionStart and CwdChanged hooks/);
   const other = randomUUID();
   assert.deepEqual(await claude.hook('--claude-watch', { session_id: other }, 'sdk-cli'), nothing, 'a session without an Agent watches nothing');
   assert.ok(!fs.existsSync(claude.spool(other)));

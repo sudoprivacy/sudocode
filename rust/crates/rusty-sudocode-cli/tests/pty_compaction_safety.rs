@@ -3254,6 +3254,26 @@ fn chrome_compaction_session(
     automatic: bool,
 ) -> (TestEnv, PathBuf, pty_expect::PtySession) {
     let env = budget_env("compaction-chrome", provider);
+    let initialized = std::process::Command::new("git")
+        .args([
+            "init",
+            "-q",
+            "-b",
+            "compaction-controls-branch-name-longer-than-the-footer-budget",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_PREFIX")
+        .current_dir(env.workspace_root())
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
     let path = budget_fixture(&env);
     if automatic {
         let mut source = Session::load_from_path(&path).unwrap();
@@ -3357,7 +3377,7 @@ fn compaction_chrome_keeps_queued_input_and_esc_flush_does_not_cancel() {
             Duration::from_secs(30),
             "compaction identity fits a narrow terminal",
         );
-        cli.resize(50, 160).unwrap();
+        cli.resize(50, 80).unwrap();
         chrome_submit(&mut cli, "CHROME_QUEUED_TASK", "\t");
         common::expect_screen(
             &cli,
@@ -3392,6 +3412,7 @@ fn compaction_chrome_keeps_queued_input_and_esc_flush_does_not_cancel() {
                 .all(is_compaction_request),
             "no task request before checkpoint completion"
         );
+        cli.resize(50, 160).unwrap();
         provider.response_released.store(true, Ordering::Relaxed);
         common::expect_screen(
             &cli,

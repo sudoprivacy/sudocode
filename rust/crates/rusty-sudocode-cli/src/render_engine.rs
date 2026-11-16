@@ -550,10 +550,21 @@ impl EngineEventRenderer {
                 RenderOutcome::Done
             }
             EngineEvent::Compaction(progress) => {
+                // Successful/cancelled manual management returns the complete
+                // report, with removed/kept message counts, as its response.
+                // Failed management has no response, so render its report here.
+                if progress.trigger == "manual" && progress.status != engine_events::CompactionStatus::Failed {
+                    return RenderOutcome::Continue;
+                }
                 if let Some(report) = progress.report {
                     if self.compaction_runs.insert(report.run_id.clone()) {
                         self.finish_response();
-                        self.write_block(&format_compaction_notice(&report), OutputBlock::Notice);
+                        let text = if progress.trigger == "manual" {
+                            commands::reports::format_compaction_report(&report)
+                        } else {
+                            format_compaction_notice(&report)
+                        };
+                        self.write_block(&text, OutputBlock::Notice);
                         self.resume_spinner();
                     }
                 }

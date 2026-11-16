@@ -864,7 +864,18 @@ pub fn format_compaction_report(report: &runtime::CompactionReport) -> String {
     if let Some(reason) = &report.reason {
         let _ = write!(text, "\n  Reason           {reason}");
     }
+    if let Some(history) = compaction_history_notice(report) {
+        let _ = write!(text, "\n  Transcript       {history}");
+    }
     text
+}
+
+fn compaction_history_notice(report: &runtime::CompactionReport) -> Option<&'static str> {
+    matches!(
+        report.outcome,
+        runtime::CompactionOutcome::Failed | runtime::CompactionOutcome::Cancelled
+    )
+    .then_some("history preserved")
 }
 
 #[must_use]
@@ -908,6 +919,9 @@ pub fn format_compaction_notice(report: &runtime::CompactionReport) -> String {
     }
     if let Some(reason) = &report.reason {
         let _ = write!(text, "; {reason}");
+    }
+    if let Some(history) = compaction_history_notice(report) {
+        let _ = write!(text, "; {history}");
     }
     text.push(']');
     text

@@ -143,6 +143,11 @@ impl Controller {
                             let _ = notifications.send(message);
                         }
                     }
+                    // A close before the handshake is the host refusing this
+                    // connection; its reason is the diagnosis.
+                    Some(SessionPayload::Closed { reason }) if ready_tx.is_some() => {
+                        return Err(format!("session closed before the handshake: {reason}"));
+                    }
                     Some(SessionPayload::Closed { .. }) => break,
                     None => {}
                 }
@@ -159,9 +164,20 @@ impl Controller {
             session_id: String::new(),
             notifications: Mutex::new(received_notifications),
         };
-        controller.session_id = ready_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("controller initialize/session-open handshake");
+        controller.session_id = match ready_rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(id) => id,
+            // A worker that ended before the handshake holds the reason.
+            Err(error) => {
+                let worker = controller.worker.take().expect("controller worker");
+                let reason = if worker.is_finished() {
+                    format!("{:?}", worker.join())
+                } else {
+                    controller.worker = Some(worker);
+                    "worker still running".to_string()
+                };
+                panic!("controller initialize/session-open handshake: {error}: {reason}");
+            }
+        };
         controller
     }
 

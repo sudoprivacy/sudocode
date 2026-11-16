@@ -61,8 +61,11 @@ export interface ClaudeDelivery {
  * `<session>.delivery.epoch`, which every bridge of the session touches, or
  * `none`. Each key has three deliveries, each logged and synced before its
  * spool entry is written. A head is delivered again only while it is unread
- * and at least ten minutes after this bridge last presented it. Only the
- * model's acknowledgement through `scode_inbox` retires a frame.
+ * and at least ten minutes after this bridge last presented it. The spacing is
+ * kept per head by time alone: scode's unread count is a polled hint that can
+ * read zero for a moment, and a head that is offered again with the same start
+ * was never committed. Only the model's acknowledgement through `scode_inbox`
+ * retires a frame.
  *
  * One bridge per session writes the log and the spool. Its claim is the
  * highest generation in `<session>.delivery.owner/`, created exclusively (a
@@ -155,9 +158,11 @@ export function openClaudeDelivery(options: { stateDirectory: string; sessionId:
         if (closed || !journal || !owns()) return;
         const heads = scodeMailboxHeads(offer);
         if (offer.unread && !heads.length) throw new Error('Unread mailbox has no offered head');
-        if (!heads.length) { presented.clear(); status = { state: 'idle' }; return; }
+        const now = performance.now();
+        for (const [id, at] of presented) if (now - at >= REDELIVERY_MS) presented.delete(id);
+        if (!heads.length) { status = { state: 'idle' }; return; }
         if (!offer.text) throw new Error('Unread mailbox offer has no presentation');
-        const now = performance.now(), current = epoch();
+        const current = epoch();
         let exhausted: ClaudeDeliveryStatus | undefined;
         for (const head of heads) {
           const key = { conversation: head.conversation, start: head.start, epoch: current };
@@ -210,8 +215,8 @@ export function openClaudeDelivery(options: { stateDirectory: string; sessionId:
     detach: release,
     unread(count) {
       if (count > 0) { void evaluate(); return; }
-      // Nothing is unread, so there is no head to deliver or to space out.
-      chain = chain.then(() => { presented.clear(); status = { state: 'idle' }; });
+      // A hint: the next offer is authoritative, and the spacing stays.
+      chain = chain.then(() => { status = { state: 'idle' }; });
     },
     status() {
       if (closed) return { state: 'closed' };

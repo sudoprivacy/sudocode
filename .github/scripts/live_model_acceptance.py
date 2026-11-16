@@ -129,6 +129,11 @@ def stop_process(process):
 
 
 def main():
+    # Cargo logs carry box drawing and other text a Windows pipe's ANSI code
+    # page cannot encode. Printing a failure's log tail must not crash the
+    # runner and replace the classified failure with runner_failure.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=sorted(SUITES), default="smoke")
     parser.add_argument("--execute", action="store_true", help="Authorize this invocation's paid model calls")

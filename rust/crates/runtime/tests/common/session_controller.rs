@@ -51,6 +51,23 @@ fn permission_reply(message: &Value) -> Result<Value, String> {
     )
 }
 
+/// The JSON-RPC message for one fixture request. A request that wants a reply
+/// gets the next fixture ID and waits in `pending` for its answer.
+fn fixture_message(
+    request: ControlRequest,
+    next_request: &mut u64,
+    pending: &mut BTreeMap<String, mpsc::SyncSender<Value>>,
+) -> Value {
+    let mut message = json!({"jsonrpc":"2.0","method":request.method,"params":request.params});
+    if let Some(reply) = request.reply {
+        let id = format!("fixture-request-{next_request}");
+        *next_request += 1;
+        message["id"] = json!(id);
+        pending.insert(id, reply);
+    }
+    message
+}
+
 impl Controller {
     pub fn attach(client: &Arc<NexusVfsClient>, started: &Value, auth: &str) -> Self {
         Self::attach_session(client, started, auth, "/", None)
@@ -93,15 +110,10 @@ impl Controller {
             let mut next_request = 0u64;
             while !stop.load(Ordering::Acquire) {
                 while let Ok(request) = incoming.try_recv() {
-                    let mut message =
-                        json!({"jsonrpc":"2.0","method":request.method,"params":request.params});
-                    if let Some(reply) = request.reply {
-                        let id = format!("fixture-request-{next_request}");
-                        next_request += 1;
-                        message["id"] = json!(id);
-                        pending.insert(id, reply);
-                    }
-                    send(&mut codec, message)?;
+                    send(
+                        &mut codec,
+                        fixture_message(request, &mut next_request, &mut pending),
+                    )?;
                 }
                 let result = connection
                     .stream_read_at(&endpoint.transcript, offset, true, 200, &token)
@@ -164,21 +176,26 @@ impl Controller {
             session_id: String::new(),
             notifications: Mutex::new(received_notifications),
         };
-        controller.session_id = match ready_rx.recv_timeout(Duration::from_secs(30)) {
+        controller.session_id = controller.await_session_id(&ready_rx);
+        controller
+    }
+
+    /// The session ID the handshake reports. A worker that ended before the
+    /// handshake holds the reason.
+    fn await_session_id(&mut self, ready: &mpsc::Receiver<String>) -> String {
+        match ready.recv_timeout(Duration::from_secs(30)) {
             Ok(id) => id,
-            // A worker that ended before the handshake holds the reason.
             Err(error) => {
-                let worker = controller.worker.take().expect("controller worker");
+                let worker = self.worker.take().expect("controller worker");
                 let reason = if worker.is_finished() {
                     format!("{:?}", worker.join())
                 } else {
-                    controller.worker = Some(worker);
+                    self.worker = Some(worker);
                     "worker still running".to_string()
                 };
                 panic!("controller initialize/session-open handshake: {error}: {reason}");
             }
-        };
-        controller
+        }
     }
 
     pub fn request(&self, method: &str, params: Value) -> Value {

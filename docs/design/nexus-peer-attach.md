@@ -58,9 +58,23 @@ node binding even when configuration or credentials cannot yet be loaded:
 Failures retain their specific cause in status and tool results. A malformed
 record, unsupported version, invalid endpoint/directory, missing bundle or
 identity mismatch leaves the selected node unavailable rather than stopping an
-ordinary standalone session or selecting disk. Credentials are minted by the
-node owner; `scode` never mints one. An explicitly Nexus-mounted model still
-needs that node's authenticated filesystem.
+ordinary standalone session or selecting disk. An explicitly Nexus-mounted
+model still needs that node's authenticated filesystem.
+
+Credentials are issued by the node owner; `scode` holds no CA or signing key.
+When the user selected shared mode and this OS user owns the registered local
+Box named by the record, an interactive or ACP session asks that Box to issue
+its own Agent the first time it attaches without a credential. It runs the Box's
+pinned Node executable, whose online `auth mint` goes to the Box's loopback
+listener under an owner lock and never uses `--allow-existing`. Only a name
+derived from the workspace's own path joins this way; a configured `agentName`
+or the home directory joins through `scode setup --mode shared` in that
+workspace. A name already claimed elsewhere is refused by Nexus. The credential
+is accepted only with the Node's online receipt and a manifest naming that
+Agent; anything else the attempt wrote is moved to `.unconfirmed-<name>-<time>`
+and never used. Any other node, a stopped Box or a refusal leaves the binding
+pending with that cause, the outcome of the join, and the recovery:
+`scode setup --mode shared` in the workspace, or the node owner minting the name.
 
 Namespace selection, including the pending binding, is cached per Agent for the
 process lifetime. Tools and receiver therefore cannot select different stores.

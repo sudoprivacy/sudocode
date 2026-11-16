@@ -109,6 +109,9 @@ impl HostContext {
         // afterwards would leave the kernel's view of who is writing and the
         // prompt's claim about who this is free to disagree.
         let agent_name = agent_name_under(&cwd);
+        if joins_automatically(&agent_name, &cwd) {
+            crate::peer::allow_join(&agent_name);
+        }
         let (fs, kernel) = crate::local_kernel::boot_session_host(&cwd, &extra_roots, &agent_name)?;
         let runtime_observation = match crate::peer::attach(&agent_name) {
             crate::peer::Peer::Disk(_) => Some(Arc::new(
@@ -250,18 +253,11 @@ fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
 /// The agent name a session under `root` answers to: what the configuration
 /// there says, else what [`runtime::mailbox::local_agent_name`] derives from
 /// the directory itself.
+#[must_use]
 pub fn agent_name_under(root: &Path) -> String {
     let loader = ConfigLoader::default_for(root);
-    let configured = loader.load().ok().and_then(|rc| {
-        rc.get("agentName")
-            .and_then(|v| v.as_str().map(str::to_string))
-    });
-    if let Some(name) = configured
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return name.to_string();
+    if let Some(name) = configured_agent_name(&loader) {
+        return name;
     }
     // No configured name: mint one from the workspace and persist it, so this
     // identity is stable across restarts instead of being re-derived every boot
@@ -272,6 +268,33 @@ pub fn agent_name_under(root: &Path) -> String {
     let minted = runtime::mailbox::local_agent_name(None, root);
     let _ = loader.set_agent_name(&minted);
     minted
+}
+
+/// Only the identity derived from this workspace's own path joins a node
+/// without being asked. A configured `agentName` may come from the repository,
+/// and the home directory's settings are every unconfigured workspace's
+/// defaults, so neither is claimed automatically.
+fn joins_automatically(agent_name: &str, cwd: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    agent_name == runtime::mailbox::local_agent_name(None, cwd)
+        && runtime::user_paths::home_dir().is_none_or(|home| canonical(&home) != canonical(cwd))
+}
+
+/// The name [`agent_name_under`] would answer to, without persisting it.
+#[must_use]
+pub fn peek_agent_name_under(root: &Path) -> String {
+    configured_agent_name(&ConfigLoader::default_for(root))
+        .unwrap_or_else(|| runtime::mailbox::local_agent_name(None, root))
+}
+
+fn configured_agent_name(loader: &ConfigLoader) -> Option<String> {
+    let configured = loader.load().ok().and_then(|rc| {
+        rc.get("agentName")
+            .and_then(|v| v.as_str().map(str::to_string))
+    })?;
+    let name = configured.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
@@ -883,4 +906,29 @@ pub(crate) fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     ))
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::joins_automatically;
+
+    #[test]
+    fn only_the_workspace_derived_name_joins_without_being_asked() {
+        let workspace = tempfile::tempdir().unwrap();
+        let derived = runtime::mailbox::local_agent_name(None, workspace.path());
+        assert!(joins_automatically(&derived, workspace.path()));
+        // A configured name, including one a repository ships, needs `scode setup`.
+        assert!(!joins_automatically("reviewer", workspace.path()));
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(!joins_automatically(&derived, elsewhere.path()));
+    }
+
+    #[test]
+    fn the_home_directory_never_joins_automatically() {
+        let Some(home) = runtime::user_paths::home_dir() else {
+            return;
+        };
+        let derived = runtime::mailbox::local_agent_name(None, &home);
+        assert!(!joins_automatically(&derived, &home));
+    }
 }

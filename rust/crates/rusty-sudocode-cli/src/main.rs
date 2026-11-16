@@ -3115,7 +3115,8 @@ fn spawn_a2a_health_tip(agent: String, ui: repl_ui::UiCommandSender) {
         .spawn(move || {
             let mut shown = None;
             loop {
-                let tip = a2a_health_tip(&engine_host::peer::status(&agent).health);
+                let status = engine_host::peer::status(&agent);
+                let tip = a2a_health_tip(&status.health, status.error.as_deref());
                 if tip != shown {
                     ui.set_status_tip(repl_ui::StatusSource::A2a, tip.clone());
                     shown = tip;
@@ -3125,7 +3126,10 @@ fn spawn_a2a_health_tip(agent: String, ui: repl_ui::UiCommandSender) {
         });
 }
 
-fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_core::Tip> {
+fn a2a_health_tip(
+    health: &runtime::mailbox::ReceiverHealth,
+    binding_error: Option<&str>,
+) -> Option<engine_core::Tip> {
     // Important, not Urgent, for both: it stays visible at the prompt, but the
     // footer does not hold it through every turn of a session that may not use
     // A2A at all.
@@ -3134,6 +3138,11 @@ fn a2a_health_tip(health: &runtime::mailbox::ReceiverHealth) -> Option<engine_co
     }
     let priority = engine_core::TipPriority::Important;
     let what = match health.failing.as_slice() {
+        [] if health.level == "fail"
+            && binding_error.is_some_and(|error| error.contains("has no credential for agent")) =>
+        {
+            "not joined; run `scode setup --mode shared` here".to_string()
+        }
         [] if health.level == "fail" => "node binding unusable".to_string(),
         [] => "receiving not yet recovered".to_string(),
         [(scope, _)] => format!("{scope} failing"),

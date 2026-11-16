@@ -187,13 +187,20 @@ fn multi_agent_setup_keeps_an_offline_box_without_installing_a_replacement() {
         );
         assert_eq!(result["mode"], "shared");
         assert_eq!(result["box"]["endpoint"], "127.0.0.1:1");
-        assert_eq!(result["box"]["agentAuthentication"], "pending");
+        assert_eq!(result["box"]["agentAuthentication"], "missing");
+        assert_eq!(result["agent"]["credential"], "missing");
+        let recovery = result["agent"]["recovery"].as_str().unwrap();
+        assert!(
+            recovery.contains("scode setup --mode shared")
+                && recovery.contains("ask the node owner to mint"),
+            "{recovery}"
+        );
         assert_eq!(result["domainJoinAccepted"], false);
         assert!(result["service"].is_null());
         assert!(!root.path().join("services").exists());
         assert_eq!(std::fs::read(&record).unwrap(), original);
     }
-    // Setup has no Agent yet: it must neither mint nor borrow another credential.
+    // This user owns no local Box: setup must neither mint nor borrow a credential.
     assert!(!root.path().join("existing-agents").exists());
     assert!(matches!(model.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
 }

@@ -44,6 +44,29 @@ pub fn node_record_present() -> bool {
     })
 }
 
+/// Whether `agent` already holds a credential bundle under `agents_dir`.
+#[must_use]
+pub fn credential_present(agents_dir: &Path, agent: &str) -> bool {
+    agents_dir
+        .join(agent)
+        .join(AgentCredential::MANIFEST)
+        .is_file()
+}
+
+/// The cause and the recovery for an Agent the node has not issued yet. One
+/// text for tool results, `/status` and `scode setup --check`.
+#[must_use]
+pub fn missing_credential(agent: &str, bundle: &Path) -> String {
+    format!(
+        "this machine's node has no credential for agent '{agent}' (expected at {}). \
+         To join, run `scode setup --mode shared` in this workspace: it enrolls \
+         '{agent}' through this OS user's local Box. If another user or machine owns \
+         the node, ask the node owner to mint '{agent}'. A running session picks up \
+         the credential without a restart",
+        bundle.display()
+    )
+}
+
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
@@ -102,6 +125,12 @@ impl NodeRecord {
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Directory holding one credential bundle per Agent name.
+    #[must_use]
+    pub fn agents_dir(&self) -> &Path {
+        Path::new(&self.agents_dir)
     }
 }
 
@@ -214,11 +243,7 @@ impl Config {
         let agents_dir = Path::new(&record.agents_dir);
         let bundle = agents_dir.join(agent);
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
-            return Err(format!(
-                "this machine's node has no credential for agent '{agent}' at {}; \
-                 ask the node owner to mint '{agent}'",
-                bundle.display()
-            ));
+            return Err(missing_credential(agent, &bundle));
         }
         let credential = AgentCredential::load(&bundle.to_string_lossy())?;
         if credential.agent != agent {

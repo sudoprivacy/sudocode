@@ -379,7 +379,7 @@ async function checkClaudeOwners(): Promise<void> {
   finally { await first.client.close().catch(() => {}); await second?.client.close(); }
 }
 
-/** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,
+/** Claude Code autojoin: each session enrolls its own claude-<workspace>-<hex> Agent once,
  * resumes it by session id, and receives deliveries through its own spool. */
 async function checkClaudeAutojoin(): Promise<void> {
   const claude = claudeInstallation('claude-autojoin');
@@ -396,7 +396,7 @@ async function checkClaudeAutojoin(): Promise<void> {
   const first = randomUUID(), second = randomUUID();
   await session(first);
   assert.equal(claude.claims().length, 1);
-  assert.match(claude.claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
+  assert.match(claude.claims()[0].actor, /^claude-[a-z0-9][a-z0-9-]{0,23}-[0-9a-f]{8}$/, 'a Claude Code session enrolls a readable claude-<workspace>-<hex> Agent');
   assert.equal(claude.claims()[0].threadId, first, 'the session id is the native root');
   await session(first);
   assert.equal(claude.claims().length, 1, 'resuming a session reuses its original Agent and ACP session');

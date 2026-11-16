@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { connectScode, type ScodeAcpConfig } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity } from './scodeA2a';
 import { CodexEnrollmentError, type CodexAgentProfile } from './codexAutojoin';
-import { canonicalWorkspace, identifier, type CodexAgentClaim } from './codexBindings';
+import { canonicalWorkspace, ENROLLED_ACTOR, identifier, type CodexAgentClaim } from './codexBindings';
 import { runEnrollmentCommand } from './enrollmentCommand';
 
 interface OperatorGrant {
@@ -180,7 +180,7 @@ function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; 
   const bytes=recordBytes(file);const grant=JSON.parse(bytes.toString('utf8')) as OperatorGrant;
   validateGrant(grant);
   if(!claim || claim.version!==1 || Object.keys(claim).sort().join(',')!=='actor,operationId,threadId,version,workspace'
-      || !/^(?:codex|claude)-[0-9a-f]{32}$/.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Agent enrollment claim');
+      || !ENROLLED_ACTOR.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Agent enrollment claim');
   canonicalWorkspace(claim.workspace);
   // No Node/CA private key or install authority is copied into this response.
   return {grant,grantSha256:createHash('sha256').update(bytes).digest('hex')};
@@ -291,7 +291,7 @@ export function refreshCodexProfiles(file: string): ProfileRefresh[] {
   validateGrant(grant);
   if(!existsSync(grant.stateDirectory))return [];
   return readdirSync(grant.stateDirectory,{withFileTypes:true})
-    .filter(entry=>entry.isDirectory() && /^(?:codex|claude)-[0-9a-f]{32}$/.test(entry.name))
+    .filter(entry=>entry.isDirectory() && ENROLLED_ACTOR.test(entry.name))
     .map(entry=>entry.name).sort()
     .map((actor): ProfileRefresh=>{
       const actorDirectory=path.join(grant.stateDirectory,actor);

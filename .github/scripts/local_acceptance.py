@@ -114,7 +114,10 @@ def contract_hash(ref):
              ".github/workflows/local-acceptance-publish.yml"]
     # Resolve the complete tree once, then read by immutable object ID. Mutable
     # refs are never memoized and archive attributes cannot omit protected data.
-    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance").stdout
+    # The periodic workflow did not exist in older authentic plans. Bind it
+    # when present without changing those original contract hashes.
+    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance",
+               ".github/workflows/local-acceptance-workspace.yml").stdout
     blobs = {}
     for row in rows.split(b"\0"):
         if not row:
@@ -1049,6 +1052,9 @@ def acceptance_plan(policy, names, author):
     jobs = {}
     local_targets = []
     for name in names:
+        complementary = policy["checks"][name].get("complementary")
+        if "complementary" in policy["checks"][name] and (name != "native-workspace" or complementary != "periodic"):
+            raise RuntimeError(f"Invalid complementary acceptance responsibility for {name}")
         if not name.startswith("native-"):
             continue
         targets = policy["checks"][name].get("targets", DEFAULT_NATIVE_TARGETS)
@@ -1063,6 +1069,8 @@ def acceptance_plan(policy, names, author):
             target = NATIVE_TARGETS[identifier]
             if target["system"] == author["system"] and target.get("architecture", architecture) == architecture:
                 covered.append(identifier)
+                continue
+            if complementary == "periodic":
                 continue
             family = "sdk" if name == "native-sdk" else "native"
             key = family, target["runner"]
@@ -1083,9 +1091,29 @@ def acceptance_plan(policy, names, author):
             "ci": list(jobs.values()), "deployment_verified": False}
 
 
+def compatible_acceptance_plan(policy, names, author, plan):
+    """Accept only the current plan or the exact former full workspace split."""
+    current = acceptance_plan(policy, names, author)
+    if plan == current:
+        return True
+    workspace = policy["checks"].get("native-workspace", {})
+    if "native-workspace" not in names or workspace.get("complementary") != "periodic":
+        return False
+    legacy = copy.deepcopy(policy)
+    del legacy["checks"]["native-workspace"]["complementary"]
+    return plan == acceptance_plan(legacy, names, author)
+
+
 def report_plan(plan, current_environment=False):
     label = {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[plan["author"]["system"]]
     lines = [f"Author-local {label}: {', '.join(plan['local_checks'])}"]
+    workspace = "native-workspace" in plan["local_checks"]
+    periodic = workspace and not any("native-workspace" in job["checks"] for job in plan["ci"])
+    if periodic:
+        lines.append("The original native-workspace profile runs on the original author host. Other OS workspace "
+                     "execution moves to weekly/manual three-platform regression; OS-specific failures may "
+                     "surface after merge. Selected complementary native journeys and three-platform queue "
+                     "Clippy remain required. Periodic execution costs belong in lifecycle accounting.")
     concurrency = None
     if current_environment and "native-workspace" in plan["local_checks"]:
         cap = os.environ.get("SCODE_ACCEPTANCE_TEST_THREADS")
@@ -1127,6 +1155,13 @@ def report_plan(plan, current_environment=False):
     lines.append("Scope: source tests only; installation and deployed-system acceptance are not verified by this receipt.")
     print("\n".join(lines), flush=True)
     print("ACCEPTANCE_PLAN=" + json.dumps(plan, separators=(",", ":")), flush=True)
+    if workspace:
+        print("WORKSPACE_ACCEPTANCE_SCOPE=" + canonical({
+            "author": "full", "complementary_workspace": "periodic" if periodic else "per_pr",
+            "cross_os_workspace_coverage_reduced": periodic,
+            "periodic_workflow": ".github/workflows/local-acceptance-workspace.yml" if periodic else None,
+            "periodic_costs_must_be_accounted": periodic,
+        }).decode(), flush=True)
     if concurrency is not None:
         print("LOCAL_ACCEPTANCE_CONCURRENCY=" + json.dumps(concurrency, separators=(",", ":")), flush=True)
     print("RELEASE_ACCEPTANCE_SCOPE=" + json.dumps({"selected": release,
@@ -1155,7 +1190,7 @@ def host():
 
 def changed_contract_files(head, base):
     protected = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
-                 ".github/workflows/local-acceptance-publish.yml"]
+                 ".github/workflows/local-acceptance-publish.yml", ".github/workflows/local-acceptance-workspace.yml"]
     return sorted(path for path in changed_paths(value("merge-base", base, head), head)
                   if path in protected or path.startswith(".github/local-acceptance/"))
 
@@ -1509,8 +1544,11 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     policy = load_policy(policy_ref)
     names = selected(policy, changed_paths(receipt["base"], head), base=receipt["base"], head=head)
     plan = acceptance_plan(policy, names, receipt["host"])
-    if not names or receipt.get("plan") != plan:
+    if not names or not compatible_acceptance_plan(policy, names, receipt["host"], receipt.get("plan")):
         raise RuntimeError("Execution plan differs from the protected source/author responsibility plan")
+    if receipt["plan"] != plan:
+        print("LOCAL_ACCEPTANCE_FULL_WORKSPACE_PLAN_REUSED: original signed full complementary plan retained; "
+              "no checks executed or signatures changed by this responsibility proof.", flush=True)
     if contract_hash(planned_policy) != contract_hash(protected):
         before = reachable_profile_commands_hashes(planned_policy, names)
         current = reachable_profile_commands_hashes(protected, names)
@@ -1649,15 +1687,16 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
     declared = original_plan.get("local_checks") if isinstance(original_plan, dict) else None
     ordered = [name for name in load_policy(policy_ref)["checks"] if isinstance(declared, list) and name in declared]
     if (declared != ordered or not set(checks).issubset(declared)
-            or original_plan != acceptance_plan(load_policy(policy_ref), declared, receipt["host"])):
+            or not compatible_acceptance_plan(load_policy(policy_ref), declared, receipt["host"], original_plan)):
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
     if original_plan != plan:
-        print("Reusing unchanged completed execution from an earlier scope; the current protected plan "
-              "still determines required checks and missing CI hosts.", flush=True)
+        print("Reusing unchanged completed execution from an earlier scope; current protected checks "
+              "remain required and a separately signed full launch retains its original CI hosts.", flush=True)
     if not completed_only and "execution_plan" in receipt:
         launch = verify_execution_plan(receipt["execution_plan"], head, base, policy_ref, signers_ref)
         if launch["host"] != receipt["host"] or launch["plan"] != original_plan:
             raise RuntimeError("Completed author evidence differs from its signed parallel execution plan")
+        plan = launch["plan"]
     if completed_only:
         print(f"Verified completed profiles for {head[:12]}: {', '.join(checks)}; full acceptance still required.", flush=True)
     else:
@@ -2360,6 +2399,16 @@ def perform_check(args, attempt):
     if not needed:
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
+    execution_plan = getattr(args, "execution_plan", None)
+    if execution_plan is None and read_note(head, PLAN_NOTE_REF)["attestations"]:
+        prior = read_execution_plan(head, base_ref, policy_ref, signers_ref)
+        execution_plan = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
+                              if json.loads(base64.b64decode(item["payload"])) == prior)
+    if execution_plan is not None:
+        launch = verify_execution_plan(execution_plan, head, base_ref, policy_ref, signers_ref)
+        if launch["host"] != host():
+            raise RuntimeError("Use the original author host for this frozen execution plan")
+        plan = launch["plan"]
     report_plan(plan, current_environment=True)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
@@ -2414,8 +2463,8 @@ def perform_check(args, attempt):
                "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
                "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
                "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
-    if getattr(args, "execution_plan", None) is not None:
-        receipt["execution_plan"] = args.execution_plan
+    if execution_plan is not None:
+        receipt["execution_plan"] = execution_plan
     if resumed is not None:
         receipt["resumed_from"] = resumed
 
@@ -2741,24 +2790,31 @@ def start_pr(args, api=None, context=None):
         policy = load_policy(trusted)
         names = selected(policy, changed_paths(base, head), base=base, head=head)
         plan = acceptance_plan(policy, names, host())
-        if not plan["ci"]:
-            raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
         for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
             fetched = git("fetch", "--no-tags", args.remote, f"+{note_ref}:{note_ref}", check=False)
             if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
                 raise RuntimeError(fetched.stderr.decode(errors="replace"))
+        prior = None
         if read_note(head, PLAN_NOTE_REF)["attestations"]:
             prior = read_execution_plan(head, trusted, trusted)
-            if prior["plan"] != plan:
+            if prior["host"] != host():
                 raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
+            plan = prior["plan"]
+        if not plan["ci"]:
+            raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
         identity = value("config", "localAcceptance.signer")
         key = Path(value("config", "localAcceptance.key")).expanduser()
         receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
                    "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
                    "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-        envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
+        if prior is None:
+            envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
+        else:
+            envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
+                            if json.loads(base64.b64decode(item["payload"])) == prior)
         verify_execution_plan(envelope, head, trusted, trusted)
-        publish(head, envelope, args.remote, note_ref=PLAN_NOTE_REF)
+        if prior is None:
+            publish(head, envelope, args.remote, note_ref=PLAN_NOTE_REF)
         git("fetch", "--no-tags", args.remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
         with tempfile.TemporaryDirectory(prefix="scode-plan-push-") as temporary:
             hook = Path(temporary) / "pre-push"

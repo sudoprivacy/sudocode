@@ -183,15 +183,28 @@ Never commit a private key. Installation preserves existing hooks by refusing to
 overwrite them; compose an existing hook explicitly. Protected-main updates refresh
 the installed runner automatically, including when pushing an older worktree.
 
-The hook runs applicable real checks before a branch push. A Windows author runs
-the Windows workspace, resize, release and service checks locally; CI runs Linux
-and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
-author runs Linux locally; CI runs Windows and macOS. Co-host build verification
-follows the same host split when its inputs change. SDK changes additionally
+The hook runs applicable real checks before a branch push. The original author
+runs the selected native-workspace profile locally, retaining its existing
+source selection, lint, build, test and doctest commands. CI runs the other
+platforms' selected resize, service, context, example and co-host profiles;
+release checks retain their existing selection. A Windows author supplies
+Windows, a Mac author macOS, and a Linux author Linux. SDK changes additionally
 require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Full three-platform workspace execution runs weekly and on manual main dispatch
+through `local-acceptance-workspace.yml`, using the original trusted native
+executor with no changed-test selection. A ready PR changing that workflow
+also runs its three-platform matrix. This deliberately reduces per-PR coverage:
+workspace cases specific to another OS may first fail after merge in periodic
+regression. Selected complementary native journeys and three-platform queue
+Clippy remain required. Periodic runner time must be included in future
+lifecycle cost comparisons; no net saving is inferred from omitted commands.
+An authenticated older full complementary plan remains valid only when it is
+the exact former generated plan. Its original source, author, signatures,
+commands, dispatcher, workflow and full host responsibilities remain bound;
+it is retained without rewriting notes or rerunning completed profiles.
 Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
 the visual and performance journeys. The shared installer provisions native
 sidecars in the dev-profile target's `debug/deps`, which nextest puts on the

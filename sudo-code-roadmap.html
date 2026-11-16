@@ -215,6 +215,19 @@ verifies those exact PR heads and the combined Git history.</p>
 
 <h3>CI cadence and coverage (2026-10-29)</h3>
 
+<p><strong>Workspace responsibility (2026-11-16).</strong>
+The original author retains the selected <code>native-workspace</code> profile
+and its existing source selection, commands, assertions and deadlines.
+Other platforms retain their selected native journeys; three-platform queue
+Clippy is unchanged. Repeated complementary full workspace execution moves to
+weekly/manual three-platform regression through
+<code>.github/workflows/local-acceptance-workspace.yml</code>. This reduces
+per-PR cross-OS workspace coverage: OS-specific workspace failures may first
+surface after merge. Periodic execution costs must be included in lifecycle
+comparisons. Old authenticated full plans retain their exact original host
+responsibilities and signatures. Omitted command occupancy is not measured
+saving; new source still requires normal contract and hosted qualification.</p>
+
 <p><strong>Selection-script changes (2026-11-11).</strong>
 Edits confined to <code>.github/scripts/ci_input_scope.py</code> omit unchanged
 CLI/co-host daemon journeys and three-platform workspace Clippy. Real Git
@@ -1699,7 +1712,15 @@ measurement script remain available for diagnosis and earn no coverage credit.</
       assertions and ignored markers; it reduces linked executables. Isolated
       test edits compare the PR common ancestor with its HEAD, excluding
       main-only changes from native target selection. Actual branch source,
-      shared/unknown inputs, deletion and renames retain full workspace scope.</td>
+      shared/unknown inputs, deletion and renames retain full workspace scope.
+      The original author retains this selected workspace profile. Other native
+      platforms keep their selected real journeys and three-platform queue
+      Clippy; full cross-OS workspace execution moves to weekly/manual
+      <code>local-acceptance-workspace.yml</code> regression. This reduces per-PR
+      OS-specific workspace coverage and can detect failures after merge.
+      Periodic runner costs belong in lifecycle comparisons; original full
+      signed plans retain all their original host checks. No net saving or
+      one-tenth lifecycle result follows from omitted command occupancy.</td>
       <td><strong>Yes — this is the coverage measure.</strong></td>
       <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>

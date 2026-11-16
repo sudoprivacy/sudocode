@@ -52,6 +52,10 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      vfs_cache_audit:
+        description: 'Fixed-driver compiler invalidation diagnostic; NEVER merge this branch'
+        type: boolean
+        default: false
       live_only:
         description: 'Explicit paid company-key acceptance; ordinary PR/queue/main runs never call models'
         type: boolean
@@ -981,3 +985,74 @@ jobs:
           name: release-native-${{ matrix.os }}
           path: ${{ runner.temp }}/release-native
           retention-days: 30
+
+  fixture-vfs-cache-audit:
+    name: Fixed VFS compiler fingerprint diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.vfs_cache_audit && github.ref_name == 'ci/vfs-cache-input-audit-20261116'
+    needs: one-nexus-vfs-pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: .
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_ACCEPTANCE_BUILD_JOBS: '1'
+    steps:
+    - name: Diagnostic checkout immutable field source
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Diagnostic install the original compiler
+      uses: ./.github/actions/rust-toolchain
+    - name: Diagnostic select observer interpreter
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Diagnostic install original compiler observer
+      run: python3 -m pip install psutil==7.2.2
+    - name: Diagnostic restore original fixed-driver cache
+      uses: ./.github/actions/vfs-search-cache
+      with:
+        publish: 'false'
+    - name: Diagnostic execute original fixed-driver producer
+      shell: python
+      run: "import hashlib, importlib.util, json, os, subprocess, sys\nfrom pathlib import Path\n\nroot = Path(os.environ[\"\
+        GITHUB_WORKSPACE\"])\nout = Path(os.environ[\"RUNNER_TEMP\"]) / \"fixed-vfs-fingerprint-audit\"\nout.mkdir(exist_ok=False)\n\
+        \ndef digest(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\ndef load(name, path):\n    spec =\
+        \ importlib.util.spec_from_file_location(name, path)\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n\
+        \    return module\n\ndef snapshot(label):\n    selected = (\"aws-lc-sys-\", \"ring-\", \"cc-\", \"nexus-cluster-\"\
+        , \"nexus-search-plugin-\")\n    fingerprints = root / \".native-vfs/.ci-cache/target/debug/.fingerprint\"\n    rows\
+        \ = []\n    for directory in sorted(fingerprints.iterdir()) if fingerprints.exists() else []:\n        if not directory.name.startswith(selected)\
+        \ or not directory.is_dir():\n            continue\n        for path in sorted(directory.glob(\"*.json\")):\n    \
+        \        raw = path.read_bytes()\n            value = json.loads(raw)\n            row = {\"path\": str(path.relative_to(root)),\
+        \ \"sha256\": hashlib.sha256(raw).hexdigest(), \"bytes\": len(raw), \"mtimeNanos\": path.stat().st_mtime_ns, \"environment\"\
+        : []}\n            for local in value.get(\"local\", []):\n                item = local.get(\"RerunIfEnvChanged\"\
+        )\n                if item:\n                    original = item.get(\"val\")\n                    row[\"environment\"\
+        ].append({\"name\": item[\"var\"], \"present\": original is not None, \"valueSHA256\": hashlib.sha256(json.dumps(original,\
+        \ sort_keys=True).encode()).hexdigest()})\n            rows.append(row)\n    (out / (label + \"-fingerprints.json\"\
+        )).write_text(json.dumps(rows, indent=2) + \"\\n\")\n\npaths = [\".github/scripts/vfs_search_cache.py\", \".github/actions/vfs-search-cache/action.yml\"\
+        , \".github/scripts/local_acceptance.py\", \"rust/Cargo.lock\"]\nstate = {\"head\": subprocess.check_output([\"git\"\
+        , \"rev-parse\", \"HEAD\"], cwd=root).decode().strip(), \"cpus\": os.cpu_count(), \"compilerCap\": os.environ[\"SCODE_ACCEPTANCE_BUILD_JOBS\"\
+        ], \"source\": {p: digest(root/p) for p in paths}, \"knownCallerCompilerEnvironment\": {name: os.environ.get(name)\
+        \ for name in [\"CARGO_BUILD_JOBS\", \"CARGO_INCREMENTAL\", \"CARGO_PROFILE_DEV_DEBUG\", \"CARGO_PROFILE_TEST_DEBUG\"\
+        , \"ImageOS\", \"ImageVersion\"]}, \"scope\": \"Original cache producer compilation only; no current-runtime test\
+        \ or production acceptance\", \"cargoFingerprintLogging\": \"cargo::core::compiler::fingerprint=info\", \"passed\"\
+        : False}\nsnapshot(\"before\")\nhelper = load(\"original_compiler_priority_observer\", root / \".github/scripts/local_acceptance.py\"\
+        )\nhelper.ROOT = root\ntry:\n    helper.run_command([sys.executable, str(root / \".github/scripts/vfs_search_cache.py\"\
+        ), \"build\", \"--output\", str(out / \"original-producer\")], root, out / \"producer.log\", env={\"CARGO_LOG\": state[\"\
+        cargoFingerprintLogging\"]})\n    producer = load(\"original_fixed_driver\", root / \".github/scripts/vfs_search_cache.py\"\
+        )\n    state[\"fixedTrackedFilesVerifiedAfterBuild\"] = producer.verify(root / \".native-vfs\", producer.pin(root))\n\
+        \    state[\"passed\"] = True\nfinally:\n    snapshot(\"after\")\n    state[\"sourceAfter\"] = {p: digest(root/p)\
+        \ for p in paths}\n    (out / \"source-and-resources.json\").write_text(json.dumps(state, indent=2) + \"\\n\")\n \
+        \   assert state[\"sourceAfter\"] == state[\"source\"], \"Diagnostic source changed; retain original field\"\n"
+    - name: Diagnostic retain original invalidation logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fixed-vfs-fingerprint-audit
+        path: ${{ runner.temp }}/fixed-vfs-fingerprint-audit
+        if-no-files-found: error
+        retention-days: 7

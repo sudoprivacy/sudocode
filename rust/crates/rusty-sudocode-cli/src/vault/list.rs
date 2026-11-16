@@ -1,6 +1,7 @@
 //! `vault_list`: every configured operation, labelled configured-unqualified,
 //! with whether its secret is reachable through this agent's credential.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -9,7 +10,7 @@ use serde_json::{json, Map, Value};
 use service_host::vault_client;
 
 use super::credential;
-use super::settings::{self, Operation, SecretRef, VaultSettings};
+use super::settings::{self, Operation, VaultSettings};
 use super::Refusal;
 
 const NOTE: &str = "operations are configured locally, not authorized by the backend; \
@@ -46,17 +47,30 @@ fn describe(operation: &Operation, availability: &str) -> Value {
     })
 }
 
-/// One credential snapshot and one connection, then a metadata-only lookup of
-/// each exact ref. A credential or connection failure applies to every operation.
+/// One credential snapshot and one connection, then one metadata listing per
+/// configured namespace. Only whether each configured key is live leaves this
+/// process; the rest of a listing is discarded.
 fn availability(settings: &VaultSettings) -> Vec<&'static str> {
-    match connect(settings) {
-        Ok(client) => settings
-            .operations
-            .iter()
-            .map(|operation| secret_state(&client, &operation.secret_ref))
-            .collect(),
-        Err(code) => vec![code; settings.operations.len()],
-    }
+    let client = match connect(settings) {
+        Ok(client) => client,
+        Err(code) => return vec![code; settings.operations.len()],
+    };
+    let mut listings = BTreeMap::new();
+    settings
+        .operations
+        .iter()
+        .map(|operation| {
+            let secret_ref = &operation.secret_ref;
+            let listing = listings
+                .entry(secret_ref.namespace.as_str())
+                .or_insert_with(|| live_keys(&client, &secret_ref.namespace));
+            match listing {
+                Ok(keys) if keys.contains(&secret_ref.key) => "available",
+                Ok(_) => "secret_absent",
+                Err(code) => *code,
+            }
+        })
+        .collect()
 }
 
 fn connect(settings: &VaultSettings) -> Result<NexusVfsClient, &'static str> {
@@ -77,14 +91,11 @@ fn connect(settings: &VaultSettings) -> Result<NexusVfsClient, &'static str> {
 /// backend errors alike, so this does not claim which one it was.
 const VAULT_UNAVAILABLE: &str = "vault_unavailable";
 
-fn secret_state(client: &NexusVfsClient, secret_ref: &SecretRef) -> &'static str {
-    match vault_client::secret_versions(client, &secret_ref.namespace, &secret_ref.key) {
-        Ok(versions) if versions.is_empty() => "secret_absent",
-        Ok(_) => "available",
-        Err(error) => match error.downcast_ref::<io::Error>().map(io::Error::kind) {
-            Some(io::ErrorKind::NotFound) => "secret_absent",
+fn live_keys(client: &NexusVfsClient, namespace: &str) -> Result<BTreeSet<String>, &'static str> {
+    vault_client::live_keys(client, namespace).map_err(|error| {
+        match error.downcast_ref::<io::Error>().map(io::Error::kind) {
             Some(io::ErrorKind::PermissionDenied) => "access_denied",
             _ => VAULT_UNAVAILABLE,
-        },
-    }
+        }
+    })
 }

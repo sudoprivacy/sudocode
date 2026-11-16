@@ -5,6 +5,7 @@
 use crate::Result;
 use nexus_vfs_client::NexusVfsClient;
 use prost::Message;
+use std::collections::BTreeSet;
 
 /// The upstream `nexus.secrets.v1` protocol.
 #[allow(
@@ -44,4 +45,25 @@ pub fn secret_versions(
         },
     )?;
     Ok(response.versions)
+}
+
+/// The keys in `namespace` that hold a live (not deleted) secret. Metadata
+/// only, never a value. Absence is read from the listing rather than from an
+/// error, because a generic `Call` reports every plugin error, not-found
+/// included, as one internal error.
+pub fn live_keys(client: &NexusVfsClient, namespace: &str) -> Result<BTreeSet<String>> {
+    let response: proto::ListSecretsResponse = call(
+        client,
+        "secret_list",
+        &proto::ListSecretsRequest {
+            namespace: Some(namespace.to_owned()),
+            include_deleted: false,
+        },
+    )?;
+    Ok(response
+        .secrets
+        .into_iter()
+        .filter(|secret| secret.namespace == namespace && !secret.deleted)
+        .map(|secret| secret.key)
+        .collect())
 }

@@ -4,10 +4,9 @@
 //! and print exactly one JSON object.
 
 use std::fs;
-use std::io::{ErrorKind, Write as _};
+use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use nexus_raft::transport::{
@@ -16,6 +15,10 @@ use nexus_raft::transport::{
 use rcgen::{CertificateParams, Issuer, KeyPair, SanType};
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use vault_tool::ToolRun;
+
+#[path = "support/vault_tool.rs"]
+mod vault_tool;
 
 const OWNER: &str = "vault-test-owner";
 const UNAVAILABLE: &str = "vault_use is unavailable: the backend has no per-agent \
@@ -30,12 +33,6 @@ const MIGRATE: &str = r#"{"operation":"db-migrate","params":{"target":"orders_v2
 /// credential directories under one temporary root.
 struct Env {
     root: TempDir,
-}
-
-/// One tool run: its single JSON result and the raw streams.
-struct ToolRun {
-    result: Value,
-    stdout: String,
 }
 
 impl Env {
@@ -94,42 +91,13 @@ impl Env {
 
     /// Run `scode vault tool <tool>` from the project with `input` on stdin.
     fn run(&self, tool: &str, input: &str) -> ToolRun {
-        let home = self.path("home");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_scode"))
-            .args(["vault", "tool", tool])
-            .current_dir(self.path("project"))
-            .env("HOME", &home)
-            .env("USERPROFILE", &home)
-            .env("SCODE_GLOBAL_CONFIG_DIR", self.path("config"))
-            .env_remove("SUDO_CODE_CONFIG_HOME")
-            .env_remove("SCODE_PROJECT_CONFIG_DIR")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("launch scode");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(input.as_bytes())
-            .expect("write the tool input");
-        let output = child.wait_with_output().expect("scode exits");
-        let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "vault tool {tool} exited {}",
-            output.status
-        );
-        assert!(
-            stderr.is_empty(),
-            "vault tool {tool} wrote stderr: {stderr}"
-        );
-        let result: Value = serde_json::from_str(&stdout)
-            .unwrap_or_else(|error| panic!("expected one JSON object ({error}): {stdout}"));
-        assert!(result.is_object(), "{stdout}");
-        ToolRun { result, stdout }
+        vault_tool::run(
+            &self.path("project"),
+            &self.path("home"),
+            &self.path("config"),
+            tool,
+            input,
+        )
     }
 
     fn list_availability(&self) -> Vec<String> {

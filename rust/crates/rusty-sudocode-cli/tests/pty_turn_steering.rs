@@ -393,7 +393,7 @@ fn tab_queues_for_the_next_turn_without_affecting_the_current_tool_continuation(
 #[test]
 fn escape_flushes_every_queued_input_without_cancellation() {
     let (env, mut session, _release) = start("escape-flush", true);
-    expect_controls(&session, "Enter steer · Tab queue · Esc/Ctrl+C cancel");
+    expect_controls(&session, "Esc/Ctrl+C cancel · Enter steer · Tab queue");
     submit(&mut session, "FLUSH_FIRST", "\t");
     submit(&mut session, "FLUSH_SECOND", "\t");
     common::expect_screen(
@@ -404,7 +404,7 @@ fn escape_flushes_every_queued_input_without_cancellation() {
     );
     expect_controls(
         &session,
-        "Enter steer · Tab queue · Esc flush · Ctrl+C cancel",
+        "Esc flush · Ctrl+C cancel · Enter steer · Tab queue",
     );
     session.send("UNSENT_DRAFT").unwrap();
     common::expect_input_line(
@@ -463,7 +463,7 @@ fn ctrl_c_cancels_with_queued_input_and_busy_management_cannot_block_it() {
         Duration::from_secs(10),
         "hard cancellation preserves unapplied input",
     );
-    expect_controls(&session, "Enter send · Esc flush · ↑ edit queued");
+    expect_controls(&session, "Esc flush · Enter send · ↑ edit queued");
     if env.is_mock() {
         assert_eq!(
             env.captured_message_count(),
@@ -1123,7 +1123,7 @@ fn ctrl_c_from_the_task_browser_cancels_even_with_queued_input() {
             "cancelled work must not restart the retained queue"
         );
     }
-    expect_controls(&session, "Enter send · Esc flush · ↑ edit queued");
+    expect_controls(&session, "Esc flush · Enter send · ↑ edit queued");
     submit(&mut session, "/exit", "\r");
     assert_eq!(session.expect_eof().unwrap(), 0);
 }

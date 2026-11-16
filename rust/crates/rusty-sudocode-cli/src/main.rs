@@ -3402,6 +3402,7 @@ fn run_repl_iocraft_dispatch(
                 // Its UI uses the same seam as every other engine consumer.
                 match &event {
                     EngineEvent::State(state) => activity.observe_engine_state(*state),
+                    EngineEvent::Compaction(progress) => activity.observe_compaction(progress),
                     EngineEvent::TurnStarted { .. } => {
                         let _ = completion_tx.send(CoordinatorEvent::TurnStarted);
                     }
@@ -3618,7 +3619,7 @@ fn run_repl_iocraft_dispatch(
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        next,
+                        ReplWork::Prompt(next),
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3691,7 +3692,7 @@ fn run_repl_iocraft_dispatch(
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        next,
+                        ReplWork::Prompt(next),
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3988,6 +3989,19 @@ fn run_repl_iocraft_dispatch(
                             repl_output.println(&render_repl_help());
                             true
                         }
+                        Ok(Some(SlashCommand::Compact)) => {
+                            coord.lock().unwrap().start_turn();
+                            runner_handle = Some(spawn_iocraft_turn(
+                                Arc::clone(&cli_shared),
+                                ReplWork::Compact,
+                                repl_output.clone(),
+                                repl_ui_cmd.clone(),
+                                repl_spinner.clone(),
+                                Arc::clone(&pending_question_answer),
+                                coord_tx.clone(),
+                            ));
+                            true
+                        }
                         Ok(Some(command)) => {
                             run_session_command(&cli_shared, command, &repl_ui_cmd, &repl_output);
                             true
@@ -4029,7 +4043,7 @@ fn run_repl_iocraft_dispatch(
                         coord.lock().unwrap().start_turn();
                         runner_handle = Some(spawn_iocraft_turn(
                             Arc::clone(&cli_shared),
-                            next,
+                            ReplWork::Prompt(next),
                             repl_output.clone(),
                             repl_ui_cmd.clone(),
                             repl_spinner.clone(),
@@ -4257,13 +4271,18 @@ fn deliver_steering_inputs(
     }
 }
 
+enum ReplWork {
+    Prompt(input_queue::NextTurn<mpsc::Sender<()>>),
+    Compact,
+}
+
 /// Spawn a runner thread for the iocraft REPL path. The runner locks
 /// `LiveCli`, calls `run_turn`, and sends the result via the output
 /// channel. The spinner state is wired so the streaming/tool layers
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    next: input_queue::NextTurn<mpsc::Sender<()>>,
+    work: ReplWork,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
     spinner: render::activity::ActivityState,
@@ -4285,17 +4304,12 @@ fn spawn_iocraft_turn(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
             }
-            match cli.run_turn_iocraft(
-                &next.prompt,
-                &next.echoes,
-                &output,
-                &ui,
-                &spinner,
-                pending_question_answer,
-            ) {
+            match cli.run_turn_iocraft(&work, &output, &ui, &spinner, pending_question_answer) {
                 Ok(true) => {
-                    for receipt in next.receipts {
-                        let _ = receipt.send(());
+                    if let ReplWork::Prompt(next) = work {
+                        for receipt in next.receipts {
+                            let _ = receipt.send(());
+                        }
                     }
                 }
                 Ok(false) => {}
@@ -4568,8 +4582,15 @@ struct TurnPresentation<'a> {
     output: Option<&'a repl_ui::OutputSender>,
     ui: Option<&'a repl_ui::UiCommandSender>,
     is_rendered: bool,
-    /// How the host already drew this turn's inputs; saved with the prompt.
-    shown: &'a [engine_events::InputView],
+}
+
+/// A model prompt and context maintenance share the admitted engine driver.
+enum TurnRequest<'a> {
+    Prompt {
+        input: &'a str,
+        shown: &'a [engine_events::InputView],
+    },
+    Compact,
 }
 
 impl LiveCli {
@@ -4847,7 +4868,7 @@ impl LiveCli {
     /// per path).
     fn drive_turn(
         &self,
-        input: &str,
+        request: &TurnRequest<'_>,
         presentation: TurnPresentation<'_>,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
@@ -4858,7 +4879,6 @@ impl LiveCli {
             output,
             ui,
             is_rendered,
-            shown,
         } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -4871,12 +4891,19 @@ impl LiveCli {
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
             is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
-        let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
-        self.engine_handle.commands.send(EngineCommand::Prompt {
-            blocks,
-            context: None,
-            shown: shown.iter().map(engine_events::InputView::echo).collect(),
-        })?;
+        let command = match request {
+            TurnRequest::Prompt { input, shown } => EngineCommand::Prompt {
+                blocks: runtime::image_input::prompt_blocks(*input, &runtime::StdFsBackend)?,
+                context: None,
+                shown: shown.iter().map(engine_events::InputView::echo).collect(),
+            },
+            TurnRequest::Compact => EngineCommand::Management {
+                line: "/compact".into(),
+                context: None,
+                build: engine_events::ManagementContext::default(),
+            },
+        };
+        self.engine_handle.commands.send(command)?;
 
         let mut outcome = TurnOutcome::default();
         let mut prompt_replies = Vec::new();
@@ -5132,13 +5159,12 @@ impl LiveCli {
         let cancel_monitor = interactive_cancel
             .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
-            input,
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: None,
                 ui: None,
                 is_rendered: true,
-                shown: &[],
             },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5282,8 +5308,7 @@ impl LiveCli {
     /// instead of indicatif.
     fn run_turn_iocraft(
         &mut self,
-        input: &str,
-        shown: &[engine_events::InputView],
+        work: &ReplWork,
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
@@ -5291,7 +5316,16 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         ui.begin_turn();
         let turn_start = Instant::now();
-        let token_budget = crate::render::parse_token_budget(input);
+        let (request, token_budget) = match work {
+            ReplWork::Prompt(next) => (
+                TurnRequest::Prompt {
+                    input: &next.prompt,
+                    shown: &next.echoes,
+                },
+                crate::render::parse_token_budget(&next.prompt),
+            ),
+            ReplWork::Compact => (TurnRequest::Compact, None),
+        };
         let model = self.lifecycle.current_model();
 
         // Prepare display metadata before submission. Engine events own the
@@ -5305,13 +5339,12 @@ impl LiveCli {
         let mut permission_prompter = question_prompter.clone();
 
         let outcome = self.drive_turn(
-            input,
+            &request,
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: Some(output),
                 ui: Some(ui),
                 is_rendered: true,
-                shown,
             },
             &mut permission_prompter,
             &mut question_prompter,
@@ -5321,6 +5354,17 @@ impl LiveCli {
         // Explicit cancellation finishes this input. The mailbox sink decides
         // whether the receiver is still running and can acknowledge delivery.
         let is_handled = outcome.complete.is_some();
+        if matches!(work, ReplWork::Compact) {
+            // Maintenance does not create a model turn or reset its statistics.
+            // The management response owns the full result, including message
+            // counts. Failed operations report through Compaction and TurnFailed.
+            if let Some(status) = self.resume_status_line() {
+                ui.set_turn_result(&status, self.lifecycle.usage_snapshot().turns());
+            }
+            self.refresh_completions();
+            ui.set_cache_tip(self.cache_ttl_tip());
+            return Ok(is_handled);
+        }
         match outcome.complete {
             Some(tc) if tc.cancelled => {
                 output.println(&format!(
@@ -5370,13 +5414,12 @@ impl LiveCli {
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
-            input,
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: None,
                 output: None,
                 ui: None,
                 is_rendered: false,
-                shown: &[],
             },
             permission_prompter,
             &mut question_prompter,

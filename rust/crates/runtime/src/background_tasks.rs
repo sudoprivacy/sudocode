@@ -116,6 +116,7 @@ struct Registry {
     history: VecDeque<String>,
     sink: Option<TaskSink>,
     changed: Arc<Condvar>,
+    control_changed: Arc<tokio::sync::Notify>,
     closing: bool,
     paused: bool,
     pause_epoch: u64,
@@ -338,7 +339,19 @@ impl BackgroundTasks {
             return Err("Tool operations are still stopping; control remains fenced".to_string());
         }
         registry.paused = false;
+        registry.control_changed.notify_one();
         Ok(())
+    }
+
+    /// Wake the owning engine after tool admission reopens. This is a stored
+    /// notification, so a resume between model turns cannot lose the wake-up.
+    pub fn control_changed(&self) -> tokio::sync::futures::OwnedNotified {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .control_changed
+            .clone()
+            .notified_owned()
     }
 
     #[must_use]

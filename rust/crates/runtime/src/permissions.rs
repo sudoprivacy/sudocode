@@ -5,7 +5,9 @@ use serde_json::Value;
 use crate::config::RuntimePermissionRuleConfig;
 
 /// Permission level assigned to a tool invocation or runtime session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum PermissionMode {
     ReadOnly,
     WorkspaceWrite,
@@ -66,7 +68,7 @@ impl PermissionContext {
 }
 
 /// Full authorization request presented to a permission prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PermissionRequest {
     pub tool_name: String,
     pub input: String,
@@ -107,6 +109,27 @@ impl PromptQueue {
 
 /// Prompting interface used when policy requires interactive approval.
 pub trait PermissionPrompter {
+    /// Persist a request independently of the current model turn. Only the
+    /// scheduler supplies the stable source, after hooks have prepared input.
+    fn submit_permission(
+        &mut self,
+        _source: &str,
+        _request: &PermissionRequest,
+        _origin: crate::session_interactions::InteractionOrigin,
+    ) -> Result<Option<crate::session_interactions::Interaction>, String> {
+        Ok(None)
+    }
+
+    /// Session-owned approval gates run before authorization and again before
+    /// execution. A host cannot bypass a pending plan by changing its mode.
+    fn check_session_gate(
+        &self,
+        _tool_name: &str,
+        _required_mode: PermissionMode,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 
     fn begin_decision(
@@ -128,11 +151,37 @@ pub trait PermissionPrompter {
 /// A child can await its parent's approval without borrowing the parent turn
 /// or granting itself a broader permission mode.
 #[derive(Clone)]
-pub struct PermissionPromptSink(
-    std::sync::Arc<
+pub struct PermissionPromptSink {
+    legacy: std::sync::Arc<
         dyn Fn(PermissionRequest) -> PromptReply<PermissionPromptDecision> + Send + Sync,
     >,
-);
+    session: Option<std::sync::Arc<WorkerPromptRoute>>,
+    agent_id: Option<String>,
+    activity: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
+}
+
+type WorkerRequest = dyn Fn(
+        String,
+        crate::session_interactions::InteractionRequest,
+    ) -> PromptReply<crate::session_interactions::InteractionReply>
+    + Send
+    + Sync;
+type SessionGate = dyn Fn(&str, PermissionMode) -> Result<(), String> + Send + Sync;
+
+struct WorkerPromptRoute {
+    request: Box<WorkerRequest>,
+    gate: Box<SessionGate>,
+}
+
+struct WorkerPromptActivity(Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>);
+
+impl Drop for WorkerPromptActivity {
+    fn drop(&mut self) {
+        if let Some(activity) = &self.0 {
+            activity(false);
+        }
+    }
+}
 
 impl std::fmt::Debug for PermissionPromptSink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -148,7 +197,97 @@ impl PermissionPromptSink {
             + Sync
             + 'static,
     ) -> Self {
-        Self(std::sync::Arc::new(request))
+        Self {
+            legacy: std::sync::Arc::new(request),
+            session: None,
+            agent_id: None,
+            activity: None,
+        }
+    }
+
+    /// Session-owned prompts keep the worker's execution in that worker. The
+    /// parent can stop waiting for its result without cancelling the prompt.
+    #[must_use]
+    pub fn session_owned(
+        request: impl Fn(
+                String,
+                crate::session_interactions::InteractionRequest,
+            ) -> PromptReply<crate::session_interactions::InteractionReply>
+            + Send
+            + Sync
+            + 'static,
+        gate: impl Fn(&str, PermissionMode) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        let mut sink = Self::new(|_| {
+            Box::pin(std::future::ready(PermissionPromptDecision::Deny {
+                reason: "worker prompt has no session route".into(),
+            }))
+        });
+        sink.session = Some(std::sync::Arc::new(WorkerPromptRoute {
+            request: Box::new(request),
+            gate: Box::new(gate),
+        }));
+        sink
+    }
+
+    #[must_use]
+    pub fn is_session_owned(&self) -> bool {
+        self.session.is_some()
+    }
+
+    #[must_use]
+    pub fn for_agent(
+        mut self,
+        agent_id: String,
+        activity: impl Fn(bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.agent_id = Some(agent_id);
+        let parent = self.activity.take();
+        self.activity = Some(std::sync::Arc::new(move |waiting| {
+            activity(waiting);
+            if let Some(parent) = &parent {
+                parent(waiting);
+            }
+        }));
+        self
+    }
+
+    fn begin_request(
+        &self,
+        request: crate::session_interactions::InteractionRequest,
+    ) -> PromptReply<crate::session_interactions::InteractionReply> {
+        let route = self.session.clone();
+        let agent_id = self.agent_id.clone();
+        let activity = self.activity.clone();
+        Box::pin(async move {
+            let (Some(route), Some(agent_id)) = (route, agent_id) else {
+                return crate::session_interactions::InteractionReply::Cancelled {
+                    reason: "worker has no session-owned human input route".into(),
+                };
+            };
+            if let Some(activity) = &activity {
+                activity(true);
+            }
+            let _activity = WorkerPromptActivity(activity);
+            (route.request)(agent_id, request).await
+        })
+    }
+
+    pub fn begin_question(
+        &self,
+        request: &QuestionPromptRequest,
+    ) -> PromptReply<Result<Vec<QuestionPromptAnswer>, String>> {
+        use crate::session_interactions::{InteractionReply, InteractionRequest};
+        let reply = self.begin_request(InteractionRequest::Question(request.clone()));
+        Box::pin(async move {
+            match reply.await {
+                InteractionReply::Answers { answers } => Ok(answers),
+                InteractionReply::Cancelled { reason } => Err(reason),
+                InteractionReply::Permission { .. } => {
+                    Err("worker question received a permission reply".into())
+                }
+            }
+        })
     }
 }
 
@@ -161,7 +300,32 @@ impl PermissionPrompter for PermissionPromptSink {
         &mut self,
         request: &PermissionRequest,
     ) -> PromptReply<PermissionPromptDecision> {
-        (self.0)(request.clone())
+        use crate::session_interactions::{InteractionReply, InteractionRequest};
+        if self.session.is_none() {
+            return (self.legacy)(request.clone());
+        }
+        let reply = self.begin_request(InteractionRequest::Permission(request.clone()));
+        Box::pin(async move {
+            match reply.await {
+                InteractionReply::Permission { approved: true, .. } => {
+                    PermissionPromptDecision::Allow
+                }
+                InteractionReply::Permission { reason, .. } => PermissionPromptDecision::Deny {
+                    reason: reason.unwrap_or_else(|| "permission denied".into()),
+                },
+                InteractionReply::Cancelled { reason } => PermissionPromptDecision::Deny { reason },
+                InteractionReply::Answers { .. } => PermissionPromptDecision::Deny {
+                    reason: "worker permission received a question reply".into(),
+                },
+            }
+        })
+    }
+
+    fn check_session_gate(&self, tool_name: &str, required: PermissionMode) -> Result<(), String> {
+        match &self.session {
+            Some(route) => (route.gate)(tool_name, required),
+            None => Ok(()),
+        }
     }
 
     fn delegation_sink(&self) -> Option<PermissionPromptSink> {
@@ -169,7 +333,7 @@ impl PermissionPrompter for PermissionPromptSink {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuestionOption {
     pub label: String,
     pub value: String,
@@ -177,7 +341,7 @@ pub struct QuestionOption {
     pub recommended: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuestionField {
     pub id: String,
     pub prompt: String,
@@ -188,7 +352,7 @@ pub struct QuestionField {
     pub options: Vec<QuestionOption>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QuestionKind {
     SingleSelect,
     MultiSelect,
@@ -224,7 +388,7 @@ impl std::str::FromStr for QuestionKind {
 
 /// Human-facing prompt content. Formatting is explicit; shell commands and
 /// paths must never be guessed to be Markdown. Clones share the immutable source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptText {
     Plain(std::sync::Arc<str>),
     Markdown(std::sync::Arc<str>),
@@ -272,7 +436,7 @@ impl From<&str> for PromptText {
 }
 
 /// Presentation intent carried through the existing question boundary.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QuestionPresentation {
     #[default]
     Question,
@@ -281,7 +445,7 @@ pub enum QuestionPresentation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuestionPromptRequest {
     pub presentation: QuestionPresentation,
     pub title: Option<String>,
@@ -289,7 +453,7 @@ pub struct QuestionPromptRequest {
     pub fields: Vec<QuestionField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuestionPromptAnswer {
     pub id: String,
     pub value: String,
@@ -297,6 +461,16 @@ pub struct QuestionPromptAnswer {
 }
 
 pub trait QuestionPrompter: Send {
+    /// A host with session-owned interactions can publish without borrowing a
+    /// turn until the human answers. Legacy and noninteractive hosts return None.
+    fn submit_question(
+        &mut self,
+        _source: &str,
+        _request: &QuestionPromptRequest,
+    ) -> Result<Option<crate::session_interactions::Interaction>, String> {
+        Ok(None)
+    }
+
     fn cancel_pending(&mut self) {}
     fn ask(&mut self, request: &QuestionPromptRequest)
         -> Result<Vec<QuestionPromptAnswer>, String>;
@@ -315,6 +489,17 @@ pub trait QuestionPrompter: Send {
 pub enum PermissionOutcome {
     Allow,
     Deny { reason: String },
+}
+
+pub(crate) enum ToolAuthorization {
+    Decision(PermissionOutcome),
+    Pending(Box<crate::session_interactions::Interaction>),
+}
+
+pub(crate) struct ToolApproval<'a> {
+    pub source: Option<&'a str>,
+    pub granted: Option<&'a PermissionRequest>,
+    pub origin: crate::session_interactions::InteractionOrigin,
 }
 
 enum PermissionEvaluation {
@@ -503,21 +688,48 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &str,
         context: &PermissionContext,
+        approval: ToolApproval<'_>,
         prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> PromptReply<PermissionOutcome> {
+    ) -> PromptReply<ToolAuthorization> {
         match self.evaluate(tool_name, input, context) {
-            PermissionEvaluation::Allow => Box::pin(std::future::ready(PermissionOutcome::Allow)),
-            PermissionEvaluation::Deny { reason } => {
-                Box::pin(std::future::ready(PermissionOutcome::Deny { reason }))
-            }
+            PermissionEvaluation::Allow => Box::pin(std::future::ready(
+                ToolAuthorization::Decision(PermissionOutcome::Allow),
+            )),
+            PermissionEvaluation::Deny { reason } => Box::pin(std::future::ready(
+                ToolAuthorization::Decision(PermissionOutcome::Deny { reason }),
+            )),
             PermissionEvaluation::Prompt(request) => {
+                if let Some(granted) = approval.granted {
+                    let outcome = if granted == &request {
+                        PermissionOutcome::Allow
+                    } else {
+                        PermissionOutcome::Deny { reason: "The tool, hooks or permission policy changed after approval; request a new decision.".into() }
+                    };
+                    return Box::pin(std::future::ready(ToolAuthorization::Decision(outcome)));
+                }
+                let mut prompter = prompter;
+                if let (Some(source), Some(prompter)) = (approval.source, prompter.as_deref_mut()) {
+                    match prompter.submit_permission(source, &request, approval.origin) {
+                        Ok(Some(interaction)) => {
+                            return Box::pin(std::future::ready(ToolAuthorization::Pending(
+                                Box::new(interaction),
+                            )))
+                        }
+                        Err(reason) => {
+                            return Box::pin(std::future::ready(ToolAuthorization::Decision(
+                                PermissionOutcome::Deny { reason },
+                            )))
+                        }
+                        Ok(None) => {}
+                    }
+                }
                 let reply = prompter.map(|p| p.begin_decision(&request));
                 Box::pin(async move {
                     let decision = match reply {
                         Some(reply) => Some(reply.await),
                         None => None,
                     };
-                    resolve_permission(&request, decision)
+                    ToolAuthorization::Decision(resolve_permission(&request, decision))
                 })
             }
         }

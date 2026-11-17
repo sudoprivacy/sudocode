@@ -1,13 +1,13 @@
 //! Controller calls share tool execution, but are not model tool history.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 /// The actual executor's mailbox, not a sender supplied in an RPC request.
 /// An empty root denotes the daemon's logical namespace; local mailboxes
 /// retain their explicit root. Neither value asserts transport availability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailboxBinding {
     pub actor: String,
@@ -15,13 +15,18 @@ pub struct MailboxBinding {
 }
 
 /// Host-created provenance carried through the scheduler and its hook rewrites.
-#[derive(Debug, Clone)]
-pub struct ExternalA2aCall {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalA2aIdentity {
     pub command_id: String,
     pub session_id: String,
     pub binding: MailboxBinding,
     pub tool: String,
     pub requested_input_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalA2aCall {
+    pub identity: ExternalA2aIdentity,
     effective_input_sha256: Arc<Mutex<Option<String>>>,
 }
 
@@ -35,7 +40,7 @@ impl ExternalA2aCall {
         if !matches!(tool, "send" | "agent_list") {
             return Err("external A2A only admits send and agent_list".to_string());
         }
-        Ok(Self {
+        Ok(Self::restore(ExternalA2aIdentity {
             command_id: format!("external-a2a-{}", uuid::Uuid::new_v4()),
             session_id: session_id.to_string(),
             binding,
@@ -44,8 +49,16 @@ impl ExternalA2aCall {
                 tool,
                 &serde_json::from_str(input).map_err(|error| error.to_string())?,
             )?,
+        }))
+    }
+
+    /// Restore only host-created identity; dispatch rechecks its current binding.
+    #[must_use]
+    pub fn restore(identity: ExternalA2aIdentity) -> Self {
+        Self {
+            identity,
             effective_input_sha256: Arc::new(Mutex::new(None)),
-        })
+        }
     }
 
     /// Recheck the effective invocation after hooks, at the actual executor.
@@ -58,10 +71,12 @@ impl ExternalA2aCall {
         binding: Option<&MailboxBinding>,
         tool_id: Option<&str>,
     ) -> Result<(), String> {
-        if binding != Some(&self.binding) || tool_id != Some(self.command_id.as_str()) {
+        if binding != Some(&self.identity.binding)
+            || tool_id != Some(self.identity.command_id.as_str())
+        {
             return Err("external A2A executor binding changed".to_string());
         }
-        if tool != self.tool {
+        if tool != self.identity.tool {
             return Err("external A2A hooks cannot change the tool".to_string());
         }
         let fields = input
@@ -109,11 +124,11 @@ impl ExternalA2aCall {
         ExternalToolResult {
             audit: ExternalA2aAudit {
                 version: 1,
-                command_id: self.command_id,
-                session_id: self.session_id,
-                binding: self.binding,
-                tool: self.tool,
-                requested_input_sha256: self.requested_input_sha256,
+                command_id: self.identity.command_id,
+                session_id: self.identity.session_id,
+                binding: self.identity.binding,
+                tool: self.identity.tool,
+                requested_input_sha256: self.identity.requested_input_sha256,
                 effective_input_sha256: self
                     .effective_input_sha256
                     .lock()
@@ -123,13 +138,14 @@ impl ExternalA2aCall {
             },
             content,
             is_error,
+            pending: None,
         }
     }
 }
 
 /// Metadata for the reported tool result, including an opaque error result.
 /// It is not a delivery receipt or proof that a cancelled worker has stopped.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalA2aAudit {
     pub version: u32,
@@ -145,10 +161,13 @@ pub struct ExternalA2aAudit {
     pub result_sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalToolResult {
     pub content: String,
     pub is_error: bool,
     pub audit: ExternalA2aAudit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<crate::turn_input::InteractionReceipt>,
 }
 
 fn frame(hash: &mut Sha256, bytes: &[u8]) {

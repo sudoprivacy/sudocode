@@ -297,10 +297,25 @@ impl EngineDelegate for DeferredDelegate {
             delegate.set_trace_id(trace);
         }
     }
+    fn continue_direct_interaction(
+        &self,
+        receipt: engine_events::InteractionReceipt,
+        journal: Arc<runtime::session_interactions::InteractionJournal>,
+        prompter: &mut dyn PermissionPrompter,
+    ) -> Result<(), DirectToolError> {
+        self.get()
+            .map_err(DirectToolError::Refused)?
+            .continue_direct_interaction(receipt, journal, prompter)
+    }
     fn set_question_prompter(&self, prompter: Box<dyn QuestionPrompter>) {
         if let Ok(delegate) = self.get() {
             delegate.set_question_prompter(prompter);
         }
+    }
+    fn interaction_journal(
+        &self,
+    ) -> Result<Option<Arc<runtime::session_interactions::InteractionJournal>>, String> {
+        self.get()?.interaction_journal()
     }
     fn abort_signal(&self) -> HookAbortSignal {
         self.get()

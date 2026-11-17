@@ -47,6 +47,8 @@ pub enum Experiment {
     PeerDescriptions,
     /// Shaded prompt surfaces using the existing native inline history.
     PromptViewport,
+    /// Session-owned question/review/approval lifecycle under acceptance.
+    NonblockingInteractions,
 }
 
 impl Experiment {
@@ -56,6 +58,7 @@ impl Experiment {
         Experiment::SharedSessionHistory,
         Experiment::PeerDescriptions,
         Experiment::PromptViewport,
+        Experiment::NonblockingInteractions,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -68,6 +71,7 @@ impl Experiment {
             Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::PeerDescriptions => "peerDescriptions",
             Experiment::PromptViewport => "promptViewport",
+            Experiment::NonblockingInteractions => "nonblockingInteractions",
         }
     }
 
@@ -80,6 +84,7 @@ impl Experiment {
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::PeerDescriptions => "PEER_DESCRIPTIONS",
             Experiment::PromptViewport => "PROMPT_VIEWPORT",
+            Experiment::NonblockingInteractions => "NONBLOCKING_INTERACTIONS",
         }
     }
 
@@ -93,7 +98,8 @@ impl Experiment {
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
             Experiment::SharedSessionHistory
             | Experiment::PeerDescriptions
-            | Experiment::PromptViewport => None,
+            | Experiment::PromptViewport
+            | Experiment::NonblockingInteractions => None,
         }
     }
 }

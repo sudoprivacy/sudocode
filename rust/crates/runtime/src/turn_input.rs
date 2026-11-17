@@ -31,6 +31,15 @@ pub enum InputSource {
     Subagent,
     Background,
     Scheduled,
+    Interaction(InteractionReceipt),
+}
+
+/// Engine-issued identity retained through either host's existing input queue.
+/// Numeric queue IDs are local to a renderer and cannot acknowledge a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InteractionReceipt {
+    pub id: uuid::Uuid,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +113,13 @@ impl InputEcho {
                 JsonValue::String(self.display.clone()),
             ),
         ]);
+        if let InputSource::Interaction(receipt) = self.source {
+            object.insert(
+                "interaction".to_string(),
+                JsonValue::parse(&serde_json::to_string(&receipt).expect("receipt serializes"))
+                    .expect("receipt is JSON"),
+            );
+        }
         if !self.pasted.is_empty() {
             let ranges = self
                 .pasted
@@ -130,7 +146,12 @@ impl InputEcho {
     /// than the `inputs` key drop the whole key.
     pub(crate) fn from_json(value: &crate::json::JsonValue) -> Option<Self> {
         let object = value.as_object()?;
-        let source = InputSource::from_name(object.get("source")?.as_str()?)?;
+        let source = if object.get("source")?.as_str()? == "interaction" {
+            let receipt = object.get("interaction")?;
+            InputSource::Interaction(serde_json::from_str(&receipt.render()).ok()?)
+        } else {
+            InputSource::from_name(object.get("source")?.as_str()?)?
+        };
         let display = object.get("display")?.as_str()?.to_string();
         let pasted = match object.get("pasted") {
             None => Vec::new(),
@@ -167,6 +188,7 @@ impl InputSource {
             Self::Subagent => "subagent",
             Self::Background => "background",
             Self::Scheduled => "scheduled",
+            Self::Interaction(_) => "interaction",
         }
     }
 

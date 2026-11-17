@@ -10,6 +10,7 @@ use super::{
     RecordOutcome,
 };
 use crate::json::JsonValue;
+use crate::turn_input::{InputSource, InteractionReceipt};
 use crate::{ContentBlock, ConversationMessage, MessageRole, Session};
 
 #[derive(Clone, Default)]
@@ -94,6 +95,21 @@ pub struct HistoryGraph {
     latest_context: Option<String>,
     seen: HashMap<String, SeenRecord>,
     parents: HashMap<String, Option<String>>,
+    // Derived from committed inputs, including inputs outside the current
+    // projection. Empty histories allocate no receipt index.
+    interaction_receipts: HashSet<InteractionReceipt>,
+}
+
+fn interaction_receipts(
+    message: &ConversationMessage,
+) -> impl Iterator<Item = InteractionReceipt> + '_ {
+    message
+        .inputs
+        .iter()
+        .filter_map(|input| match input.source {
+            InputSource::Interaction(receipt) => Some(receipt),
+            _ => None,
+        })
 }
 
 fn digest(record: &HistoryRecord) -> io::Result<[u8; 32]> {
@@ -406,7 +422,11 @@ impl HistoryGraph {
         let mut chain = Arc::new(MessageChain::default());
         let mut nodes = HashMap::new();
         let mut open = BTreeMap::new();
+        let mut receipts = HashSet::new();
         for (index, message) in session.messages.iter().enumerate() {
+            if interaction_receipts(message).any(|receipt| !receipts.insert(receipt)) {
+                return Ok(rejected("initial_interaction_receipt_conflict"));
+            }
             let mut identity = serde_json::to_value((
                 "legacy-message-v1",
                 &session.session_id,
@@ -446,6 +466,7 @@ impl HistoryGraph {
         };
         self.session_id = Some(session.session_id);
         self.messages = nodes;
+        self.interaction_receipts = receipts;
         self.contexts.insert(
             record.context_id.clone(),
             Context {
@@ -496,6 +517,12 @@ impl HistoryGraph {
                     return Ok(rejected("message_parent_changed"));
                 }
                 let message = decode_message(message)?;
+                let mut receipts = HashSet::new();
+                if interaction_receipts(&message).any(|receipt| {
+                    self.interaction_receipts.contains(&receipt) || !receipts.insert(receipt)
+                }) {
+                    return Ok(rejected("interaction_already_committed"));
+                }
                 let Ok((open, origins)) = tool_changes(&message, id, &context.open_tools) else {
                     return Ok(rejected("tool_association_invalid"));
                 };
@@ -507,6 +534,7 @@ impl HistoryGraph {
                         tool_origins: origins,
                     },
                 );
+                self.interaction_receipts.extend(receipts);
                 MessageChain::append(&mut context.projection.chain, id.clone());
                 context.unsealed.insert(id.clone());
                 context.open_tools = open;
@@ -527,6 +555,9 @@ impl HistoryGraph {
                     || message.role != MessageRole::Assistant
                 {
                     return Ok(rejected("update_target_is_not_assistant"));
+                }
+                if !interaction_receipts(&message).eq(interaction_receipts(&node.message)) {
+                    return Ok(rejected("assistant_interaction_receipt_changed"));
                 }
                 let old_calls: BTreeSet<_> = node
                     .message
@@ -596,6 +627,21 @@ impl HistoryGraph {
                     return Ok(rejected("projection_session_identity_changed"));
                 };
                 let source: BTreeSet<_> = context.projection.chain.ids().into_iter().collect();
+                // Ordinary sessions have no interaction receipts. Do not add a
+                // history scan to their existing projection/compaction path.
+                let source_receipts: HashSet<_> = if self.interaction_receipts.is_empty() {
+                    HashSet::new()
+                } else {
+                    source
+                        .iter()
+                        .flat_map(|id| {
+                            interaction_receipts(
+                                &self.messages.get(id).expect("source node").message,
+                            )
+                        })
+                        .collect()
+                };
+                let mut projected_receipts = HashSet::new();
                 let mut ids = BTreeSet::new();
                 let mut nodes = Vec::new();
                 let mut chain = Arc::new(MessageChain::default());
@@ -619,6 +665,16 @@ impl HistoryGraph {
                     let Ok((next_open, origins)) = tool_changes(&message, &entry.id, &open) else {
                         return Ok(rejected("projection_tool_association_invalid"));
                     };
+                    // A projection may retain or rewrite its own answered
+                    // inputs. It cannot introduce a receipt already admitted
+                    // only by another context, or repeat one within itself.
+                    if interaction_receipts(&message).any(|receipt| {
+                        !projected_receipts.insert(receipt)
+                            || (self.interaction_receipts.contains(&receipt)
+                                && !source_receipts.contains(&receipt))
+                    }) {
+                        return Ok(rejected("interaction_already_committed"));
+                    }
                     open = next_open;
                     if entry.message.is_none()
                         && self
@@ -646,6 +702,7 @@ impl HistoryGraph {
                     return Ok(rejected("projection_has_unfinished_tools"));
                 }
                 context.unsealed.retain(|id| ids.contains(id));
+                self.interaction_receipts.extend(projected_receipts);
                 for (id, node) in nodes {
                     context.unsealed.insert(id.clone());
                     self.messages.insert(id, node);
@@ -723,6 +780,11 @@ impl HistoryGraph {
             .projection
             .chain
             .ids())
+    }
+
+    #[must_use]
+    pub(crate) fn has_interaction_receipt(&self, receipt: InteractionReceipt) -> bool {
+        self.interaction_receipts.contains(&receipt)
     }
 
     pub fn message_head(&self, context: &str) -> io::Result<Option<&str>> {

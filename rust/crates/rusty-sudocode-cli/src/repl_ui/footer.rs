@@ -25,6 +25,8 @@ pub(crate) enum StatusSource {
     Cache,
     /// Peer-messaging health: shown only while degraded, gone once it recovers.
     A2a,
+    /// Pending questions outlive a turn and never take keyboard focus.
+    Interactions,
 }
 
 #[derive(Clone, Default, Hash)]

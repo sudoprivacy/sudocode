@@ -341,6 +341,9 @@ struct DirectAgentListRequest {
 struct DirectA2aResponse {
     content: String,
     is_error: bool,
+    /// Present when the operation has not executed and awaits a durable decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_interaction: Option<engine_core::engine_events::InteractionReceipt>,
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     meta: Option<serde_json::Value>,
 }
@@ -1690,6 +1693,12 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
+    if runtime::experiments::is_enabled(runtime::experiments::Experiment::NonblockingInteractions) {
+        sudocode_ns.insert(
+            "interactions".to_string(),
+            json!({ "version": 1, "experimental": true }),
+        );
+    }
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
@@ -4216,6 +4225,37 @@ pub(crate) async fn run_acp_on_transport(
                                     .map_err(|error| acp_error_to_sdk(&error)),
                                 Err(error) => Err(error),
                             };
+                            responder.respond_with_result(result)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::interaction_control::InteractionRequest::matches_method(
+                            message.method(),
+                        ) =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let connection = cx.clone();
+                        cx.spawn(async move {
+                            let (method, params) = message.into_parts();
+                            let result = async {
+                                let request =
+                                    crate::interaction_control::InteractionRequest::parse_message(
+                                        &method, &params,
+                                    )?;
+                                let driver =
+                                    registry.driver(&request.session_id).ok_or_else(|| {
+                                        acp_error_to_sdk(&AcpError::invalid_params(
+                                            "Unknown session",
+                                        ))
+                                    })?;
+                                driver
+                                    .interactions(request.action, connection)
+                                    .await
+                                    .map_err(|error| acp_error_to_sdk(&AcpError::internal(error)))
+                            }
+                            .await;
                             responder.respond_with_result(result)?;
                             Ok(())
                         })?;

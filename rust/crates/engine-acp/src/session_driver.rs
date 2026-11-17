@@ -168,27 +168,36 @@ impl SessionDriver {
             }
         }
         match event {
-            EngineEvent::CommandResult { id, result } => {
-                {
-                    let mut state = self
-                        .connection
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if state.pending_configuration == Some(id) {
-                        state.pending_configuration = None;
-                        if result.is_err() {
-                            state.disconnect();
-                        }
-                    }
-                }
-                if let Some(waiter) = self
-                    .requests
+            EngineEvent::Interactions(snapshot) => {
+                if let Some(connection) = self
+                    .connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id)
+                    .connection
+                    .clone()
                 {
-                    let _ = waiter.send(result);
+                    let _ = connection.send_notification(crate::interaction_control::notification(
+                        session_id, &snapshot,
+                    ));
                 }
+                return;
+            }
+            EngineEvent::InteractionError { message } => {
+                if let Some(connection) = self
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .connection
+                    .clone()
+                {
+                    let _ = connection.send_notification(
+                        crate::interaction_control::error_notification(session_id, &message),
+                    );
+                }
+                return;
+            }
+            EngineEvent::CommandResult { id, result } => {
+                self.finish_control_request(id, result);
                 return;
             }
             EngineEvent::CompletionRequest {
@@ -215,6 +224,29 @@ impl SessionDriver {
             _ => {}
         }
         self.route_event(session_id, event);
+    }
+
+    fn finish_control_request(&self, id: u64, result: Result<Value, String>) {
+        {
+            let mut state = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.pending_configuration == Some(id) {
+                state.pending_configuration = None;
+                if result.is_err() {
+                    state.disconnect();
+                }
+            }
+        }
+        if let Some(waiter) = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+        {
+            let _ = waiter.send(result);
+        }
     }
 
     fn answer_interaction(self: &Arc<Self>, session_id: &str, event: &EngineEvent) -> bool {
@@ -540,6 +572,32 @@ impl SessionDriver {
         let driver = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             driver.request(|request_id| EngineCommand::RuntimeStatus { request_id })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    pub(crate) async fn interactions(
+        self: &Arc<Self>,
+        action: engine_core::engine_events::InteractionAction,
+        connection: ConnectionTo<Client>,
+    ) -> Result<Value, String> {
+        if matches!(
+            action,
+            engine_core::engine_events::InteractionAction::Configure {
+                delivery: engine_core::engine_events::InteractionDeliveryOwner::Host,
+                ..
+            }
+        ) {
+            return Err("ACP sessions use the engine input coordinator".into());
+        }
+        self.connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection = Some(connection);
+        let driver = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            driver.request(|id| EngineCommand::Interactions { id, action })
         })
         .await
         .map_err(|error| error.to_string())?

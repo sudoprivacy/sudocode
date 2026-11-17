@@ -382,7 +382,9 @@ fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std:
             }
             println!("migrated {}", report.path.display());
             if let Some(account) = &report.wrote_auth_profile {
-                println!("  auth_profile = {account}  (recorded before dropping the pins, so routing never lapses)");
+                println!(
+                    "  auth_profile = {account}  (recorded before dropping the pins, so routing never lapses)"
+                );
             }
             if !report.cleared_providers.is_empty() {
                 println!(
@@ -397,7 +399,9 @@ fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std:
                     report.cleared_apis.len(),
                     report.cleared_apis.join(", ")
                 );
-                println!("  (wire format now comes from the model capabilities SSOT — this is what re-enables prompt caching)");
+                println!(
+                    "  (wire format now comes from the model capabilities SSOT — this is what re-enables prompt caching)"
+                );
             }
             if let Some(backup) = &report.backup {
                 println!("  backup      {}", backup.display());
@@ -829,7 +833,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|result| println!("{result}"))
                 }
                 ServiceSub::StopLocalBox { .. } => {
-                    return Err("A shared Box stop requires explicit outage acknowledgement".into())
+                    return Err("A shared Box stop requires explicit outage acknowledgement".into());
                 }
             };
             result.map_err(|error| error as Box<dyn std::error::Error>)?;
@@ -1087,7 +1091,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_login() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Login via Claude Code credential import is no longer supported. Use ANTHROPIC_API_KEY or PROXY_AUTH_TOKEN instead.");
+    eprintln!(
+        "Login via Claude Code credential import is no longer supported. Use ANTHROPIC_API_KEY or PROXY_AUTH_TOKEN instead."
+    );
     Ok(())
 }
 
@@ -1226,7 +1232,9 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         None => println!("  prompt read     unknown (legacy input-token coverage)"),
     }
     println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
-    println!("  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON");
+    println!(
+        "  TTL advice      unpinned sessions follow it (cache_ttl_1h pins); decisions and forward scenarios in JSON"
+    );
     println!("  TTL default     {}", ttl_default_label());
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
@@ -1253,7 +1261,9 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         }
         if let Some(untracked) = (unexpected + expected).checked_sub(tallied) {
             if untracked > 0 {
-                println!("    {untracked_label:<widest$}  {untracked}  (sessions older than cause tracking)");
+                println!(
+                    "    {untracked_label:<widest$}  {untracked}  (sessions older than cause tracking)"
+                );
             }
         }
     } else if unexpected + expected > 0 {
@@ -1354,8 +1364,7 @@ fn dump_manifests(
     dump_manifests_at_path(&workspace_dir, manifests_dir, output_format)
 }
 
-const DUMP_MANIFESTS_OVERRIDE_HINT: &str =
-    "Hint: set CLAUDE_CODE_UPSTREAM=/path/to/upstream or pass `scode dump-manifests --manifests-dir /path/to/upstream`.";
+const DUMP_MANIFESTS_OVERRIDE_HINT: &str = "Hint: set CLAUDE_CODE_UPSTREAM=/path/to/upstream or pass `scode dump-manifests --manifests-dir /path/to/upstream`.";
 
 // Internal function for testing that accepts a workspace directory path.
 fn dump_manifests_at_path(
@@ -2197,7 +2206,8 @@ fn run_resume_command(
                 })),
             })
         }
-        SlashCommand::Bughunter { .. }
+        SlashCommand::Questions { .. }
+        | SlashCommand::Bughunter { .. }
         | SlashCommand::Commit { .. }
         | SlashCommand::Pr { .. }
         | SlashCommand::Issue { .. }
@@ -2457,6 +2467,13 @@ struct SlashSelectionHandler(Box<SlashSelectionCallback>);
 /// `SubagentCompleted`, and the turn runner produces `TurnComplete`.
 enum CoordinatorEvent {
     Human(repl_ui::InputEvent),
+    Interactions(engine_events::InteractionSnapshot),
+    InteractionInput(engine_events::TurnInput),
+    InteractionError(String),
+    CommandResult {
+        id: u64,
+        result: Result<serde_json::Value, String>,
+    },
     /// A peer's message, plus the acknowledgement its receiver waits on.
     ///
     /// The receiver must not advance its durable cursor past a message that is
@@ -2479,9 +2496,12 @@ enum CoordinatorEvent {
     },
     InputCommitted(u64),
     InputDeferred(Vec<engine_events::TurnInput>),
+    InteractionDeliveryReturned(engine_events::InteractionReceipt),
     PumpQueue,
     TurnStarted,
-    TurnComplete,
+    TurnComplete {
+        is_failed: bool,
+    },
 }
 
 /// Build a mailbox sink that waits for terminal handling by the coordinator.
@@ -2615,31 +2635,8 @@ impl IocraftQuestionPrompter {
         index: usize,
         earlier: Option<&runtime::QuestionPromptAnswer>,
     ) {
-        let field = &request.fields[index];
-        self.ui.show_turn_question(repl_ui::QuestionPromptView {
-            presentation: request.presentation.clone(),
-            title: request.title.clone(),
-            description: request.description.clone(),
-            index,
-            total: request.fields.len(),
-            prompt: field.prompt.clone(),
-            options: field
-                .options
-                .iter()
-                .map(|option| repl_ui::QuestionOptionView {
-                    label: option.label.clone(),
-                    value: option.value.clone(),
-                    description: option.description.clone(),
-                    recommended: option.recommended,
-                    is_navigable: false,
-                })
-                .collect(),
-            allow_custom_input: field.allow_custom_input,
-            custom_input_hint: field.custom_input_hint.clone(),
-            force_fuzzy_select: false,
-            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
-            initial_value: earlier.map(|answer| answer.value.clone()),
-        });
+        self.ui
+            .show_turn_question(cli::interactions::question_field(request, index, earlier));
     }
 
     fn prepare_answer_receiver(&self) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
@@ -2664,18 +2661,7 @@ impl IocraftQuestionPrompter {
         field: &runtime::QuestionField,
         raw_answer: String,
     ) -> runtime::QuestionPromptAnswer {
-        let matched = field
-            .options
-            .iter()
-            .find(|option| option.value == raw_answer);
-        let label = matched
-            .map(|option| option.label.clone())
-            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
-        runtime::QuestionPromptAnswer {
-            id: field.id.clone(),
-            value: raw_answer,
-            label,
-        }
+        cli::interactions::answer_for_field(field, raw_answer)
     }
 }
 
@@ -2737,40 +2723,7 @@ impl runtime::PermissionPrompter for IocraftQuestionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
-        let question = runtime::QuestionPromptRequest {
-            presentation: runtime::QuestionPresentation::Question,
-            title: Some(format!("Approve {}?", request.tool_name)),
-            description: Some(
-                format!(
-                    "{}\n{}",
-                    request.input,
-                    request.reason.as_deref().unwrap_or_default()
-                )
-                .into(),
-            ),
-            fields: vec![runtime::QuestionField {
-                id: "permission".into(),
-                prompt: "Allow this tool call?".into(),
-                kind: runtime::QuestionKind::SingleSelect,
-                required: true,
-                allow_custom_input: false,
-                custom_input_hint: None,
-                options: vec![
-                    runtime::QuestionOption {
-                        label: "Allow once".into(),
-                        value: "allow".into(),
-                        description: None,
-                        recommended: false,
-                    },
-                    runtime::QuestionOption {
-                        label: "Deny".into(),
-                        value: "deny".into(),
-                        description: None,
-                        recommended: false,
-                    },
-                ],
-            }],
-        };
+        let question = cli::interactions::permission_question(request);
         let reply = runtime::QuestionPrompter::begin_question(self, &question);
         Box::pin(async move {
             match reply.await {
@@ -3099,7 +3052,9 @@ impl Drop for ReplTurnCancelMonitor {
 /// sub-agent or background result is a one-line notice.
 fn echo_input(output: &repl_ui::OutputSender, input: &engine_events::InputView) {
     match input.source {
-        input_queue::QueuedKind::Subagent | input_queue::QueuedKind::Background => {
+        input_queue::QueuedKind::Subagent
+        | input_queue::QueuedKind::Background
+        | input_queue::QueuedKind::Interaction(_) => {
             output.println(&input.display);
         }
         _ => output.user_prompt(input.echo()),
@@ -3295,6 +3250,10 @@ fn run_repl_iocraft_dispatch(
     // Esc flushes pending input; Ctrl+C always sends Cancel across the seam.
     // There is no separate raw-mode HookAbortMonitor.
     let commands = cli.engine_handle.commands.clone();
+    let mut questions = cli::interactions::Questions::default();
+    if runtime::experiments::is_enabled(runtime::experiments::Experiment::NonblockingInteractions) {
+        questions.configure(&commands);
+    }
     let _ = commands.send(EngineCommand::BackgroundTask {
         action: engine_events::BackgroundTaskAction::Watch,
     });
@@ -3401,6 +3360,28 @@ fn run_repl_iocraft_dispatch(
                 // Background work keeps publishing while the parent is idle.
                 // Its UI uses the same seam as every other engine consumer.
                 match &event {
+                    EngineEvent::Interactions(snapshot) => {
+                        let _ =
+                            completion_tx.send(CoordinatorEvent::Interactions(snapshot.clone()));
+                        continue;
+                    }
+                    EngineEvent::InteractionInput(input) => {
+                        let _ =
+                            completion_tx.send(CoordinatorEvent::InteractionInput(input.clone()));
+                        continue;
+                    }
+                    EngineEvent::InteractionError { message } => {
+                        let _ =
+                            completion_tx.send(CoordinatorEvent::InteractionError(message.clone()));
+                        continue;
+                    }
+                    EngineEvent::CommandResult { id, result } => {
+                        let _ = completion_tx.send(CoordinatorEvent::CommandResult {
+                            id: *id,
+                            result: result.clone(),
+                        });
+                        continue;
+                    }
                     EngineEvent::State(state) => activity.observe_engine_state(*state),
                     EngineEvent::TurnStarted { .. } => {
                         let _ = completion_tx.send(CoordinatorEvent::TurnStarted);
@@ -3436,6 +3417,11 @@ fn run_repl_iocraft_dispatch(
                     }
                     EngineEvent::InputDeferred(inputs) => {
                         let _ = completion_tx.send(CoordinatorEvent::InputDeferred(inputs.clone()));
+                        continue;
+                    }
+                    EngineEvent::InteractionDeliveryReturned(receipt) => {
+                        let _ = completion_tx
+                            .send(CoordinatorEvent::InteractionDeliveryReturned(*receipt));
                         continue;
                     }
                     _ => {}
@@ -3541,6 +3527,15 @@ fn run_repl_iocraft_dispatch(
             event => event,
         };
         match event {
+            CoordinatorEvent::Interactions(snapshot) => {
+                questions.update(snapshot, &repl_ui_cmd, &repl_output);
+            }
+            CoordinatorEvent::InteractionError(message) => {
+                repl_output.println(&format!("Question delivery failed: {message}"));
+            }
+            CoordinatorEvent::CommandResult { id, result } => {
+                questions.result(id, result, &repl_output);
+            }
             CoordinatorEvent::TurnStarted => {
                 let command = coord.lock().unwrap().turn_started();
                 if let Some(command) = command {
@@ -3553,6 +3548,11 @@ fn run_repl_iocraft_dispatch(
                     let _ = receipt.send(());
                 }
                 repl_ui_cmd.pending_input_remove(id);
+            }
+            CoordinatorEvent::InteractionDeliveryReturned(receipt) => {
+                for (input, _) in coord.lock().unwrap().return_interaction(receipt) {
+                    repl_ui_cmd.pending_input_remove(input.id);
+                }
             }
             CoordinatorEvent::InputDeferred(inputs) => {
                 let inputs = {
@@ -3569,14 +3569,19 @@ fn run_repl_iocraft_dispatch(
                     let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                 }
             }
-            event @ (CoordinatorEvent::TurnComplete | CoordinatorEvent::PumpQueue) => {
+            event @ (CoordinatorEvent::TurnComplete { .. } | CoordinatorEvent::PumpQueue) => {
                 if matches!(event, CoordinatorEvent::PumpQueue)
                     && coord.lock().unwrap().is_running()
                 {
                     continue;
                 }
-                if matches!(event, CoordinatorEvent::TurnComplete) {
-                    coord.lock().unwrap().finish_turn();
+                if let CoordinatorEvent::TurnComplete { is_failed } = event {
+                    let mut queue = coord.lock().unwrap();
+                    if is_failed {
+                        queue.finish_failed_turn();
+                    } else {
+                        queue.finish_turn();
+                    }
                 }
                 if let Some(h) = runner_handle.take() {
                     let _ = h.join();
@@ -3629,6 +3634,7 @@ fn run_repl_iocraft_dispatch(
             }
             event @ (CoordinatorEvent::PeerMessage(..)
             | CoordinatorEvent::SubagentCompleted { .. }
+            | CoordinatorEvent::InteractionInput(_)
             | CoordinatorEvent::BackgroundTaskCompleted { .. }) => {
                 // Peer messages, sub-agent results and background completions
                 // share human input's scheduling: steer active work or queue the next
@@ -3655,6 +3661,9 @@ fn run_repl_iocraft_dispatch(
                     }
                     CoordinatorEvent::BackgroundTaskCompleted { prompt, display } => {
                         (prompt, display, input_queue::QueuedKind::Background, None)
+                    }
+                    CoordinatorEvent::InteractionInput(input) => {
+                        (input.text, input.display, input.source, None)
                     }
                     _ => unreachable!(),
                 };
@@ -3714,6 +3723,17 @@ fn run_repl_iocraft_dispatch(
                 }
             }
             CoordinatorEvent::Human(input_event) => match input_event {
+                repl_ui::InputEvent::OpenInteractions => {
+                    if pending_slash_selection.is_none()
+                        && pending_question_answer.lock().unwrap().is_none()
+                    {
+                        questions.open(None, &commands, &repl_ui_cmd, &repl_output);
+                    }
+                }
+                repl_ui::InputEvent::DismissInteraction => questions.dismiss(&repl_ui_cmd),
+                repl_ui::InputEvent::InteractionAnswer { focus, answer } => {
+                    questions.answer(&focus, answer, &commands, &repl_ui_cmd);
+                }
                 repl_ui::InputEvent::Exit => {
                     mailbox_abort.abort();
                     let _ = commands.send(EngineCommand::Close);
@@ -3758,6 +3778,7 @@ fn run_repl_iocraft_dispatch(
                     }
                 }
                 repl_ui::InputEvent::Abort | repl_ui::InputEvent::Cancel => {
+                    questions.dismiss(&repl_ui_cmd);
                     let closed_picker = pending_slash_selection.take().is_some()
                         | mid_turn_selection.take().is_some();
                     cancel_pending_question_answer(&pending_question_answer);
@@ -3844,6 +3865,38 @@ fn run_repl_iocraft_dispatch(
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
                     if !matches!(parsed, Ok(None)) {
                         echo_input(&repl_output, &human(text.clone()).input.view());
+                    }
+                    if let Ok(Some(SlashCommand::Questions {
+                        interaction_id,
+                        cancel,
+                    })) = &parsed
+                    {
+                        if !runtime::experiments::is_enabled(
+                            runtime::experiments::Experiment::NonblockingInteractions,
+                        ) {
+                            repl_output.println(
+                                "/questions requires nonblockingInteractions to be enabled.",
+                            );
+                        } else if pending_slash_selection.is_none()
+                            && pending_question_answer.lock().unwrap().is_none()
+                        {
+                            if *cancel {
+                                // The shared command parser requires this ID.
+                                if let Some(id) = interaction_id.as_deref() {
+                                    questions.cancel(id, &commands, &repl_ui_cmd, &repl_output);
+                                }
+                            } else {
+                                questions.open(
+                                    interaction_id.as_deref(),
+                                    &commands,
+                                    &repl_ui_cmd,
+                                    &repl_output,
+                                );
+                            }
+                        } else {
+                            repl_output.println("Finish or dismiss the active selection before reviewing another request.");
+                        }
+                        continue;
                     }
                     // Task inspection is local UI, so it remains available
                     // during work without taking the session lock.
@@ -4003,6 +4056,15 @@ fn run_repl_iocraft_dispatch(
                         }
                     };
                     if is_slash {
+                        if !is_running {
+                            let session_id = cli_shared
+                                .lock()
+                                .expect("LiveCli mutex poisoned")
+                                .lifecycle
+                                .session_handle()
+                                .id;
+                            questions.refresh(session_id, &commands, &repl_ui_cmd);
+                        }
                         continue;
                     }
 
@@ -4087,6 +4149,11 @@ fn run_repl_iocraft_dispatch(
                             repl_ui_cmd.begin_turn();
                         }
                         repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
+                        questions.refresh(
+                            cli.lifecycle.session_handle().id,
+                            &commands,
+                            &repl_ui_cmd,
+                        );
                         // A queue held for this picker goes on once it closes.
                         if pending_slash_selection.is_none() && !coord.lock().unwrap().is_running()
                         {
@@ -4263,7 +4330,7 @@ fn deliver_steering_inputs(
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    next: input_queue::NextTurn<mpsc::Sender<()>>,
+    next: input_queue::NextTurn,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
     spinner: render::activity::ActivityState,
@@ -4285,29 +4352,25 @@ fn spawn_iocraft_turn(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
             }
-            match cli.run_turn_iocraft(
-                &next.prompt,
+            let is_failed = match cli.run_turn_iocraft(
+                &next.inputs,
                 &next.echoes,
                 &output,
                 &ui,
                 &spinner,
                 pending_question_answer,
             ) {
-                Ok(true) => {
-                    for receipt in next.receipts {
-                        let _ = receipt.send(());
-                    }
-                }
-                Ok(false) => {}
+                Ok(committed) => !committed,
                 Err(error) => {
                     output.println(&format!(
                         "{}{error}{}",
                         theme().fg_seq(TextRole::Error),
                         RESET
                     ));
+                    true
                 }
-            }
-            let _ = done_tx.send(CoordinatorEvent::TurnComplete);
+            };
+            let _ = done_tx.send(CoordinatorEvent::TurnComplete { is_failed });
         })
         .expect("spawn repl-runner thread")
 }
@@ -4570,6 +4633,8 @@ struct TurnPresentation<'a> {
     is_rendered: bool,
     /// How the host already drew this turn's inputs; saved with the prompt.
     shown: &'a [engine_events::InputView],
+    /// Typed queued inputs retain their attachment policy through preparation.
+    inputs: Option<&'a [engine_events::TurnInput]>,
 }
 
 impl LiveCli {
@@ -4859,6 +4924,7 @@ impl LiveCli {
             ui,
             is_rendered,
             shown,
+            inputs,
         } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -4871,11 +4937,23 @@ impl LiveCli {
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
             is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
-        let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
+        let blocks = match inputs {
+            Some(inputs) => inputs
+                .iter()
+                .map(|input| runtime::image_input::turn_input_blocks(input, &runtime::StdFsBackend))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
+            None => runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?,
+        };
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
-            context: None,
-            shown: shown.iter().map(engine_events::InputView::echo).collect(),
+            context: (!shown.is_empty()).then(|| engine_events::PromptContext {
+                input_views: shown.to_vec(),
+                ..engine_events::PromptContext::default()
+            }),
+            shown: Vec::new(),
         })?;
 
         let mut outcome = TurnOutcome::default();
@@ -4999,6 +5077,13 @@ impl LiveCli {
                     }
                 }
                 _ => {}
+            }
+            // Initial input was drawn when the terminal submitted it. Its
+            // durable receipt still reaches the coordinator, but only newly
+            // consumed steering needs another scrollback row here.
+            if matches!(&ev, EngineEvent::InputCommitted(input) if shown.iter().any(|shown| shown.id == input.id))
+            {
+                continue;
             }
             let action = match renderer.as_mut() {
                 Some(r) => r.render(ev),
@@ -5139,6 +5224,7 @@ impl LiveCli {
                 ui: None,
                 is_rendered: true,
                 shown: &[],
+                inputs: None,
             },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5282,16 +5368,21 @@ impl LiveCli {
     /// instead of indicatif.
     fn run_turn_iocraft(
         &mut self,
-        input: &str,
+        inputs: &[engine_events::TurnInput],
         shown: &[engine_events::InputView],
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
         pending_question_answer: PendingQuestionAnswer,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        let input = inputs
+            .iter()
+            .map(|input| input.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         ui.begin_turn();
         let turn_start = Instant::now();
-        let token_budget = crate::render::parse_token_budget(input);
+        let token_budget = crate::render::parse_token_budget(&input);
         let model = self.lifecycle.current_model();
 
         // Prepare display metadata before submission. Engine events own the
@@ -5305,22 +5396,26 @@ impl LiveCli {
         let mut permission_prompter = question_prompter.clone();
 
         let outcome = self.drive_turn(
-            input,
+            &input,
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: Some(output),
                 ui: Some(ui),
                 is_rendered: true,
                 shown,
+                inputs: Some(inputs),
             },
             &mut permission_prompter,
             &mut question_prompter,
             None,
         )?;
 
-        // Explicit cancellation finishes this input. The mailbox sink decides
-        // whether the receiver is still running and can acknowledge delivery.
-        let is_handled = outcome.complete.is_some();
+        // Durable input events acknowledge ownership independently of turn
+        // success. Failure/cancellation pauses any input still awaiting commit.
+        let is_handled = outcome
+            .complete
+            .as_ref()
+            .is_some_and(|turn| !turn.cancelled);
         match outcome.complete {
             Some(tc) if tc.cancelled => {
                 output.println(&format!(
@@ -5377,6 +5472,7 @@ impl LiveCli {
                 ui: None,
                 is_rendered: false,
                 shown: &[],
+                inputs: None,
             },
             permission_prompter,
             &mut question_prompter,
@@ -5492,6 +5588,10 @@ impl LiveCli {
         Ok(match command {
             SlashCommand::Help => {
                 self.out_println(render_repl_help());
+                false
+            }
+            SlashCommand::Questions { .. } => {
+                self.out_println("/questions requires the default interactive REPL with nonblockingInteractions enabled.");
                 false
             }
             SlashCommand::Status => {
@@ -6246,10 +6346,13 @@ impl LiveCli {
                 "\n> To use a different editor, set the $EDITOR or $VISUAL environment variable.",
             );
         } else {
-            let _ = std::fmt::Write::write_fmt(&mut msg, format_args!(
-                "\n> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
-                source, editor
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut msg,
+                format_args!(
+                    "\n> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
+                    source, editor
+                ),
+            );
         }
         Ok(msg)
     }

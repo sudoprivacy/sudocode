@@ -247,6 +247,18 @@ impl LocalBox {
         command
     }
 
+    fn list_credentials_command(&self) -> Command {
+        let mut command = self.node_process();
+        command
+            .args(["--bind-addr", &self.local_endpoint.to_string()])
+            .args(["auth", "list"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        super::supervisor::hide_console(&mut command);
+        command
+    }
+
     pub(crate) fn status(&self, managed: bool) -> Value {
         json!({"profile": "existing_box", "endpoint": self.box_endpoint,
             "persistedNodeId": self.node_id, "binarySha256": self.binary_sha256,
@@ -292,6 +304,8 @@ pub enum AgentEnrollment {
 
 /// Bounds the Node's own online issuance; its RPC timeout is 15 seconds.
 const MINT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Bounds asking the Node which credentials it recorded.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounds waiting for another session's issuance on the same Box.
 const ENROLLMENT_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -330,7 +344,7 @@ fn valid_agent_name(agent: &str) -> bool {
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))
             && port.len() == 4
-            && matches!(port[3], '1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'));
+            && matches!(port[3], '0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'));
     !agent.is_empty()
         && !device
         && !agent.starts_with(['-', '.'])
@@ -394,20 +408,9 @@ fn enroll_with(
         std::thread::sleep(Duration::from_millis(100));
     }
     if marker.exists() {
-        // An earlier issuance stopped (the process exited or was killed)
-        // before it confirmed what it wrote.
-        if bundle.exists() {
-            let error = quarantine(
-                &profile,
-                &bundle,
-                &format!("an earlier join for '{agent}' did not finish confirming its credential"),
-            );
-            if !bundle.exists() {
-                fs::remove_file(&marker)?;
-            }
-            return Err(error);
+        if let Some(joined) = settle_interrupted(&profile, agent, &bundle, &marker, timeout)? {
+            return Ok(joined);
         }
-        fs::remove_file(&marker)?;
     }
     if bundle.join("credential.json").is_file() {
         return if manifest_names(&bundle, agent) {
@@ -438,9 +441,107 @@ fn enroll_with(
     let issued = issue(&profile, agent, &bundle, timeout);
     // A bundle that could not be moved aside stays blocked by the marker.
     if issued.is_ok() || !bundle.exists() {
-        fs::remove_file(&marker)?;
+        if let Err(error) = clear_marker(&marker) {
+            let outcome = match &issued {
+                Ok(_) => "the credential was confirmed".to_string(),
+                Err(cause) => cause.to_string(),
+            };
+            return Err(blocked(&marker, &outcome, &error));
+        }
     }
     issued
+}
+
+/// Settle what an earlier issuance left behind its marker. `Some` when that
+/// issuance had in fact joined; `None` when the name can be issued now.
+fn settle_interrupted(
+    profile: &LocalBox,
+    agent: &str,
+    bundle: &Path,
+    marker: &Path,
+    timeout: Duration,
+) -> Result<Option<AgentEnrollment>> {
+    // An earlier issuance stopped (its session quit or was killed) before
+    // it confirmed what it wrote. Its Node child may outlive it, so give
+    // that child the issuance's own bound to finish first. Then the Node's
+    // record decides: keep a whole bundle it recorded, set aside one it
+    // never did and issue again.
+    let age = fs::metadata(marker)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|written| written.elapsed().ok())
+        .unwrap_or(timeout);
+    if let Some(rest) = timeout.checked_sub(age) {
+        std::thread::sleep(rest);
+    }
+    if bundle.exists() {
+        match recorded(profile, agent) {
+            Ok(true) if usable_bundle(bundle, agent) => {
+                clear_marker(marker).map_err(|error| {
+                    blocked(marker, "the node had recorded the earlier join", &error)
+                })?;
+                return Ok(Some(AgentEnrollment::Joined));
+            }
+            Ok(_) => {
+                let error = quarantine(
+                    profile,
+                    bundle,
+                    &format!(
+                        "an earlier join for '{agent}' did not finish, and the node holds no \
+                         usable record of what it wrote"
+                    ),
+                );
+                if bundle.exists() {
+                    return Err(error);
+                }
+                clear_marker(marker).map_err(|error| {
+                    blocked(marker, "what an earlier join wrote was set aside", &error)
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "an earlier join for '{agent}' did not finish; what it wrote stays unused \
+                     until the node can be asked about it: {error}"
+                )
+                .into());
+            }
+        }
+    } else {
+        clear_marker(marker)
+            .map_err(|error| blocked(marker, "an earlier join wrote nothing", &error))?;
+    }
+    Ok(None)
+}
+
+/// Remove the issuance marker. Windows refuses briefly while a scanner or a
+/// reader holds the file.
+fn clear_marker(marker: &Path) -> std::io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        match fs::remove_file(marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) if attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            done => return done,
+        }
+    }
+}
+
+/// A marker that could not be removed keeps the bundle from every session until
+/// the next join settles it with the Node.
+fn blocked(
+    marker: &Path,
+    outcome: &str,
+    error: &std::io::Error,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    format!(
+        "{outcome}, but {} could not be removed ({error}); sessions wait for the next \
+         join to settle it with the node",
+        marker.display()
+    )
+    .into()
 }
 
 /// Run the Node's issuance and accept only a confirmed result; anything else
@@ -453,7 +554,7 @@ fn issue(
 ) -> Result<AgentEnrollment> {
     let output = match run_bounded(profile.mint_agent_command(agent), timeout) {
         Ok(output) => output,
-        Err(error) => return Err(quarantine(profile, bundle, &error.to_string())),
+        Err(error) => return settle(profile, agent, bundle, &error.to_string()),
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -461,19 +562,21 @@ fn issue(
             profile,
             bundle,
             &format!(
-                "the node refused to issue '{agent}': {}. If another Agent already uses this \
-                 name, ask the node owner to mint a different name for this workspace and set \
-                 it as `agentName`",
+                "the node refused to issue '{agent}': {}. If the node already holds this name \
+                 for this workspace, its owner can issue it again with `auth mint --subject-type \
+                 agent --subject-id={agent} --allow-existing`; otherwise ask for a different \
+                 name and set it as `agentName`",
                 last_lines(&stderr)
             ),
         ));
     }
     if !online_receipt(&stderr, agent, profile.local_endpoint) {
-        return Err(quarantine(
+        return settle(
             profile,
+            agent,
             bundle,
             &format!("the node returned no online receipt for '{agent}'"),
-        ));
+        );
     }
     if !manifest_names(bundle, agent) {
         return Err(quarantine(
@@ -489,17 +592,61 @@ fn issue(
 /// An offline cold-start signature names no endpoint; a fallback warning on
 /// another line does not count.
 fn online_receipt(stderr: &str, agent: &str, endpoint: SocketAddr) -> bool {
-    let subject = format!("agent:{agent}");
-    let origin = format!("https://{endpoint}");
+    // Derived names keep the folder name, spaces included, so the subject is
+    // matched as a phrase rather than as a whitespace-separated token.
+    let receipt = format!("subject=agent:{agent} via https://{endpoint}");
     stderr.lines().any(|line| {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        tokens
-            .iter()
-            .any(|token| token.strip_prefix("subject=").unwrap_or(token) == subject)
-            && tokens
-                .windows(2)
-                .any(|pair| pair[0] == "via" && pair[1] == origin)
+        line.match_indices(&receipt).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let after = line[at + receipt.len()..].chars().next();
+            before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace)
+        })
     })
+}
+
+/// An issuance that did not confirm itself (it timed out, or its receipt was
+/// unfamiliar) still joined if the Node recorded this Agent and the bundle is
+/// whole; anything else is set aside.
+fn settle(profile: &LocalBox, agent: &str, bundle: &Path, cause: &str) -> Result<AgentEnrollment> {
+    if usable_bundle(bundle, agent) && matches!(recorded(profile, agent), Ok(true)) {
+        return Ok(AgentEnrollment::Joined);
+    }
+    Err(quarantine(profile, bundle, cause))
+}
+
+/// Whether the running Node lists `agent:<agent>` among its credentials.
+fn recorded(profile: &LocalBox, agent: &str) -> Result<bool> {
+    let output = run_bounded(profile.list_credentials_command(), LIST_TIMEOUT)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "the node did not list its credentials: {}",
+            last_lines(&stderr)
+        )
+        .into());
+    }
+    // `agent:<name>  agent:<name>  admin=…`: columns are two spaces apart, and
+    // a name may itself contain a space.
+    let subject = format!("agent:{agent}  ");
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(stderr.lines())
+        .any(|line| line.starts_with(&subject)))
+}
+
+/// A manifest naming `agent` and every file it refers to.
+fn usable_bundle(bundle: &Path, agent: &str) -> bool {
+    fs::read(bundle.join("credential.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|manifest| {
+            manifest["agent"] == agent
+                && ["ca", "cert", "key"].iter().all(|field| {
+                    manifest[*field]
+                        .as_str()
+                        .is_some_and(|file| bundle.join(file).is_file())
+                })
+        })
 }
 
 fn manifest_names(bundle: &Path, agent: &str) -> bool {
@@ -527,19 +674,27 @@ fn quarantine(
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let held = bundle.with_file_name(format!(".unconfirmed-{name}-{stamp}"));
+    let shown = |path: &Path| {
+        let path = path.display().to_string();
+        if path.contains(char::is_whitespace) {
+            format!("\"{path}\"")
+        } else {
+            path
+        }
+    };
     let check = format!(
-        "\"{}\" --data-dir \"{}\" --identity-dir \"{}\" --bind-addr {} auth list",
-        profile.binary.display(),
-        profile.data_dir.display(),
-        profile.identity_dir.display(),
+        "{} --data-dir {} --identity-dir {} --bind-addr {} auth list",
+        shown(&profile.binary),
+        shown(&profile.data_dir),
+        shown(&profile.identity_dir),
         profile.local_endpoint
     );
     match fs::rename(bundle, &held) {
         Ok(()) => format!(
-            "{cause}. What it wrote was moved to {} and is not used. The node owner can see \
-             whether the Node recorded agent:{name} with {check}, and decides whether to \
-             revoke it; once that is settled, delete the moved directory and the next \
-             session joins again",
+            "{cause}. What it wrote was moved to {} and is not used; the next session \
+             issues again. If the Node lists agent:{name} anyway ({check}), it refuses \
+             that, and the node owner issues it again with `auth mint --subject-type agent \
+             --subject-id={name} --allow-existing`",
             held.display()
         )
         .into(),
@@ -616,11 +771,12 @@ set "DATA=%~2"
 set "BIND=%~6"
 >>"%HERE%calls.txt" echo %*
 set NEXUS_>"%HERE%env.txt" 2>nul
+set /p MODE=<"%HERE%mode.txt"
+if "%~8"=="list" goto list
 shift & shift & shift & shift & shift & shift & shift & shift & shift & shift
 rem cmd may split "--subject-id=NAME" at "=" when it is not quoted.
 set "NAME=%~2"
 if "%NAME%"=="" for /f "tokens=2 delims==" %%a in ("%~1") do set "NAME=%%a"
-set /p MODE=<"%HERE%mode.txt"
 if "%MODE%"=="slow" ping -n 3 127.0.0.1 >nul
 if "%MODE%"=="refuse" (
   echo error: agent:%NAME% is already registered 1>&2
@@ -629,7 +785,8 @@ if "%MODE%"=="refuse" (
 set "OWNER=%NAME%"
 if "%MODE%"=="wrong" set "OWNER=someone-else"
 mkdir "%DATA%\agents\%NAME%"
->"%DATA%\agents\%NAME%\credential.json" echo {"agent":"%OWNER%"}
+>"%DATA%\agents\%NAME%\credential.json" echo {"agent":"%OWNER%","ca":"ca.pem","cert":"agent.pem","key":"agent-key.pem"}
+for %%f in (ca.pem agent.pem agent-key.pem) do >"%DATA%\agents\%NAME%\%%f" echo pem
 if "%MODE%"=="fallback" (
   echo warning: no answer via https://%BIND% 1>&2
   echo minted agent cert subject=agent:%NAME% -^> offline 1>&2
@@ -639,7 +796,12 @@ if "%MODE%"=="noreceipt" (
   echo minted agent cert subject=agent:%NAME% -^> offline 1>&2
   exit /b 0
 )
+>>"%HERE%recorded.txt" echo agent:%NAME%  agent:%NAME%  admin=false
 echo minted agent cert subject=agent:%NAME% via https://%BIND% -^> written 1>&2
+exit /b 0
+:list
+if "%MODE%"=="nolist" exit /b 1
+if exist "%HERE%recorded.txt" type "%HERE%recorded.txt"
 exit /b 0
 "#,
     );
@@ -653,13 +815,16 @@ echo "$*" >> "$here/calls.txt"
 env | grep '^NEXUS_' > "$here/env.txt"
 data=$2; bind=$6; name=${11#--subject-id=}
 mode=$(cat "$here/mode.txt")
+if [ "$8" = list ]; then [ "$mode" = nolist ] && exit 1; cat "$here/recorded.txt" 2>/dev/null; exit 0; fi
 [ "$mode" = slow ] && sleep 2
 if [ "$mode" = refuse ]; then echo "error: agent:$name is already registered" >&2; exit 1; fi
 owner=$name; [ "$mode" = wrong ] && owner=someone-else
 mkdir -p "$data/agents/$name"
-printf '{"agent":"%s"}\n' "$owner" > "$data/agents/$name/credential.json"
+printf '{"agent":"%s","ca":"ca.pem","cert":"agent.pem","key":"agent-key.pem"}\n' "$owner" > "$data/agents/$name/credential.json"
+for file in ca.pem agent.pem agent-key.pem; do echo pem > "$data/agents/$name/$file"; done
 if [ "$mode" = fallback ]; then echo "warning: no answer via https://$bind" >&2; echo "minted agent cert subject=agent:$name -> offline" >&2; exit 0; fi
 if [ "$mode" = noreceipt ]; then echo "minted agent cert subject=agent:$name -> offline" >&2; exit 0; fi
+echo "agent:$name  agent:$name  admin=false" >> "$here/recorded.txt"
 echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
 "#,
     );
@@ -763,6 +928,33 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
                 .collect()
         }
 
+        /// A whole bundle, as an issuance writes it, left behind with its marker.
+        fn leave_unconfirmed(&self, agent: &str) -> PathBuf {
+            let bundle = self.agents().join(agent);
+            fs::create_dir_all(&bundle).unwrap();
+            fs::write(
+                bundle.join("credential.json"),
+                json!({"agent": agent, "ca": "ca.pem", "cert": "agent.pem", "key": "agent-key.pem"})
+                    .to_string(),
+            )
+            .unwrap();
+            for file in ["ca.pem", "agent.pem", "agent-key.pem"] {
+                fs::write(bundle.join(file), "pem").unwrap();
+            }
+            let marker = self.agents().join(format!(".joining-{agent}"));
+            fs::write(&marker, "1").unwrap();
+            backdate(&marker);
+            marker
+        }
+
+        fn record(&self, agent: &str) {
+            fs::write(
+                self.dir.path().join("bin/recorded.txt"),
+                format!("agent:{agent}  agent:{agent}  admin=false\n"),
+            )
+            .unwrap();
+        }
+
         fn bundle(&self, agent: &str) -> PathBuf {
             self.agents().join(agent).join("credential.json")
         }
@@ -851,7 +1043,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         let fixture = Fixture::new("ok");
         for name in [
             "", ".", "..", ".hidden", "-x", "a.", "a ", "a/b", "a\\b", "a:b", "a@b", "a|b", "a\nb",
-            "con", "NUL.txt", "com1", "Lpt9", "COM¹", "nul .txt",
+            "con", "NUL.txt", "com0", "com1", "Lpt9", "COM¹", "nul .txt",
         ] {
             let message = error(fixture.enroll(name));
             assert!(
@@ -874,6 +1066,16 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
     }
 
     /// An unconfirmed issuance is moved aside so the session never uses it.
+    /// An issuance that stopped long enough ago that no Node child of it runs.
+    fn backdate(path: &Path) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+            .unwrap();
+    }
+
     fn assert_quarantined(fixture: &Fixture, agent: &str, message: &str) {
         assert!(!fixture.bundle(agent).exists(), "{message}");
         let held = fs::read_dir(fixture.agents())
@@ -905,33 +1107,138 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
     }
 
     #[test]
-    fn an_interrupted_issuance_is_set_aside_by_the_next_attempt() {
+    fn an_interrupted_issuance_the_node_recorded_is_kept() {
         let fixture = Fixture::new("ok");
-        fs::create_dir_all(fixture.agents().join("worker")).unwrap();
-        fs::write(fixture.bundle("worker"), r#"{"agent":"worker"}"#).unwrap();
-        let marker = fixture.agents().join(".joining-worker");
-        fs::write(&marker, "1").unwrap();
-        let message = error(fixture.enroll("worker"));
-        assert!(message.contains("did not finish confirming"), "{message}");
-        assert_quarantined(&fixture, "worker", &message);
+        let marker = fixture.leave_unconfirmed("worker");
+        fixture.record("worker");
+        assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
         assert!(!marker.exists());
-        assert_eq!(fixture.calls(), Vec::<String>::new());
-        // With the interrupted result set aside, the name can be issued again.
-        let held: Vec<_> = fs::read_dir(fixture.agents())
+        assert!(fixture.bundle("worker").exists());
+        let calls = fixture.calls();
+        assert!(
+            calls.len() == 1 && calls[0].contains("auth list"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_issuance_the_node_never_recorded_is_set_aside_and_issued_again() {
+        let fixture = Fixture::new("ok");
+        let marker = fixture.leave_unconfirmed("worker");
+        assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
+        assert!(!marker.exists());
+        assert!(fixture.bundle("worker").exists());
+        let held = fs::read_dir(fixture.agents())
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|entry| {
+            .any(|entry| {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".unconfirmed-")
-            })
-            .collect();
-        for entry in held {
-            fs::remove_dir_all(entry.path()).unwrap();
-        }
+                    .starts_with(".unconfirmed-worker-")
+            });
+        assert!(held);
+        let calls = fixture.calls();
+        assert!(
+            calls.len() == 2 && calls[0].contains("auth list") && calls[1].contains("auth mint"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_issuance_stays_unused_while_the_node_cannot_be_asked() {
+        let fixture = Fixture::new("nolist");
+        let marker = fixture.leave_unconfirmed("worker");
+        let message = error(fixture.enroll("worker"));
+        assert!(message.contains("stays unused"), "{message}");
+        assert!(marker.exists() && fixture.bundle("worker").exists());
+    }
+
+    #[test]
+    fn a_partial_bundle_is_not_kept_even_when_the_name_is_recorded() {
+        let fixture = Fixture::new("ok");
+        fixture.leave_unconfirmed("worker");
+        fs::remove_file(fixture.agents().join("worker").join("agent.pem")).unwrap();
+        fixture.record("worker");
         assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
-        assert!(!marker.exists());
+        let held = fs::read_dir(fixture.agents())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".unconfirmed-worker-")
+            });
+        let calls = fixture.calls();
+        assert!(held && calls.len() == 2, "{calls:?}");
+    }
+
+    #[test]
+    fn a_name_with_a_space_is_issued_and_recognised() {
+        // Derived names keep the folder name, spaces included.
+        let fixture = Fixture::new("ok");
+        let agent = "My Project-1a2b3c";
+        assert_eq!(fixture.enroll(agent).unwrap(), AgentEnrollment::Joined);
+        let marker = fixture.agents().join(format!(".joining-{agent}"));
+        fs::write(&marker, "1").unwrap();
+        backdate(&marker);
+        // Settled by the Node's list, which must find the spaced name too.
+        assert_eq!(fixture.enroll(agent).unwrap(), AgentEnrollment::Joined);
+        assert!(!marker.exists() && fixture.bundle(agent).exists());
+        let calls = fixture.calls();
+        // One issuance confirmed by its receipt, then one list.
+        assert!(
+            calls.len() == 2 && calls[0].contains("auth mint") && calls[1].contains("auth list"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_marker_waits_for_an_issuance_that_may_still_be_running() {
+        let fixture = Fixture::new("ok");
+        fs::write(fixture.agents().join(".joining-worker"), "1").unwrap();
+        let started = Instant::now();
+        let outcome = enroll_with(
+            "worker",
+            &fixture.endpoint,
+            &fixture.agents(),
+            Some(&fixture.owner()),
+            Duration::from_millis(1500),
+        );
+        assert_eq!(outcome.unwrap(), AgentEnrollment::Joined);
+        assert!(
+            started.elapsed() >= Duration::from_millis(1000),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_receipt_names_exactly_this_agent_and_endpoint() {
+        let endpoint: SocketAddr = "127.0.0.1:2026".parse().unwrap();
+        let receipt = |stderr: &str| online_receipt(stderr, "ws-1a2b3c", endpoint);
+        assert!(receipt(
+            "minted agent cert subject=agent:ws-1a2b3c via https://127.0.0.1:2026 -> C:\\agents"
+        ));
+        assert!(!receipt(
+            "minted agent cert subject=agent:ws-1a2b3c via https://127.0.0.1:20261 -> x"
+        ));
+        assert!(!receipt(
+            "minted agent cert subject=agent:ws-1a2b3cd via https://127.0.0.1:2026 -> x"
+        ));
+        assert!(!receipt(
+            "warning: no answer via https://127.0.0.1:2026\nminted agent cert subject=agent:ws-1a2b3c -> offline"
+        ));
+    }
+
+    #[test]
+    fn a_recorded_issuance_with_an_unfamiliar_receipt_is_kept() {
+        let fixture = Fixture::new("noreceipt");
+        fixture.record("worker");
+        assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
+        assert!(fixture.bundle("worker").exists());
+        assert!(!fixture.agents().join(".joining-worker").exists());
     }
 
     #[test]
@@ -939,6 +1246,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         let fixture = Fixture::new("ok");
         let marker = fixture.agents().join(".joining-worker");
         fs::write(&marker, "1").unwrap();
+        backdate(&marker);
         assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
         assert!(!marker.exists());
     }

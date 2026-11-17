@@ -71,22 +71,32 @@ whose online `auth mint` goes to the Box's loopback listener under an owner
 lock and never uses `--allow-existing`. Only the name derived from the
 workspace's own path joins, automatically or through `scode setup --mode
 shared`; a configured `agentName`, including one inherited from the user's
-settings, and the home directory are never claimed by scode. A name already
-claimed elsewhere is refused by Nexus. The credential is accepted only with the
-Node's online receipt and a manifest naming that Agent; anything else the
-attempt wrote is moved to `.unconfirmed-<name>-<time>` and never used, and the
-error names the Node's `auth list` check for the node owner. While an issuance
-runs, a `.joining-<name>` marker beside the bundle keeps every session from
-using it; the next attempt sets aside what an interrupted issuance wrote. Any other node, a
-stopped Box or a refusal leaves the binding pending with that cause, the
-outcome of the join, and the recovery.
+settings, and a directory whose settings are the user's own (the home
+directory by default) are never claimed by scode. A name already
+claimed elsewhere is refused by Nexus, which then writes nothing. While an
+issuance runs, a `.joining-<name>` marker beside the bundle keeps every session
+from using it; sessions check it after reading the bundle and again before
+dialling. The credential is accepted with the Node's online receipt and a
+manifest naming that Agent. An issuance that cannot confirm itself (it timed
+out, its receipt was unfamiliar, or its session quit first and left the marker)
+is settled by the Node's own `auth list`: a whole bundle the Node lists is kept;
+anything else is moved to `.unconfirmed-<name>-<time>` (or, if it cannot be
+moved, stays blocked by the marker) and never used, and the name is issued
+again. A fresh leftover marker first gets the issuance's own time bound, in
+case the Node child of a session that quit is still writing. While the Node
+cannot be asked, the bundle stays unused. A name the Node
+already holds is never freed by revoking it; the node owner issues it again
+with `auth mint --allow-existing`.
+Any other node, a stopped Box or a refusal leaves the binding pending with that
+cause, the outcome of the join, and the recovery.
 
 Shared mode is the owner's one consent for every workspace. A verified sender
 on this Node therefore means "a session of the Node owner's OS user", not an
 Agent the owner admitted individually: a freshly cloned repository's session
 is verified as that workspace's own Agent too. Peers treat message contents as
 untrusted data either way. Each workspace keeps its identity on the Node;
-retiring one is the node owner's `auth revoke --agent` operation.
+retiring one is the node owner's `auth revoke --agent` operation, which leaves
+the name taken.
 
 Namespace selection, including the pending binding, is cached per Agent for the
 process lifetime. Tools and receiver therefore cannot select different stores.

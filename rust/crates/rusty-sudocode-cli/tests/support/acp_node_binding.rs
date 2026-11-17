@@ -143,8 +143,6 @@ async fn a_configured_agent_loads_without_a_bundle_and_resolves_it_in_the_same_p
     workspace.cleanup();
 }
 
-/// A real CA-signed bundle arrives after the original receiver started. The
-/// selected mailbox must recover in place, including inbound ACP delivery.
 #[tokio::test]
 async fn a_bundle_whose_issuance_is_unconfirmed_is_not_used() {
     const AGENT: &str = "joining-node-actor";
@@ -182,8 +180,12 @@ async fn a_bundle_whose_issuance_is_unconfirmed_is_not_used() {
             .is_some_and(|e| e.contains(runtime::nexus_mailbox::JOINING_CAUSE)),
         "an unconfirmed bundle must not be used: {created}"
     );
+
+    workspace.cleanup();
 }
 
+/// A real CA-signed bundle arrives after the original receiver started. The
+/// selected mailbox must recover in place, including inbound ACP delivery.
 #[tokio::test]
 #[ignore = "real TLS daemon; e2e/nexus-a2a/run.sh"]
 async fn live_pending_node_recovers_send_and_the_original_receiver() {

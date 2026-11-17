@@ -100,18 +100,15 @@ fn workspace() -> Result<PathBuf> {
     Ok(std::fs::canonicalize(std::env::current_dir()?)?)
 }
 
-fn is_home(path: &Path) -> bool {
-    runtime::user_paths::home_dir()
-        .and_then(|home| std::fs::canonicalize(home).ok())
-        .is_some_and(|home| home == path)
-}
-
 /// The actual credential state of `agent` on the configured node, with the
 /// recovery text a missing credential carries.
 fn agent_status(record: &NodeRecord, agent: &str) -> Value {
     match Config::from_node_record(agent) {
         Ok(Some(_)) => json!({"name": agent, "credential": "ready"}),
         Ok(None) => json!({"name": agent, "credential": "unavailable"}),
+        Err(error) if error.contains(runtime::nexus_mailbox::JOINING_CAUSE) => {
+            json!({"name": agent, "credential": "joining", "detail": error})
+        }
         Err(error) if !credential_present(record.agents_dir(), agent) => {
             json!({"name": agent, "credential": "missing", "recovery": error})
         }
@@ -185,20 +182,26 @@ pub(crate) fn run(
                 // Not persisted here: the session derives and saves the same name.
                 let name = engine_host::peek_agent_name_under(&cwd);
                 let derived = runtime::mailbox::local_agent_name(None, &cwd);
-                let joined = if is_home(&cwd) {
+                let joined = if engine_host::settings_are_shared(&cwd) {
                     Err(
-                        "the home directory's settings apply to every workspace without its \
-                         own, so its Agent is not joined; run `scode setup --mode shared` in \
-                         a workspace"
+                        "this directory's settings are the user's own, which every workspace \
+                         without its own inherits, so its Agent is not joined; run `scode setup \
+                         --mode shared` in a workspace"
                             .to_string(),
                     )
                 } else if name != derived {
                     // A configured name may come from the repository or be inherited
                     // from the user's settings by every unconfigured workspace.
-                    let source = engine_host::agent_name_source(&cwd).map_or_else(
-                        || "its settings".to_string(),
-                        |path| path.display().to_string(),
-                    );
+                    let sources = engine_host::agent_name_sources(&cwd);
+                    let source = if sources.is_empty() {
+                        "its settings".to_string()
+                    } else {
+                        sources
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    };
                     Err(format!(
                         "this workspace answers to '{name}' from {source}, not from its own \
                          path, and scode does not claim a configured name. Ask the node owner \
@@ -246,6 +249,9 @@ pub(crate) fn run(
                     println!("Joined A2A as '{name}'.");
                 }
                 (Some("ready"), _) => println!("A2A agent '{name}' is ready."),
+                (Some("joining"), None) => {
+                    println!("A2A agent '{name}' is joining: its credential is being confirmed.");
+                }
                 (Some("invalid"), None) => println!(
                     "A2A agent '{name}' has an unusable credential: {}",
                     agent["error"].as_str().unwrap_or_default()

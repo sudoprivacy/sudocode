@@ -81,7 +81,8 @@ impl NodeBinding {
 
     /// Issue this Agent's credential once per process, when the host enrolls,
     /// the Agent is a session's own workspace-derived identity, and the node
-    /// has no bundle for it. Runs outside every process-wide lock.
+    /// has no confirmed bundle for it: none, or one an interrupted issuance
+    /// left behind its marker. Runs outside every process-wide lock.
     fn join_if_needed(&self) {
         let Some(enroll) = ENROLLER.get() else {
             return;

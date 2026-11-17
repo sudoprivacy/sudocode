@@ -3149,7 +3149,7 @@ fn a2a_health_tip(
                 error.contains(runtime::nexus_mailbox::MISSING_CREDENTIAL_CAUSE)
             }) =>
         {
-            "not joined; /status says how".to_string()
+            "not joined".to_string()
         }
         [] if health.level == "fail" => "node binding unusable".to_string(),
         [] => "receiving not yet recovered".to_string(),

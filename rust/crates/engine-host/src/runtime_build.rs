@@ -266,36 +266,53 @@ pub fn agent_name_under(root: &Path) -> String {
     // native analog of nexus minting the name at auth. Best-effort: if the
     // write fails we still return the derived name for this boot.
     let minted = runtime::mailbox::local_agent_name(None, root);
-    // In the home directory the project settings are the user's settings;
-    // saving the name there would hand it to every unconfigured workspace.
-    if !is_home(root) {
+    // Where the project settings are the user's own (the home directory, by
+    // default), saving the name would hand it to every unconfigured workspace.
+    if !settings_are_shared(root) {
         let _ = loader.set_agent_name(&minted);
     }
     minted
 }
 
-fn is_home(path: &Path) -> bool {
-    let canonical =
-        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    runtime::user_paths::home_dir().is_some_and(|home| canonical(&home) == canonical(path))
+/// Whether the workspace under `root` keeps its settings in the user's own
+/// settings files, which every workspace without its own inherits: the home
+/// directory by default, or wherever the configuration directories point.
+#[must_use]
+pub fn settings_are_shared(root: &Path) -> bool {
+    let located = |path: &Path| {
+        let directory = path.parent().unwrap_or(path);
+        std::fs::canonicalize(directory)
+            .unwrap_or_else(|_| directory.to_path_buf())
+            .join(path.file_name().unwrap_or_default())
+    };
+    let entries = ConfigLoader::default_for(root).discover();
+    let user: Vec<PathBuf> = entries
+        .iter()
+        .filter(|entry| entry.source == runtime::ConfigSource::User)
+        .map(|entry| located(&entry.path))
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| entry.source != runtime::ConfigSource::User)
+        .any(|entry| user.contains(&located(&entry.path)))
 }
 
 /// Only the identity derived from this workspace's own path joins a node
 /// without being asked. A configured `agentName` may come from the repository,
-/// and the home directory's settings are every unconfigured workspace's
-/// defaults, so neither is claimed automatically.
+/// and a workspace whose settings are the user's own sets every unconfigured
+/// workspace's defaults, so neither is claimed automatically.
 fn joins_automatically(agent_name: &str, cwd: &Path) -> bool {
-    agent_name == runtime::mailbox::local_agent_name(None, cwd) && !is_home(cwd)
+    agent_name == runtime::mailbox::local_agent_name(None, cwd) && !settings_are_shared(cwd)
 }
 
-/// The settings file whose `agentName` the workspace under `root` answers to.
+/// Every settings file that sets an `agentName` for the workspace under
+/// `root`, lowest precedence first.
 #[must_use]
-pub fn agent_name_source(root: &Path) -> Option<PathBuf> {
+pub fn agent_name_sources(root: &Path) -> Vec<PathBuf> {
     ConfigLoader::default_for(root)
         .discover()
         .into_iter()
-        .rev()
-        .find(|entry| {
+        .filter(|entry| {
             std::fs::read(&entry.path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -306,6 +323,7 @@ pub fn agent_name_source(root: &Path) -> Option<PathBuf> {
                 })
         })
         .map(|entry| entry.path)
+        .collect()
 }
 
 /// The name [`agent_name_under`] would answer to, without persisting it.

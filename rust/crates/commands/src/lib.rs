@@ -3439,12 +3439,14 @@ fn render_plugin_install_report(plugin_id: &str, plugin: Option<&PluginSummary>)
     )
 }
 
+/// The one plugin `target` names by id or name, among every plugin the manager
+/// can enable: builtin, installed, bundled and external.
 fn resolve_plugin_target(
     manager: &PluginManager,
     target: &str,
 ) -> Result<PluginSummary, PluginError> {
     let mut matches = manager
-        .list_installed_plugins()?
+        .list_plugins()?
         .into_iter()
         .filter(|plugin| plugin.metadata.id == target || plugin.metadata.name == target)
         .collect::<Vec<_>>();

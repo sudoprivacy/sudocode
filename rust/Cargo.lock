@@ -4623,6 +4623,7 @@ dependencies = [
  "indicatif",
  "iocraft",
  "kernel",
+ "lib",
  "managed-agent",
  "mock-anthropic-service",
  "nexus-vfs-client",
@@ -4631,7 +4632,9 @@ dependencies = [
  "process-text",
  "pty-expect",
  "pulldown-cmark",
+ "raft 0.1.0",
  "rcgen",
+ "regex",
  "reqwest 0.12.28",
  "runtime",
  "rustyline",
@@ -4657,6 +4660,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "vte",
+ "x509-parser",
  "zip",
 ]
 

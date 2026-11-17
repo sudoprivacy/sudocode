@@ -35,8 +35,12 @@ rustyline = "=19.0.0"
 runtime = { path = "../runtime" }
 # ACP renderer (server + stdio/ws transports) moved out of `runtime`.
 engine-acp = { path = "../engine-acp" }
+# Owner-bound credential checks for the builtin vault tools, from the same
+# definitions the nexus runtime uses (transport primitives, X.509 parsing).
+lib = { workspace = true, features = ["transport"] }
 nexus-vfs-client = { path = "../nexus-vfs-client" }
 plugins = { path = "../plugins" }
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 telemetry = { path = "../telemetry" }
 serde = { version = "1", features = ["derive"] }
@@ -58,6 +62,8 @@ tools = { path = "../tools" }
 unicode-width = "0.2"
 unicode-segmentation = "1"
 vte = "0.15"
+x509-parser = "0.18"
+rcgen = "0.14"
 
 [lints]
 workspace = true
@@ -70,7 +76,7 @@ flate2 = "1"
 futures-util = "0.3"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 pty-expect.workspace = true
-rcgen = "0.14"
+rcgen = { version = "0.14", features = ["x509-parser"] }
 serde_json.workspace = true
 socket2 = "0.6"
 tempfile = "3"
@@ -128,3 +134,8 @@ test = false
 name = "acceptance_cli_08"
 path = "tests/acceptance_groups/acceptance_cli_08.rs"
 test = false
+
+# The live Vault acceptance mints with nexus's certgen. Its crate needs protoc,
+# so it is a Linux-only dev-dependency, as in runtime and nexusd-cohost.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nexus-raft = { workspace = true }

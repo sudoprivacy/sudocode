@@ -672,6 +672,114 @@ def run_case(output, order):
             "states": statuses, "failures": failures, "observed": observed}, indent=2) + "\n")
 
 
+def plan_admission_controls(output):
+    """Exercise the real check entry before and after compatible schema support."""
+    output.mkdir(parents=True, exist_ok=False)
+    parent = load("admission_environment", SOURCE / "e2e/local-acceptance/run.py")
+    environment = {**parent.FIXTURE_ENV, "PYTHONDONTWRITEBYTECODE": "1"}
+    current = (SOURCE / ".github/scripts/local_acceptance.py").read_text(encoding="utf-8")
+    anchor = '        complementary = policy["checks"][name].get("complementary")\n'
+    start = current.index(anchor)
+    end = current.index('        if not name.startswith("native-"):\n', start)
+    # Reproduce the observed former parser: the new responsibility field is
+    # ignored. All other verification/signing/process functions stay intact.
+    legacy = current[:start] + "        complementary = None\n" + current[end:]
+    admission = "    preflight_plan_compatibility(plan, needed, host(), policy_ref, signers_ref)\n"
+    assert current.count(admission) == 1
+    old_entry = current.replace(admission, "", 1)
+    platform = load("admission_platform", SOURCE / ".github/scripts/local_acceptance.py").host()
+    records = []
+    for case, protected_source, candidate_source in [
+        ("old-entry-late-refusal", legacy, old_entry),
+        ("early-refusal", legacy, current),
+        ("compatible-parser", current, current),
+    ]:
+        directory = output / case
+        work = directory / "work"
+        work.mkdir(parents=True)
+        commands = []
+
+        def execute(arguments, *, expected=0):
+            result = subprocess.run(arguments, cwd=work, env=environment, capture_output=True, timeout=60)
+            stem = directory / f"command-{len(commands):03d}"
+            stem.with_suffix(".stdout").write_bytes(result.stdout)
+            stem.with_suffix(".stderr").write_bytes(result.stderr)
+            commands.append({"command": arguments, "exit_code": result.returncode, "log": str(stem)})
+            assert (result.returncode == 0) == (expected == 0), result.stderr.decode(errors="replace")
+            return result
+
+        def git(*arguments):
+            return execute(["git", *arguments]).stdout.decode().strip()
+
+        git("init", "--initial-branch=main")
+        git("config", "user.name", "Plan admission fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "core.autocrlf", "false")
+        key = directory / "key"
+        execute(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
+        for relative in [".github/workflows/local-acceptance.yml",
+                         ".github/workflows/local-acceptance-publish.yml"]:
+            target = work / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SOURCE / relative, target)
+        entry = work / ".github/scripts/local_acceptance.py"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(protected_source, encoding="utf-8")
+        (work / "spec").mkdir()
+        policy = {"version": 1, "repository": "fixture/plan-admission", "checks": {
+            "native-workspace": {"include": ["input.txt"]}}}
+        policy_path = work / "spec/local_acceptance.json"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        (work / "spec/local_acceptance_signers.json").write_text(json.dumps({"version": 1, "signers": {
+            "fixture": {"platform": platform["system"], "public_key": key.with_suffix(".pub").read_text().strip()}}}), encoding="utf-8")
+        checks = work / ".github/local-acceptance/checks.py"
+        checks.parent.mkdir(parents=True)
+        checks.write_text('import sys\ndef run(name,root,output,base,execute):\n'
+            ' output.mkdir(parents=True,exist_ok=True)\n'
+            ' return [execute([sys.executable,"-c","from pathlib import Path;Path(\'native-started\').write_text(\'executed\')"],output,output/"000.log")]\n', encoding="utf-8")
+        (work / "input.txt").write_text("before", encoding="utf-8")
+        (work / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        git("add", ".")
+        git("-c", "commit.gpgsign=false", "commit", "-m", "Protected plan fixture")
+        base = git("rev-parse", "HEAD")
+        entry.write_text(candidate_source, encoding="utf-8")
+        policy["checks"]["native-workspace"]["complementary"] = "periodic"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        (work / "input.txt").write_text("pass", encoding="utf-8")
+        git("add", ".")
+        git("-c", "commit.gpgsign=false", "commit", "-m", "Candidate plan fixture")
+        head = git("rev-parse", "HEAD")
+        git("config", "localAcceptance.signer", "fixture")
+        git("config", "localAcceptance.key", str(key))
+        acceptance = directory / "acceptance"
+        result = execute([sys.executable, "-B", str(entry), "check", "--head", head,
+            "--base", base, "--policy-ref", head, "--signers-ref", base,
+            "--output", str(acceptance)], expected=1 if case == "early-refusal" else 0)
+        marker = acceptance / "native-workspace/native-started"
+        if case == "early-refusal":
+            assert b"protected verifier cannot validate this candidate acceptance plan" in result.stderr
+            assert not marker.exists() and not (acceptance / "protected_profiles.py").exists()
+            assert not (acceptance / "envelope.json").exists()
+        else:
+            assert marker.read_text() == "executed" and (acceptance / "envelope.json").is_file()
+            verifier = directory / "protected-verifier.py"
+            verifier.write_text(protected_source, encoding="utf-8")
+            code = ('import importlib.util,json,sys;from pathlib import Path;'
+                    's=importlib.util.spec_from_file_location("protected",sys.argv[1]);'
+                    'h=importlib.util.module_from_spec(s);s.loader.exec_module(h);h.ROOT=Path.cwd();'
+                    'h.verify_envelope(json.loads(Path(sys.argv[2]).read_bytes()),sys.argv[3],sys.argv[4],sys.argv[3],signers_ref=sys.argv[4])')
+            verified = execute([sys.executable, "-B", "-c", code, str(verifier),
+                str(acceptance / "envelope.json"), head, base], expected=1 if case == "old-entry-late-refusal" else 0)
+            if case == "old-entry-late-refusal":
+                assert b"Signed acceptance plan does not match the protected policy/author host" in verified.stderr
+            else:
+                assert b"LOCAL_ACCEPTANCE_PLAN_ADMISSION" in result.stdout
+        assert not git("status", "--porcelain")
+        records.append({"case": case, "native_child_executed": marker.exists(), "commands": commands})
+    (output / "result.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+    return records
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     helper = load("parallel_control_lease", SOURCE / ".github/scripts/local_acceptance.py")
@@ -685,6 +793,7 @@ def run(output):
         source_identity = (revision.stdout.decode().strip() if revision.returncode == 0
                            else "private-tool-fixture-without-source-commit")
         with helper.host_acceptance_lease(attempt, source_identity):
+            summary["plan_admission"] = plan_admission_controls(output / "plan-admission")
             results = [run_case(output / order, order) for order in ["ci-first", "author-first"]]
         summary.update(status="PASS", cases=[{"order": row["order"], "states": row["states"]} for row in results])
     except BaseException as error:

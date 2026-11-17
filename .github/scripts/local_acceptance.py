@@ -2382,6 +2382,28 @@ def materialize_profile_module(policy_ref, output):
     return module
 
 
+def preflight_plan_compatibility(plan, names, author, policy_ref, signers_ref):
+    """Refuse an unsupported plan before checks; final verification still applies."""
+    if policy_ref == signers_ref:
+        return
+    path = ".github/scripts/local_acceptance.py"
+    protected = {"__file__": str(ROOT / path), "__name__": "protected_acceptance_planner"}
+    exec(compile(tracked(signers_ref, path), f"{signers_ref}:{path}", "exec"), protected)
+    protected["ROOT"] = ROOT
+    policy = load_policy(policy_ref)
+    compatible = protected.get("compatible_acceptance_plan")
+    supported = (compatible(policy, names, author, plan) if callable(compatible)
+                 else protected["acceptance_plan"](policy, names, author) == plan)
+    if not supported:
+        raise RuntimeError(
+            "The protected verifier cannot validate this candidate acceptance plan. "
+            "Land a compatible verifier with the production policy unchanged first, "
+            "then qualify the policy activation through contract-update. "
+            "Candidate source and original receipts were preserved; no checks started.")
+    print("LOCAL_ACCEPTANCE_PLAN_ADMISSION: current protected parser accepts the proposed plan; "
+          "source, signatures, every selected check and final publication verification remain required.", flush=True)
+
+
 def perform_check(args, attempt):
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
@@ -2411,6 +2433,7 @@ def perform_check(args, attempt):
             raise RuntimeError("Use the original author host for this frozen execution plan")
         plan = launch["plan"]
     report_plan(plan, current_environment=True)
+    preflight_plan_compatibility(plan, needed, host(), policy_ref, signers_ref)
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]

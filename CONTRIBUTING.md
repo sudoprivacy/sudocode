@@ -1516,6 +1516,12 @@ not constrain the executor's automatic host-sized budget.
 Protected profile modules and their compiler-cache companion are materialized
 from the same frozen Git policy. A candidate's working-tree companion is never
 an execution source. The original cache tests also exercise this managed loader.
+Before local profiles start, the candidate compares its proposed plan with
+the current protected parser. An unsupported policy schema refuses before
+profile-module materialization, signing-key use or host queue acquisition.
+Stage a compatible protected verifier with production policy unchanged first.
+This metadata admission does not authorize execution or replace any required
+check, signature, source binding or final publication verification.
 Scheduling plans and completed receipts share the existing exact recipe approval
 lookup in protected policy, including the source-without-test-groups condition.
 Original signatures, source/tree/base, author/platform responsibility, required

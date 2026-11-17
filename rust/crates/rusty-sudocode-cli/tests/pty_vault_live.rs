@@ -2,11 +2,12 @@
 //! the real `scode vault tool` entry against a real `nexusd-cluster serve-user`
 //! that loads the real, signed Vault plugin. Skipped unless
 //! `SUDOCODE_VAULT_LIVE` points at those artifacts; `e2e/vault-live/run.sh`
-//! fetches and checks them, then runs this file in a container.
+//! fetches and checks them, then runs this file in a container, and
+//! `e2e/vault-live/run-native.sh` runs it on a host such as macOS arm64.
 //!
 //! Every case scans what it produced for the canary secret: tool stdout (stderr
 //! must be empty), the runtime's log and every process command line.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", vault_live))]
 
 #[path = "support/vault_live.rs"]
 mod vault_live;
@@ -14,6 +15,7 @@ mod vault_live;
 mod vault_tool;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use vault_live::{
@@ -46,6 +48,35 @@ fn assert_unseen(runtime: &Runtime, outputs: &[&str], secret: &str) {
         "the runtime log carried the canary"
     );
     assert_eq!(command_lines_containing(secret), Vec::<String>::new());
+}
+
+/// Every case trusts the command-line scan to find the canary if it were
+/// there; a scan that saw nothing would pass them all. It must see a process
+/// that carries a marker.
+#[test]
+fn the_command_line_scan_sees_a_marked_process() {
+    let Some(_live) = live() else { return };
+    let marker = canary();
+    // Two commands keep the shell itself alive (a lone command may replace
+    // it, marker and all), and `read` blocks without starting a child.
+    let mut process = std::process::Command::new("sh")
+        .args(["-c", "read -r line; :", &marker])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn a marked process");
+    // `spawn` returns before the kernel has published the new image's
+    // arguments, so the marked command line appears a moment later.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let seen = loop {
+        let seen = command_lines_containing(&marker);
+        if !seen.is_empty() || Instant::now() >= deadline {
+            break seen;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = process.kill();
+    let _ = process.wait();
+    assert_eq!(seen.len(), 1, "{seen:?}");
 }
 
 #[test]

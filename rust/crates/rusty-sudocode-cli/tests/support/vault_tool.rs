@@ -3,7 +3,7 @@
 //! object on stdout and nothing on stderr.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
@@ -17,7 +17,7 @@ pub struct ToolRun {
 /// Run `scode vault tool <tool>` from `project`, with `home` as the home
 /// directory and `config` as the global (user-layer) config directory.
 pub fn run(project: &Path, home: &Path, config: &Path, tool: &str, input: &str) -> ToolRun {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scode"))
+    let mut child = Command::new(scode())
         .args(["vault", "tool", tool])
         .current_dir(project)
         .env("HOME", home)
@@ -52,4 +52,12 @@ pub fn run(project: &Path, home: &Path, config: &Path, tool: &str, input: &str) 
         .unwrap_or_else(|error| panic!("expected one JSON object ({error}): {stdout}"));
     assert!(result.is_object(), "{stdout}");
     ToolRun { result, stdout }
+}
+
+/// The scode cargo built beside this test, or the relocated copy
+/// `SUDOCODE_VAULT_SCODE` names: e2e/vault-live/run-native.sh runs a prebuilt
+/// bundle on a host that has no compiler, where cargo's path does not exist.
+fn scode() -> PathBuf {
+    std::env::var_os("SUDOCODE_VAULT_SCODE")
+        .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_scode")), PathBuf::from)
 }

@@ -4,7 +4,8 @@
 //! `scode vault tool` entry against it.
 //!
 //! `SUDOCODE_VAULT_LIVE` names a directory holding `nexusd-cluster` and
-//! `plugins/libnexus_vault.so` (+ `.sig`), as `e2e/vault-live/run.sh` lays it out.
+//! the platform's signed plugin library in `plugins/` (`libnexus_vault.so` or
+//! `.dylib`, with its `.sig`), as `e2e/vault-live/lib.sh` lays it out.
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -289,18 +290,19 @@ pub fn canary() -> String {
     value
 }
 
-/// Every process command line on this host that contains `needle`.
+/// Every process command line on this host that contains `needle`, as `ps`
+/// reports them, which reads the same on Linux and macOS.
 pub fn command_lines_containing(needle: &str) -> Vec<String> {
-    let mut hits = Vec::new();
-    for entry in fs::read_dir("/proc").expect("/proc").flatten() {
-        if let Ok(raw) = fs::read(entry.path().join("cmdline")) {
-            let line = String::from_utf8_lossy(&raw).replace('\0', " ");
-            if line.contains(needle) {
-                hits.push(line);
-            }
-        }
-    }
-    hits
+    let output = Command::new("ps")
+        .args(["-axww", "-o", "args="])
+        .output()
+        .expect("run ps");
+    assert!(output.status.success(), "ps failed: {output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Every file under `dir` whose bytes contain `needle`.

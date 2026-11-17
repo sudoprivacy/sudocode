@@ -319,7 +319,18 @@ pub fn enroll_local_agent(
 /// A name that is one directory under `agents_dir` on every platform and one
 /// argument to the Node.
 fn valid_agent_name(agent: &str) -> bool {
+    // Windows device names stay devices with any extension: `nul`, `com1.txt`.
+    let stem = agent
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
     !agent.is_empty()
+        && !device
         && !agent.starts_with(['-', '.'])
         && !agent.ends_with(['.', ' '])
         && !agent.chars().any(|c| {
@@ -403,11 +414,12 @@ fn enroll_with(
     })?;
     let output = match run_bounded(profile.mint_agent_command(agent), timeout) {
         Ok(output) => output,
-        Err(error) => return Err(quarantine(&bundle, &error.to_string())),
+        Err(error) => return Err(quarantine(&profile, &bundle, &error.to_string())),
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         return Err(quarantine(
+            &profile,
             &bundle,
             &format!(
                 "the node refused to issue '{agent}': {}. If another Agent already uses this \
@@ -417,19 +429,19 @@ fn enroll_with(
         ));
     }
     // An offline cold-start signature would also exit zero; only the Node's
-    // own online receipt proves the running cluster recorded the claim.
-    let receipt = format!(
-        "subject=agent:{agent} via https://{}",
-        profile.local_endpoint
-    );
-    if !stderr.contains(&receipt) {
+    // online issuance through the running Box names the endpoint it used.
+    if !(stderr.contains(&format!("agent:{agent}"))
+        && stderr.contains(&format!("via https://{}", profile.local_endpoint)))
+    {
         return Err(quarantine(
+            &profile,
             &bundle,
             &format!("the node returned no online receipt for '{agent}'"),
         ));
     }
     if !manifest_names(&bundle, agent) {
         return Err(quarantine(
+            &profile,
             &bundle,
             &format!("the credential written for '{agent}' does not name it"),
         ));
@@ -446,8 +458,12 @@ fn manifest_names(bundle: &Path, agent: &str) -> bool {
 
 /// An issuance that could not be confirmed must never become the session's
 /// identity: move whatever it wrote out of the credential directory. Nexus may
-/// still hold the name, so what follows is the node owner's decision.
-fn quarantine(bundle: &Path, cause: &str) -> Box<dyn std::error::Error + Send + Sync> {
+/// still hold the name, so the recovery is the node owner's check.
+fn quarantine(
+    profile: &LocalBox,
+    bundle: &Path,
+    cause: &str,
+) -> Box<dyn std::error::Error + Send + Sync> {
     if !bundle.exists() {
         return cause.to_string().into();
     }
@@ -458,16 +474,25 @@ fn quarantine(bundle: &Path, cause: &str) -> Box<dyn std::error::Error + Send + 
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let held = bundle.with_file_name(format!(".unconfirmed-{name}-{stamp}"));
+    let check = format!(
+        "\"{}\" --data-dir \"{}\" --identity-dir \"{}\" --bind-addr {} auth list",
+        profile.binary.display(),
+        profile.data_dir.display(),
+        profile.identity_dir.display(),
+        profile.local_endpoint
+    );
     match fs::rename(bundle, &held) {
         Ok(()) => format!(
-            "{cause}. The unconfirmed credential was moved to {} and is not used; ask the \
-             node owner whether the name was issued before retrying",
-            held.display()
+            "{cause}. The unconfirmed credential was moved to {} and is not used. To check \
+             it, run {check}: if it lists agent:{name}, the node issued it, so move it back \
+             to {} to use it; otherwise delete it and the next session retries",
+            held.display(),
+            bundle.display()
         )
         .into(),
         Err(error) => format!(
             "{cause}. The unconfirmed credential at {} could not be moved aside ({error}); \
-             remove it before this session uses A2A",
+             check it with {check} before this session uses A2A",
             bundle.display()
         )
         .into(),
@@ -692,10 +717,9 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
     fn issues_the_session_agent_through_the_running_local_box() {
         let fixture = Fixture::new("ok");
         std::env::set_var("NEXUS_ENROLL_FIXTURE_LEAK", "1");
-        assert_eq!(
-            fixture.enroll("worker-1a2b3c").unwrap(),
-            AgentEnrollment::Joined
-        );
+        let outcome = fixture.enroll("worker-1a2b3c");
+        std::env::remove_var("NEXUS_ENROLL_FIXTURE_LEAK");
+        assert_eq!(outcome.unwrap(), AgentEnrollment::Joined);
         assert!(fixture.bundle("worker-1a2b3c").is_file());
         let calls = fixture.calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
@@ -767,6 +791,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         let fixture = Fixture::new("ok");
         for name in [
             "", ".", "..", ".hidden", "-x", "a.", "a ", "a/b", "a\\b", "a:b", "a@b", "a|b", "a\nb",
+            "con", "NUL.txt", "com1", "Lpt9",
         ] {
             let message = error(fixture.enroll(name));
             assert!(

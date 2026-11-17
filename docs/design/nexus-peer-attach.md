@@ -64,17 +64,27 @@ model still needs that node's authenticated filesystem.
 Credentials are issued by the node owner; `scode` holds no CA or signing key.
 When the user selected shared mode and this OS user owns the registered local
 Box named by the record, an interactive or ACP session asks that Box to issue
-its own Agent the first time it attaches without a credential. It runs the Box's
-pinned Node executable, whose online `auth mint` goes to the Box's loopback
-listener under an owner lock and never uses `--allow-existing`. Only a name
-derived from the workspace's own path joins this way; a configured `agentName`
-or the home directory joins through `scode setup --mode shared` in that
-workspace. A name already claimed elsewhere is refused by Nexus. The credential
-is accepted only with the Node's online receipt and a manifest naming that
-Agent; anything else the attempt wrote is moved to `.unconfirmed-<name>-<time>`
-and never used. Any other node, a stopped Box or a refusal leaves the binding
-pending with that cause, the outcome of the join, and the recovery:
-`scode setup --mode shared` in the workspace, or the node owner minting the name.
+its own Agent the first time it attaches without a credential. The session
+starts pending and the issuance runs in the background; its tools and receiver
+pick the credential up when it lands. It runs the Box's pinned Node executable,
+whose online `auth mint` goes to the Box's loopback listener under an owner
+lock and never uses `--allow-existing`. Only the name derived from the
+workspace's own path joins, automatically or through `scode setup --mode
+shared`; a configured `agentName`, including one inherited from the user's
+settings, and the home directory are never claimed by scode. A name already
+claimed elsewhere is refused by Nexus. The credential is accepted only with the
+Node's online receipt and a manifest naming that Agent; anything else the
+attempt wrote is moved to `.unconfirmed-<name>-<time>` and never used, and the
+error names the Node's `auth list` check for restoring it. Any other node, a
+stopped Box or a refusal leaves the binding pending with that cause, the
+outcome of the join, and the recovery.
+
+Shared mode is the owner's one consent for every workspace. A verified sender
+on this Node therefore means "a session of the Node owner's OS user", not an
+Agent the owner admitted individually: a freshly cloned repository's session
+is verified as that workspace's own Agent too. Peers treat message contents as
+untrusted data either way. Each workspace keeps its identity on the Node;
+retiring one is the node owner's `auth revoke --agent` operation.
 
 Namespace selection, including the pending binding, is cached per Agent for the
 process lifetime. Tools and receiver therefore cannot select different stores.

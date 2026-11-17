@@ -73,6 +73,12 @@ impl NodeBinding {
         }
     }
 
+    fn may_join(&self) -> bool {
+        ENROLLER.get().is_some()
+            && joinable(&self.agent)
+            && !self.join_attempted.load(Ordering::Acquire)
+    }
+
     /// Issue this Agent's credential once per process, when the host enrolls,
     /// the Agent is a session's own workspace-derived identity, and the node
     /// has no bundle for it. Runs outside every process-wide lock.
@@ -364,7 +370,15 @@ impl Node {
 pub fn attach(agent_name: &str) -> Peer {
     match node(agent_name) {
         Some(node) => {
-            node.binding.join_if_needed();
+            if node.binding.may_join() {
+                // Issuance can take seconds and session builds can hold
+                // process-wide leases. The session starts pending; its tools
+                // and receiver use the credential once it lands.
+                let binding = Arc::clone(&node.binding);
+                let _ = std::thread::Builder::new()
+                    .name("a2a-join".into())
+                    .spawn(move || binding.join_if_needed());
+            }
             Peer::Node(node)
         }
         None => Peer::Disk(agent_name.to_string()),

@@ -206,6 +206,39 @@ fn multi_agent_setup_keeps_an_offline_box_without_installing_a_replacement() {
 }
 
 #[test]
+fn shared_setup_never_claims_an_inherited_or_configured_name() {
+    let root = tempfile::tempdir().unwrap();
+    configured_box(
+        root.path(),
+        &serde_json::json!({"version": 1, "endpoint": "127.0.0.1:1",
+            "agents_dir": root.path().join("existing-agents")}),
+    );
+    // A home session saved its derived name in the user settings, which every
+    // unconfigured workspace inherits.
+    std::fs::create_dir_all(root.path().join("config")).unwrap();
+    std::fs::write(
+        root.path().join("config/settings.json"),
+        r#"{"agentName":"inherited-home-name"}"#,
+    )
+    .unwrap();
+    let result = output_json(
+        &command(root.path())
+            .args(["setup", "--mode", "shared", "--output-format", "json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(result["agent"]["name"], "inherited-home-name");
+    let error = result["agent"]["joinError"].as_str().unwrap();
+    assert!(
+        error.contains("does not claim a configured name")
+            && error.contains("Ask the node owner to mint 'inherited-home-name'")
+            && error.contains("remove `agentName`"),
+        "{error}"
+    );
+    assert!(!root.path().join("existing-agents").exists());
+}
+
+#[test]
 fn acp_honors_the_selected_runtime_without_prompting_or_replacing_an_unowned_box() {
     for mode in [None, Some("local"), Some("shared")] {
         let root = tempfile::tempdir().unwrap();

@@ -184,9 +184,23 @@ pub(crate) fn run(
                 let cwd = workspace()?;
                 // Not persisted here: the session derives and saves the same name.
                 let name = engine_host::peek_agent_name_under(&cwd);
+                let derived = runtime::mailbox::local_agent_name(None, &cwd);
                 let joined = if is_home(&cwd) {
-                    Err("the home directory's settings apply to every workspace without its                          own, so its Agent is not joined; run `scode setup --mode shared` in a                          workspace"
-                        .to_string())
+                    Err(
+                        "the home directory's settings apply to every workspace without its \
+                         own, so its Agent is not joined; run `scode setup --mode shared` in \
+                         a workspace"
+                            .to_string(),
+                    )
+                } else if name != derived {
+                    // A configured name may come from the repository or be inherited
+                    // from the user's settings by every unconfigured workspace.
+                    Err(format!(
+                        "this workspace answers to '{name}' from configuration, not from its \
+                         own path, and scode does not claim a configured name. Ask the node \
+                         owner to mint '{name}', or remove `agentName` so this workspace joins \
+                         as '{derived}'"
+                    ))
                 } else {
                     enroll(&record, &name, owner_root.as_deref())
                 };

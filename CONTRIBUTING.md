@@ -1386,6 +1386,9 @@ and proof children use the existing isolated command environment, including
 when outer hooks export Git repository/index selectors. They add
 no product journey coverage. Measured individual command costs do not establish
 a whole-lifecycle speedup.
+The preflight plan-admission hook has a further paired observer control. Its
+exact reviewed program layout is registered; modified admission-hook behavior
+still refuses reuse. The original three observations remain separate.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

@@ -520,6 +520,7 @@ except subprocess.TimeoutExpired:
     reviewed_sources = {
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
+        "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({

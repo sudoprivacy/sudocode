@@ -2,7 +2,8 @@
 //!
 //! Explicitly queued inputs wait for a turn boundary. Steering transfers them
 //! to engine-core, retaining receipts until a durable consumption event arrives.
-//! Esc flushes the queue; cancellation is a separate engine command.
+//! Esc flushes queued messages; a queued slash command waits for the turn to
+//! end and runs as a command. Cancellation is a separate engine command.
 
 pub use engine_events::InputSource as QueuedKind;
 use engine_events::{EngineCommand, InputView, TurnInput};
@@ -75,6 +76,9 @@ pub struct QueuedInput<R = ()> {
     pub input: TurnInput,
     /// The transport receipt follows ownership until durable consumption.
     pub receipt: Option<R>,
+    /// A slash command typed during a turn. It runs as a command at a turn
+    /// boundary and is never model input: not batched, never steered.
+    pub is_command: bool,
 }
 
 impl<R> QueuedInput<R> {
@@ -94,6 +98,14 @@ impl<R> QueuedInput<R> {
                 attachments: Vec::new(),
             },
             receipt,
+            is_command: false,
+        }
+    }
+    /// A slash command the user typed while a turn ran, kept for its end.
+    pub fn command(text: impl Into<String>, display: impl Into<String>) -> Self {
+        Self {
+            is_command: true,
+            ..Self::new(text, display, QueuedKind::Human, None)
         }
     }
     /// Mark which bytes of the display were pasted.
@@ -286,9 +298,16 @@ impl<R> TurnInputCoordinator<R> {
         message
     }
 
+    /// Esc: steer queued messages into the running turn. Queued commands are
+    /// not model input, so they stay queued in their order.
     pub fn flush(&mut self) -> Vec<TurnInput> {
-        let queued = self.queue.drain(..).collect::<Vec<_>>();
-        queued.into_iter().map(|input| self.steer(input)).collect()
+        let (commands, messages): (VecDeque<_>, VecDeque<_>) =
+            self.queue.drain(..).partition(|item| item.is_command);
+        self.queue = commands;
+        messages
+            .into_iter()
+            .map(|input| self.steer(input))
+            .collect()
     }
 
     #[must_use]
@@ -389,22 +408,29 @@ impl<R> TurnInputCoordinator<R> {
         SubmitOutcome::Rejected
     }
 
-    /// Called on turn end. Consumes all queued items and joins their text with
-    /// `\n\n` for a single batched turn. `echoes` collects an [`EchoLine`] per
-    /// item (human and peer alike) so the caller can write them to scrollback
-    /// now, at the moment they actually run, with the right marker.
+    /// Called on turn end. Consumes the queued items up to the first queued
+    /// command and joins their text with `\n\n` for a single batched turn.
+    /// `echoes` collects an [`EchoLine`] per item (human and peer alike) so
+    /// the caller can write them to scrollback now, at the moment they
+    /// actually run, with the right marker.
     ///
-    /// Returns `None` when the queue is empty — the caller reverts to the
-    /// idle prompt.
+    /// Returns `None` when the queue is empty or a command is first; the
+    /// caller runs that command through [`Self::take_command`].
     pub fn drain_next(&mut self) -> Option<NextTurn<R>> {
-        if self.queue.is_empty() {
+        // A queued command is a boundary: only the messages before it run.
+        let batch = self
+            .queue
+            .iter()
+            .position(|item| item.is_command)
+            .unwrap_or(self.queue.len());
+        if batch == 0 {
             return None;
         }
         let mut parts = Vec::new();
         let mut echoes = Vec::new();
         let mut consumed = 0_usize;
         let mut receipts = Vec::new();
-        while let Some(item) = self.queue.pop_front() {
+        for item in self.queue.drain(..batch) {
             echoes.push(item.input.view());
             parts.push(item.input.text);
             receipts.extend(item.receipt);
@@ -416,6 +442,16 @@ impl<R> TurnInputCoordinator<R> {
             consumed,
             receipts,
         })
+    }
+
+    /// The slash command at the head of the queue, once every message queued
+    /// before it has run. `None` while a message comes first.
+    pub fn take_command(&mut self) -> Option<QueuedInput<R>> {
+        if self.queue.front()?.is_command {
+            self.queue.pop_front()
+        } else {
+            None
+        }
     }
 
     /// Up-arrow dequeue: pop the newest **human**-queued item back so the user
@@ -598,6 +634,56 @@ mod queue_docs {
         c.submit_during_turn(QueuedInput::peer("b", "b"), mode);
         assert_eq!(c.dequeue_all_human(), None);
         assert_eq!(c.pending(), 2);
+    }
+
+    #[test]
+    fn a_queued_command_is_a_boundary_between_message_batches() {
+        let mut c = TurnInputCoordinator::<()>::new();
+        let mode = QueueMode::Queue;
+        c.submit_during_turn(human("A"), mode);
+        c.submit_during_turn(QueuedInput::command("/clear", "/clear"), mode);
+        c.submit_during_turn(human("B"), mode);
+        assert!(
+            c.take_command().is_none(),
+            "A is still ahead of the command"
+        );
+        let first = c.drain_next().expect("A runs first");
+        assert_eq!(
+            first.prompt, "A",
+            "the command is not merged into the batch"
+        );
+        assert_eq!(first.consumed, 1);
+        assert!(
+            c.drain_next().is_none(),
+            "the command blocks the next batch"
+        );
+        let command = c.take_command().expect("the command is next");
+        assert_eq!(command.input.text, "/clear");
+        assert!(c.take_command().is_none());
+        assert_eq!(c.drain_next().expect("B runs after").prompt, "B");
+    }
+
+    #[test]
+    fn esc_flush_steers_messages_and_keeps_commands_queued() {
+        let mut c = TurnInputCoordinator::<()>::new();
+        let mode = QueueMode::Queue;
+        c.submit_during_turn(human("A"), mode);
+        c.submit_during_turn(QueuedInput::command("/clear", "/clear"), mode);
+        c.submit_during_turn(human("B"), mode);
+        let steered: Vec<_> = c.flush().into_iter().map(|input| input.text).collect();
+        assert_eq!(steered, vec!["A", "B"]);
+        assert_eq!(c.peek_display(), vec!["/clear"]);
+        assert!(c.flush().is_empty(), "a command is never steered");
+        assert_eq!(c.peek_display(), vec!["/clear"]);
+    }
+
+    #[test]
+    fn recall_returns_queued_commands_with_typed_messages() {
+        let mut c = TurnInputCoordinator::<()>::new();
+        let mode = QueueMode::Queue;
+        c.submit_during_turn(QueuedInput::command("/status", "/status"), mode);
+        assert_eq!(c.dequeue_all_human(), Some("/status".to_string()));
+        assert_eq!(c.pending(), 0);
     }
 
     #[test]

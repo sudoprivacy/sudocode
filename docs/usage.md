@@ -598,6 +598,15 @@ FooterSlot fold into explicit summaries rather than silently disappearing.
 Growing the window restores their full contents. Long drafts scroll within the
 same editor, preserving the complete text and cursor.
 
+In the interactive REPL, the TodoSlot owns the current todo list. Successful
+`TodoWrite` calls leave only `✓ Todos updated` in scrollback, with
+`✓ Todos cleared` for an empty list or `✓ All todos complete` when every item
+is finished. Resuming a session uses the same compact receipts. Hook feedback
+remains visible, and failures or unrecognized results retain their detailed
+tool cards. The saved session and model still receive the complete result.
+Terminal rendering without a live todo panel retains the full checklist card;
+structured output retains the complete tool result.
+
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden

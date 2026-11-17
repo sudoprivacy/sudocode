@@ -18,7 +18,8 @@ use engine_events::{
 };
 
 use crate::cli::format::{
-    format_auto_compaction_notice, format_compaction_notice, format_tool_result,
+    format_auto_compaction_notice, format_compaction_notice, format_tool_result_for_view,
+    ToolResultView,
 };
 use crate::render::styled_text::StyledText;
 use crate::render::{
@@ -66,6 +67,7 @@ pub(crate) struct EngineEventRenderer {
     block: Option<OutputBlock>,
     spinner: Option<SpinnerRef>,
     output_writer: Option<OutputSender>,
+    tool_result_view: ToolResultView,
     /// Collect one event's history writes for a single history/preview handoff.
     preview_output: Option<String>,
     /// Keep everything drawn, for [`replay`]: a saved transcript goes through
@@ -101,7 +103,11 @@ enum OutputBlock {
 }
 
 impl EngineEventRenderer {
-    pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
+    pub(crate) fn new(
+        spinner: Option<SpinnerRef>,
+        output_writer: Option<OutputSender>,
+        tool_result_view: ToolResultView,
+    ) -> Self {
         let is_preview_enabled = output_writer.is_some();
         Self {
             markdown: MarkdownStreamState::default(),
@@ -112,6 +118,7 @@ impl EngineEventRenderer {
             block: None,
             spinner,
             output_writer,
+            tool_result_view,
             preview_output: is_preview_enabled.then(String::new),
             capture: None,
             thinking_active: false,
@@ -173,8 +180,8 @@ impl EngineEventRenderer {
     }
 
     /// A renderer that keeps what it draws, for [`replay`].
-    fn capturing() -> Self {
-        let mut renderer = Self::new(None, None);
+    fn capturing(view: ToolResultView) -> Self {
+        let mut renderer = Self::new(None, None, view);
         renderer.capture = Some(String::new());
         renderer
     }
@@ -473,10 +480,10 @@ impl EngineEventRenderer {
                 self.pause_spinner();
                 // No card is committed here. `Running` (amber) is a live,
                 // self-clearing status that belongs only to the iocraft staging
-                // overlay; scrollback is durable and must carry exactly one card
-                // per call — the terminal-status (green/red) card committed on
-                // `ToolResult` below. Committing a `Running` header here froze an
-                // amber "in-flight" card permanently above the real result. The
+                // overlay; scrollback is durable and carries one completed card
+                // or panel receipt on `ToolResult` below. Committing a `Running`
+                // header here froze an amber "in-flight" card permanently above
+                // the real result. The
                 // in-flight cue is the spinner and the live progress summary.
                 //
                 // The glyph reset still runs: the tool line reset column 0, so
@@ -504,7 +511,10 @@ impl EngineEventRenderer {
                     self.resume_spinner();
                     return RenderOutcome::Continue;
                 }
-                self.write_block(&format_tool_result(&name, &input, &output, is_error), OutputBlock::Tool);
+                self.write_block(
+                    &format_tool_result_for_view(&name, &input, &output, is_error, self.tool_result_view),
+                    OutputBlock::Tool,
+                );
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
@@ -761,7 +771,7 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
 /// each message becomes the events that turn produced, and each user turn gets
 /// a fresh renderer, as it does live. Replay therefore cannot drift from what
 /// was shown before a restart.
-pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
+pub(crate) fn replay(messages: &[runtime::ConversationMessage], view: ToolResultView) -> String {
     use runtime::{ContentBlock, MessageRole};
 
     let mut output = String::new();
@@ -783,7 +793,7 @@ pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
                     continue;
                 }
                 finish(turn.take(), &mut output);
-                let mut renderer = EngineEventRenderer::capturing();
+                let mut renderer = EngineEventRenderer::capturing(view);
                 if message.inputs.is_empty() {
                     renderer.saved_prompt(&text);
                 }
@@ -793,7 +803,7 @@ pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
                 turn = Some(renderer);
             }
             MessageRole::Assistant => {
-                let renderer = turn.get_or_insert_with(EngineEventRenderer::capturing);
+                let renderer = turn.get_or_insert_with(|| EngineEventRenderer::capturing(view));
                 for block in &message.blocks {
                     let event = match block {
                         ContentBlock::Thinking { thinking, .. } => EngineEvent::ThinkingDelta {
@@ -816,7 +826,7 @@ pub(crate) fn replay(messages: &[runtime::ConversationMessage]) -> String {
                 renderer.render_event(EngineEvent::MessageComplete);
             }
             MessageRole::Tool => {
-                let renderer = turn.get_or_insert_with(EngineEventRenderer::capturing);
+                let renderer = turn.get_or_insert_with(|| EngineEventRenderer::capturing(view));
                 for block in &message.blocks {
                     let ContentBlock::ToolResult {
                         tool_use_id,

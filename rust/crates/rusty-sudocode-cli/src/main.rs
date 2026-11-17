@@ -4830,7 +4830,10 @@ impl LiveCli {
         if session.messages().is_empty() {
             return String::new();
         }
-        render_engine::replay(session.messages())
+        render_engine::replay(
+            session.messages(),
+            cli::format::ToolResultView::WithTodoPanel,
+        )
     }
 
     /// Build the status line for a freshly resumed session: the same B2 line the
@@ -4900,13 +4903,20 @@ impl LiveCli {
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
         // (Done / permission / question) straight from the event kinds. The
-        // renderer commits exactly one card per tool call — the completed
-        // (green/red) result card. The in-flight running card is drawn only by
-        // the iocraft staging overlay (a live, self-clearing region); it is
+        // renderer commits one completed record per tool call: a result card,
+        // or a compact receipt when a live panel owns the details. The in-flight
+        // running card is drawn only by the iocraft staging overlay (a live,
+        // self-clearing region); it is
         // never committed to durable scrollback, so `Running` cannot outlive
         // the call regardless of whether a `ui` overlay is present.
-        let mut renderer =
-            is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
+        let tool_result_view = if ui.is_some() {
+            cli::format::ToolResultView::WithTodoPanel
+        } else {
+            cli::format::ToolResultView::Standalone
+        };
+        let mut renderer = is_rendered.then(|| {
+            EngineEventRenderer::new(spinner_ref.cloned(), output.cloned(), tool_result_view)
+        });
         let command = match request {
             TurnRequest::Prompt { input, shown } => EngineCommand::Prompt {
                 blocks: runtime::image_input::prompt_blocks(*input, &runtime::StdFsBackend)?,
@@ -4985,16 +4995,15 @@ impl LiveCli {
                                 ui.set_tip(tip);
                             }
                         }
-                        if !*is_error && tools::canonicalize_tool_name(name).as_str() == "TodoWrite"
+                        if let Some(result) =
+                            cli::format::todo::from_tool_result(name, output, *is_error)
                         {
                             // From the result itself — the list is in the
                             // output we are holding. Re-reading a store here
                             // was the side-channel this comment disclaims, and
                             // it read the CLI's own disk even when the session
                             // wrote somewhere else.
-                            if let Some(todos) = tools::todos_from_tool_result(output) {
-                                ui.update_todos(todos);
-                            }
+                            ui.update_todos(result.todos);
                         }
                         // Staging overlay: this call is done — clear its running
                         // yellow card. The finished (green/red) card is written

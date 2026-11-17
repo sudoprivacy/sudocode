@@ -4406,12 +4406,17 @@ Empty-composer Left may open the browser; ordinary cursor movement is unchanged.
 Agent identity colors resolve through ColorTheme, independently of status
 colors; amber retains its brand role. MossWork shares the engine projection
 and operation contract, not the terminal widget implementation.</p>
-<p><b>Remaining implementation and acceptance.</b> Request provenance and
-lifecycle projection; cross-host delivery-option parity; inline browser and
-footer; MossWork consumer; identity palette consolidation. Cover queued
-permissions/questions, child approval attribution, answer/cancel races, late
-background-child prompts, disconnect/reconnect and stale instance observations
-through real CLI/ACP journeys. Keep existing rendering/typing/CPU/RSS gates.
+<p><b>Implementation and acceptance boundary.</b> The engine request table owns
+provenance and queued/presented attention. The terminal browser, footer and
+versioned ACP observations consume it; MossWork validates that projection
+without adding a scheduler. Direct A2A and SDK calls preserve the explicit
+delivery choice. Real CLI/ACP journeys cover queued questions, child approval
+attribution, automatic background handoff, foreground cancellation with a
+waiting child, and peer discovery/delivery. MossWork checks connection identity,
+ordered notifications and disconnection. Existing rendering/typing/CPU/RSS
+gates remain required. The native MossWork adapter still rejects permission
+requests until an authenticated product approval adapter is connected; a
+read-only attention observation is not an approval interface.
 Shared message-board channels and subscriptions are a later capability: reuse
 message scheduling and keep board writes, notifications and control separate.</p>
 

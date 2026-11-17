@@ -31,6 +31,7 @@ REVIEWED_VERIFIER_LAYOUTS = {
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
     "352ee3b249fb1e16aac60de13f8bfa442668eedd7a4b41c9981d4415d037b3d7",
     "bda03cd870bb222bcbb38092f32c11b0d5ff51231f6d9d23cd4bf299e8b5efdd",
+    "ee11ddac8a14ea9a0d79355589c50fff2bac9f76f0c3dadce1ead90d4292000f",
 }
 
 

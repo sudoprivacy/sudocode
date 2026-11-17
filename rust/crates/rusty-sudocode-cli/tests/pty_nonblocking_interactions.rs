@@ -1354,6 +1354,130 @@ fn unanswered_question_allows_continuation_and_reply_is_consumed_once() {
     resumed.close();
 }
 
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the connected question, queued compaction and chat journey together."
+)]
+fn question_reply_survives_a_queued_compaction_and_preserves_later_chat() {
+    let env = TestEnv::new_mock("interaction-queued-compaction");
+    let mut terminal = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[ENABLED[0], ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    terminal.resize(60, 140).unwrap();
+    common::expect_input_line_cleared(&terminal, env.timeout(), "initial chat input");
+    let marker = common::turn_status_marker(&terminal);
+    submit(&mut terminal, &question_prompt(&env));
+    common::expect_turn_complete_after(
+        &terminal,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "independent work finishes with an unanswered question",
+    );
+    finish_mock_question(&env);
+    let journals = interaction_journals(&env);
+    assert_eq!(journals.len(), 1);
+
+    // Hold a real tool so the queued command, later chat and explicit reply
+    // reach the same coordinator before the turn can finish.
+    std::fs::write(env.workspace_root().join("shared-input.sh"),
+        "printf started > shared-input-started\ni=0\nwhile [ ! -f release-shared-input ] && [ $i -lt 1200 ]; do\n sleep 0.1\n i=$((i+1))\ndone\nprintf SharedInputToolFinished\n").unwrap();
+    let _release = ReleaseSharedInput(env.workspace_root().to_path_buf());
+    let prompt = tool_batch(
+        &env,
+        &json!([{"id":"held-question-tool","name":"bash","input":{
+            "command":"sh shared-input.sh","timeout":180_000,"run_in_background":false
+        }}]),
+        "",
+    );
+    submit(&mut terminal, &prompt);
+    common::expect_screen(
+        &terminal,
+        |_| env.workspace_root().join("shared-input-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "independent tool is running",
+    );
+    submit(&mut terminal, "/compact");
+    common::expect_screen(
+        &terminal,
+        |view| view.contains("queued: /compact"),
+        env.timeout(),
+        "compaction waits for the running tool",
+    );
+    terminal.send("ChatAfterQuestionCompaction").unwrap();
+    common::expect_input_line(
+        &terminal,
+        "ChatAfterQuestionCompaction",
+        env.timeout(),
+        "later chat draft",
+    );
+    terminal.send("\t").unwrap();
+    common::expect_screen(
+        &terminal,
+        |view| {
+            common::input_line_of(view).is_empty()
+                && view.contains("queued: ChatAfterQuestionCompaction")
+        },
+        env.timeout(),
+        "later chat waits behind compaction",
+    );
+    terminal.send("\x1bq").unwrap();
+    common::expect_screen(
+        &terminal,
+        |view| view.contains("Which colour?") && view.contains("[2] blue"),
+        env.timeout(),
+        "question can be reviewed while the tool is running",
+    );
+    terminal.send("2").unwrap();
+    common::expect_screen(
+        &terminal,
+        |_| {
+            let saved: Value =
+                serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+            saved["records"][0]["status"] == "resolved"
+        },
+        env.timeout(),
+        "reply is durable before the independent tool finishes",
+    );
+    finish_mock_question(&env);
+    std::fs::write(env.workspace_root().join("release-shared-input"), "release").unwrap();
+    common::expect_screen(
+        &terminal,
+        |_| {
+            env.captured_message_bodies()
+                .iter()
+                .any(|body| body.contains("ChatAfterQuestionCompaction"))
+        },
+        common::LIVE_TURN_BUDGET,
+        "later chat reaches the model after compaction",
+    );
+    let screen = common::expect_screen(
+        &terminal,
+        |view| view.contains("Estimated tokens") && !view.contains("queued: "),
+        env.timeout(),
+        "compaction finishes and the queue drains",
+    );
+    let report = screen.find("Estimated tokens").unwrap();
+    assert!(
+        screen
+            .find("ChatAfterQuestionCompaction")
+            .is_some_and(|message| message > report),
+        "later chat must run after the compaction report:\n{screen}"
+    );
+    let bodies = env.captured_message_bodies();
+    assert!(bodies.iter().all(|body| !body.contains("/compact")));
+    assert!(bodies
+        .iter()
+        .any(|body| body.contains("interaction_reply") && body.contains("blue")));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+    assert_eq!(saved["records"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["records"][0]["status"], "delivered");
+    common::expect_input_line_cleared(&terminal, env.timeout(), "idle before exit");
+    submit(&mut terminal, "/exit");
+    assert_eq!(terminal.expect_eof().unwrap(), 0);
+}
+
 fn interaction_journals(env: &TestEnv) -> Vec<std::path::PathBuf> {
     let mut directories = vec![env.workspace_root().to_path_buf()];
     let mut journals = Vec::new();

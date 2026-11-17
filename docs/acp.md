@@ -152,7 +152,7 @@ Every request includes `sessionId` and an `action`:
 | --- | --- |
 | `submit` | Supply a unique `clientId`, ACP text/image `content`, and `delivery: "steer"` or `"queue"`. Optional `display` is the queue preview; optional `draft` is opaque editor metadata returned on recall. |
 | `flush` | Make pending input eligible at the next safe model boundary without cancelling the current tool. |
-| `flush_or_cancel` | Flush pending input; if there is none, cancel the active turn. |
+| `flush_or_cancel` | Flush pending follow-up input; if there is none, cancel the active turn, including while its initial prompt awaits durable admission. |
 | `recall` | Return all still-queued human inputs in FIFO order, including content and draft metadata. Peer and task notifications remain queued. |
 | `snapshot` | Return the current queue projection without starting a turn. |
 
@@ -1157,6 +1157,99 @@ mismatch returns `-32602` with `context_mismatch`. Transcript edits/compaction t
 invalidate the recorded digest cannot be presented as exact recovery. Hosted
 factories do not advertise this extension until they implement its storage contract.
 
+
+## Session interactions (experimental v1)
+
+This extension is experimental and disabled by default. When
+`nonblockingInteractions` is enabled, initialization advertises
+`_meta.sudocode.interactions: {"version":1,"experimental":true}`.
+
+The loaded session owns requests and decisions. A controller projects this
+state and sends explicit replies; it must not turn ordinary chat into an
+approval or maintain a second request journal. Configure the extension before
+starting a turn:
+
+```json
+{"method":"_sudocode/session/interactions","params":{"sessionId":"session-id","action":"configure","enabled":true}}
+```
+
+If opening the requested interaction route fails because its journal is
+unreadable or mismatched, the route remains required. Model turns fail before
+inference until the binding opens successfully;
+the engine does not fall back to blocking prompts or remove pending approval
+gates. Status and input controls remain available. After repairing storage,
+retry configuration on the same session. Disabling requires a readable journal
+with no outstanding requests.
+
+Interaction controls use one ordered storage worker, with at most 32 admitted
+controls including the active operation. Excess controls return a retryable busy
+error before storage work begins. A pending reply does not hold chat admission,
+runtime status or cancellation. Its RPC still waits for durable persistence;
+receiving an input receipt does not mean that input has committed. Configuration
+holds execution until its journal binding finishes. Session replacement returns
+a busy error while interaction controls remain admitted; retry after they finish.
+A delayed reply cannot change the new session. Storage contention can still
+delay the model's durable commits.
+
+All actions use this method and require `sessionId`. The action payload keeps
+the shared engine contract's snake_case field names:
+
+| Action | Additional fields | Result |
+| --- | --- | --- |
+| `configure` | `enabled` | Enable or disable the session route. Outstanding requests prevent disabling. |
+| `snapshot` | None | Current request snapshot. |
+| `reply` | `interaction_id`, `revision`, `reply` | Persist an explicit decision and return the current snapshot. |
+| `result` | `interaction_id` | Saved outcome of a direct host operation, when available. |
+
+ACP always uses engine-owned input delivery. `delivery: "host"` is reserved
+for the terminal's existing input coordinator and is rejected over ACP.
+
+Snapshots contain `session_id`, a journal `revision`, and `requests`. Each
+request has `id`, its own `revision`, `source`, creation/update timestamps in
+milliseconds, `origin`, `request`, `status`, and an optional `reply` and
+execution receipt. Use the request's revision when answering it. Notifications
+arrive through `_sudocode/session/interactions_update` as
+`{sessionId,snapshot}` or `{sessionId,error}`. A controller can recover its
+projection with `snapshot` after reconnecting.
+
+Reply forms are:
+
+```json
+{"kind":"answers","answers":[{"id":"question-id","value":"blue","label":"Blue"}]}
+{"kind":"permission","approved":true,"reason":"Allow this exact operation once"}
+{"kind":"cancelled","reason":"No longer needed"}
+```
+
+A matching duplicate reply is idempotent. A stale revision or conflicting
+answer is rejected. Persisted decisions move from `pending` to `resolved`;
+`delivered` records leave the active snapshot. Publishing a new plan changes
+older pending reviews and undelivered approvals to `superseded`; these also
+leave the active snapshot. Their queued replies cannot execute or clear
+context, and stale reply attempts are rejected. Dismissing a review grants
+no implementation permission. Delivery is not evidence of a successful side
+effect. Requests are bounded to 64 outstanding records and 128 retained
+closed records, within a 2 MiB journal.
+
+Origins determine the executor:
+
+- `conversation`: questions and plan decisions enter the existing session input
+  queue. Approval of a model tool resumes its captured arguments through the
+  shared scheduler and current hooks/policy. An exact-document plan gate
+  continues to fence writes while the model performs independent reads.
+- `direct`: the direct A2A response exposes `pendingInteraction` and releases
+  the host lane. A decision resumes the original authenticated operation
+  without model inference. `result` returns its status, execution receipt and
+  saved result/audit. After an ambiguous interruption it reports uncertainty
+  rather than repeating a possible side effect.
+- `worker`: the request identifies its `agent_id`. Foreground spawn and
+  `pid_output` waits return so the parent can continue. Only that live worker
+  receives the decision. Cancelling the worker or closing its parent retires
+  unanswered requests. A new parent execution cannot replay an orphaned child
+  operation after process loss.
+
+The Mosswork authenticated consumer is not integrated. Advertising this
+experimental engine contract does not establish frontend integration or
+production readiness.
 
 ## Direct background terminal completions (task extension v1)
 

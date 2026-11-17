@@ -450,7 +450,46 @@ and text questions always accept typed answers. The terminal shows a `[+]` row
 for short lists. Searchable lists use Enter to select a match, or submit the
 filter text when no option matches and custom input is allowed.
 
-`AskUserQuestion` can wait alongside independent reads. Questions and permission
+The experimental `nonblockingInteractions` setting lets questions, plan reviews,
+and model tool permissions return pending requests while the agent continues
+independent work. It is off by default and still undergoing acceptance.
+Use **Alt+Q** or `/questions` to review a pending request; `/questions <id>`
+opens a specific one when several are waiting. **Esc** returns to chat without
+answering; `/questions cancel <id>` cancels an obsolete request explicitly.
+Review preserves the unsent draft and cursor. An explicit answer is
+saved with the session and delivered through the normal input queue; ordinary
+chat text does not answer a question. Pending requests survive `--resume`.
+Pending plans allow read-only investigation and plan revision. Implementation
+waits for approval of the exact saved document. Approval can preserve context
+or clear exploration while retaining the approved plan and decision.
+Publishing a revised plan supersedes earlier pending reviews and undelivered
+approvals. Their queued replies cannot execute or clear context. Dismissing
+a review grants no write permission; read-only work and a new review remain
+available.
+`/questions` uses the same command registry as `/help` and Tab completion.
+These controls remain available during a running turn.
+Permission approval resumes the captured operation through the normal hooks
+and policy checks; a denial never runs it. If an interruption leaves execution
+uncertain, recovery reports that uncertainty without repeating the operation.
+Delegated workers use the same inbox for questions and permissions. When a
+worker needs human input, a synchronous spawn or blocking `pid_output` returns
+control to the parent so it can continue independent work. The reply goes to
+that live worker; the parent never executes the child's operation. Closing
+the session or cancelling the worker retires its outstanding requests. After
+a process loss, an orphaned worker request cannot authorize a new execution.
+
+With interactions enabled, an ACP direct host call that needs permission
+returns `pendingInteraction` and releases the host's session lane. Answer it
+through `_sudocode/session/interactions`, then use the same method with
+`action: "result"` and `interaction_id` to read its saved outcome. This path
+retains the original call identity and does not invoke a model. A pending
+receipt is not evidence that the operation executed.
+
+Delegated and direct routes are implemented experimentally; their acceptance,
+shared-context ownership, and the Mosswork consumer remain incomplete. Keep
+the experiment disabled in production until those checks pass.
+
+With the experiment disabled, `AskUserQuestion` can wait alongside independent reads. Questions and permission
 requests share one input queue, so only one prompt owns the editor at a time;
 other results continue to render while it waits. When one call asks several
 questions, ← or Shift+Tab returns to the previous question with its answer

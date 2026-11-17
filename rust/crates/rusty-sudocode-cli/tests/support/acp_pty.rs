@@ -1,6 +1,6 @@
 //! The same real ACP binary over a PTY for hosted input and interaction tests.
 #![allow(dead_code)]
-use crate::common::{self, TestEnv};
+use super::common::{self, TestEnv};
 use pty_expect::PtySession;
 use serde_json::{json, Value};
 use std::path::PathBuf;

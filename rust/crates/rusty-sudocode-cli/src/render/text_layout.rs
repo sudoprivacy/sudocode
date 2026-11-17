@@ -169,6 +169,93 @@ pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) ->
         .collect()
 }
 
+/// [`wrap_line_with_indent`] for prose: rows end between words. A row ends
+/// at its last space that fits, the spaces are dropped, and the next row
+/// starts at `continuation_indent` with the following word. A word wider than
+/// a whole row is still split between graphemes. Leading indentation is never
+/// a break, and a row continuing at `initial_col` cannot move its first word.
+pub(crate) fn wrap_words_with_indent(
+    source: &StyledText,
+    range: Range<usize>,
+    width: usize,
+    initial_col: usize,
+    continuation_indent: usize,
+) -> Vec<(StyledText, usize)> {
+    let width = width.max(1);
+    let indent = continuation_indent.min(width.saturating_sub(2));
+    let padding = " ".repeat(indent);
+    let graphemes: Vec<(usize, &str)> = source.text[range.clone()]
+        .grapheme_indices(true)
+        .map(|(offset, grapheme)| (range.start + offset, grapheme))
+        .collect();
+    let skip_spaces = |mut index: usize| {
+        while graphemes
+            .get(index)
+            .is_some_and(|(_, grapheme)| *grapheme == " ")
+        {
+            index += 1;
+        }
+        index
+    };
+    let mut rows = Vec::new();
+    let mut row = StyledText::default();
+    let mut col = initial_col;
+    // Where this row may end: its length and column before the latest run of
+    // spaces that follows a word on it, and the index of that run.
+    let mut space: Option<(usize, usize, usize)> = None;
+    let mut has_word = false;
+    // A continuation row holding only its indentation.
+    let mut fresh = false;
+    let mut index = 0;
+    while index < graphemes.len() {
+        let (start, grapheme) = graphemes[index];
+        let cells = grapheme_width(grapheme, col);
+        if col > 0 && col + cells > width && !fresh {
+            let next = if let Some((len, end_col, run)) = space.take() {
+                row.truncate(len);
+                rows.push((std::mem::take(&mut row), end_col));
+                Some(skip_spaces(run))
+            } else {
+                rows.push((std::mem::take(&mut row), col));
+                (grapheme == " ").then(|| skip_spaces(index))
+            };
+            row.push(crossterm::style::ContentStyle::default(), &padding);
+            col = indent;
+            has_word = false;
+            fresh = true;
+            if let Some(next) = next {
+                index = next;
+                continue;
+            }
+        }
+        if grapheme == " " {
+            let follows_word = has_word && index > 0 && graphemes[index - 1].1 != " ";
+            if follows_word {
+                space = Some((row.text.len(), col, index));
+            }
+        } else {
+            has_word = true;
+        }
+        let (style, _, link) = source
+            .rich_spans(start..start + grapheme.len())
+            .next()
+            .unwrap();
+        if grapheme == "\t" {
+            // Tabs become the spaces they occupy, as in `wrap_line_with_indent`.
+            row.push_link(style, &" ".repeat(cells), link);
+        } else {
+            for (style, part, link) in source.rich_spans(start..start + grapheme.len()) {
+                row.push_link(style, part, link);
+            }
+        }
+        col += cells;
+        fresh = false;
+        index += 1;
+    }
+    rows.push((row, col));
+    rows
+}
+
 /// Terminal strings use grapheme widths. The pinned iocraft canvas clips by
 /// scalar widths, so its adapter must reserve those columns without splitting
 /// a grapheme. Keep that compatibility decision separate from scrollback.

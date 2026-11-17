@@ -140,10 +140,11 @@ RUST_LOG=info \
   >"$DATA_DIR/joiner.log" 2>&1 &
 JOINER_PID=$!
 
-# Ready when it has caught up to the leader's log, not merely when it answered a
-# dial: the tests read a stream the founder created, and a joiner that is up but
-# behind returns not-found.
-authon_wait_log_file "$DATA_DIR/joiner.log" "local raft state caught up to leader" 90
+# Ready when the ConfState naming it is installed and it follows the leader,
+# not merely when it answered a dial: the tests read a stream the founder
+# created, and a joiner that is not yet a member returns not-found. nexus rc.9
+# logs this as "local raft state follows the leader" (rc.8 said "caught up").
+authon_wait_log_file "$DATA_DIR/joiner.log" "local raft state follows the leader" 90
 
 # Observer installation precedes the production data-plane-ready event. The
 # obsolete per-zone "stream-wakeup" log is no longer emitted. The real blocking

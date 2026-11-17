@@ -101,6 +101,9 @@ fn main() {
         });
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
+    // Set by e2e/vault-live/run-native.sh to build the live Vault acceptance off Linux.
+    println!("cargo::rustc-check-cfg=cfg(vault_live)");
+
     // Cargo executes here in the nested package, not the repository root.
     // Let Git resolve worktree/common-dir metadata and watch existing inputs.
     println!("cargo:rerun-if-changed=build.rs");

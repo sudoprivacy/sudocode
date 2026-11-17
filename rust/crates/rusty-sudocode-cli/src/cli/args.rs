@@ -306,6 +306,10 @@ enum AcpSub {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Serve one managed agent for the host that started this process: its
+    /// private bootstrap line on stdin, then ACP on the same stdio
+    #[command(hide = true)]
+    Managed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -435,6 +439,8 @@ pub(crate) enum CliAction {
         auth_mode: Option<AuthMode>,
         ws_port: Option<u16>,
     },
+    /// One managed agent, set up by its host over private stdio.
+    AcpManaged,
     CacheStats {
         output_format: CliOutputFormat,
     },
@@ -813,8 +819,14 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                     output_format,
                 })
             }
+            Cmd::Acp {
+                sub: Some(AcpSub::Managed),
+            } => Ok(CliAction::AcpManaged),
             Cmd::Acp { sub } => {
-                let ws_port = sub.map(|AcpSub::Serve { port }| port);
+                let ws_port = match sub {
+                    Some(AcpSub::Serve { port }) => Some(port),
+                    Some(AcpSub::Managed) | None => None,
+                };
                 Ok(CliAction::Acp {
                     model,
                     model_flag_raw,

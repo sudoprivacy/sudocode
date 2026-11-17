@@ -6,6 +6,7 @@ mod capabilities;
 mod diagnostics;
 mod local_box;
 mod supervisor;
+pub mod vault_client;
 
 pub use local_box::register_local_box;
 pub use supervisor::{

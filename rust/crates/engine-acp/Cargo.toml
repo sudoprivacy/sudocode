@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 default = ["websocket"]
 websocket = ["dep:axum"]
-mailbox = ["dep:a2a", "dep:managed-agent", "dep:kernel"]
+mailbox = ["dep:a2a", "dep:kernel"]
 
 [dependencies]
 # engine-acp sits ABOVE the seam on the renderer side: it consumes the engine
@@ -29,7 +29,7 @@ agent-client-protocol = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
 axum = { workspace = true, optional = true }
 a2a = { workspace = true, optional = true }
-managed-agent = { workspace = true, optional = true }
+managed-agent = { workspace = true }
 kernel = { workspace = true, optional = true }
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }

@@ -2070,7 +2070,11 @@ impl PluginManager {
 
 #[must_use]
 pub fn builtin_plugins() -> Vec<PluginDefinition> {
-    vec![PluginDefinition::Builtin(BuiltinPlugin {
+    vec![example_builtin_plugin(), vault_builtin_plugin()]
+}
+
+fn example_builtin_plugin() -> PluginDefinition {
+    PluginDefinition::Builtin(BuiltinPlugin {
         metadata: PluginMetadata {
             id: plugin_id("example-builtin", BUILTIN_MARKETPLACE),
             name: "example-builtin".to_string(),
@@ -2086,7 +2090,94 @@ pub fn builtin_plugins() -> Vec<PluginDefinition> {
         lifecycle: PluginLifecycle::default(),
         tools: Vec::new(),
         capabilities: PluginCapabilityMetadata::default(),
-    })]
+    })
+}
+
+/// First-party Vault tools. Builtin rather than bundled because bundled plugins
+/// do not ship in releases; both tools run this executable's hidden
+/// `vault tool` command, which never returns a secret value.
+fn vault_builtin_plugin() -> PluginDefinition {
+    let id = plugin_id("vault", BUILTIN_MARKETPLACE);
+    let command = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "scode".to_string());
+    let tool = |name: &str, description: &str, input_schema: Value, action: &str, permission| {
+        PluginTool::new(
+            id.clone(),
+            "vault",
+            PluginToolDefinition {
+                name: name.to_string(),
+                description: Some(description.to_string()),
+                input_schema,
+            },
+            command.clone(),
+            vec!["vault".to_string(), "tool".to_string(), action.to_string()],
+            permission,
+            None,
+        )
+    };
+    let tools = vec![
+        tool(
+            "vault_list",
+            "List the Vault operations configured in user settings, each labelled \
+             configured-unqualified with whether its secret is reachable. Returns \
+             metadata only; no Vault tool returns secret values.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            "list",
+            PluginToolPermission::ReadOnly,
+        ),
+        tool(
+            "vault_use",
+            "Run one configured Vault operation by id with exactly its declared params \
+             and body. Unavailable until the backend has per-agent credential-use \
+             authority (nexi-lab/nexus-vfs#579). No Vault tool returns secret values.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "Operation id from vault_list"
+                    },
+                    "params": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "body": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
+                "required": ["operation"],
+                "additionalProperties": false
+            }),
+            "use",
+            PluginToolPermission::DangerFullAccess,
+        ),
+    ];
+    PluginDefinition::Builtin(BuiltinPlugin {
+        metadata: PluginMetadata {
+            id,
+            name: "vault".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Vault operations configured in user settings, backed by the \
+                          owner's nexus runtime. No tool returns secret values."
+                .to_string(),
+            kind: PluginKind::Builtin,
+            source: BUILTIN_MARKETPLACE.to_string(),
+            default_enabled: false,
+            root: None,
+            display_name: None,
+        },
+        hooks: PluginHooks::default(),
+        lifecycle: PluginLifecycle::default(),
+        tools,
+        capabilities: PluginCapabilityMetadata::default(),
+    })
 }
 
 fn load_plugin_definition(

@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use engine_events::EngineState;
+use engine_events::{CompactionProgress, CompactionStatus, EngineState};
 
 use super::{spinner_progress::SpinnerProgress, text_layout};
 
@@ -35,6 +35,11 @@ struct TurnMetadata {
     token_budget: Option<u32>,
 }
 
+struct CompactionActivity {
+    id: String,
+    start: Instant,
+}
+
 /// Shared renderer projection fed by the session's ordered engine event bridge.
 #[derive(Clone)]
 pub(crate) struct ActivityState {
@@ -42,6 +47,7 @@ pub(crate) struct ActivityState {
     lifecycle: Arc<Mutex<EngineState>>,
     phase: Arc<Mutex<ActivityPhase>>,
     metadata: Arc<Mutex<TurnMetadata>>,
+    compaction: Arc<Mutex<Option<CompactionActivity>>>,
 }
 
 impl ActivityState {
@@ -55,12 +61,14 @@ impl ActivityState {
                 model: None,
                 token_budget: None,
             })),
+            compaction: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Prepare counters before submission; only engine events activate a turn.
     pub(crate) fn prepare_turn(&self, model: &str, token_budget: Option<u32>) {
         self.progress.reset();
+        *self.compaction.lock().unwrap() = None;
         *self.phase.lock().unwrap() = ActivityPhase::Working;
         *self.metadata.lock().unwrap() = TurnMetadata {
             start: Instant::now(),
@@ -77,11 +85,35 @@ impl ActivityState {
     /// Called only by the event bridge, including while the renderer is idle.
     #[inline]
     pub(crate) fn observe_engine_state(&self, state: EngineState) {
+        if state == EngineState::Idle {
+            *self.compaction.lock().unwrap() = None;
+        }
         let mut lifecycle = self.lifecycle.lock().unwrap();
         if *lifecycle != state {
             *lifecycle = state;
             self.progress.record_activity();
         }
+    }
+
+    /// The same engine event identifies manual and automatic maintenance.
+    /// Match terminal events by operation id so a stale result cannot clear
+    /// a newer operation. Stream/retry presentation never owns this lifetime.
+    pub(crate) fn observe_compaction(&self, progress: &CompactionProgress) {
+        let mut active = self.compaction.lock().unwrap();
+        match progress.status {
+            CompactionStatus::Started => {
+                *active = Some(CompactionActivity {
+                    id: progress.id.clone(),
+                    start: Instant::now(),
+                });
+            }
+            _ if active.as_ref().is_some_and(|value| value.id == progress.id) => {
+                *active = None;
+                *self.phase.lock().unwrap() = ActivityPhase::Working;
+            }
+            _ => {}
+        }
+        self.progress.record_activity();
     }
 
     pub(crate) fn set_reasoning(&self, on: bool) {
@@ -112,6 +144,24 @@ impl ActivityState {
         // row while waiting rather than adding a second instruction above it.
         if state != EngineState::Running {
             return String::new();
+        }
+        if let Some(compaction) = &*self.compaction.lock().unwrap() {
+            // Compaction has no trustworthy percentage, token rate or ETA.
+            // Keep its identity visible even when a long model name would
+            // otherwise consume the row's width budget.
+            return progress_line(
+                frame_index,
+                "Compacting context…",
+                ProgressValues {
+                    model: None,
+                    elapsed: compaction.start.elapsed().as_secs_f64(),
+                    bytes: 0,
+                    token_budget: None,
+                },
+                width,
+                text_layout::ColumnMetric::Canvas,
+                false,
+            );
         }
         let phase = self.phase.lock().unwrap();
         let content = match &*phase {

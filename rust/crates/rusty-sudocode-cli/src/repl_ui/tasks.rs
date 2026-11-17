@@ -1170,7 +1170,8 @@ fn tokens(count: u64) -> String {
 
 fn status_color(status: BackgroundTaskStatus) -> crossterm::style::Color {
     match status {
-        BackgroundTaskStatus::Running => theme().color(TextRole::Info),
+        // Running work wears the brand accent, as the status row does.
+        BackgroundTaskStatus::Running => theme().color(TextRole::Brand),
         BackgroundTaskStatus::Stopping | BackgroundTaskStatus::ExecutionUnconfirmed => {
             theme().color(TextRole::Warning)
         }

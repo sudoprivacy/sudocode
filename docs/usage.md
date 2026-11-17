@@ -344,6 +344,15 @@ remain live. Final turn statistics retain their precise duration.
 Foreground tools use the same row and show available progress first. Quiet
 tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
+Manual and automatic context compaction use this same foreground row:
+`Compacting context…` and elapsed time, without a guessed percentage or ETA.
+Queued messages remain visible above it. With no pending input the footer
+shows `Esc/Ctrl+C cancel`; with pending input it shows `Esc flush` and
+`Ctrl+C cancel` separately. Flushing requests delivery of pending input;
+compaction finishes before that input can reach a model request. Cancellation
+keeps unapplied queued input available for explicit continuation.
+While working or holding pending input, flush/cancel controls lead the other keys and workspace
+position so a long branch name does not hide them on an 80-column terminal.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described
@@ -757,11 +766,12 @@ tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
 over cache advice. While a turn runs, only urgent tips are shown.
 
-Below the tips, the slot shows where the workspace is, then the keys for the
-current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
-steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
-cancel` in place of the cancel keys when input is queued, and `· Enter send ·
-Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+Below the tips, the slot shows the workspace and the keys for the current turn
+and queue state. Idle without a queue shows `sudocode ⎇ main · /help`.
+With pending input it shows `Esc flush · Enter send · ↑ edit queued` before
+the workspace position. During work, controls also lead the
+workspace: `Esc/Ctrl+C cancel · Enter steer · Tab queue`, or `Esc flush ·
+Ctrl+C cancel · Enter steer · Tab queue` when input is pending. Typing never changes it,
 so keystrokes never redraw the footer; it changes when a turn starts or ends,
 as the rest of the screen does. The repository is named by its shared git
 directory, so every worktree of one repository shows the same name; a detached

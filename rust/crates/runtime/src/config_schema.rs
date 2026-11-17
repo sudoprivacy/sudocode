@@ -373,6 +373,13 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
     // workspace path.
     FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
+    // Read only from user settings by the builtin `vault` plugin, which validates
+    // its own schema and refuses a project or local copy by path.
+    FieldSchema::leaf(
+        "vault",
+        FieldType::Object,
+        "Vault operations for the builtin vault plugin (user settings only)",
+    ),
 ];
 
 const IGNORED: &str = "Claude Code setting; scode ignores it";

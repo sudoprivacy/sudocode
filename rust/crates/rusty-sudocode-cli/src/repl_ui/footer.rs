@@ -14,6 +14,7 @@ pub(super) struct FooterHints<'a> {
     pub transient: Option<&'a str>,
     /// The keys for the current turn and queue state, after the position.
     pub keys: &'a str,
+    pub has_pending_input: bool,
 }
 
 /// Who owns a persistent footer tip. Unlike the model's tips these outlive a
@@ -76,11 +77,16 @@ impl FooterTips {
                 .text
                 .replace(['\n', '\r', '\t'], " "),
         });
-        // Where the workspace is, then the keys for the current state. The
-        // position leads so truncation trims the keys first.
+        // Active controls lead the workspace position so a long branch name
+        // cannot hide the distinction between flushing and cancellation.
+        // Pending input keeps its flush controls visible even after a cancel;
+        // only idle without a queue keeps the workspace first.
         let filler = Tip {
             priority: TipPriority::Normal,
             message: match &self.position {
+                Some(position) if active || hints.has_pending_input => {
+                    format!("{} · {position}", hints.keys)
+                }
                 Some(position) => format!("{position} · {}", hints.keys),
                 None => hints.keys.into(),
             },

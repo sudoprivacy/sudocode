@@ -64,9 +64,11 @@ the code first.
   are forbidden by rule. See [Test policy](#test-policy) below for
   the rationale. (See ROADMAP § Goal 1 → "Test layer policy".)
 
-- **No in-CLI multi-agent dashboard.** sudocode is an agent unit,
-  not a hub. Multi-agent orchestration UI belongs in sudowork /
-  your tmux — not inside scode. (See ROADMAP § Goal 4.)
+- **Agent navigation shares engine facts.** An inline agent browser may
+  expose child tasks and peers in distinct groups. Reuse the existing task
+  browser and engine command/event seam; do not introduce a second scheduler,
+  transcript owner or permission authority. MossWork consumes the same facts
+  and operations. (See ROADMAP § Goal 4.)
 
 - **No CLA, no copyright assignment, no closed-source escape
   hatch.** Contributors retain their copyright; their code is
@@ -2183,7 +2185,7 @@ Before opening a PR:
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen
-      mode, a `--tui` flag, or any in-CLI multi-agent UI (see
+      mode, a `--tui` flag, or a second agent scheduler (see
       [Design principles](#design-principles-you-must-respect)).
 - [ ] If the change is parity work, the PR description leads with a
       CCB validation section (see

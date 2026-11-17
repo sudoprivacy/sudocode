@@ -165,17 +165,7 @@ pub(super) fn agent_list_card(
         return generic_tool_card("agent_list", input, Some(output), status);
     }
     let _ = write!(header, " · {} agents", agents.len());
-    let is_incomplete = output.get("runtime_discovery").is_some_and(|coverage| {
-        coverage.get("unsupported").and_then(Value::as_bool) == Some(true)
-            || coverage
-                .get("unknown_instances")
-                .and_then(Value::as_u64)
-                .is_some_and(|count| count > 0)
-            || coverage
-                .get("unavailable")
-                .and_then(Value::as_array)
-                .is_some_and(|scopes| !scopes.is_empty())
-    });
+    let is_incomplete = directory_incomplete(output);
     if is_incomplete {
         header.push_str(" · observations incomplete");
     }
@@ -192,35 +182,9 @@ pub(super) fn agent_list_card(
     }
     let mut rows = Vec::new();
     for agent in agents.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
-        let name = text(agent, "name").unwrap_or_default();
-        let address = text(agent, "send_to").unwrap_or_default();
-        let kind = text(agent, "kind").unwrap_or_default();
-        let mut row = format!("{kind}  {name}");
-        if address != name {
-            let _ = write!(row, " · send_to={address}");
-        }
-        if let Some(description) = text(agent, "description") {
-            let _ = write!(row, " · {}", truncate_for_summary(description, 160));
-            if let Some(age) = text(agent, "description_updated_at")
-                .and_then(runtime::agent_description::relative_age)
-            {
-                let _ = write!(row, " · updated {age}");
-            }
-        }
-        if let Some(runtime) = agent.get("runtime") {
-            let Ok(observation) = serde_json::from_value::<RuntimeObservation>(runtime.clone())
-            else {
-                return generic_tool_card("agent_list", input, Some(output), status);
-            };
-            row.push_str(&runtime_labels(&observation));
-        } else if let Some(active) = agent.get("active").and_then(Value::as_bool) {
-            row.push_str(if active { " · active" } else { " · inactive" });
-        }
-        for key in ["role", "task_id"] {
-            if let Some(value) = text(agent, key).filter(|value| *value != address) {
-                let _ = write!(row, " · {key}={}", truncate_for_summary(value, 80));
-            }
-        }
+        let Some(row) = agent_row(agent) else {
+            return generic_tool_card("agent_list", input, Some(output), status);
+        };
         rows.push(row);
     }
     if agents.len() > rows.len() {
@@ -271,4 +235,55 @@ fn runtime_labels(observation: &RuntimeObservation) -> String {
         );
     }
     labels
+}
+
+/// The tool card and peer navigator share status/freshness wording.
+pub(crate) fn agent_row(agent: &Value) -> Option<String> {
+    let name = text(agent, "name").unwrap_or_default();
+    let address = text(agent, "send_to").unwrap_or_default();
+    let kind = text(agent, "kind").unwrap_or_default();
+    let mut row = format!(
+        "{kind}  {}{name}{}",
+        crate::render::ansi_fg(crate::render::theme().agent_color(address)),
+        crate::render::RESET
+    );
+    if address != name {
+        let _ = write!(row, " · send_to={address}");
+    }
+    if let Some(description) = text(agent, "description") {
+        let _ = write!(row, " · {}", truncate_for_summary(description, 160));
+        if let Some(age) =
+            text(agent, "description_updated_at").and_then(runtime::agent_description::relative_age)
+        {
+            let _ = write!(row, " · updated {age}");
+        }
+    }
+    if let Some(runtime) = agent.get("runtime") {
+        let Ok(observation) = serde_json::from_value::<RuntimeObservation>(runtime.clone()) else {
+            return None;
+        };
+        row.push_str(&runtime_labels(&observation));
+    } else if let Some(active) = agent.get("active").and_then(Value::as_bool) {
+        row.push_str(if active { " · active" } else { " · inactive" });
+    }
+    for key in ["role", "task_id"] {
+        if let Some(value) = text(agent, key).filter(|value| *value != address) {
+            let _ = write!(row, " · {key}={}", truncate_for_summary(value, 80));
+        }
+    }
+    Some(row)
+}
+
+pub(crate) fn directory_incomplete(output: &Value) -> bool {
+    output.get("runtime_discovery").is_some_and(|coverage| {
+        coverage.get("unsupported").and_then(Value::as_bool) == Some(true)
+            || coverage
+                .get("unknown_instances")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+            || coverage
+                .get("unavailable")
+                .and_then(Value::as_array)
+                .is_some_and(|scopes| !scopes.is_empty())
+    })
 }

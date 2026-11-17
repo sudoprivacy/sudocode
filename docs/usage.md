@@ -360,6 +360,27 @@ there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described
 under [Background tasks](#background-tasks-in-the-repl).
 
+### Agent navigation and attention
+
+Press **Left** with an empty input to open **Subagents**. **Left/Right** cycles
+between background terminals, subagents, peers and scheduled jobs in the existing
+inline task browser. With text in the editor, Left still moves the cursor.
+Questions and approvals keep keyboard ownership; navigation never submits input
+or cancels the current turn.
+
+Subagent rows and the footer show **Waiting on you** from outstanding engine
+requests. Details identify the requesting child and include a bounded preview;
+the actual approval/question panel retains the complete request. Queued requests
+wait behind the currently presented request. A background child can still ask
+after its parent's turn ends, and answering or cancelling removes the request
+from every view.
+
+**Peers** is an on-demand directory snapshot. Open the tab or press **r** to
+refresh it; Enter opens details. Discovery uses the same directory and runtime
+facts as `agent_list`. Missing or stale observations remain unknown. A peer's
+waiting state does not grant permission to answer or interrupt that peer.
+The browser does not introduce a periodic discovery poll or a new rendering engine.
+
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
 the file picker, press Enter to edit, or Esc to cancel. With none, it creates
@@ -859,7 +880,7 @@ already scheduling.
 The task browser has a **Scheduled** tab: open it from the footer as above,
 then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
 enables or disables it, **r** runs it now, and **d** deletes it after you
-confirm with **y**. **←** returns to background tasks. The footer shows how
+confirm with **y**. **←/→** switches browser tabs. The footer shows how
 many jobs are enabled. Desktop hosts manage the same jobs through the ACP
 `_sudocode/cron/*` methods.
 

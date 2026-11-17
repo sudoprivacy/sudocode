@@ -11,6 +11,89 @@ use serde_json::{json, Value};
 const BODY: &str = "hello from the discovered agent address";
 
 #[test]
+fn peer_navigation_uses_empty_input_and_refreshes_without_starting_a_turn() {
+    let env = TestEnv::new("agent-directory-navigation");
+    let pair_root = local_pair_root_in(env.config_home());
+    let first = Mailbox::workspace_local(&pair_root, "attention-peer-one".into());
+    first.ensure_presence().unwrap();
+    let mut cli = spawn_interactive(&env, &["--permission-mode", "read-only"]);
+    cli.resize(32, 110).unwrap();
+    common::expect_input_line_cleared(&cli, env.timeout(), "navigation ready");
+    let before = common::turn_status_marker(&cli);
+    cli.send("keep-this-text").unwrap();
+    common::expect_input_line(&cli, "keep-this-text", env.timeout(), "typed buffer");
+    cli.send("\x1b[D!").unwrap();
+    common::expect_input_line(
+        &cli,
+        "keep-this-tex!t",
+        env.timeout(),
+        "left still edits text",
+    );
+    cli.send("\x15").unwrap();
+    common::expect_input_line_cleared(&cli, env.timeout(), "empty input");
+    cli.send("\x1b[D").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("No subagents in this session"),
+        env.timeout(),
+        "subagents tab",
+    );
+    cli.send("\x1b[C").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("Peers · snapshot") && s.contains("attention-peer-one"),
+        env.timeout(),
+        "peer snapshot",
+    );
+
+    let second = Mailbox::workspace_local(&pair_root, "attention-peer-two".into());
+    second.ensure_presence().unwrap();
+    cli.send("r").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("attention-peer-two"),
+        env.timeout(),
+        "explicit refresh",
+    );
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("Peers · details") && s.contains("Esc back"),
+        env.timeout(),
+        "peer details",
+    );
+    cli.resize(16, 46).unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("Peers · details"),
+        env.timeout(),
+        "small peer panel",
+    );
+    cli.send("\x1b").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("Peers · snapshot"),
+        env.timeout(),
+        "back to peers",
+    );
+    cli.send("\x1b").unwrap();
+    common::expect_input_line_cleared(&cli, env.timeout(), "back to editor");
+    assert_eq!(
+        common::turn_status_marker(&cli),
+        before,
+        "navigation must not create a model turn"
+    );
+    if env.is_mock() {
+        assert!(
+            env.captured_message_bodies().is_empty(),
+            "navigation must not call the provider"
+        );
+    }
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+}
+
+#[test]
 fn discovered_agent_list_address_delivers_to_the_peer() {
     let env = TestEnv::new("agent-directory-address");
     let peer = Mailbox::workspace_local(

@@ -58,8 +58,8 @@ fn the_scheduled_tab_manages_jobs_from_the_task_browser() {
     sess.send(DOWN).unwrap();
     see(&env, &sess, "Enter to view");
     sess.send("\r").unwrap();
-    see(&env, &sess, "→ scheduled");
-    sess.send(RIGHT).unwrap();
+    see(&env, &sess, "←/→ tabs");
+    sess.send(&RIGHT.repeat(3)).unwrap();
     see(&env, &sess, "Scheduled · 2 jobs");
     see(&env, &sess, "every 10m");
     see(&env, &sess, "weekly report");
@@ -88,7 +88,7 @@ fn the_scheduled_tab_manages_jobs_from_the_task_browser() {
     assert!(registry.get(&build).is_none());
     assert!(registry.get(&weekly).is_some());
 
-    sess.send(LEFT).unwrap();
+    sess.send(&LEFT.repeat(3)).unwrap();
     see(&env, &sess, "No background tasks in this session");
     sess.send(ESC).unwrap();
     common::expect_input_line_cleared(&sess, Duration::from_secs(30), "back at input");

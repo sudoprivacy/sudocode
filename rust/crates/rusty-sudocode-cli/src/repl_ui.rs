@@ -42,6 +42,7 @@ use crate::render::activity::{ActivityState, ToolActivity};
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
+mod agents;
 mod ansi_text;
 mod choice_text;
 mod footer;
@@ -326,6 +327,8 @@ impl ToolCard {
 
 #[derive(Clone, Debug)]
 pub enum UiCommand {
+    AgentDirectory(Result<serde_json::Value, String>),
+    Attention(Arc<engine_events::AttentionState>),
     BackgroundTask(engine_events::BackgroundTaskEvent),
     BackgroundTaskError(String),
     OpenTasks,
@@ -391,6 +394,13 @@ pub enum QuestionOwner {
 }
 
 impl UiCommandSender {
+    pub fn agent_directory(&self, result: Result<serde_json::Value, String>) {
+        let _ = self.tx.send(UiCommand::AgentDirectory(result));
+    }
+
+    pub fn attention(&self, state: Arc<engine_events::AttentionState>) {
+        let _ = self.tx.send(UiCommand::Attention(state));
+    }
     pub fn open_tasks(&self) {
         let _ = self.tx.send(UiCommand::OpenTasks);
     }
@@ -933,6 +943,7 @@ pub(crate) struct CacheTip {
 /// Events from the iocraft UI to the coordinator thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
+    RefreshAgents,
     /// A submitted line. `text` is the full content (paste placeholders
     /// expanded) sent to the model; `display` is the compact echo form (paste
     /// collapsed). The coordinator — not the UI — writes the `❯ display` echo to
@@ -1325,11 +1336,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // Navigation is local; cancellation always reaches the
                     // same handler below, including double Ctrl+C to exit.
                     if focus != TaskFocus::Input && !is_cancel {
+                        let previous_tab = browser.tab;
                         match (focus, code) {
+                            (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Peers => {
+                                if browser.peer_key(code) {
+                                    let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
+                                }
+                            }
                             (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Scheduled => {
                                 browser.scheduled_key(code);
                             }
-                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(),
+                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(code == KeyCode::Right),
                             (TaskFocus::Footer, KeyCode::Enter | KeyCode::Down) => browser.open(),
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
                             (TaskFocus::List, KeyCode::Down) => browser.move_selection(true),
@@ -1369,6 +1386,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             _ => {}
                         }
+                        if browser.tab == tasks::TaskTab::Peers && previous_tab != browser.tab {
+                            let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
+                        }
+                        frame.set(frame.get().wrapping_add(1));
+                        return;
+                    }
+                    if code == KeyCode::Left && modifiers.is_empty() && input_value.read().is_empty() {
+                        browser.open_agents();
+                        let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
                         frame.set(frame.get().wrapping_add(1));
                         return;
                     }
@@ -1788,8 +1814,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = ui_rx_for_future.lock() {
                 loop {
                     match rx.try_recv() {
+                        Ok(UiCommand::AgentDirectory(result)) => {
+                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).peers(result);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
+                        Ok(UiCommand::Attention(state)) => {
+                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).attention(state);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::OpenTasks) => {
-                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).open();
+                            let mut browser = tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            browser.open();
+                            if browser.tab == tasks::TaskTab::Peers {
+                                let _ = input_tx_for_future.send(InputEvent::RefreshAgents);
+                            }
                             frame.set(frame.get().wrapping_add(1));
                         }
                         Ok(UiCommand::BackgroundTask(event)) => {

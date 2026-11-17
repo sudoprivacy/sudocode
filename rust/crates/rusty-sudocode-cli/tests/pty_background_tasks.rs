@@ -249,9 +249,12 @@ fn task_panel(view: &str) -> Option<(usize, &str)> {
     let rows = view.lines().collect::<Vec<_>>();
     let live = common::input_and_footer_row_range(&rows)?;
     let top = live.start
-        + rows[live]
-            .iter()
-            .position(|row| row.trim_start_matches('─').trim() == "Background tasks")?;
+        + rows[live].iter().position(|row| {
+            matches!(
+                row.trim_start_matches('─').trim(),
+                "Background tasks" | "Subagents"
+            )
+        })?;
     let offset = view.split_inclusive('\n').take(top).map(str::len).sum();
     Some((top, &view[offset..]))
 }

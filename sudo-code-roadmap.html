@@ -4370,6 +4370,51 @@ Logged here so the insight isn't lost to discussion-only memory.</p>
 
 <h2 id="goal-4">Goal 4 · Agent storage, communication and execution</h2>
 
+<h3 id="agent-attention">Agent attention and inline navigation</h3>
+<p><b>CCB validation.</b> Read
+<code>src/hooks/useSwarmPermissionPoller.ts</code> and
+<code>src/components/permissions/WorkerPendingPermission.tsx</code> in the local
+CCB reference at <code>236d99ed</code>. Requests have correlated callbacks that
+are removed before replying, and the worker UI identifies the requesting agent
+and tool. Its 500 ms permission poll is not a design target. This is a historical
+source check, not a current Claude Code behavioral acceptance.</p>
+<p><b>Codex reference.</b> At <code>586203ad13</code>, app-server
+<code>thread_status.rs</code> derives waiting flags from pending request guards;
+the agent center aggregates child attention without granting control over a
+thread. Its task overview and child picker are distinct from a network peer
+directory. Reuse the lifecycle and bounded/event-driven presentation principles,
+not its full-height transcript ownership.</p>
+<p><b>Agreed behavior.</b> Keep <code>steer</code> and <code>queue</code> as the
+message delivery choices. Both enter the existing engine scheduling path and
+eventually wake an eligible recipient; there is no <code>wake_if_idle</code>
+switch. Neither cancels work or forces the model to change direction. Explicit
+user cancellation and lifecycle fences retain their existing meaning.
+Cancellation is a separate operation for an owned child; discovering a peer
+does not grant authority to interrupt it.</p>
+<p><b>Single authority.</b> Extend the existing request lifecycle with source
+agent identity and queued/presented request views. Derive attention from those
+records and remove it on answer, cancellation, failure or session teardown.
+Keep foreground execution, background activity and attention distinct. The
+native renderer, tool results and ACP/MossWork consume that projection; they
+must not infer waiting from prose, spinner state or elapsed output time.
+Unknown or stale peer observations remain unknown, and a peer waiting for
+someone else is not labelled as needing the current user's answer.</p>
+<p><b>Presentation.</b> One inline navigation surface groups Subagents and Peers
+without duplicating the existing task registry. Reuse list/detail allocation,
+preserve drafts and terminal scrollback, and retain approval input ownership.
+Empty-composer Left may open the browser; ordinary cursor movement is unchanged.
+Agent identity colors resolve through ColorTheme, independently of status
+colors; amber retains its brand role. MossWork shares the engine projection
+and operation contract, not the terminal widget implementation.</p>
+<p><b>Remaining implementation and acceptance.</b> Request provenance and
+lifecycle projection; cross-host delivery-option parity; inline browser and
+footer; MossWork consumer; identity palette consolidation. Cover queued
+permissions/questions, child approval attribution, answer/cancel races, late
+background-child prompts, disconnect/reconnect and stale instance observations
+through real CLI/ACP journeys. Keep existing rendering/typing/CPU/RSS gates.
+Shared message-board channels and subscriptions are a later capability: reuse
+message scheduling and keep board writes, notifications and control separate.</p>
+
 <h3 id="peer-descriptions">Persistent peer descriptions</h3>
 <p><b>CCB validation.</b> Read <code>claude-code-best/src/memdir/memoryAge.ts</code>,
 <code>memoryScan.ts</code>, and <code>memoryTypes.ts</code> at <code>8d80e740</code>.

@@ -25,6 +25,7 @@ pub(super) struct TaskSummary {
     unconfirmed: usize,
     unread: usize,
     failed: usize,
+    waiting: usize,
     /// Enabled scheduled jobs: their tab is reachable from the footer even
     /// when no background task exists.
     scheduled: usize,
@@ -33,7 +34,10 @@ pub(super) struct TaskSummary {
 impl TaskSummary {
     /// Attention states keep priority over the remaining running work.
     pub fn animates_status(self) -> bool {
-        self.unconfirmed == 0 && self.failed == 0 && self.running + self.stopping > 0
+        self.waiting == 0
+            && self.unconfirmed == 0
+            && self.failed == 0
+            && self.running + self.stopping > 0
     }
 
     pub fn status_lines(
@@ -43,7 +47,13 @@ impl TaskSummary {
         frame: usize,
     ) -> Option<(std::sync::Arc<StyledText>, std::sync::Arc<StyledText>)> {
         let active = self.running + self.stopping;
-        let (full, short, role) = if self.unconfirmed > 0 {
+        let (full, short, role) = if self.waiting > 0 {
+            (
+                format!("{} waiting on you", quantity(self.waiting, "request")),
+                format!("{} waiting on you", self.waiting),
+                TextRole::Warning,
+            )
+        } else if self.unconfirmed > 0 {
             (
                 format!(
                     "{} unconfirmed",
@@ -223,6 +233,8 @@ pub(super) enum TaskFocus {
 pub(super) enum TaskTab {
     #[default]
     Background,
+    Subagents,
+    Peers,
     Scheduled,
 }
 
@@ -255,6 +267,7 @@ struct Entry {
 
 #[derive(Default)]
 pub(super) struct TaskBrowser {
+    attention: std::sync::Arc<engine_events::AttentionState>,
     entries: BTreeMap<String, Entry>,
     rows: Vec<String>,
     summary: TaskSummary,
@@ -269,11 +282,17 @@ pub(super) struct TaskBrowser {
     ttl_row: usize,
     pub tab: TaskTab,
     scheduled: ScheduledTab,
+    peers: super::agents::PeerTab,
     /// Turns begun in this session.
     turns_begun: u32,
 }
 
 impl TaskBrowser {
+    pub fn attention(&mut self, state: std::sync::Arc<engine_events::AttentionState>) {
+        self.attention = state;
+        self.refresh_rows();
+        self.refresh_summary();
+    }
     /// Apply producer state and report whether the visible browser changed.
     pub fn update(&mut self, event: BackgroundTaskEvent) -> bool {
         let previous_summary = self.summary;
@@ -325,29 +344,71 @@ impl TaskBrowser {
                 self.entries.remove(&id);
             }
         }
-        self.rows = self
-            .entries
-            .values()
-            .filter(|e| e.task.background)
-            .map(|e| e.task.id.clone())
-            .collect();
-        self.rows.sort_by_key(|id| {
-            let task = &self.entries[id].task;
-            (
-                !task.status.is_active(),
-                std::cmp::Reverse(task.started_ms),
-                id.clone(),
-            )
-        });
+        self.refresh_rows();
         self.refresh_summary();
         self.clamp();
         self.is_panel() || self.summary != previous_summary || self.focus != previous_focus
     }
 
+    fn refresh_rows(&mut self) {
+        self.rows = self
+            .entries
+            .values()
+            .filter(|entry| match self.tab {
+                TaskTab::Subagents => entry.task.kind == BackgroundTaskKind::Agent,
+                _ => entry.task.background && entry.task.kind == BackgroundTaskKind::Terminal,
+            })
+            .map(|entry| entry.task.id.clone())
+            .collect();
+        self.rows.sort_by_key(|id| {
+            let task = &self.entries[id].task;
+            let waiting = self.attention.requests.iter().any(|request| {
+                request
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.agent_id == *id)
+            });
+            (
+                !waiting,
+                !task.status.is_active(),
+                std::cmp::Reverse(task.started_ms),
+                id.clone(),
+            )
+        });
+        self.clamp();
+    }
+
+    pub fn open_agents(&mut self) {
+        self.tab = TaskTab::Subagents;
+        self.open();
+    }
+
+    pub fn peers(&mut self, result: Result<serde_json::Value, String>) {
+        self.peers.update(result);
+    }
+
+    pub fn peer_key(&mut self, code: iocraft::KeyCode) -> bool {
+        use iocraft::KeyCode;
+        match code {
+            KeyCode::Char('r') => return true,
+            KeyCode::Esc if self.focus == TaskFocus::Detail => self.focus = TaskFocus::List,
+            KeyCode::Esc => self.close(),
+            KeyCode::Left | KeyCode::Right if self.focus == TaskFocus::List => {
+                self.switch_tab(code == KeyCode::Right);
+            }
+            KeyCode::Up | KeyCode::Down => self.peers.move_selection(code == KeyCode::Down),
+            KeyCode::Enter => self.focus = TaskFocus::Detail,
+            _ => {}
+        }
+        false
+    }
+
     fn refresh_summary(&mut self) {
-        let mut summary = TaskSummary::default();
-        for id in &self.rows {
-            let entry = &self.entries[id];
+        let mut summary = TaskSummary {
+            waiting: self.attention.requests.len(),
+            ..TaskSummary::default()
+        };
+        for entry in self.entries.values().filter(|entry| entry.task.background) {
             if entry.task.status.is_active() {
                 match entry.task.kind {
                     BackgroundTaskKind::Terminal => summary.terminals += 1,
@@ -379,6 +440,9 @@ impl TaskBrowser {
         }
         self.summary = summary;
         let mut parts = Vec::new();
+        if summary.waiting > 0 {
+            parts.push(format!("{} waiting on you", summary.waiting));
+        }
         if summary.terminals > 0 {
             parts.push(quantity(summary.terminals, "terminal"));
         }
@@ -396,6 +460,9 @@ impl TaskBrowser {
         }
         self.footer_summary = parts.join(" · ");
         let mut compact = Vec::new();
+        if summary.waiting > 0 {
+            compact.push(format!("{} waiting", summary.waiting));
+        }
         if summary.terminals > 0 {
             compact.push(format!("{}t", summary.terminals));
         }
@@ -499,6 +566,7 @@ impl TaskBrowser {
     }
     pub fn shows_running_detail(&self) -> bool {
         self.focus == TaskFocus::Detail
+            && matches!(self.tab, TaskTab::Background | TaskTab::Subagents)
             && self.selected.as_ref().is_some_and(|id| {
                 self.entries
                     .get(id)
@@ -526,11 +594,16 @@ impl TaskBrowser {
         self.refresh_summary();
     }
 
-    pub fn switch_tab(&mut self) {
-        self.tab = match self.tab {
-            TaskTab::Background => TaskTab::Scheduled,
-            TaskTab::Scheduled => TaskTab::Background,
-        };
+    pub fn switch_tab(&mut self, right: bool) {
+        const TABS: [TaskTab; 4] = [
+            TaskTab::Background,
+            TaskTab::Subagents,
+            TaskTab::Peers,
+            TaskTab::Scheduled,
+        ];
+        let index = TABS.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        self.tab = TABS[(index + if right { 1 } else { TABS.len() - 1 }) % TABS.len()];
+        self.refresh_rows();
         self.focus = TaskFocus::List;
         self.scheduled.confirm_delete = false;
         self.scheduled.notice = None;
@@ -564,7 +637,9 @@ impl TaskBrowser {
         match (self.focus, code) {
             (TaskFocus::Detail, KeyCode::Esc) => self.focus = TaskFocus::List,
             (TaskFocus::List, KeyCode::Esc) => self.close(),
-            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => self.switch_tab(),
+            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => {
+                self.switch_tab(code == KeyCode::Right);
+            }
             (TaskFocus::List, KeyCode::Up) => {
                 self.scheduled.selected = self.scheduled.selected.saturating_sub(1);
             }
@@ -608,7 +683,7 @@ impl TaskBrowser {
     fn scheduled_panel(&self, width: usize, max_rows: usize) -> String {
         let secondary = theme().fg_seq(TextRole::Secondary);
         let mut lines = vec![format!(
-            "{}Scheduled{RESET}{secondary} · {} · ← background tasks{RESET}",
+            "{}Scheduled{RESET}{secondary} · {} · ←/→ tabs{RESET}",
             theme().fg_seq(TextRole::Brand),
             quantity(self.scheduled.jobs.len(), "job"),
         )];
@@ -678,6 +753,19 @@ impl TaskBrowser {
 
     pub fn open(&mut self) {
         self.focus = TaskFocus::List;
+        if self.tab == TaskTab::Background
+            && !self
+                .entries
+                .values()
+                .any(|entry| entry.task.kind == BackgroundTaskKind::Terminal)
+            && self
+                .entries
+                .values()
+                .any(|entry| entry.task.kind == BackgroundTaskKind::Agent)
+        {
+            self.tab = TaskTab::Subagents;
+        }
+        self.refresh_rows();
         self.refresh_scheduled();
         self.clamp();
     }
@@ -760,9 +848,19 @@ impl TaskBrowser {
         if self.tab == TaskTab::Scheduled {
             return self.scheduled_panel(width, max_rows);
         }
+        if self.tab == TaskTab::Peers {
+            return self
+                .peers
+                .panel(width, max_rows, self.focus == TaskFocus::Detail);
+        }
         let mut lines = vec![format!(
-            "{}Background tasks{RESET}",
-            theme().fg_seq(TextRole::Brand)
+            "{}{label}{RESET}",
+            theme().fg_seq(TextRole::Brand),
+            label = if self.tab == TaskTab::Subagents {
+                "Subagents"
+            } else {
+                "Background tasks"
+            }
         )];
         if self.focus == TaskFocus::List {
             let _ = write!(
@@ -773,7 +871,14 @@ impl TaskBrowser {
             );
             let rows = max_rows.saturating_sub(2).clamp(1, 18);
             if self.rows.is_empty() {
-                lines.push("  No background tasks in this session".into());
+                lines.push(
+                    if self.tab == TaskTab::Subagents {
+                        "  No subagents in this session"
+                    } else {
+                        "  No background tasks in this session"
+                    }
+                    .into(),
+                );
             }
             let selected = self
                 .selected
@@ -795,16 +900,30 @@ impl TaskBrowser {
                     BackgroundTaskKind::Terminal => "terminal",
                     BackgroundTaskKind::Agent => "agent",
                 };
-                let status = format!(
-                    "{}{}{}",
-                    ansi_fg(status_color(task.status)),
-                    task.status.label(),
-                    RESET
-                );
+                let waiting = self.attention.requests.iter().find(|request| {
+                    request
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| agent.agent_id == task.id)
+                });
+                let status = if let Some(request) = waiting {
+                    format!(
+                        "{}{} · {}{RESET}",
+                        theme().fg_seq(TextRole::Warning),
+                        request_label(request),
+                        plain(&request.summary)
+                    )
+                } else {
+                    format!(
+                        "{}{}{RESET}",
+                        ansi_fg(status_color(task.status)),
+                        task.status.label()
+                    )
+                };
                 let title = fit(&plain(&task.title), width.saturating_sub(28));
                 lines.push(format!(
                     "{marker} {}{title}{RESET} · {kind} · {status}{}",
-                    theme().fg_seq(TextRole::Accent),
+                    ansi_fg(task_title_color(task)),
                     if !entry.read && !task.status.is_active() {
                         " · new"
                     } else {
@@ -813,7 +932,7 @@ impl TaskBrowser {
                 ));
             }
             lines.push(format!(
-                "{}↑/↓ select · Enter details · k stop · → scheduled · Esc back{RESET}",
+                "{}↑/↓ select · Enter details · k stop · ←/→ tabs · Esc back{RESET}",
                 theme().fg_seq(TextRole::Secondary)
             ));
         } else if let Some(entry) = self
@@ -821,13 +940,40 @@ impl TaskBrowser {
             .as_ref()
             .and_then(|id| self.entries.get_mut(id))
         {
-            lines.extend(entry.detail_panel(width, max_rows, &mut self.scroll));
+            for request in self.attention.requests.iter().filter(|request| {
+                request
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.agent_id == entry.task.id)
+            }) {
+                lines.push(format!(
+                    "{}{} · {}{RESET}",
+                    theme().fg_seq(TextRole::Warning),
+                    request_label(request),
+                    plain(&request.summary)
+                ));
+            }
+            lines.extend(entry.detail_panel(
+                width,
+                max_rows.saturating_sub(lines.len().saturating_sub(1)),
+                &mut self.scroll,
+            ));
         }
         lines
             .into_iter()
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+#[inline]
+fn request_label(request: &engine_events::AttentionRequest) -> &'static str {
+    use engine_events::{InputReason, RequestPhase};
+    match (request.phase, request.reason) {
+        (RequestPhase::Queued, InputReason::Permission) => "Approval queued",
+        (RequestPhase::Queued, InputReason::Question) => "Question queued",
+        (RequestPhase::Presented, _) => "Waiting on you",
     }
 }
 
@@ -848,7 +994,7 @@ impl Entry {
         let mut lines = vec![format!(
             "{}{kind}{RESET} · {}{}{RESET}",
             theme().fg_seq(TextRole::Brand),
-            theme().fg_seq(TextRole::Accent),
+            ansi_fg(task_title_color(task)),
             fit(&plain(&task.title), width.saturating_sub(kind.len() + 3)),
         )];
         let elapsed = task.elapsed_ms.saturating_add(if task.status.is_active() {
@@ -1165,6 +1311,14 @@ fn tokens(count: u64) -> String {
         format!("{}k", count / 1000)
     } else {
         count.to_string()
+    }
+}
+
+#[inline]
+fn task_title_color(task: &BackgroundTask) -> crossterm::style::Color {
+    match task.kind {
+        BackgroundTaskKind::Agent => theme().agent_color(&task.id),
+        BackgroundTaskKind::Terminal => theme().color(TextRole::Accent),
     }
 }
 

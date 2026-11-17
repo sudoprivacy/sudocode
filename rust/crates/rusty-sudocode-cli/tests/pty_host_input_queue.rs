@@ -26,10 +26,14 @@ impl Host {
     }
 
     fn with_permissions(env: &TestEnv, allow_tools: bool) -> Self {
+        Self::with_options(env, allow_tools, &[])
+    }
+
+    fn with_options(env: &TestEnv, allow_tools: bool, extra: &[(&str, &str)]) -> Self {
         let mut terminal = if allow_tools {
-            env.spawn(&["--dangerously-skip-permissions", "acp"])
+            env.spawn_with_env(&["--dangerously-skip-permissions", "acp"], extra)
         } else {
-            env.spawn(&["--permission-mode", "workspace-write", "acp"])
+            env.spawn_with_env(&["--permission-mode", "workspace-write", "acp"], extra)
         };
         terminal.resize(40, 4096).unwrap();
         terminal.set_default_timeout(common::LIVE_TURN_BUDGET);
@@ -42,6 +46,7 @@ impl Host {
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
         assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
+        assert_eq!(init["_meta"]["sudocode"]["attention"]["version"], 1);
         let created = host.request(
             "session/new",
             &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
@@ -99,6 +104,14 @@ impl Host {
         self.request(METHOD, &action)
     }
 
+    fn cancel(&mut self) {
+        let newline = if cfg!(windows) { "\r" } else { "\n" };
+        self.terminal.send(&format!(
+            "{}{newline}",
+            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}})
+        )).unwrap();
+    }
+
     fn incoming_request(&mut self, method: &str) -> Value {
         let message = self
             .terminal
@@ -130,6 +143,13 @@ impl Host {
 
     fn snapshot(&mut self) -> Value {
         self.input(json!({"action":"snapshot"}))["state"].clone()
+    }
+
+    fn attention(&mut self) -> Value {
+        self.request(
+            "_sudocode/session/attention",
+            &json!({"sessionId":self.session}),
+        )
     }
 
     fn runtime_status(&mut self) -> Value {
@@ -282,13 +302,7 @@ fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
         "HOST_AFTER_CANCEL: reply briefly; do not run any tools.",
         "queue",
     );
-    let newline = if cfg!(windows) { "\r" } else { "\n" };
-    host.terminal
-        .send(&format!(
-            "{}{newline}",
-            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":host.session}})
-        ))
-        .unwrap();
+    host.cancel();
     let paused = host.idle();
     assert_eq!(paused["paused"], true, "{paused}");
     assert_eq!(paused["pending"].as_array().unwrap().len(), 1);
@@ -387,6 +401,16 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
     host.submit("permission-input", &prompt, "steer");
     let request = host.incoming_request("session/request_permission");
     assert_eq!(request["params"]["sessionId"], host.session);
+    let attention = host.attention();
+    let requests = attention["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1, "{attention}");
+    assert_eq!(requests[0]["phase"], "presented");
+    assert_eq!(requests[0]["reason"], "permission");
+    assert_eq!(requests[0]["agent"], Value::Null);
+    assert!(requests[0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("HOST_PERMISSION_GRANTED"));
     assert_eq!(
         host.runtime_status()["foreground"],
         json!({"state":"awaiting_input","waiting_for":"permission"})
@@ -405,6 +429,9 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
         &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
     host.idle();
+    let cleared = host.attention();
+    assert_eq!(cleared["requests"], json!([]));
+    assert!(cleared["revision"].as_u64().unwrap() > attention["revision"].as_u64().unwrap());
     assert_eq!(
         fs::read_to_string(env.workspace_root().join("host-permission-proof.txt")).unwrap(),
         "HOST_PERMISSION_GRANTED"
@@ -956,4 +983,143 @@ fn local_directory_missing_live_routing_is_unknown_and_recovers() {
     assert_eq!(env.captured_message_count(), 0);
     first.close();
     observer.close();
+}
+
+#[test]
+fn attention_tracks_queued_questions_and_clears_cancelled_requests() {
+    let env = TestEnv::new_mock("attention-queued-questions");
+    let mut host = Host::new(&env);
+    let batch = json!([
+        {"id":"one","name":"AskUserQuestion","input":{"questions":[{"id":"q1","prompt":"FIRST_ATTENTION_REQUEST"}]}},
+        {"id":"two","name":"AskUserQuestion","input":{"questions":[{"id":"q2","prompt":"SECOND_ATTENTION_REQUEST"}]}}
+    ]);
+    host.submit(
+        "two-questions",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    let first = host.incoming_request("_scode/ask_user_question");
+    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+    let waiting = loop {
+        let state = host.attention();
+        if state["requests"].as_array().unwrap().len() == 2 {
+            break state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second request never queued: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    assert_eq!(waiting["requests"][0]["phase"], "presented");
+    assert_eq!(waiting["requests"][1]["phase"], "queued");
+    host.respond(&first, &json!({"answers":[{"id":"q1","value":"continue"}]}));
+    let _second = host.incoming_request("_scode/ask_user_question");
+    let next = host.attention();
+    assert_eq!(next["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(next["requests"][0]["id"], waiting["requests"][1]["id"]);
+    assert_eq!(next["requests"][0]["phase"], "presented");
+    host.cancel();
+    host.idle();
+    assert_eq!(host.attention()["requests"], json!([]));
+    host.close();
+}
+
+#[test]
+fn attention_background_child_can_request_approval_after_parent_turn_finishes() {
+    assert_background_child_approval(false, false);
+}
+
+#[test]
+fn attention_automatically_backgrounded_child_retains_approval_owner() {
+    assert_background_child_approval(true, false);
+}
+
+#[test]
+fn attention_foreground_cancel_does_not_revoke_a_detached_childs_reply_route() {
+    assert_background_child_approval(false, true);
+}
+
+fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
+    let env = TestEnv::new_mock("attention-background-child");
+    fs::write(
+        env.workspace_root()
+            .join(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH),
+        "CHILD_APPROVAL_CONTENT",
+    )
+    .unwrap();
+    let mut host = Host::with_options(&env, false, &[("SUDOCODE_AGENT_AUTO_BG_SECS", "1")]);
+    host.request(
+        "session/setPermissionMode",
+        &json!({"sessionId":host.session,"permissionMode":"prompt"}),
+    );
+    let mut batch = json!([{"id":"detached-child","name":"agent_spawn","input":{
+        "description":"child approval owner", "subagent_type":"general-purpose", "model":"inherit", "run_in_background":!automatic,
+        "prompt":"PARITY_SCENARIO:subagent_slow_child Read the notes"
+    }}]);
+    if cancel_parent {
+        batch
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"parent-hold","name":"Bash","input":{
+                "command":"echo ATTENTION_PARENT_HOLD"
+            }}));
+    }
+    host.submit(
+        "parent",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    let spawn = host.incoming_request("session/request_permission");
+    assert!(spawn["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains("run_in_background"));
+    host.respond(
+        &spawn,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+    );
+    if cancel_parent {
+        let pending_parent = host.incoming_request("session/request_permission");
+        assert!(pending_parent["params"]["toolCall"]["rawInput"]
+            .as_str()
+            .unwrap()
+            .contains("ATTENTION_PARENT_HOLD"));
+        host.cancel();
+    }
+    host.idle();
+    assert_eq!(
+        host.attention()["requests"],
+        json!([]),
+        "child request must happen after the parent ended"
+    );
+    let child = host.incoming_request("session/request_permission");
+    assert!(child["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH));
+    let state = host.attention();
+    assert_eq!(state["requests"].as_array().unwrap().len(), 1, "{state}");
+    assert_eq!(state["requests"][0]["agent"]["background"], true);
+    assert!(state["requests"][0]["agent"]["agent_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert_eq!(state["requests"][0]["phase"], "presented");
+    assert_eq!(host.runtime_status()["foreground"]["state"], "idle");
+    host.respond(
+        &child,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+    );
+    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+    loop {
+        if host.attention()["requests"] == json!([]) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "answered child request did not clear"
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    host.close();
 }

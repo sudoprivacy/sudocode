@@ -1238,3 +1238,45 @@ The task extension retains each migrated sub-agent source, frozen payload,
 publication ordinal, ACK and context. Protocol capability negotiation controls
 which completion payloads the controller can handle; the storage binding
 controls writer compatibility.
+
+### Outstanding request attention (v1)
+
+`initialize.result._meta.sudocode.attention.version = 1` advertises a read-only
+projection of the live engine's request table. Query
+`_sudocode/session/attention` with `{ "sessionId": "…" }`; updates arrive as
+`_sudocode/session/attention_update` with `{ "sessionId": "…", "update": state }`.
+Both return the same shape:
+
+```json
+{"revision": 3, "requests": [{"id": 7, "reason": "permission", "phase": "presented", "agent": null, "summary": "Bash · {\"command\":\"cargo check\"}"}]}
+```
+
+- IDs are unique within the live engine session, including cancelled turns.
+  Revisions advance only when the projection changes. Scope caches to the actual
+  connection/incarnation and session; discard them on disconnect or replacement.
+- `reason` is `permission` or `question`; `phase` is `queued` or `presented`.
+  Only one request can own the input surface. Queued requests remain visible but
+  cannot be answered ahead of the presented request.
+- `agent: null` identifies the current session. A child includes the runtime's
+  existing `SubagentIdentity` (including `agent_id`, `name`, and `background`).
+  This is runtime provenance, not an identity parsed from message text.
+- Full details and answers use the existing permission/question RPCs.
+  Permission `toolCall._meta.sudocode.attention.requestId` and question
+  `requestId` correlate those RPCs with this list. Reading the list grants no
+  authority to approve, answer, or cancel a peer.
+- Answer, request cancellation, dropped request futures and session close remove
+  the entry. Parent-turn completion or foreground cancellation retains requests
+  owned by still-running detached children, including automatic background
+  handoff; an idle parent can still present and answer them. Foreground execution
+  and attention are separate facts: an idle parent with a waiting child is not a
+  running model.
+- Older agents or unavailable connections have unknown attention, not an empty
+  request list. No output-timing or spinner heuristic substitutes for this data.
+
+The direct A2A capability additionally advertises `directA2a.delivery = 1`.
+`_sudocode/a2a/send` accepts optional `delivery: "steer" | "queue"`, matching the
+model's `send` tool. Omission preserves the existing default. Neither option
+cancels the recipient's turn or overrides its judgement about the message.
+Eligible idle inputs already wake the engine; there is no `wake_if_idle` option.
+Explicit human pause fences still apply. SDK callers specifying delivery must
+negotiate this capability rather than silently dropping their chosen intent.

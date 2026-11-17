@@ -34,6 +34,7 @@
 // field of an `EngineEvent` / `EngineCommand` without ever naming `runtime`
 // (or the lower `api`) directly. These are plain data — no behaviour crosses
 // the seam.
+pub use runtime::attention::{AttentionRequest, AttentionState, RequestPhase};
 pub use runtime::background_tasks::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
@@ -103,7 +104,7 @@ pub enum BackgroundTaskAction {
 ///
 /// The engine allocates ids; renderers echo them verbatim. Ids are unique
 /// within a single engine session, including across cancelled turns.
-pub type RequestId = u64;
+pub use runtime::attention::RequestId;
 
 pub use runtime::subagent_completion::{ContextRef, TaskCompletion};
 
@@ -271,6 +272,10 @@ pub enum EngineEvent {
         id: RequestId,
     },
     InputState(InputState),
+    /// One request-derived projection for every frontend; no transcript parsing.
+    Attention(std::sync::Arc<AttentionState>),
+    /// On-demand directory result. This is a snapshot, not a liveness lease.
+    AgentDirectory(Result<serde_json::Value, String>),
     /// Persisted into this turn, rather than merely accepted by its input channel.
     InputCommitted(InputView),
     /// Not consumed: return ownership to the submitting surface.
@@ -433,6 +438,8 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Refresh navigation without running a model or blocking cancellation.
+    RefreshAgents,
     /// Answer the matching host-context request. Failure forbids a stale turn.
     HostContextAnswer {
         id: RequestId,
@@ -441,6 +448,10 @@ pub enum EngineCommand {
     /// Read current runtime metadata without starting or interrupting a turn.
     /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
     RuntimeStatus {
+        request_id: u64,
+    },
+    /// Read the same outstanding-request projection emitted by `Attention`.
+    Attention {
         request_id: u64,
     },
     Input {

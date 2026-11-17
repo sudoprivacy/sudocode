@@ -1941,6 +1941,9 @@ fn execute_tool_with_enforcer(
             input,
             fs.as_ref(),
             ctx.and_then(|ctx| ctx.runtime_observation.as_deref()),
+            ctx.and_then(|ctx| ctx.permission_sink.as_ref())
+                .map(runtime::PermissionPromptSink::attention)
+                .as_deref(),
         ),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
@@ -2296,11 +2299,23 @@ fn run_agent_list(
     input: &Value,
     fs: &dyn FsBackend,
     host: Option<&dyn runtime::runtime_status::RuntimeObservationHost>,
+    attention: Option<&runtime::attention::AttentionState>,
 ) -> Result<String, String> {
     let active_only = input
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    collect_agent_directory(active_only, fs, host, attention).and_then(to_pretty_json)
+}
+
+/// Read-only directory shared by the model tool and engine navigation.
+/// The caller supplies the same filesystem and mailbox scope as tool dispatch.
+pub fn collect_agent_directory(
+    active_only: bool,
+    fs: &dyn FsBackend,
+    host: Option<&dyn runtime::runtime_status::RuntimeObservationHost>,
+    attention: Option<&runtime::attention::AttentionState>,
+) -> Result<Value, String> {
     // Apply active_only after observation enrichment: a mailbox identity alone
     // is unknown, while a fresh idle instance is still online.
     let mut agents = collect_agent_list(false, fs)?;
@@ -2372,10 +2387,11 @@ fn run_agent_list(
                     }))
             })
     });
-    to_pretty_json(json!({
+    Ok(json!({
         "agents": agents,
         "count": agents.len(),
         "runtime_discovery": discovery,
+        "attention": attention.map(|state| json!({"scope":"current_session", "state":state})),
     }))
 }
 
@@ -4339,6 +4355,20 @@ struct AgentOutput {
     notified: Option<bool>,
 }
 
+impl AgentOutput {
+    fn identity(&self, background: bool) -> SubagentIdentity {
+        SubagentIdentity {
+            agent_id: self.agent_id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            subagent_type: self.subagent_type.clone(),
+            model: self.model.clone(),
+            color: self.color.clone(),
+            background,
+        }
+    }
+}
+
 /// Telemetry captured from a sub-agent's completed run and folded
 /// into the manifest before terminal-state persistence. Mirrors the
 /// `<usage>` sub-tags the coordinator prompt teaches the model.
@@ -4411,6 +4441,16 @@ struct AgentJob {
     permission_sink: Option<runtime::PermissionPromptSink>,
 }
 
+impl AgentJob {
+    fn register_started(&self) -> Result<(), String> {
+        if let Some(link) = &self.subagent {
+            link.register_completion(&self.manifest)?;
+            link.emit_started(&self.manifest, self.abort_signal.clone());
+        }
+        Ok(())
+    }
+}
+
 /// A spawned agent's connection to the renderer's sub-agent sink.
 #[derive(Debug, Clone)]
 struct SubagentLink {
@@ -4447,15 +4487,7 @@ impl SubagentLink {
                 ctx.assistant_message_id().map(str::to_owned),
             )),
             spawner,
-            identity: SubagentIdentity {
-                agent_id: manifest.agent_id.clone(),
-                name: manifest.name.clone(),
-                description: manifest.description.clone(),
-                subagent_type: manifest.subagent_type.clone(),
-                model: manifest.model.clone(),
-                color: manifest.color.clone(),
-                background,
-            },
+            identity: manifest.identity(background),
         })
     }
 
@@ -5606,12 +5638,11 @@ fn prepare_agent_job(
         workspace: WorkspaceRootHandoff::capture(),
         subagent,
         permission_mode,
-        permission_sink: ctx.and_then(|ctx| ctx.permission_sink.clone()),
+        permission_sink: ctx
+            .and_then(|ctx| ctx.permission_sink.as_ref())
+            .map(|sink| sink.for_agent(manifest.identity(background))),
     };
-    if let Some(link) = &job.subagent {
-        link.register_completion(&manifest)?;
-        link.emit_started(&manifest, job.abort_signal.clone());
-    }
+    job.register_started()?;
     Ok(PreparedAgent { manifest, job })
 }
 
@@ -5736,6 +5767,7 @@ where
     let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, fs)?;
     let subagent = job.subagent.clone();
     let registration = register_agent_job(&job)?;
+    let permission_owner = job.permission_sink.clone();
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
         let abort_signal = job.abort_signal.clone();
@@ -5775,6 +5807,9 @@ where
     match global_agent_registry().await_agent(&agent_id, threshold) {
         Ok(final_manifest) => Ok(final_manifest),
         Err(e) if e.contains("timed out") => {
+            if let Some(owner) = &permission_owner {
+                owner.detach();
+            }
             if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
                 tasks.update(&manifest.agent_id, |task| task.background = true);
             }

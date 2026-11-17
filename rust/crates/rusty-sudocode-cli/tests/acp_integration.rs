@@ -8892,7 +8892,7 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         .await;
     assert_eq!(
         init["result"]["_meta"]["sudocode"]["directA2a"],
-        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1 }),
+        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1, "delivery": 1 }),
         "initialize advertises the direct A2A requests and their typed outcomes: {init}"
     );
     assert_eq!(

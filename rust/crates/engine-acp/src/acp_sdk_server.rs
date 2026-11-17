@@ -318,6 +318,8 @@ struct DirectSendRequest {
     to: String,
     message: String,
     summary: String,
+    #[serde(default)]
+    delivery: Option<engine_core::engine_events::InputDelivery>,
     /// ACP lets any request carry `_meta`; it is accepted and ignored.
     #[serde(rename = "_meta", default)]
     _meta: Option<serde::de::IgnoredAny>,
@@ -1690,11 +1692,12 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("attention".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
         json!({
-            "version": 1, "errorOutcomes": 1, "hostAudit": 1,
+            "version": 1, "errorOutcomes": 1, "hostAudit": 1, "delivery": 1,
         }),
     );
     // `session/new` accepts `_meta.sudocode.forkFrom` (see
@@ -2798,6 +2801,7 @@ struct AcpQuestionFieldPayload {
 #[serde(rename_all = "camelCase")]
 struct AcpAskUserQuestionRequestPayload {
     session_id: String,
+    request_id: engine_core::RequestId,
     tool_call_id: String,
     title: Option<String>,
     description: Option<String>,
@@ -2827,11 +2831,11 @@ pub(crate) fn answer_question(
     id: engine_core::RequestId,
     question_req: &runtime::QuestionPromptRequest,
     driver: &Arc<crate::session_driver::SessionDriver>,
-    abort: HookAbortSignal,
     cx_reply: ConnectionTo<Client>,
 ) -> futures::future::BoxFuture<'static, ()> {
     let payload = AcpAskUserQuestionRequestPayload {
         session_id: session_id.to_owned(),
+        request_id: id,
         tool_call_id: format!("ask-{}", uuid_v4()),
         title: question_req.title.clone(),
         description: question_req
@@ -2869,31 +2873,28 @@ pub(crate) fn answer_question(
     async move {
         let outcome = match serde_json::value::to_raw_value(&payload) {
             Ok(raw) => {
-                let answer = tokio::select! {
-                    biased;
-                    () = abort.cancelled() => None,
-                    answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
-                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
-                    )).block_task() => Some(answer),
-                };
+                let answer = cx_reply
+                    .send_request(ClientRequest::ExtMethodRequest(ExtRequest::new(
+                        ACP_ASK_USER_QUESTION_METHOD,
+                        StdArc::from(raw),
+                    )))
+                    .block_task()
+                    .await;
                 match answer {
-                    None => Err("turn cancelled".into()),
-                    Some(Ok(resp)) => {
-                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
-                            .map_err(|error| format!("deserialize: {error}"))
-                            .map(|payload| {
-                                payload
-                                    .answers
-                                    .into_iter()
-                                    .map(|answer| QuestionPromptAnswer {
-                                        id: answer.id,
-                                        value: answer.value,
-                                        label: answer.label,
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                    }
-                    Some(Err(error)) => Err(error.to_string()),
+                    Ok(resp) => serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                        .map_err(|error| format!("deserialize: {error}"))
+                        .map(|payload| {
+                            payload
+                                .answers
+                                .into_iter()
+                                .map(|answer| QuestionPromptAnswer {
+                                    id: answer.id,
+                                    value: answer.value,
+                                    label: answer.label,
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    Err(error) => Err(error.to_string()),
                 }
             }
             Err(error) => Err(error.to_string()),
@@ -2911,19 +2912,18 @@ pub(crate) fn answer_permission(
     id: engine_core::RequestId,
     request: &PermissionRequest,
     driver: &Arc<crate::session_driver::SessionDriver>,
-    abort: HookAbortSignal,
     cx: ConnectionTo<Client>,
 ) -> futures::future::BoxFuture<'static, ()> {
-    let request = build_acp_permission_request(session_id.to_string(), request);
+    let mut request = build_acp_permission_request(session_id.to_string(), request);
+    request.tool_call.meta = Some(Map::from_iter([(
+        "sudocode".into(),
+        json!({"attention":{"requestId":id}}),
+    )]));
     let driver = Arc::clone(driver);
     async move {
-        let answer = tokio::select! {
-            biased;
-            () = abort.cancelled() => None,
-            answer = cx.send_request(request).block_task() => Some(answer),
-        };
+        let answer = cx.send_request(request).block_task().await;
         let decision = match answer {
-            Some(Ok(response)) => map_permission_response(response),
+            Ok(response) => map_permission_response(response),
             _ => PermissionPromptDecision::Deny {
                 reason: "ACP permission request cancelled or failed".into(),
             },
@@ -2936,9 +2936,10 @@ pub(crate) fn answer_permission(
 /// The session, tool and tool input a direct A2A request asks for.
 /// Observe one engine through its command lane without acquiring a turn
 /// listener or the session lock, including while input or tools are pending.
-async fn read_runtime_status(
+async fn read_session_observation(
     registry: Arc<SessionRegistry>,
     params: serde_json::Value,
+    command: fn(u64) -> engine_core::EngineCommand,
 ) -> Result<serde_json::Value, Error> {
     let request: RuntimeStatusRequest = serde_json::from_value(params)
         .map_err(|error| Error::invalid_params().data(error.to_string()))?;
@@ -2946,7 +2947,7 @@ async fn read_runtime_status(
         .driver(&request.session_id)
         .ok_or_else(|| Error::invalid_params().data("Unknown session"))?;
     driver
-        .runtime_status()
+        .observation(command)
         .await
         .map_err(|error| Error::internal_error().data(error))
 }
@@ -2958,11 +2959,14 @@ fn direct_a2a_call(
     let invalid = |error: serde_json::Error| DirectToolError::Refused(error.to_string());
     if method == DIRECT_SEND_METHOD {
         let request: DirectSendRequest = serde_json::from_value(params).map_err(invalid)?;
-        let input = json!({
+        let mut input = json!({
             "to": request.to,
             "message": request.message,
             "summary": request.summary,
         });
+        if let Some(delivery) = request.delivery {
+            input["delivery"] = json!(delivery);
+        }
         Ok((request.session_id, "send", input))
     } else {
         let request: DirectAgentListRequest = serde_json::from_value(params).map_err(invalid)?;
@@ -4190,13 +4194,24 @@ pub(crate) async fn run_acp_on_transport(
                 let cron_watching = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
                     Dispatch::Request(message, responder)
-                        if message.method() == RUNTIME_STATUS_METHOD =>
+                        if matches!(
+                            message.method(),
+                            RUNTIME_STATUS_METHOD | crate::attention_control::METHOD
+                        ) =>
                     {
                         let registry = Arc::clone(&registry);
-                        let (_, params) = message.into_parts();
+                        let (method, params) = message.into_parts();
+                        let command: fn(u64) -> engine_core::EngineCommand = if method
+                            == crate::attention_control::METHOD
+                        {
+                            |request_id| engine_core::EngineCommand::Attention { request_id }
+                        } else {
+                            |request_id| engine_core::EngineCommand::RuntimeStatus { request_id }
+                        };
                         cx.spawn(async move {
-                            responder
-                                .respond_with_result(read_runtime_status(registry, params).await)?;
+                            responder.respond_with_result(
+                                read_session_observation(registry, params, command).await,
+                            )?;
                             Ok(())
                         })?;
                         Ok(Handled::Yes)

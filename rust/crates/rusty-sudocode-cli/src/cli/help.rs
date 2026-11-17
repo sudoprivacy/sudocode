@@ -20,6 +20,7 @@ pub(crate) fn render_repl_help() -> String {
         "  ! <command>          Run a shell command; output is shown and added to context"
             .to_string(),
         "  Up/Down              Navigate prompt history".to_string(),
+        "  Left (empty input)   Browse subagents and peers; Left/Right switches tabs".to_string(),
         "  Enter / Tab          Steer current work / queue next turn; Tab completes /commands"
             .to_string(),
         "  Ctrl-C twice         Exit (second press within 800 ms)".to_string(),

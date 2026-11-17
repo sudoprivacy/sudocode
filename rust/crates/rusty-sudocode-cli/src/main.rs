@@ -5015,6 +5015,10 @@ impl LiveCli {
 
         let mut outcome = TurnOutcome::default();
         let mut prompt_replies = Vec::new();
+        let shown = match request {
+            TurnRequest::Prompt { shown, .. } => *shown,
+            TurnRequest::Compact => &[],
+        };
         while let Ok(ev) = self.engine_handle.events.recv() {
             // Collect the JSON-output data from the event stream (the old paths
             // read it off the finished turn; TurnComplete drops the message

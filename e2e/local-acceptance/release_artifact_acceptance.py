@@ -136,7 +136,8 @@ fn main() {
     wrong_base = code.replace("reference + ':' + relative", "'HEAD:' + relative")
     assert wrong_base != code
     case, result = invoke("candidate-source-mutant", wrong_base)
-    assert result.returncode == 97 and (case / "candidate-marker").is_file()
+    assert result.returncode != 0 and (case / "candidate-marker").is_file()
+    assert b"returned non-zero exit status 97" in result.stderr
     cleanup = "token = os.environ.pop('GH_TOKEN')\nfor key in list(os.environ):\n    if key.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'}:\n        del os.environ[key]"
     assert code.count(cleanup) == 1
     leaky = code.replace(cleanup, "token = os.environ['GH_TOKEN']\nfor key in list(os.environ):\n    if key.upper() == 'GITHUB_TOKEN':\n        del os.environ[key]")

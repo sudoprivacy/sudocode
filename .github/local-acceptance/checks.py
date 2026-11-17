@@ -1154,7 +1154,7 @@ def native_guard_files():
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
-        "e2e/local-acceptance/release_artifact_acceptance.py": "f06b6ee253312d5ef5d3126b185f51960ddd5100ca21b9c7bd757b833cb297aa",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
         ".github/scripts/ci_input_scope.py": "51c72a0115e1802fbe2c18259424986438ec0580f52007245ab6dd73a98d57f2",
         ".github/workflows/rust-ci.yml": "814e0a94e4338f950f79d1c3624e69be0af2e230519f1e9d1a1ed5b6cd3b4816",

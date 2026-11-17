@@ -7,7 +7,7 @@ use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nexus_vfs_client::NexusVfsClient;
 use serde::{Deserialize, Serialize};
@@ -306,8 +306,12 @@ pub enum AgentEnrollment {
 const MINT_TIMEOUT: Duration = Duration::from_secs(45);
 /// Bounds asking the Node which credentials it recorded.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bounds waiting for another session's issuance on the same Box.
-const ENROLLMENT_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bounds waiting for another session's issuance on the same Box: its whole
+/// worst case, a leftover marker's wait, two listings and one issuance.
+const ENROLLMENT_LOCK_TIMEOUT: Duration =
+    Duration::from_secs(MINT_TIMEOUT.as_secs() * 2 + LIST_TIMEOUT.as_secs() * 2 + 30);
+/// A certificate may predate the issuance that wrote it by this much clock skew.
+const ISSUANCE_SKEW: Duration = Duration::from_secs(600);
 
 /// Issue `agent`'s credential through this OS user's registered local Box.
 ///
@@ -315,12 +319,14 @@ const ENROLLMENT_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// issue; anything else is an error naming the owner to ask instead. Nothing is
 /// issued for a name that already has a bundle, and the Node refuses a name
 /// already claimed elsewhere in its cluster, so this never takes over an Agent.
-/// An issuance that cannot be confirmed is moved out of the credential
-/// directory, so it never becomes the session's identity.
+/// An issuance that does not confirm itself is kept only when the Node lists
+/// the Agent and the bundle is this Box's own credential for it, issued during
+/// that issuance; anything else is moved out of the credential directory, so
+/// it never becomes the session's identity.
 ///
 /// # Errors
 /// No registered or matching local Box, a Box that is not running, an invalid
-/// name, a Node refusal, or an issuance without the Node's online receipt.
+/// name, a Node refusal, or an issuance that could not be confirmed.
 pub fn enroll_local_agent(
     agent: &str,
     endpoint: &str,
@@ -466,29 +472,36 @@ fn settle_interrupted(
     // that child the issuance's own bound to finish first. Then the Node's
     // record decides: keep a whole bundle it recorded, set aside one it
     // never did and issue again.
-    let age = fs::metadata(marker)
+    let written = fs::metadata(marker)
         .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|written| written.elapsed().ok())
-        .unwrap_or(timeout);
+        .unwrap_or_else(|_| SystemTime::now());
+    let age = written.elapsed().unwrap_or_default();
     if let Some(rest) = timeout.checked_sub(age) {
         std::thread::sleep(rest);
     }
     if bundle.exists() {
         match recorded(profile, agent) {
-            Ok(true) if usable_bundle(bundle, agent) => {
+            Ok(true) if issued_here(profile, bundle, agent, written) => {
                 clear_marker(marker).map_err(|error| {
                     blocked(marker, "the node had recorded the earlier join", &error)
                 })?;
                 return Ok(Some(AgentEnrollment::Joined));
             }
-            Ok(_) => {
+            Ok(true) => {
+                let moved = quarantine(
+                    profile,
+                    bundle,
+                    &format!("an earlier join for '{agent}' did not finish"),
+                );
+                return Err(held_name(profile, agent, &moved.to_string()));
+            }
+            Ok(false) => {
                 let error = quarantine(
                     profile,
                     bundle,
                     &format!(
-                        "an earlier join for '{agent}' did not finish, and the node holds no \
-                         usable record of what it wrote"
+                        "an earlier join for '{agent}' did not finish, and the node never \
+                         recorded it"
                     ),
                 );
                 if bundle.exists() {
@@ -552,31 +565,30 @@ fn issue(
     bundle: &Path,
     timeout: Duration,
 ) -> Result<AgentEnrollment> {
+    let started = SystemTime::now();
     let output = match run_bounded(profile.mint_agent_command(agent), timeout) {
         Ok(output) => output,
-        Err(error) => return settle(profile, agent, bundle, &error.to_string()),
+        Err(error) => return settle(profile, agent, bundle, &error.to_string(), started),
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        return Err(quarantine(
+        let refused = quarantine(
             profile,
             bundle,
             &format!(
-                "the node refused to issue '{agent}': {}. If the node already holds this name \
-                 for this workspace, its owner can issue it again with `auth mint --subject-type \
-                 agent --subject-id={agent} --allow-existing`; otherwise ask for a different \
-                 name and set it as `agentName`",
+                "the node refused to issue '{agent}': {}",
                 last_lines(&stderr)
             ),
-        ));
+        );
+        return Err(held_name(profile, agent, &refused.to_string()));
     }
     if !online_receipt(&stderr, agent, profile.local_endpoint) {
-        return settle(
-            profile,
-            agent,
-            bundle,
-            &format!("the node returned no online receipt for '{agent}'"),
-        );
+        let cause = format!("the node returned no online receipt for '{agent}'");
+        // An explicit offline signature never joins the running Box.
+        if stderr.to_ascii_lowercase().contains("offline") {
+            return Err(quarantine(profile, bundle, &cause));
+        }
+        return settle(profile, agent, bundle, &cause, started);
     }
     if !manifest_names(bundle, agent) {
         return Err(quarantine(
@@ -607,11 +619,116 @@ fn online_receipt(stderr: &str, agent: &str, endpoint: SocketAddr) -> bool {
 /// An issuance that did not confirm itself (it timed out, or its receipt was
 /// unfamiliar) still joined if the Node recorded this Agent and the bundle is
 /// whole; anything else is set aside.
-fn settle(profile: &LocalBox, agent: &str, bundle: &Path, cause: &str) -> Result<AgentEnrollment> {
-    if usable_bundle(bundle, agent) && matches!(recorded(profile, agent), Ok(true)) {
-        return Ok(AgentEnrollment::Joined);
+fn settle(
+    profile: &LocalBox,
+    agent: &str,
+    bundle: &Path,
+    cause: &str,
+    since: SystemTime,
+) -> Result<AgentEnrollment> {
+    if !bundle.exists() {
+        return Err(cause.into());
     }
-    Err(quarantine(profile, bundle, cause))
+    match recorded(profile, agent) {
+        Ok(true) if issued_here(profile, bundle, agent, since) => Ok(AgentEnrollment::Joined),
+        Ok(true) => Err(held_name(
+            profile,
+            agent,
+            &quarantine(profile, bundle, cause).to_string(),
+        )),
+        Ok(false) => Err(quarantine(profile, bundle, cause)),
+        // Neither kept nor set aside: the marker blocks it until a join can ask.
+        Err(error) => Err(format!(
+            "{cause}; what it wrote stays unused until the node can be asked about it: {error}"
+        )
+        .into()),
+    }
+}
+
+/// The node holds `agent` but this machine has no credential it can use: only
+/// the node owner can issue the name again.
+fn held_name(
+    profile: &LocalBox,
+    agent: &str,
+    cause: &str,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    format!(
+        "{cause}. If the node already holds '{agent}' for this workspace, its owner can issue it \
+         again with {}; otherwise ask the owner for a different name and set it as `agentName`",
+        owner_command(
+            profile,
+            &format!("auth mint --subject-type agent \"--subject-id={agent}\" --allow-existing")
+        )
+    )
+    .into()
+}
+
+/// `tail` as a command for the Box's own Node, quoted where a path needs it.
+fn owner_command(profile: &LocalBox, tail: &str) -> String {
+    let shown = |path: &Path| {
+        let path = path.display().to_string();
+        if path.contains(char::is_whitespace) {
+            format!("\"{path}\"")
+        } else {
+            path
+        }
+    };
+    format!(
+        "`{} --data-dir {} --identity-dir {} --bind-addr {} {tail}`",
+        shown(&profile.binary),
+        shown(&profile.data_dir),
+        shown(&profile.identity_dir),
+        profile.local_endpoint
+    )
+}
+
+/// Whether `bundle` is this Box's own credential for `agent`, issued no earlier
+/// than `since`: the Box's CA, a certificate for `nexus://agent/<agent>` and a
+/// private key. The Node's listing alone proves only that it holds the name.
+fn issued_here(profile: &LocalBox, bundle: &Path, agent: &str, since: SystemTime) -> bool {
+    let Some(manifest) = fs::read(bundle.join("credential.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|manifest| manifest["agent"] == agent)
+    else {
+        return false;
+    };
+    let file = |field: &str| manifest[field].as_str().map(|name| bundle.join(name));
+    let (Some(ca), Some(cert), Some(key)) = (file("ca"), file("cert"), file("key")) else {
+        return false;
+    };
+    let own_ca = digest(&ca).is_ok_and(|ca| ca == profile.ca_sha256);
+    // A whole PEM private-key block; a truncated or empty file is not one.
+    let key = fs::read(&key).is_ok_and(|key| {
+        x509_parser::pem::parse_x509_pem(&key)
+            .is_ok_and(|(_, pem)| pem.label.ends_with("PRIVATE KEY") && !pem.contents.is_empty())
+    });
+    let Ok(cert) = fs::read(&cert) else {
+        return false;
+    };
+    let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(&cert) else {
+        return false;
+    };
+    let Ok(cert) = pem.parse_x509() else {
+        return false;
+    };
+    let names_agent = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .is_some_and(|names| {
+            names.value.general_names.iter().any(|name| {
+                matches!(name, x509_parser::extensions::GeneralName::URI(uri)
+                if *uri == format!("nexus://agent/{agent}"))
+            })
+        });
+    let earliest = since
+        .checked_sub(ISSUANCE_SKEW)
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let recent = u64::try_from(cert.validity().not_before.timestamp())
+        .is_ok_and(|issued| issued >= earliest);
+    own_ca && key && names_agent && recent
 }
 
 /// Whether the running Node lists `agent:<agent>` among its credentials.
@@ -625,28 +742,13 @@ fn recorded(profile: &LocalBox, agent: &str) -> Result<bool> {
         )
         .into());
     }
-    // `agent:<name>  agent:<name>  admin=…`: columns are two spaces apart, and
-    // a name may itself contain a space.
-    let subject = format!("agent:{agent}  ");
+    // `agent:<name>  agent:<name>  admin=…`: columns are two spaces apart and a
+    // name may itself contain spaces, so match both name columns.
+    let subject = format!("agent:{agent}  agent:{agent}  ");
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .chain(stderr.lines())
         .any(|line| line.starts_with(&subject)))
-}
-
-/// A manifest naming `agent` and every file it refers to.
-fn usable_bundle(bundle: &Path, agent: &str) -> bool {
-    fs::read(bundle.join("credential.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|manifest| {
-            manifest["agent"] == agent
-                && ["ca", "cert", "key"].iter().all(|field| {
-                    manifest[*field]
-                        .as_str()
-                        .is_some_and(|file| bundle.join(file).is_file())
-                })
-        })
 }
 
 fn manifest_names(bundle: &Path, agent: &str) -> bool {
@@ -667,34 +769,18 @@ fn quarantine(
     if !bundle.exists() {
         return cause.to_string().into();
     }
-    let stamp = std::time::SystemTime::now()
+    let stamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
+        .map_or(0, |elapsed| elapsed.as_nanos());
     let name = bundle
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let held = bundle.with_file_name(format!(".unconfirmed-{name}-{stamp}"));
-    let shown = |path: &Path| {
-        let path = path.display().to_string();
-        if path.contains(char::is_whitespace) {
-            format!("\"{path}\"")
-        } else {
-            path
-        }
-    };
-    let check = format!(
-        "{} --data-dir {} --identity-dir {} --bind-addr {} auth list",
-        shown(&profile.binary),
-        shown(&profile.data_dir),
-        shown(&profile.identity_dir),
-        profile.local_endpoint
-    );
+    let check = owner_command(profile, "auth list");
     match fs::rename(bundle, &held) {
         Ok(()) => format!(
-            "{cause}. What it wrote was moved to {} and is not used; the next session \
-             issues again. If the Node lists agent:{name} anyway ({check}), it refuses \
-             that, and the node owner issues it again with `auth mint --subject-type agent \
-             --subject-id={name} --allow-existing`",
+            "{cause}. What it wrote was moved to {} and is not used; {check} shows whether \
+             the node holds agent:{name}",
             held.display()
         )
         .into(),
@@ -778,15 +864,18 @@ rem cmd may split "--subject-id=NAME" at "=" when it is not quoted.
 set "NAME=%~2"
 if "%NAME%"=="" for /f "tokens=2 delims==" %%a in ("%~1") do set "NAME=%%a"
 if "%MODE%"=="slow" ping -n 3 127.0.0.1 >nul
-if "%MODE%"=="refuse" (
-  echo error: agent:%NAME% is already registered 1>&2
-  exit /b 1
-)
+if "%MODE%"=="refuse" goto refuse
+rem Like the Node: a name it already holds is refused, and nothing is written.
+if exist "%HERE%recorded.txt" findstr /b /l /c:"agent:%NAME%  agent:%NAME%  " "%HERE%recorded.txt" >nul && goto refuse
 set "OWNER=%NAME%"
 if "%MODE%"=="wrong" set "OWNER=someone-else"
 mkdir "%DATA%\agents\%NAME%"
 >"%DATA%\agents\%NAME%\credential.json" echo {"agent":"%OWNER%","ca":"ca.pem","cert":"agent.pem","key":"agent-key.pem"}
-for %%f in (ca.pem agent.pem agent-key.pem) do >"%DATA%\agents\%NAME%\%%f" echo pem
+if exist "%HERE%issue\%NAME%\agent.pem" (
+  for %%f in (ca.pem agent.pem agent-key.pem) do copy /y "%HERE%issue\%NAME%\%%f" "%DATA%\agents\%NAME%\%%f" >nul
+) else (
+  for %%f in (ca.pem agent.pem agent-key.pem) do >"%DATA%\agents\%NAME%\%%f" echo pem
+)
 if "%MODE%"=="fallback" (
   echo warning: no answer via https://%BIND% 1>&2
   echo minted agent cert subject=agent:%NAME% -^> offline 1>&2
@@ -797,10 +886,19 @@ if "%MODE%"=="noreceipt" (
   exit /b 0
 )
 >>"%HERE%recorded.txt" echo agent:%NAME%  agent:%NAME%  admin=false
+if "%MODE%"=="unfamiliar" goto unfamiliar
+if "%MODE%"=="unfamiliar-nolist" goto unfamiliar
 echo minted agent cert subject=agent:%NAME% via https://%BIND% -^> written 1>&2
 exit /b 0
+:unfamiliar
+echo issued agent:%NAME% at https://%BIND% 1>&2
+exit /b 0
+:refuse
+echo error: agent:%NAME% is already registered 1>&2
+exit /b 1
 :list
 if "%MODE%"=="nolist" exit /b 1
+if "%MODE%"=="unfamiliar-nolist" exit /b 1
 if exist "%HERE%recorded.txt" type "%HERE%recorded.txt"
 exit /b 0
 "#,
@@ -815,16 +913,27 @@ echo "$*" >> "$here/calls.txt"
 env | grep '^NEXUS_' > "$here/env.txt"
 data=$2; bind=$6; name=${11#--subject-id=}
 mode=$(cat "$here/mode.txt")
-if [ "$8" = list ]; then [ "$mode" = nolist ] && exit 1; cat "$here/recorded.txt" 2>/dev/null; exit 0; fi
+if [ "$8" = list ]; then
+  case "$mode" in nolist|unfamiliar-nolist) exit 1;; esac
+  cat "$here/recorded.txt" 2>/dev/null; exit 0
+fi
 [ "$mode" = slow ] && sleep 2
-if [ "$mode" = refuse ]; then echo "error: agent:$name is already registered" >&2; exit 1; fi
+refuse() { echo "error: agent:$name is already registered" >&2; exit 1; }
+[ "$mode" = refuse ] && refuse
+# Like the Node: a name it already holds is refused, and nothing is written.
+grep -qF "agent:$name  agent:$name  " "$here/recorded.txt" 2>/dev/null && refuse
 owner=$name; [ "$mode" = wrong ] && owner=someone-else
 mkdir -p "$data/agents/$name"
 printf '{"agent":"%s","ca":"ca.pem","cert":"agent.pem","key":"agent-key.pem"}\n' "$owner" > "$data/agents/$name/credential.json"
-for file in ca.pem agent.pem agent-key.pem; do echo pem > "$data/agents/$name/$file"; done
+if [ -f "$here/issue/$name/agent.pem" ]; then
+  for file in ca.pem agent.pem agent-key.pem; do cp "$here/issue/$name/$file" "$data/agents/$name/$file"; done
+else
+  for file in ca.pem agent.pem agent-key.pem; do echo pem > "$data/agents/$name/$file"; done
+fi
 if [ "$mode" = fallback ]; then echo "warning: no answer via https://$bind" >&2; echo "minted agent cert subject=agent:$name -> offline" >&2; exit 0; fi
 if [ "$mode" = noreceipt ]; then echo "minted agent cert subject=agent:$name -> offline" >&2; exit 0; fi
 echo "agent:$name  agent:$name  admin=false" >> "$here/recorded.txt"
+case "$mode" in unfamiliar|unfamiliar-nolist) echo "issued agent:$name at https://$bind" >&2; exit 0;; esac
 echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
 "#,
     );
@@ -835,6 +944,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         dir: tempfile::TempDir,
         listener: Option<TcpListener>,
         endpoint: String,
+        ca: (String, String),
     }
 
     impl Fixture {
@@ -861,8 +971,15 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
                 fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
             }
             fs::write(bin.join("mode.txt"), mode).unwrap();
+            let ca_key = rcgen::KeyPair::generate().unwrap();
+            let mut ca_params = rcgen::CertificateParams::default();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca = (
+                ca_params.self_signed(&ca_key).unwrap().pem(),
+                ca_key.serialize_pem(),
+            );
+            fs::write(data.join("tls/ca.pem"), &ca.0).unwrap();
             for (name, body) in [
-                ("tls/ca.pem", "ca"),
                 ("tls/node.pem", "node"),
                 ("tls/node-key.pem", "key"),
                 ("metastore.redb", ""),
@@ -901,11 +1018,38 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
                 serde_json::to_vec(&profile).unwrap(),
             )
             .unwrap();
-            Self {
+            let fixture = Self {
                 dir,
                 listener: Some(listener),
                 endpoint,
+                ca,
+            };
+            for agent in ["worker", "My Project-1a2b3c"] {
+                fixture.issue(agent);
             }
+            fixture
+        }
+
+        /// What the Node would issue `agent` now: this Box's CA, a certificate
+        /// for `nexus://agent/<agent>` and its key. The fake Node copies it.
+        fn issue(&self, agent: &str) {
+            let issuer = rcgen::Issuer::from_ca_cert_pem(
+                &self.ca.0,
+                rcgen::KeyPair::from_pem(&self.ca.1).unwrap(),
+            )
+            .unwrap();
+            let key = rcgen::KeyPair::generate().unwrap();
+            let mut params = rcgen::CertificateParams::default();
+            params.not_before = time::OffsetDateTime::now_utc();
+            params.subject_alt_names = vec![rcgen::SanType::URI(
+                format!("nexus://agent/{agent}").try_into().unwrap(),
+            )];
+            let cert = params.signed_by(&key, &issuer).unwrap();
+            let output = self.dir.path().join("bin/issue").join(agent);
+            fs::create_dir_all(&output).unwrap();
+            fs::write(output.join("ca.pem"), &self.ca.0).unwrap();
+            fs::write(output.join("agent.pem"), cert.pem()).unwrap();
+            fs::write(output.join("agent-key.pem"), key.serialize_pem()).unwrap();
         }
 
         fn owner(&self) -> PathBuf {
@@ -938,8 +1082,12 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
                     .to_string(),
             )
             .unwrap();
+            let issued = self.dir.path().join("bin/issue").join(agent);
             for file in ["ca.pem", "agent.pem", "agent-key.pem"] {
-                fs::write(bundle.join(file), "pem").unwrap();
+                match fs::read(issued.join(file)) {
+                    Ok(bytes) => fs::write(bundle.join(file), bytes).unwrap(),
+                    Err(_) => fs::write(bundle.join(file), "pem").unwrap(),
+                }
             }
             let marker = self.agents().join(format!(".joining-{agent}"));
             fs::write(&marker, "1").unwrap();
@@ -1065,7 +1213,6 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         assert!(!fixture.bundle("taken").exists());
     }
 
-    /// An unconfirmed issuance is moved aside so the session never uses it.
     /// An issuance that stopped long enough ago that no Node child of it runs.
     fn backdate(path: &Path) {
         fs::File::options()
@@ -1076,6 +1223,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
             .unwrap();
     }
 
+    /// An unconfirmed issuance is moved aside so the session never uses it.
     fn assert_quarantined(fixture: &Fixture, agent: &str, message: &str) {
         assert!(!fixture.bundle(agent).exists(), "{message}");
         let held = fs::read_dir(fixture.agents())
@@ -1160,18 +1308,67 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
         fixture.leave_unconfirmed("worker");
         fs::remove_file(fixture.agents().join("worker").join("agent.pem")).unwrap();
         fixture.record("worker");
-        assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
-        let held = fs::read_dir(fixture.agents())
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".unconfirmed-worker-")
-            });
+        let message = error(fixture.enroll("worker"));
+        // The Node would refuse the held name, so it is not issued again.
+        assert!(message.contains("--allow-existing"), "{message}");
+        assert_quarantined(&fixture, "worker", &message);
         let calls = fixture.calls();
-        assert!(held && calls.len() == 2, "{calls:?}");
+        assert!(
+            calls.len() == 1 && calls[0].contains("auth list"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_a_truncated_key_is_not_kept() {
+        let fixture = Fixture::new("ok");
+        fixture.leave_unconfirmed("worker");
+        let key = fixture.agents().join("worker").join("agent-key.pem");
+        let whole = fs::read_to_string(&key).unwrap();
+        fs::write(&key, &whole[..whole.len() / 2]).unwrap();
+        fixture.record("worker");
+        let message = error(fixture.enroll("worker"));
+        assert!(message.contains("--allow-existing"), "{message}");
+        assert_quarantined(&fixture, "worker", &message);
+    }
+
+    #[test]
+    fn a_bundle_from_another_ca_is_not_kept() {
+        let fixture = Fixture::new("ok");
+        fixture.leave_unconfirmed("worker");
+        let other = rcgen::CertificateParams::default()
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        fs::write(fixture.agents().join("worker").join("ca.pem"), other.pem()).unwrap();
+        fixture.record("worker");
+        let message = error(fixture.enroll("worker"));
+        assert!(message.contains("--allow-existing"), "{message}");
+        assert_quarantined(&fixture, "worker", &message);
+    }
+
+    #[test]
+    fn an_explicit_offline_issuance_is_never_kept() {
+        let fixture = Fixture::new("noreceipt");
+        let message = error(fixture.enroll("worker"));
+        assert!(message.contains("no online receipt"), "{message}");
+        assert_quarantined(&fixture, "worker", &message);
+        let calls = fixture.calls();
+        assert!(
+            calls.iter().all(|call| !call.contains("auth list")),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_issuance_stays_unused_while_the_node_cannot_be_asked() {
+        let fixture = Fixture::new("unfamiliar-nolist");
+        let message = error(fixture.enroll("worker"));
+        assert!(message.contains("stays unused"), "{message}");
+        assert!(fixture.bundle("worker").exists(), "{message}");
+        assert!(
+            fixture.agents().join(".joining-worker").exists(),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1204,11 +1401,11 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
             &fixture.endpoint,
             &fixture.agents(),
             Some(&fixture.owner()),
-            Duration::from_millis(1500),
+            Duration::from_millis(4000),
         );
         assert_eq!(outcome.unwrap(), AgentEnrollment::Joined);
         assert!(
-            started.elapsed() >= Duration::from_millis(1000),
+            started.elapsed() >= Duration::from_millis(3000),
             "{:?}",
             started.elapsed()
         );
@@ -1234,8 +1431,7 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
 
     #[test]
     fn a_recorded_issuance_with_an_unfamiliar_receipt_is_kept() {
-        let fixture = Fixture::new("noreceipt");
-        fixture.record("worker");
+        let fixture = Fixture::new("unfamiliar");
         assert_eq!(fixture.enroll("worker").unwrap(), AgentEnrollment::Joined);
         assert!(fixture.bundle("worker").exists());
         assert!(!fixture.agents().join(".joining-worker").exists());

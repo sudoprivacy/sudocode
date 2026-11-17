@@ -189,6 +189,9 @@ pub struct TlsPaths {
     pub client_cert: String,
     pub client_key: String,
     pub server_name: String,
+    /// The bundle directory these files were named by; its issuance marker
+    /// sits beside it.
+    pub bundle_dir: String,
 }
 
 /// A minted agent credential: the identity + mTLS material scode dials with.
@@ -251,6 +254,7 @@ impl AgentCredential {
                 client_cert: join(&manifest.cert),
                 client_key: join(&manifest.key),
                 server_name: manifest.server_name,
+                bundle_dir: dir.to_string_lossy().into_owned(),
             },
         })
     }
@@ -290,7 +294,9 @@ impl Config {
         let agents_dir = Path::new(&record.agents_dir);
         let bundle = agents_dir.join(agent);
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
-            return Err(missing_credential(agent, &bundle));
+            // An issuance that has not written its manifest yet is joining.
+            return Err(unconfirmed_issuance(agents_dir, agent)
+                .unwrap_or_else(|| missing_credential(agent, &bundle)));
         }
         let loaded = AgentCredential::load(&bundle.to_string_lossy());
         // Checked after reading: the marker outlives every unconfirmed bundle,
@@ -332,7 +338,7 @@ impl Config {
         // since it was resolved: use what was read only if no issuance is
         // unconfirmed and the certificate is still where it was read.
         let cert_path = Path::new(&t.client_cert);
-        if let Some(agents_dir) = cert_path.parent().and_then(Path::parent) {
+        if let Some(agents_dir) = Path::new(&t.bundle_dir).parent() {
             if let Some(unconfirmed) = unconfirmed_issuance(agents_dir, &self.agent) {
                 return Err(unconfirmed);
             }
@@ -379,6 +385,7 @@ mod tests {
                 client_cert: path("agent.pem"),
                 client_key: path("agent-key.pem"),
                 server_name: "nexus-node".into(),
+                bundle_dir: bundle.to_string_lossy().into_owned(),
             },
         };
         // The Box began confirming this bundle after it was resolved.

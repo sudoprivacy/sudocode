@@ -77,16 +77,19 @@ claimed elsewhere is refused by Nexus, which then writes nothing. While an
 issuance runs, a `.joining-<name>` marker beside the bundle keeps every session
 from using it; sessions check it after reading the bundle and again before
 dialling. The credential is accepted with the Node's online receipt and a
-manifest naming that Agent. An issuance that cannot confirm itself (it timed
-out, its receipt was unfamiliar, or its session quit first and left the marker)
-is settled by the Node's own `auth list`: a whole bundle the Node lists is kept;
-anything else is moved to `.unconfirmed-<name>-<time>` (or, if it cannot be
-moved, stays blocked by the marker) and never used, and the name is issued
-again. A fresh leftover marker first gets the issuance's own time bound, in
-case the Node child of a session that quit is still writing. While the Node
-cannot be asked, the bundle stays unused. A name the Node
-already holds is never freed by revoking it; the node owner issues it again
-with `auth mint --allow-existing`.
+manifest naming that Agent; an explicit offline signature is never kept. An
+issuance that cannot confirm itself (it timed out, its receipt was unfamiliar,
+or its session quit first and left the marker) is settled by the Node's own
+`auth list`. A listed Agent is kept only if its bundle is this Box's own
+credential for it, issued during that issuance: the Box's CA, a certificate
+for `nexus://agent/<name>` and a key. A listed Agent without one is set aside,
+and only the node owner can issue the name again (`auth mint --allow-existing`;
+revoking never frees a name). An unlisted one is set aside and issued again.
+Set aside means moved to `.unconfirmed-<name>-<time>`, or, if it cannot be
+moved, left blocked by the marker; it is never used. While the Node cannot be
+asked, the bundle stays unused. A fresh leftover marker first gets the
+issuance's own time bound, in case the Node child of a session that quit is
+still writing.
 Any other node, a stopped Box or a refusal leaves the binding pending with that
 cause, the outcome of the join, and the recovery.
 

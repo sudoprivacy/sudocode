@@ -279,11 +279,27 @@ pub fn agent_name_under(root: &Path) -> String {
 /// directory by default, or wherever the configuration directories point.
 #[must_use]
 pub fn settings_are_shared(root: &Path) -> bool {
+    // Spell both sides from their nearest existing ancestor: the settings
+    // directory may not exist yet, and a canonical root (`\\?\C:\...` on
+    // Windows) must still match a plain home path.
     let located = |path: &Path| {
-        let directory = path.parent().unwrap_or(path);
-        std::fs::canonicalize(directory)
-            .unwrap_or_else(|_| directory.to_path_buf())
-            .join(path.file_name().unwrap_or_default())
+        let mut ancestor = path;
+        let mut rest = Vec::new();
+        loop {
+            if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+                return rest
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path, part| path.join(part));
+            }
+            match (ancestor.parent(), ancestor.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_os_string());
+                    ancestor = parent;
+                }
+                _ => return path.to_path_buf(),
+            }
+        }
     };
     let entries = ConfigLoader::default_for(root).discover();
     let user: Vec<PathBuf> = entries
@@ -970,7 +986,15 @@ mod join_tests {
 
     #[test]
     fn the_home_directory_never_joins_automatically() {
-        let Some(home) = runtime::user_paths::home_dir() else {
+        // Overridden configuration directories make home an ordinary workspace.
+        let overridden = [
+            "SCODE_GLOBAL_CONFIG_DIR",
+            "SUDO_CODE_CONFIG_HOME",
+            "SCODE_PROJECT_CONFIG_DIR",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+        let Some(home) = runtime::user_paths::home_dir().filter(|_| !overridden) else {
             return;
         };
         let derived = runtime::mailbox::local_agent_name(None, &home);

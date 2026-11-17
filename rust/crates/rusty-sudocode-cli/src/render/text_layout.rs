@@ -44,6 +44,24 @@ fn terminal_width(text: &str) -> usize {
     text.width() + text.matches(['\u{FF9E}', '\u{FF9F}']).count()
 }
 
+/// Columns a grapheme may take when deciding where a row breaks. Terminals
+/// disagree on multi-code-point clusters: `👩🏽‍💻` is one 2-cell cluster to
+/// iTerm2 and `unicode-width`, but 6 cells to xterm.js with Unicode 11 (VS Code)
+/// and to vt100, which lay out each code point. A row measured short
+/// overflows, and the terminal wraps its tail into column 0; a row measured
+/// long only ends a few cells early. Breaks therefore take the larger count.
+fn row_fitting_width(grapheme: &str, col: usize) -> usize {
+    let clustered = grapheme_width(grapheme, col);
+    if grapheme.chars().nth(1).is_none() {
+        return clustered;
+    }
+    let per_code_point: usize = grapheme
+        .chars()
+        .map(|c| terminal_width(c.encode_utf8(&mut [0; 4])))
+        .sum();
+    clustered.max(per_code_point)
+}
+
 fn grapheme_width(grapheme: &str, col: usize) -> usize {
     if grapheme == "\t" {
         8 - col % 8
@@ -209,7 +227,7 @@ pub(crate) fn wrap_words_with_indent(
     let mut index = 0;
     while index < graphemes.len() {
         let (start, grapheme) = graphemes[index];
-        let cells = grapheme_width(grapheme, col);
+        let cells = row_fitting_width(grapheme, col);
         if col > 0 && col + cells > width && !fresh {
             let next = if let Some((len, end_col, run)) = space.take() {
                 row.truncate(len);

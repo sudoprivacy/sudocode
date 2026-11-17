@@ -1820,6 +1820,16 @@ contains all forty source/merge associations, original phase events and 5,394
 deduplicated physical job IDs with their original run, attempt, timing and anonymous runner-assignment fields.
 Unknown runner intervals remain null. The table's sums and medians were recomputed
 from these rows; they do not establish a controlled or population-wide speedup.</p>
+<p><strong>Source-mix and outlier sensitivity.</strong> On these same fixed records,
+the ratio of known runner-minute means is 9.09%. Reweighting the four coarse source
+strata to the historical cohort mix changes that ratio to 10.40%; using the current
+mix gives 9.12%. Removing each single PR in turn gives ratios from 7.97% to 11.49%.
+These are descriptive arithmetic checks, not confidence intervals or matched-source
+causal estimates. The sample therefore does not robustly establish the one-tenth
+target. Unknown job costs, local author work, queue waits and separate maintenance
+investment retain their original boundaries; no failed run or validation requirement
+is removed by this calculation. The linked inventory includes every stratum weight,
+mean and all forty omission calculations.</p>
 <p><strong>Separate repair investment.</strong> The maintained
 <a href="https://github.com/sudoprivacy/pty-expect/pull/10">PTY resize correction</a>
 records 19.150 known assigned runner-minutes across its original failed fixture,

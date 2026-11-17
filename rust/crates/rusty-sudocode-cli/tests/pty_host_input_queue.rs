@@ -193,7 +193,9 @@ fn working(env: &TestEnv) -> (Host, Release) {
 fn working_with_mode(env: &TestEnv, background: bool) -> (Host, Release) {
     // Publish readiness only after the progress file can be read. ACP replies
     // may otherwise finish before the shell gets to its first loop iteration.
-    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished\n").unwrap();
+    // Likewise, publish completion only after the full output is written; a
+    // shell redirection creates an empty file before printf fills it.
+    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished.tmp\nmv input-tool-finished.tmp input-tool-finished\n").unwrap();
     let mut host = Host::new(env);
     let input =
         json!({"command":"sh input-work.sh","timeout":180_000,"run_in_background":background});

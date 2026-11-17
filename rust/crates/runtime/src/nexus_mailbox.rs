@@ -95,12 +95,12 @@ fn unconfirmed_issuance(agents_dir: &Path, agent: &str) -> Option<String> {
 /// text for tool results, `/status` and `scode setup --check`.
 #[must_use]
 pub fn missing_credential(agent: &str, bundle: &Path) -> String {
+    // Keep the recovery near the front: PTY status lines with long temporary
+    // paths (macOS) cut the tail.
     format!(
-        "this machine's node {MISSING_CREDENTIAL_CAUSE} '{agent}' (expected at {}). \
-         To join, run `scode setup --mode shared` in this workspace: it enrolls the \
-         workspace's own Agent through this OS user's local Box. If another user or \
-         machine owns the node, or '{agent}' is a configured name, ask the node owner \
-         to mint '{agent}'. A running session picks up the credential without a restart",
+        "this machine's node {MISSING_CREDENTIAL_CAUSE} '{agent}' (expected at {}). Join \
+         with `scode setup --mode shared` here, or ask the node owner to mint '{agent}'; \
+         a running session picks it up without a restart",
         bundle.display()
     )
 }

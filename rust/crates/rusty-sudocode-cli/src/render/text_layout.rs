@@ -52,6 +52,30 @@ fn grapheme_width(grapheme: &str, col: usize) -> usize {
     }
 }
 
+/// `text` word-wrapped right of the gutter, each row starting at
+/// [`GUTTER_COLS`](crate::render::GUTTER_COLS). A row that already fits keeps
+/// its own indentation, so pre-laid-out panels only move into the gutter.
+pub(crate) fn wrap_in_gutter(text: &StyledText, width: usize) -> StyledText {
+    let mut out = StyledText::default();
+    if text.text.is_empty() {
+        return out;
+    }
+    let rows = wrap_words(
+        text,
+        width.saturating_sub(crate::render::GUTTER_COLS).max(1),
+    );
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            out.plain("\n");
+        }
+        if !row.text.is_empty() {
+            out.plain(crate::render::GUTTER);
+            out.append(row);
+        }
+    }
+    out
+}
+
 /// Wrap a single logical line. Rows retain complete styles so a frame or
 /// response prefix can reset the terminal without losing continuation colors.
 /// An indivisible grapheme wider than the entire viewport is kept intact.

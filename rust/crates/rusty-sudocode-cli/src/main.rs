@@ -3512,17 +3512,26 @@ fn run_repl_iocraft_dispatch(
         .lock()
         .expect("LiveCli mutex poisoned")
         .turn_settings_view = Some(Arc::clone(&settings_view));
+    // A slash command queued during a turn replays through the Submit path at
+    // the turn boundary, ahead of anything else waiting, so it runs exactly as
+    // it does when typed while idle.
+    let mut replay = std::collections::VecDeque::new();
 
     loop {
-        let Ok(event) = coord_rx.recv() else {
-            mailbox_abort.abort();
-            let _ = commands.send(EngineCommand::Close);
-            cancel_pending_question_answer(&pending_question_answer);
-            repl_ui_cmd.clear_question();
-            if let Some(h) = runner_handle.take() {
-                let _ = h.join();
-            }
-            break;
+        let event = if let Some(event) = replay.pop_front() {
+            event
+        } else {
+            let Ok(event) = coord_rx.recv() else {
+                mailbox_abort.abort();
+                let _ = commands.send(EngineCommand::Close);
+                cancel_pending_question_answer(&pending_question_answer);
+                repl_ui_cmd.clear_question();
+                if let Some(h) = runner_handle.take() {
+                    let _ = h.join();
+                }
+                break;
+            };
+            event
         };
 
         // Expanded prompts can still contain an exit command. Give both input
@@ -3596,11 +3605,7 @@ fn run_repl_iocraft_dispatch(
                     let _ = h.join();
                 }
                 if coord.lock().unwrap().is_paused() {
-                    repl_ui_cmd.pending_inputs_clear();
-                    let previews = coord.lock().unwrap().previews();
-                    for echo in previews {
-                        repl_ui_cmd.pending_input(echo, engine_events::InputDelivery::Queue);
-                    }
+                    show_queued_inputs(&coord, &repl_ui_cmd);
                     continue;
                 }
                 // Between turns: a picker still open holds the queue, so what
@@ -3618,17 +3623,30 @@ fn run_repl_iocraft_dispatch(
                 if pending_slash_selection.is_some() {
                     continue;
                 }
+                // A command queued during the turn runs once the messages queued
+                // before it have; then the queue goes on.
+                let command = coord.lock().unwrap().take_command();
+                if let Some(command) = command {
+                    show_queued_inputs(&coord, &repl_ui_cmd);
+                    replay.push_back(CoordinatorEvent::Human(repl_ui::InputEvent::Submit {
+                        text: command.input.text,
+                        display: command.input.display,
+                        pasted: command.input.pasted,
+                    }));
+                    replay.push_back(CoordinatorEvent::PumpQueue);
+                    continue;
+                }
                 let next = coord.lock().unwrap().drain_next();
                 if let Some(next) = next {
                     // Echo the queued items to scrollback now, as they actually
                     // run — the coordinator deferred these from submit time so a
                     // queued item never looked sent. Each carries its marker
-                    // kind (`❯` human / message frame for peers). Then clear the queued
-                    // messages from the pending overlay: they're leaving the queue.
+                    // kind (`❯` human / message frame for peers). The pending
+                    // overlay keeps only what is still queued behind them.
                     for echo in &next.echoes {
                         echo_input(&repl_output, echo);
                     }
-                    repl_ui_cmd.pending_inputs_clear();
+                    show_queued_inputs(&coord, &repl_ui_cmd);
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -3869,10 +3887,15 @@ fn run_repl_iocraft_dispatch(
                     let trimmed = text.trim();
                     let parsed = SlashCommand::parse(trimmed);
                     let is_running = coord.lock().unwrap().is_running();
+                    // A command that needs the session waits for the turn to end
+                    // and is echoed when it runs, as a queued message is.
+                    let is_queued_command = is_running
+                        && matches!(&parsed, Ok(Some(command))
+                            if slash_command_turn_policy(command) == TurnPolicy::AfterTurn);
                     // A command's report follows its own `❯` line in
                     // scrollback, as a prompt's turn does. Text that is not a
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
-                    if !matches!(parsed, Ok(None)) {
+                    if !matches!(parsed, Ok(None)) && !is_queued_command {
                         echo_input(&repl_output, &human(text.clone()).input.view());
                     }
                     if let Ok(Some(SlashCommand::Questions {
@@ -3930,11 +3953,17 @@ fn run_repl_iocraft_dispatch(
                                 continue;
                             }
                             TurnPolicy::AfterTurn => {
-                                let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
-                                repl_output.println(&format!(
-                                    "{}'{name}' can't run while a turn is running.{RESET}",
-                                    theme().fg_seq(TextRole::Secondary),
-                                ));
+                                stage_turn_input(
+                                    &coord,
+                                    input_queue::QueuedInput::command(
+                                        text.clone(),
+                                        display.clone(),
+                                    )
+                                    .with_pasted(pasted.clone()),
+                                    engine_events::InputDelivery::Queue,
+                                    &commands,
+                                    &repl_ui_cmd,
+                                );
                                 continue;
                             }
                         }
@@ -4061,6 +4090,11 @@ fn run_repl_iocraft_dispatch(
                                 Arc::clone(&pending_question_answer),
                                 coord_tx.clone(),
                             ));
+                            true
+                        }
+                        Ok(Some(SlashCommand::Unknown(name))) => {
+                            // Reported at once, during a turn too: it never runs.
+                            repl_output.println(&format_unknown_slash_command(&name));
                             true
                         }
                         Ok(Some(command)) => {
@@ -4262,6 +4296,18 @@ fn run_repl_iocraft_dispatch(
     // The iocraft render loop thread may still be alive (it blocks on
     // terminal events). Persistent state and engine teardown are complete.
     std::process::exit(0);
+}
+
+/// Show what is still queued in the pending area, after part of it ran.
+fn show_queued_inputs(
+    coord: &Arc<Mutex<input_queue::TurnInputCoordinator<mpsc::Sender<()>>>>,
+    ui: &repl_ui::UiCommandSender,
+) {
+    ui.pending_inputs_clear();
+    let previews = coord.lock().unwrap().previews();
+    for echo in previews {
+        ui.pending_input(echo, engine_events::InputDelivery::Queue);
+    }
 }
 
 fn stage_turn_input(

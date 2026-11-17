@@ -2283,7 +2283,8 @@ pub enum TurnPolicy {
     /// A setting: chosen during the turn and applied when the turn ends, so a
     /// running turn never changes model or effort midway.
     NextTurn,
-    /// Needs the session the turn is using, so it runs only between turns.
+    /// Needs the session the turn is using: queued, it runs as a command when
+    /// the turn ends.
     AfterTurn,
 }
 
@@ -2293,7 +2294,10 @@ pub enum TurnPolicy {
 #[must_use]
 pub fn slash_command_turn_policy(command: &SlashCommand) -> TurnPolicy {
     match command {
-        SlashCommand::Help | SlashCommand::Tasks { args: None } => TurnPolicy::Now,
+        // An unknown command is reported at once; it never runs.
+        SlashCommand::Help | SlashCommand::Tasks { args: None } | SlashCommand::Unknown(_) => {
+            TurnPolicy::Now
+        }
         SlashCommand::Model { .. } | SlashCommand::Effort { .. } => TurnPolicy::NextTurn,
         _ => TurnPolicy::AfterTurn,
     }
@@ -5208,15 +5212,16 @@ mod tests {
         assert_eq!(policy("/effort high"), TurnPolicy::NextTurn);
         // A task action needs the session; only the bare panel is local.
         assert_eq!(policy("/tasks stop 1"), TurnPolicy::AfterTurn);
+        // Anything not listed waits for the turn.
         for input in [
             "/compact", "/clear", "/resume", "/status", "/rewind", "/init",
         ] {
             assert_eq!(policy(input), TurnPolicy::AfterTurn, "{input}");
         }
-        // Anything not listed waits for the turn.
+        // An unknown command is reported at once instead of waiting.
         assert_eq!(
             slash_command_turn_policy(&SlashCommand::Unknown("not-a-command".into())),
-            TurnPolicy::AfterTurn
+            TurnPolicy::Now
         );
     }
 

@@ -52,12 +52,9 @@ when there is no room for a frame and its padding, information appears unboxed.
 
 ## Persistent peer descriptions
 
-Enable `experimental.peerDescriptions` in settings to let model-backed
-compaction publish a short description of each peer's ongoing work:
-
-```json
-{"experimental":{"peerDescriptions":true}}
-```
+Model-backed compaction publishes a short description of each peer's ongoing
+work. This is always on; a leftover `experimental.peerDescriptions` setting is
+accepted and ignored.
 
 The existing compaction call produces optional description metadata alongside
 its checkpoint. It adds no separate summarizer or repair request. New agents
@@ -80,6 +77,11 @@ provide conditional writes.
 age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.
+
+An agent's name is its identity: the `agentName` setting, or by default the
+workspace folder name plus a short hash of its path. For a long-lived role, set
+a readable `agentName` when the agent is first created. Renaming an existing
+agent gives it a new identity and leaves its conversations under the old name.
 
 Runtime discovery is separate from these stored descriptions. `agent_list`
 adds one `runtime` row per observed instance, including foreground
@@ -681,6 +683,18 @@ peer/A2A messages remain queued. The cursor starts at the end of the recalled
 text, and further arrow presses use normal cursor navigation. Enter steers with
 the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
+
+Slash commands typed while a turn runs never reach the model:
+
+- `/help` and `/tasks` run at once.
+- `/model` and `/effort` (with or without an argument) choose the setting now.
+  The running turn keeps its model and effort; the choice applies when it
+  ends, before any queued message is sent.
+- Every other command waits in the staging area as `queued: /compact` and runs
+  as a command when the turn ends, in order with queued messages. Esc steers
+  queued messages into the turn but leaves queued commands for its end; ↑
+  brings a queued command back for editing like a queued message.
+- An unknown command is reported at once.
 
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:

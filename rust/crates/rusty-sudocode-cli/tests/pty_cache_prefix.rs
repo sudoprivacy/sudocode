@@ -1203,14 +1203,19 @@ fn response_content(request: &Value, number: usize) -> Value {
             } else {
                 mock_anthropic_service::CANNED_COMPACTION_SUMMARY.to_owned()
             };
-            if !last.contains("Optional checkpoint metadata:") || last.contains("PEER_DESCRIPTION_MISSING") {
+            // Every compaction offers optional description metadata; only the
+            // peer-description cases answer it, like a model with nothing to describe.
+            let peer_case = last.contains("CURRENT_PEER_WORK") || last.contains("PEER_DESCRIPTION_");
+            if !last.contains("Optional checkpoint metadata:")
+                || !peer_case
+                || last.contains("PEER_DESCRIPTION_MISSING")
+            {
                 checkpoint
             } else if last.contains("PEER_DESCRIPTION_INVALID") || last.contains("PEER_DESCRIPTION_PLAIN_INVALID") {
                 format!("{checkpoint}\n<agent-description>{{\"unexpected\":true}}</agent-description>")
             } else if last.contains("PEER_DESCRIPTION_UNTERMINATED") {
                 format!("{checkpoint}\n<agent-description>broken optional metadata")
             } else {
-                assert!(last.contains("CURRENT_PEER_WORK"), "description must receive the latest preserved intent");
                 let description = if last.contains("PEER_DESCRIPTION_RAW") {
                     "Investigating peer discovery"
                 } else {
@@ -1227,7 +1232,6 @@ fn peer_description_settings(env: &TestEnv, agent: &str) {
         env.config_home().join("settings.json"),
         json!({
             "agentName": agent,
-            "experimental": {"peerDescriptions": true},
         })
         .to_string(),
     )
@@ -1250,11 +1254,7 @@ fn assert_peer_description_lifecycle(raw_metadata: bool) {
     let metadata = namespace.join("agents/description-author/description.json");
     let empty = runtime::mailbox::Mailbox::workspace_local(&namespace, "empty-peer".into());
     empty.ensure_presence().unwrap();
-    let mut cli = spawn_with_env(
-        &env,
-        &path,
-        &[("SUDOCODE_EXPERIMENT_PEER_DESCRIPTIONS", "0")],
-    );
+    let mut cli = spawn(&env, &path);
     turn(
         &mut cli,
         &format!(
@@ -1272,18 +1272,6 @@ fn assert_peer_description_lifecycle(raw_metadata: bool) {
         "ordinary turns leave a new peer undescribed"
     );
     let ordinary = capture.bodies().pop().unwrap();
-    let original = std::fs::read(&path).unwrap();
-    cli.send("/compact\r").unwrap();
-    cli.expect("Messages removed").unwrap();
-    common::expect_input_line_cleared(&cli, WAIT, "baseline checkpoint committed");
-    let baseline = capture.bodies().pop().unwrap();
-    exit(&mut cli);
-    assert!(
-        !metadata.exists(),
-        "disabled compaction leaves metadata absent"
-    );
-    std::fs::write(&path, original).unwrap();
-    let mut cli = spawn(&env, &path);
     cli.send("/compact\r").unwrap();
     cli.expect("Messages removed").unwrap();
     common::expect_input_line_cleared(&cli, WAIT, "peer description committed");
@@ -1292,7 +1280,7 @@ fn assert_peer_description_lifecycle(raw_metadata: bool) {
     assert_eq!(description["description"], "Investigating peer discovery");
     assert!(description["updated_at"].as_str().is_some());
     let compact = capture.bodies().pop().unwrap();
-    assert_peer_compaction_prefix(&ordinary, &baseline, &compact);
+    assert_peer_compaction_prefix(&ordinary, &compact);
     turn(&mut cli, "Continue after the description checkpoint.");
     exit(&mut cli);
     let saved = Session::load_from_path(&path).unwrap();
@@ -1322,16 +1310,8 @@ fn assert_peer_description_lifecycle(raw_metadata: bool) {
     assert_peer_description_discovery(&env, &capture, &description);
 }
 
-fn assert_peer_compaction_prefix(ordinary: &Value, baseline: &Value, compact: &Value) {
+fn assert_peer_compaction_prefix(ordinary: &Value, compact: &Value) {
     fixed_prefix(ordinary, compact);
-    fixed_prefix(baseline, compact);
-    let baseline_messages = baseline["messages"].as_array().unwrap();
-    let compact_messages = compact["messages"].as_array().unwrap();
-    assert_eq!(
-        &baseline_messages[..baseline_messages.len() - 1],
-        &compact_messages[..compact_messages.len() - 1],
-        "enabling descriptions preserves every historical cache marker"
-    );
     let mut summarized_prefix = compact.clone();
     let instruction = summarized_prefix["messages"]
         .as_array_mut()

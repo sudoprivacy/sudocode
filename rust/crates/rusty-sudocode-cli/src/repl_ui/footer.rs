@@ -118,7 +118,8 @@ impl FooterTips {
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
         let selected = focused.as_ref().or(selected);
 
-        let mut base = truncate_to_width(&format!("  ⏵⏵ {permission}"), width);
+        let mut base =
+            truncate_to_width(&format!("{}⏵⏵ {permission}", crate::render::GUTTER), width);
         let mut task = tasks.footer_label(false);
         if tasks.focus == TaskFocus::Footer
             && display_width(&base) + display_width(&task) + 3 > width

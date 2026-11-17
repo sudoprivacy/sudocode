@@ -245,7 +245,7 @@ fn send_summary_and_body_keep_independent_preview_limits() {
 }
 
 #[test]
-fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() {
+fn agent_list_replay_distinguishes_unknown_liveness_descriptions_empty_and_truncated_lists() {
     let env = TestEnv::new_mock("agent-list-card-history");
     let mut source = Session::new().with_workspace_root(env.workspace_root());
     add(
@@ -253,8 +253,10 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
         "directory",
         "agent_list",
         &json!({}),
-        &json!({"count":3,"agents":[
+        &json!({"count":4,"agents":[
             {"kind":"peer","name":"peer-未知状态","send_to":"peer-未知状态"},
+            {"kind":"peer","name":"described-peer","send_to":"described-peer",
+                "description":"Coordinating Mac fixtures","description_updated_at":"2026-01-02T03:04:05Z"},
             {"kind":"subagent","name":"reviewer","send_to":"worker-exact-address-42",
                 "active":true,"role":"review","task_id":"task-42"},
             {"kind":"subagent","name":"writer","send_to":"worker-43","active":false},
@@ -294,8 +296,9 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
     let widths = &[52, 120];
     replay(&env, &source, "Recorded list-error.", widths, |screen| {
         for expected in [
-            "AgentList · 3 agents",
+            "AgentList · 4 agents",
             "peer  peer-未知状态",
+            "peer  described-peer · Coordinating Mac fixtures · updated",
             "subagent  reviewer",
             "send_to=worker-exact-address-42 · active",
             "role=review · task_id=task-42",
@@ -312,6 +315,10 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
                 "missing {expected}: {screen}"
             );
         }
+        assert!(
+            common::screen_contains(screen, "d ago"),
+            "description age is visible: {screen}"
+        );
         assert!(!screen.contains("listed-15"));
         assert!(!screen.contains("peer-未知状态 · active"));
         assert!(!screen.contains("peer-未知状态 · inactive"));

@@ -21,6 +21,7 @@ mod render_engine;
 mod repl_ui;
 mod startup;
 mod stderr_capture;
+mod vault;
 mod windows_console;
 
 use crate::render::TextRole;
@@ -533,6 +534,12 @@ fn run_config_account(
 }
 
 fn main() {
+    // The builtin vault plugin's tools answer before anything else runs: argument
+    // parsing and config loading can write to stderr, and a tool never may.
+    if let Some(tool) = vault::requested_tool(&env::args().skip(1).collect::<Vec<_>>()) {
+        vault::run(tool);
+        return;
+    }
     startup::initialize();
     // Must run before any output so early raw ANSI escapes render correctly on
     // the Windows console, and so the color-tier detection that reads the same
@@ -1000,6 +1007,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ws_port,
             )?;
         }
+        CliAction::AcpManaged => run_acp_managed()?,
         CliAction::CacheStats { output_format } => run_cache_stats(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
@@ -3402,6 +3410,7 @@ fn run_repl_iocraft_dispatch(
                 // Its UI uses the same seam as every other engine consumer.
                 match &event {
                     EngineEvent::State(state) => activity.observe_engine_state(*state),
+                    EngineEvent::Compaction(progress) => activity.observe_compaction(progress),
                     EngineEvent::TurnStarted { .. } => {
                         let _ = completion_tx.send(CoordinatorEvent::TurnStarted);
                     }
@@ -3517,17 +3526,26 @@ fn run_repl_iocraft_dispatch(
         .lock()
         .expect("LiveCli mutex poisoned")
         .turn_settings_view = Some(Arc::clone(&settings_view));
+    // A slash command queued during a turn replays through the Submit path at
+    // the turn boundary, ahead of anything else waiting, so it runs exactly as
+    // it does when typed while idle.
+    let mut replay = std::collections::VecDeque::new();
 
     loop {
-        let Ok(event) = coord_rx.recv() else {
-            mailbox_abort.abort();
-            let _ = commands.send(EngineCommand::Close);
-            cancel_pending_question_answer(&pending_question_answer);
-            repl_ui_cmd.clear_question();
-            if let Some(h) = runner_handle.take() {
-                let _ = h.join();
-            }
-            break;
+        let event = if let Some(event) = replay.pop_front() {
+            event
+        } else {
+            let Ok(event) = coord_rx.recv() else {
+                mailbox_abort.abort();
+                let _ = commands.send(EngineCommand::Close);
+                cancel_pending_question_answer(&pending_question_answer);
+                repl_ui_cmd.clear_question();
+                if let Some(h) = runner_handle.take() {
+                    let _ = h.join();
+                }
+                break;
+            };
+            event
         };
 
         // Expanded prompts can still contain an exit command. Give both input
@@ -3582,11 +3600,7 @@ fn run_repl_iocraft_dispatch(
                     let _ = h.join();
                 }
                 if coord.lock().unwrap().is_paused() {
-                    repl_ui_cmd.pending_inputs_clear();
-                    let previews = coord.lock().unwrap().previews();
-                    for echo in previews {
-                        repl_ui_cmd.pending_input(echo, engine_events::InputDelivery::Queue);
-                    }
+                    show_queued_inputs(&coord, &repl_ui_cmd);
                     continue;
                 }
                 // Between turns: a picker still open holds the queue, so what
@@ -3604,21 +3618,34 @@ fn run_repl_iocraft_dispatch(
                 if pending_slash_selection.is_some() {
                     continue;
                 }
+                // A command queued during the turn runs once the messages queued
+                // before it have; then the queue goes on.
+                let command = coord.lock().unwrap().take_command();
+                if let Some(command) = command {
+                    show_queued_inputs(&coord, &repl_ui_cmd);
+                    replay.push_back(CoordinatorEvent::Human(repl_ui::InputEvent::Submit {
+                        text: command.input.text,
+                        display: command.input.display,
+                        pasted: command.input.pasted,
+                    }));
+                    replay.push_back(CoordinatorEvent::PumpQueue);
+                    continue;
+                }
                 let next = coord.lock().unwrap().drain_next();
                 if let Some(next) = next {
                     // Echo the queued items to scrollback now, as they actually
                     // run — the coordinator deferred these from submit time so a
                     // queued item never looked sent. Each carries its marker
-                    // kind (`❯` human / message frame for peers). Then clear the queued
-                    // messages from the pending overlay: they're leaving the queue.
+                    // kind (`❯` human / message frame for peers). The pending
+                    // overlay keeps only what is still queued behind them.
                     for echo in &next.echoes {
                         echo_input(&repl_output, echo);
                     }
-                    repl_ui_cmd.pending_inputs_clear();
+                    show_queued_inputs(&coord, &repl_ui_cmd);
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        next,
+                        ReplWork::Prompt(next),
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3691,7 +3718,7 @@ fn run_repl_iocraft_dispatch(
                     coord.lock().unwrap().start_turn();
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        next,
+                        ReplWork::Prompt(next),
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3839,10 +3866,15 @@ fn run_repl_iocraft_dispatch(
                     let trimmed = text.trim();
                     let parsed = SlashCommand::parse(trimmed);
                     let is_running = coord.lock().unwrap().is_running();
+                    // A command that needs the session waits for the turn to end
+                    // and is echoed when it runs, as a queued message is.
+                    let is_queued_command = is_running
+                        && matches!(&parsed, Ok(Some(command))
+                            if slash_command_turn_policy(command) == TurnPolicy::AfterTurn);
                     // A command's report follows its own `❯` line in
                     // scrollback, as a prompt's turn does. Text that is not a
                     // command (`Ok(None)`) runs as a prompt and is echoed there.
-                    if !matches!(parsed, Ok(None)) {
+                    if !matches!(parsed, Ok(None)) && !is_queued_command {
                         echo_input(&repl_output, &human(text.clone()).input.view());
                     }
                     // Task inspection is local UI, so it remains available
@@ -3868,11 +3900,17 @@ fn run_repl_iocraft_dispatch(
                                 continue;
                             }
                             TurnPolicy::AfterTurn => {
-                                let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
-                                repl_output.println(&format!(
-                                    "{}'{name}' can't run while a turn is running.{RESET}",
-                                    theme().fg_seq(TextRole::Secondary),
-                                ));
+                                stage_turn_input(
+                                    &coord,
+                                    input_queue::QueuedInput::command(
+                                        text.clone(),
+                                        display.clone(),
+                                    )
+                                    .with_pasted(pasted.clone()),
+                                    engine_events::InputDelivery::Queue,
+                                    &commands,
+                                    &repl_ui_cmd,
+                                );
                                 continue;
                             }
                         }
@@ -3988,6 +4026,24 @@ fn run_repl_iocraft_dispatch(
                             repl_output.println(&render_repl_help());
                             true
                         }
+                        Ok(Some(SlashCommand::Compact)) => {
+                            coord.lock().unwrap().start_turn();
+                            runner_handle = Some(spawn_iocraft_turn(
+                                Arc::clone(&cli_shared),
+                                ReplWork::Compact,
+                                repl_output.clone(),
+                                repl_ui_cmd.clone(),
+                                repl_spinner.clone(),
+                                Arc::clone(&pending_question_answer),
+                                coord_tx.clone(),
+                            ));
+                            true
+                        }
+                        Ok(Some(SlashCommand::Unknown(name))) => {
+                            // Reported at once, during a turn too: it never runs.
+                            repl_output.println(&format_unknown_slash_command(&name));
+                            true
+                        }
                         Ok(Some(command)) => {
                             run_session_command(&cli_shared, command, &repl_ui_cmd, &repl_output);
                             true
@@ -4029,7 +4085,7 @@ fn run_repl_iocraft_dispatch(
                         coord.lock().unwrap().start_turn();
                         runner_handle = Some(spawn_iocraft_turn(
                             Arc::clone(&cli_shared),
-                            next,
+                            ReplWork::Prompt(next),
                             repl_output.clone(),
                             repl_ui_cmd.clone(),
                             repl_spinner.clone(),
@@ -4173,6 +4229,18 @@ fn run_repl_iocraft_dispatch(
     std::process::exit(0);
 }
 
+/// Show what is still queued in the pending area, after part of it ran.
+fn show_queued_inputs(
+    coord: &Arc<Mutex<input_queue::TurnInputCoordinator<mpsc::Sender<()>>>>,
+    ui: &repl_ui::UiCommandSender,
+) {
+    ui.pending_inputs_clear();
+    let previews = coord.lock().unwrap().previews();
+    for echo in previews {
+        ui.pending_input(echo, engine_events::InputDelivery::Queue);
+    }
+}
+
 fn stage_turn_input(
     coord: &Arc<Mutex<input_queue::TurnInputCoordinator<mpsc::Sender<()>>>>,
     input: input_queue::QueuedInput<mpsc::Sender<()>>,
@@ -4257,13 +4325,18 @@ fn deliver_steering_inputs(
     }
 }
 
+enum ReplWork {
+    Prompt(input_queue::NextTurn<mpsc::Sender<()>>),
+    Compact,
+}
+
 /// Spawn a runner thread for the iocraft REPL path. The runner locks
 /// `LiveCli`, calls `run_turn`, and sends the result via the output
 /// channel. The spinner state is wired so the streaming/tool layers
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    next: input_queue::NextTurn<mpsc::Sender<()>>,
+    work: ReplWork,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
     spinner: render::activity::ActivityState,
@@ -4285,17 +4358,12 @@ fn spawn_iocraft_turn(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
             }
-            match cli.run_turn_iocraft(
-                &next.prompt,
-                &next.echoes,
-                &output,
-                &ui,
-                &spinner,
-                pending_question_answer,
-            ) {
+            match cli.run_turn_iocraft(&work, &output, &ui, &spinner, pending_question_answer) {
                 Ok(true) => {
-                    for receipt in next.receipts {
-                        let _ = receipt.send(());
+                    if let ReplWork::Prompt(next) = work {
+                        for receipt in next.receipts {
+                            let _ = receipt.send(());
+                        }
                     }
                 }
                 Ok(false) => {}
@@ -4410,6 +4478,14 @@ fn run_acp_server(
     } else {
         rt.block_on(engine_acp::acp_stdio_server::run_acp_stdio_server(config))
     }
+}
+
+/// One managed agent for the host that started this process. Its model,
+/// workspace and storage all come from the host's private bootstrap.
+fn run_acp_managed() -> Result<(), Box<dyn std::error::Error>> {
+    let config_home = runtime::default_config_home();
+    runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+    tokio::runtime::Runtime::new()?.block_on(engine_acp::managed_child::run_managed_stdio())
 }
 
 /// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`
@@ -4568,8 +4644,15 @@ struct TurnPresentation<'a> {
     output: Option<&'a repl_ui::OutputSender>,
     ui: Option<&'a repl_ui::UiCommandSender>,
     is_rendered: bool,
-    /// How the host already drew this turn's inputs; saved with the prompt.
-    shown: &'a [engine_events::InputView],
+}
+
+/// A model prompt and context maintenance share the admitted engine driver.
+enum TurnRequest<'a> {
+    Prompt {
+        input: &'a str,
+        shown: &'a [engine_events::InputView],
+    },
+    Compact,
 }
 
 impl LiveCli {
@@ -4847,7 +4930,7 @@ impl LiveCli {
     /// per path).
     fn drive_turn(
         &self,
-        input: &str,
+        request: &TurnRequest<'_>,
         presentation: TurnPresentation<'_>,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
@@ -4858,7 +4941,6 @@ impl LiveCli {
             output,
             ui,
             is_rendered,
-            shown,
         } = presentation;
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -4871,12 +4953,19 @@ impl LiveCli {
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
             is_rendered.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
-        let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
-        self.engine_handle.commands.send(EngineCommand::Prompt {
-            blocks,
-            context: None,
-            shown: shown.iter().map(engine_events::InputView::echo).collect(),
-        })?;
+        let command = match request {
+            TurnRequest::Prompt { input, shown } => EngineCommand::Prompt {
+                blocks: runtime::image_input::prompt_blocks(*input, &runtime::StdFsBackend)?,
+                context: None,
+                shown: shown.iter().map(engine_events::InputView::echo).collect(),
+            },
+            TurnRequest::Compact => EngineCommand::Management {
+                line: "/compact".into(),
+                context: None,
+                build: engine_events::ManagementContext::default(),
+            },
+        };
+        self.engine_handle.commands.send(command)?;
 
         let mut outcome = TurnOutcome::default();
         let mut prompt_replies = Vec::new();
@@ -5132,13 +5221,12 @@ impl LiveCli {
         let cancel_monitor = interactive_cancel
             .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
-            input,
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: None,
                 ui: None,
                 is_rendered: true,
-                shown: &[],
             },
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5282,8 +5370,7 @@ impl LiveCli {
     /// instead of indicatif.
     fn run_turn_iocraft(
         &mut self,
-        input: &str,
-        shown: &[engine_events::InputView],
+        work: &ReplWork,
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
@@ -5291,7 +5378,16 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         ui.begin_turn();
         let turn_start = Instant::now();
-        let token_budget = crate::render::parse_token_budget(input);
+        let (request, token_budget) = match work {
+            ReplWork::Prompt(next) => (
+                TurnRequest::Prompt {
+                    input: &next.prompt,
+                    shown: &next.echoes,
+                },
+                crate::render::parse_token_budget(&next.prompt),
+            ),
+            ReplWork::Compact => (TurnRequest::Compact, None),
+        };
         let model = self.lifecycle.current_model();
 
         // Prepare display metadata before submission. Engine events own the
@@ -5305,13 +5401,12 @@ impl LiveCli {
         let mut permission_prompter = question_prompter.clone();
 
         let outcome = self.drive_turn(
-            input,
+            &request,
             TurnPresentation {
                 spinner_ref: Some(&spinner_ref),
                 output: Some(output),
                 ui: Some(ui),
                 is_rendered: true,
-                shown,
             },
             &mut permission_prompter,
             &mut question_prompter,
@@ -5321,6 +5416,17 @@ impl LiveCli {
         // Explicit cancellation finishes this input. The mailbox sink decides
         // whether the receiver is still running and can acknowledge delivery.
         let is_handled = outcome.complete.is_some();
+        if matches!(work, ReplWork::Compact) {
+            // Maintenance does not create a model turn or reset its statistics.
+            // The management response owns the full result, including message
+            // counts. Failed operations report through Compaction and TurnFailed.
+            if let Some(status) = self.resume_status_line() {
+                ui.set_turn_result(&status, self.lifecycle.usage_snapshot().turns());
+            }
+            self.refresh_completions();
+            ui.set_cache_tip(self.cache_ttl_tip());
+            return Ok(is_handled);
+        }
         match outcome.complete {
             Some(tc) if tc.cancelled => {
                 output.println(&format!(
@@ -5370,13 +5476,12 @@ impl LiveCli {
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
-            input,
+            &TurnRequest::Prompt { input, shown: &[] },
             TurnPresentation {
                 spinner_ref: None,
                 output: None,
                 ui: None,
                 is_rendered: false,
-                shown: &[],
             },
             permission_prompter,
             &mut question_prompter,

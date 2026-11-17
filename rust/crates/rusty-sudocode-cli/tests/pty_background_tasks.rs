@@ -400,12 +400,13 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
         .enumerate()
         .find(|(_, line)| line.contains("1 task still running · turn "))
         .unwrap();
-    let (activity, metadata) = if no_color {
-        ("Default", "Default")
+    let activity = brand_color(background, no_color);
+    let metadata = if no_color {
+        "Default"
     } else if background == "0;15" {
-        ("Rgb(148, 93, 5)", "Rgb(118, 118, 118)")
+        "Rgb(118, 118, 118)"
     } else {
-        ("Rgb(245, 158, 11)", "Rgb(158, 158, 158)")
+        "Rgb(158, 158, 158)"
     };
     // ConPTY may retain the preceding style on invisible separator spaces.
     // Assert every visible metadata glyph, including the separator itself.
@@ -443,6 +444,40 @@ fn assert_background_activity(session: &PtySession, view: &str, background: &str
         assert!(
             !cell.dim() && !cell.bold(),
             "theme spans have normal font weight"
+        );
+    }
+}
+
+/// The theme's brand accent as the PTY reports it, per `COLORFGBG` background.
+fn brand_color(background: &str, no_color: bool) -> &'static str {
+    if no_color {
+        "Default"
+    } else if background == "0;15" {
+        "Rgb(148, 93, 5)"
+    } else {
+        "Rgb(245, 158, 11)"
+    }
+}
+
+/// A running task's status in the list wears the same accent as the status row.
+fn assert_running_row_color(session: &PtySession, background: &str, no_color: bool) {
+    let raw = session.render(|screen| screen.raw().clone());
+    let (row, line) = raw
+        .rows(0, raw.size().1)
+        .enumerate()
+        .find(|(_, line)| line.contains(" · terminal · running"))
+        .expect("the running task is listed");
+    let start =
+        unicode_width::UnicodeWidthStr::width(&line[..line.find(" · running").unwrap()]) + 3;
+    for column in start..start + "running".len() {
+        let cell = raw
+            .cell(row.try_into().unwrap(), column.try_into().unwrap())
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", cell.fgcolor()),
+            brand_color(background, no_color),
+            "running status cell {column} ({:?}) in {line:?}",
+            cell.contents(),
         );
     }
 }
@@ -490,6 +525,7 @@ fn background_status_theme(background: &str, no_color: bool) {
     screen(&session, "k stop");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
+    assert_running_row_color(&session, background, no_color);
     session.send("\x1b").unwrap();
     expect_input_ready(
         &session,

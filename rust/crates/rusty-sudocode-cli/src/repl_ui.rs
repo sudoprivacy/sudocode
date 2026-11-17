@@ -975,9 +975,9 @@ pub enum InputEvent {
 #[inline]
 pub(crate) const fn running_input_controls(has_pending_input: bool) -> &'static str {
     if has_pending_input {
-        "Enter steer · Tab queue · Esc flush · Ctrl+C cancel"
+        "Esc flush · Ctrl+C cancel · Enter steer · Tab queue"
     } else {
-        "Enter steer · Tab queue · Esc/Ctrl+C cancel"
+        "Esc/Ctrl+C cancel · Enter steer · Tab queue"
     }
 }
 
@@ -2148,14 +2148,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    // The keys for the current state follow the workspace position. Only turn
-    // and queue state choose them — never typing — so the footer changes when
+    // Only turn and queue state choose the keys — never typing — so the footer changes when
     // a turn starts or ends, as the rest of the screen does, and keystrokes
     // never redraw it. While queued input exists, Esc flushes it.
     let keys = if turn_active {
         running_input_controls(pending_input)
     } else if pending_input {
-        "Enter send · Esc flush · ↑ edit queued"
+        "Esc flush · Enter send · ↑ edit queued"
     } else if submitted {
         "/help"
     } else {
@@ -2170,6 +2169,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let hints = FooterHints {
             transient: native_hint,
             keys,
+            has_pending_input: pending_input,
         };
         hooks.use_memo(
             || {

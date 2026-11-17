@@ -1,6 +1,6 @@
 //! Slash commands typed while a turn runs. Settings are chosen during the turn
-//! and apply when it ends; commands that need the session are refused by name;
-//! none of them reaches the model.
+//! and apply when it ends; commands that need the session are queued and run
+//! as commands when it ends; none of them reaches the model.
 mod common;
 
 use common::TestEnv;
@@ -103,6 +103,37 @@ fn requests(env: &TestEnv) -> Vec<Value> {
         .collect()
 }
 
+/// The first request that carries `marker`.
+fn request_with(env: &TestEnv, marker: &str) -> Option<String> {
+    requests(env)
+        .into_iter()
+        .map(|body| body.to_string())
+        .find(|body| body.contains(marker))
+}
+
+/// Queue a message behind the held turn with Tab.
+fn queue_message(session: &mut PtySession, env: &TestEnv, marker: &str) {
+    paste(session, env, &env.prompt(marker, "single_turn_text"));
+    session.send("\t").unwrap();
+    common::expect_screen(
+        session,
+        |view| common::input_line_of(view).is_empty() && view.contains(marker),
+        env.timeout(),
+        "the message waits in the queue",
+    );
+}
+
+/// Press Enter on `command` during the turn; it waits in the pending area.
+fn queue_command(session: &mut PtySession, env: &TestEnv, command: &str) {
+    enter(session, env, command);
+    common::expect_screen(
+        session,
+        |view| view.contains(&format!("queued: {command}")),
+        env.timeout(),
+        "the command waits in the queue",
+    );
+}
+
 #[test]
 fn a_model_chosen_during_a_turn_applies_when_the_turn_ends() {
     let (env, mut session, release) = start_held_turn("turn-commands-model");
@@ -118,18 +149,7 @@ fn a_model_chosen_during_a_turn_applies_when_the_turn_ends() {
         "the switch waits for the turn",
     );
     // A message queued behind the turn goes out after the switch.
-    paste(
-        &mut session,
-        &env,
-        &env.prompt("QUEUED_AFTER_SWITCH", "single_turn_text"),
-    );
-    session.send("\t").unwrap();
-    common::expect_screen(
-        &session,
-        |view| common::input_line_of(view).is_empty() && view.contains("QUEUED_AFTER_SWITCH"),
-        env.timeout(),
-        "the message waits in the queue",
-    );
+    queue_message(&mut session, &env, "QUEUED_AFTER_SWITCH");
     let marker = common::turn_status_marker(&session);
     release.now();
     common::expect_turn_complete_after(&session, &marker, env.timeout(), "the held turn ends");
@@ -182,19 +202,11 @@ fn a_model_chosen_during_a_turn_applies_when_the_turn_ends() {
 }
 
 #[test]
-fn a_session_command_during_a_turn_is_refused_by_name_and_help_still_runs() {
-    let (env, mut session, release) = start_held_turn("turn-commands-refused");
-    enter(&mut session, &env, "/compact");
-    let screen = common::expect_screen(
-        &session,
-        |view| view.contains("'/compact' can't run while a turn is running."),
-        env.timeout(),
-        "the refusal names the command",
-    );
-    assert!(
-        !screen.contains("finish or cancel before changing session settings"),
-        "{screen}"
-    );
+fn a_session_command_queued_during_a_turn_runs_between_the_messages_around_it() {
+    let (env, mut session, release) = start_held_turn("turn-commands-queued");
+    queue_message(&mut session, &env, "QUEUED_BEFORE_CLEAR");
+    queue_command(&mut session, &env, "/clear --confirm");
+    queue_message(&mut session, &env, "QUEUED_AFTER_CLEAR");
     // `/help` needs no session, so it answers while the tool is still held.
     // Its last section is the Debug commands.
     enter(&mut session, &env, "/help");
@@ -204,17 +216,163 @@ fn a_session_command_during_a_turn_is_refused_by_name_and_help_still_runs() {
         env.timeout(),
         "help answers during the turn",
     );
-    assert!(!env.workspace_root().join("release-tool").exists());
-    let marker = common::turn_status_marker(&session);
+    let screen = session.render(common::screen_contents);
+    assert!(
+        !screen.contains("Session cleared"),
+        "the command waited for the turn:\n{screen}"
+    );
     release.now();
-    common::expect_turn_complete_after(&session, &marker, env.timeout(), "the held turn ends");
+    common::expect_screen(
+        &session,
+        |_| request_with(&env, "QUEUED_AFTER_CLEAR").is_some(),
+        env.timeout(),
+        "the message queued after the command is sent",
+    );
+    common::expect_screen(
+        &session,
+        |view| view.contains("Session cleared"),
+        env.timeout(),
+        "the command ran",
+    );
+    let before = request_with(&env, "QUEUED_BEFORE_CLEAR").unwrap();
+    let after = request_with(&env, "QUEUED_AFTER_CLEAR").unwrap();
+    assert!(
+        before.contains("held-tool") && !before.contains("QUEUED_AFTER_CLEAR"),
+        "the first message ran alone, in the held session: {before}"
+    );
+    assert!(
+        !after.contains("held-tool") && !after.contains("QUEUED_BEFORE_CLEAR"),
+        "the second message ran in the cleared session: {after}"
+    );
+    assert!(
+        requests(&env).iter().all(|body| {
+            let body = body.to_string();
+            !body.contains("/clear") && !body.contains("/help")
+        }),
+        "no command reaches the model"
+    );
+    finish(session, &env);
+}
+
+/// `/compact` runs as its own foreground work. The message queued after it
+/// must wait for that work to finish, not start beside it.
+#[test]
+fn a_queued_compact_finishes_before_the_message_queued_after_it() {
+    let (env, mut session, release) = start_held_turn("turn-commands-compact");
+    queue_command(&mut session, &env, "/compact");
+    queue_message(&mut session, &env, "QUEUED_AFTER_COMPACT");
+    release.now();
+    common::expect_screen(
+        &session,
+        |_| request_with(&env, "QUEUED_AFTER_COMPACT").is_some(),
+        env.timeout(),
+        "the message queued after /compact is sent",
+    );
+    let screen = common::expect_screen(
+        &session,
+        |view| view.contains("Estimated tokens") && !view.contains("queued: "),
+        env.timeout(),
+        "the compaction report is shown and nothing is left queued",
+    );
+    let report = screen.find("Estimated tokens").unwrap();
+    let message = screen.find("QUEUED_AFTER_COMPACT");
+    assert!(
+        message.is_some_and(|message| message > report),
+        "the message ran after the compaction finished:\n{screen}"
+    );
     assert!(
         requests(&env)
             .iter()
-            .all(|body| !body.to_string().contains("/compact")
-                && !body.to_string().contains("/help")),
-        "no command reaches the model"
+            .all(|body| !body.to_string().contains("/compact")),
+        "the command never reaches the model"
     );
+    finish(session, &env);
+}
+
+#[test]
+fn esc_steers_queued_messages_and_keeps_a_queued_command_for_the_turn_end() {
+    let (env, mut session, release) = start_held_turn("turn-commands-esc");
+    queue_command(&mut session, &env, "/clear --confirm");
+    queue_message(&mut session, &env, "STEERED_BY_ESC");
+    session.send("\x1b").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering: ") && view.contains("queued: /clear --confirm"),
+        env.timeout(),
+        "Esc steers the message and leaves the command queued",
+    );
+    release.now();
+    common::expect_screen(
+        &session,
+        |view| view.contains("Session cleared"),
+        env.timeout(),
+        "the command runs when the turn ends",
+    );
+    let steered = request_with(&env, "STEERED_BY_ESC").unwrap();
+    assert!(
+        steered.contains("held-tool"),
+        "the message joined the running turn: {steered}"
+    );
+    assert!(
+        requests(&env)
+            .iter()
+            .all(|body| !body.to_string().contains("/clear")),
+        "the command is never steered into the turn"
+    );
+    finish(session, &env);
+}
+
+#[test]
+fn up_recalls_a_queued_command_and_it_no_longer_runs() {
+    let (env, mut session, release) = start_held_turn("turn-commands-recall");
+    queue_command(&mut session, &env, "/clear --confirm");
+    session.send("\x1b[A").unwrap();
+    common::expect_screen(
+        &session,
+        |view| {
+            common::input_line_of(view) == "/clear --confirm"
+                && !view.contains("queued: /clear --confirm")
+        },
+        env.timeout(),
+        "↑ brings the command back to the draft",
+    );
+    session.send("\x15").unwrap();
+    // The held turn's spinner keeps the screen moving, so wait on the input
+    // line alone rather than for a settled screen.
+    common::expect_screen(
+        &session,
+        |view| common::input_line_of(view).is_empty(),
+        env.timeout(),
+        "draft dropped",
+    );
+    let marker = common::turn_status_marker(&session);
+    release.now();
+    common::expect_turn_complete_after(&session, &marker, env.timeout(), "the held turn ends");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let screen = session.render(common::screen_contents);
+    assert!(
+        !screen.contains("Session cleared"),
+        "a recalled command does not run:\n{screen}"
+    );
+    finish(session, &env);
+}
+
+#[test]
+fn an_unknown_command_during_a_turn_is_reported_at_once() {
+    let (env, mut session, release) = start_held_turn("turn-commands-unknown");
+    enter(&mut session, &env, "/not-a-command");
+    let screen = common::expect_screen(
+        &session,
+        |view| view.contains("Unknown slash command: /not-a-command"),
+        env.timeout(),
+        "reported while the tool is held",
+    );
+    assert!(
+        !screen.contains("queued: /not-a-command"),
+        "an unknown command is not queued:\n{screen}"
+    );
+    assert!(!env.workspace_root().join("release-tool").exists());
+    release.now();
     finish(session, &env);
 }
 
@@ -252,18 +410,7 @@ fn the_model_picker_opens_during_a_turn_and_esc_leaves_the_turn_running() {
 #[test]
 fn a_picker_open_when_the_turn_ends_stays_and_holds_the_queue() {
     let (env, mut session, release) = start_held_turn("turn-commands-held-queue");
-    paste(
-        &mut session,
-        &env,
-        &env.prompt("QUEUED_BEHIND_PICKER", "single_turn_text"),
-    );
-    session.send("\t").unwrap();
-    common::expect_screen(
-        &session,
-        |view| common::input_line_of(view).is_empty() && view.contains("QUEUED_BEHIND_PICKER"),
-        env.timeout(),
-        "the message waits in the queue",
-    );
+    queue_message(&mut session, &env, "QUEUED_BEHIND_PICKER");
     enter(&mut session, &env, "/model");
     common::expect_screen(
         &session,

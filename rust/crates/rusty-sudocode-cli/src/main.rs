@@ -1000,6 +1000,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ws_port,
             )?;
         }
+        CliAction::AcpManaged => run_acp_managed()?,
         CliAction::CacheStats { output_format } => run_cache_stats(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
@@ -4424,6 +4425,14 @@ fn run_acp_server(
     } else {
         rt.block_on(engine_acp::acp_stdio_server::run_acp_stdio_server(config))
     }
+}
+
+/// One managed agent for the host that started this process. Its model,
+/// workspace and storage all come from the host's private bootstrap.
+fn run_acp_managed() -> Result<(), Box<dyn std::error::Error>> {
+    let config_home = runtime::default_config_home();
+    runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+    tokio::runtime::Runtime::new()?.block_on(engine_acp::managed_child::run_managed_stdio())
 }
 
 /// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`

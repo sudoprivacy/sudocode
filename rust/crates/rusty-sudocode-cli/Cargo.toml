@@ -63,6 +63,8 @@ vte = "0.15"
 workspace = true
 
 [dev-dependencies]
+kernel = { workspace = true }
+managed-agent = { workspace = true }
 scode-test-support.workspace = true
 flate2 = "1"
 futures-util = "0.3"

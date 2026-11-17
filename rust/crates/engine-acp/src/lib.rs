@@ -15,6 +15,7 @@ mod input_control;
 pub mod managed;
 #[cfg(feature = "mailbox")]
 pub mod managed_agent;
+pub mod managed_child;
 /// scode `peerInput` version 3: offers, acknowledgement tokens and windows.
 pub mod peer_offer;
 mod session_driver;

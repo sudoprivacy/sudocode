@@ -18,6 +18,7 @@ use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
     user_ctx, wait_for_agent_reply,
 };
+use kernel::core::agents::host_cleanup::HostCleanupOutcome;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
@@ -745,13 +746,43 @@ fn wait_idle(kernel: &Kernel, pid: &serde_json::Value) {
     }
 }
 
+/// Cancel is a stop request: the original host keeps custody until its own
+/// teardown has joined, and the service reports the session as `stopping`
+/// meanwhile. Wait for the retirement the host publishes. Any other error is a
+/// failed stop, never a retirement.
 fn stop_session(kernel: &Kernel, pid: &serde_json::Value) {
-    managed_call(
+    let cancelled = managed_call(
         kernel,
         "cancel_v1",
         &serde_json::json!({"session_id":pid,"mode":"session"}),
     )
-    .unwrap();
+    .expect("cancel of a hosted session is accepted");
+    assert_eq!(
+        cancelled["cancelled"], true,
+        "cancel reached the session: {cancelled}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_mins(1);
+    loop {
+        match managed_call(
+            kernel,
+            "get_session_v1",
+            &serde_json::json!({"session_id":pid}),
+        ) {
+            Ok(state) if state["state"] == "terminated" => return,
+            Ok(state) => assert_eq!(
+                state["state"], "stopping",
+                "a cancelled session reports its stop: {state}"
+            ),
+            // Retirement released the pid.
+            Err(error) if error.contains("unknown session_id") => return,
+            Err(error) => panic!("the stop failed instead of retiring: {error}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled host did not retire"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn await_new_reply(
@@ -1157,10 +1188,16 @@ fn a_cohost_that_closes_cleanly_is_terminated() {
         states.observer(),
     )
     .expect("spawn the co-host");
+    let cleanup = handle.cleanup.clone();
     complete_turn_then_stop(&world, agent_id, handle);
     assert!(
         states.terminated_within(Duration::from_secs(30)),
         "a confirmed teardown publishes Terminated"
+    );
+    assert_eq!(
+        cleanup.outcome(),
+        HostCleanupOutcome::Joined,
+        "the registry's latch accepted the joined teardown before Terminated"
     );
 }
 
@@ -1196,6 +1233,7 @@ fn a_cohost_whose_engine_is_stuck_in_a_tool_is_not_terminated() {
     entered
         .recv_timeout(Duration::from_mins(1))
         .expect("the agent's read tool reached the held read");
+    let cleanup = handle.cleanup.clone();
     handle.abort_signal.abort();
     let _ = handle.join.join();
     // Engine reap, bridge stop and completion retirement wait 30 s each.
@@ -1203,12 +1241,22 @@ fn a_cohost_whose_engine_is_stuck_in_a_tool_is_not_terminated() {
         !states.terminated_within(Duration::from_secs(120)),
         "a host whose engine is still inside a tool must not be reported terminated"
     );
+    assert!(
+        matches!(cleanup.outcome(), HostCleanupOutcome::Unconfirmed(_)),
+        "the host completed the registry's latch as unconfirmed: {:?}",
+        cleanup.outcome()
+    );
     // Had the outcome still been pending, the release would now let teardown
     // confirm; the latched unconfirmed result must stay.
     drop(release);
     assert!(
         !states.terminated_within(Duration::from_secs(20)),
         "a late release must not turn an unconfirmed teardown into Terminated"
+    );
+    assert!(
+        matches!(cleanup.outcome(), HostCleanupOutcome::Unconfirmed(_)),
+        "a late release must not turn the latch into joined: {:?}",
+        cleanup.outcome()
     );
 }
 
@@ -1243,9 +1291,117 @@ fn a_cohost_whose_session_lease_was_broken_is_not_terminated() {
         .clone()
         .expect("a write into the session ran while the host held its lease");
     eprintln!("[test] broke the session lease {lease}");
+    let cleanup = handle.cleanup.clone();
     complete_turn_then_stop(&world, agent_id, handle);
     assert!(
         !states.terminated_within(Duration::from_secs(30)),
         "a host that could not release its lease must not be reported terminated"
     );
+    assert!(
+        matches!(&cleanup.outcome(), HostCleanupOutcome::Unconfirmed(error) if error.contains(&lease)),
+        "the latch carries the failed release of {lease}: {:?}",
+        cleanup.outcome()
+    );
+}
+
+/// One field of this process's `/proc/self/status`, in KiB (Linux only).
+fn self_status_kib(field: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .expect("read the process status")
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no {field}"))
+}
+
+fn millis(samples: &mut [f64]) -> serde_json::Value {
+    samples.sort_by(f64::total_cmp);
+    let at = |percent: usize| samples[(samples.len() - 1) * percent / 100];
+    json!({"p50": at(50), "p95": at(95), "max": at(100)})
+}
+
+/// The co-host route's cost: agents hosted in one process on one kernel,
+/// through the production adapter. Memory per agent is this process's growth
+/// over its own baseline. Prints one `MEASURE` JSON line; the harness runs it
+/// with release builds.
+#[test]
+#[ignore = "measurement; run by the cost-measurement harness"]
+fn measure_cohost_cost() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let harness = harness();
+    let kernel = Arc::new(Kernel::new());
+    mount_agent_world(&kernel);
+    let _model = common::mount_model(
+        &kernel,
+        "anthropic",
+        &harness.service.base_url(),
+        "test-cohost-key",
+    );
+    let user_fs = test_agent_fs(&kernel, USER, "/");
+    let baseline = self_status_kib("VmRSS:");
+    let (mut to_ready, mut to_session) = (Vec::new(), Vec::new());
+    let mut hosts = Vec::new();
+    let mut points = Vec::new();
+    for n in 1..=8 {
+        let pid = format!("pid-measure-{n}");
+        let agent = format!("measure-agent-{n}");
+        user_fs.create_dir_all(&agent_workspace(&pid)).unwrap();
+        let ready_at = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&ready_at);
+        let started = Instant::now();
+        let host = spawn_managed_agent(
+            Arc::clone(&kernel),
+            make_desc(&pid, &agent, MODEL),
+            move |state, _| {
+                if state == AgentState::Ready {
+                    seen.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert_with(Instant::now);
+                }
+            },
+        )
+        .expect("spawn a measured co-host agent");
+        to_session.push(started.elapsed().as_secs_f64() * 1000.0);
+        let became_ready = ready_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .expect("the host reported Ready");
+        to_ready.push(became_ready.duration_since(started).as_secs_f64() * 1000.0);
+        hosts.push(host);
+        if [1, 4, 8].contains(&n) {
+            points.push(json!({"agents": n,
+                "process_rss_kib": self_status_kib("VmRSS:"),
+                "process_hwm_kib": self_status_kib("VmHWM:")}));
+        }
+    }
+    let fs = test_agent_fs(
+        &kernel,
+        "measure-agent-1",
+        &agent_workspace("pid-measure-1"),
+    );
+    let file = format!("{}/latency.bin", agent_workspace("pid-measure-1"));
+    let payload = vec![7_u8; 1024];
+    let (mut writes, mut reads, mut stats) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..200 {
+        let op = Instant::now();
+        fs.write(&file, &payload).unwrap();
+        writes.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        assert_eq!(fs.read(&file).unwrap().len(), 1024);
+        reads.push(op.elapsed().as_secs_f64() * 1000.0);
+        let op = Instant::now();
+        fs.stat(&file).unwrap();
+        stats.push(op.elapsed().as_secs_f64() * 1000.0);
+    }
+    println!(
+        "MEASURE {}",
+        json!({"route": "cohost", "process_baseline_rss_kib": baseline, "points": points,
+            "ready_ms": millis(&mut to_ready), "session_new_ms": millis(&mut to_session),
+            "write_1k_ms": millis(&mut writes), "read_1k_ms": millis(&mut reads),
+            "stat_ms": millis(&mut stats)})
+    );
+    for host in hosts {
+        host.abort_signal.abort();
+        let _ = host.join.join();
+    }
 }

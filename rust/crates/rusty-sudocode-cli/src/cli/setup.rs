@@ -195,11 +195,15 @@ pub(crate) fn run(
                 } else if name != derived {
                     // A configured name may come from the repository or be inherited
                     // from the user's settings by every unconfigured workspace.
+                    let source = engine_host::agent_name_source(&cwd).map_or_else(
+                        || "its settings".to_string(),
+                        |path| path.display().to_string(),
+                    );
                     Err(format!(
-                        "this workspace answers to '{name}' from configuration, not from its \
-                         own path, and scode does not claim a configured name. Ask the node \
-                         owner to mint '{name}', or remove `agentName` so this workspace joins \
-                         as '{derived}'"
+                        "this workspace answers to '{name}' from {source}, not from its own \
+                         path, and scode does not claim a configured name. Ask the node owner \
+                         to mint '{name}', or remove `agentName` from {source} so this \
+                         workspace joins as '{derived}'"
                     ))
                 } else {
                     enroll(&record, &name, owner_root.as_deref())

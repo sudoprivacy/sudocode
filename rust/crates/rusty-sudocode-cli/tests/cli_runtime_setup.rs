@@ -232,7 +232,8 @@ fn shared_setup_never_claims_an_inherited_or_configured_name() {
     assert!(
         error.contains("does not claim a configured name")
             && error.contains("Ask the node owner to mint 'inherited-home-name'")
-            && error.contains("remove `agentName`"),
+            && error.contains("remove `agentName` from")
+            && error.contains("settings.json"),
         "{error}"
     );
     assert!(!root.path().join("existing-agents").exists());

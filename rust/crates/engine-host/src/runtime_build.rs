@@ -266,8 +266,18 @@ pub fn agent_name_under(root: &Path) -> String {
     // native analog of nexus minting the name at auth. Best-effort: if the
     // write fails we still return the derived name for this boot.
     let minted = runtime::mailbox::local_agent_name(None, root);
-    let _ = loader.set_agent_name(&minted);
+    // In the home directory the project settings are the user's settings;
+    // saving the name there would hand it to every unconfigured workspace.
+    if !is_home(root) {
+        let _ = loader.set_agent_name(&minted);
+    }
     minted
+}
+
+fn is_home(path: &Path) -> bool {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    runtime::user_paths::home_dir().is_some_and(|home| canonical(&home) == canonical(path))
 }
 
 /// Only the identity derived from this workspace's own path joins a node
@@ -275,10 +285,27 @@ pub fn agent_name_under(root: &Path) -> String {
 /// and the home directory's settings are every unconfigured workspace's
 /// defaults, so neither is claimed automatically.
 fn joins_automatically(agent_name: &str, cwd: &Path) -> bool {
-    let canonical =
-        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    agent_name == runtime::mailbox::local_agent_name(None, cwd)
-        && runtime::user_paths::home_dir().is_none_or(|home| canonical(&home) != canonical(cwd))
+    agent_name == runtime::mailbox::local_agent_name(None, cwd) && !is_home(cwd)
+}
+
+/// The settings file whose `agentName` the workspace under `root` answers to.
+#[must_use]
+pub fn agent_name_source(root: &Path) -> Option<PathBuf> {
+    ConfigLoader::default_for(root)
+        .discover()
+        .into_iter()
+        .rev()
+        .find(|entry| {
+            std::fs::read(&entry.path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|settings| {
+                    settings["agentName"]
+                        .as_str()
+                        .is_some_and(|name| !name.trim().is_empty())
+                })
+        })
+        .map(|entry| entry.path)
 }
 
 /// The name [`agent_name_under`] would answer to, without persisting it.
@@ -917,7 +944,7 @@ mod join_tests {
         let workspace = tempfile::tempdir().unwrap();
         let derived = runtime::mailbox::local_agent_name(None, workspace.path());
         assert!(joins_automatically(&derived, workspace.path()));
-        // A configured name, including one a repository ships, needs `scode setup`.
+        // A configured name, including one a repository ships, is never claimed.
         assert!(!joins_automatically("reviewer", workspace.path()));
         let elsewhere = tempfile::tempdir().unwrap();
         assert!(!joins_automatically(&derived, elsewhere.path()));

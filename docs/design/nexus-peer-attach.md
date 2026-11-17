@@ -75,7 +75,9 @@ settings, and the home directory are never claimed by scode. A name already
 claimed elsewhere is refused by Nexus. The credential is accepted only with the
 Node's online receipt and a manifest naming that Agent; anything else the
 attempt wrote is moved to `.unconfirmed-<name>-<time>` and never used, and the
-error names the Node's `auth list` check for restoring it. Any other node, a
+error names the Node's `auth list` check for the node owner. While an issuance
+runs, a `.joining-<name>` marker beside the bundle keeps every session from
+using it; the next attempt sets aside what an interrupted issuance wrote. Any other node, a
 stopped Box or a refusal leaves the binding pending with that cause, the
 outcome of the join, and the recovery.
 

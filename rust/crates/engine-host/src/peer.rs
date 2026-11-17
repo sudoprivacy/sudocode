@@ -93,13 +93,21 @@ impl NodeBinding {
             .join_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let missing = runtime::nexus_mailbox::NodeRecord::load()
+        // One attempt per process, whether or not it turns out to be needed,
+        // so status polling never starts another.
+        if self.join_attempted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // A missing bundle, or one an interrupted issuance left unconfirmed.
+        let needed = runtime::nexus_mailbox::NodeRecord::load()
             .ok()
             .flatten()
             .is_some_and(|record| {
-                !runtime::nexus_mailbox::credential_present(record.agents_dir(), &self.agent)
+                let agents = record.agents_dir();
+                !runtime::nexus_mailbox::credential_present(agents, &self.agent)
+                    || runtime::nexus_mailbox::joining_marker(agents, &self.agent).exists()
             });
-        if !missing || self.join_attempted.swap(true, Ordering::AcqRel) {
+        if !needed {
             return;
         }
         if let Err(reason) = enroll(&self.agent) {
@@ -278,8 +286,8 @@ pub fn set_enroller(enroller: Enroller) {
 }
 
 /// Mark `agent` as a session's own workspace-derived identity, which the
-/// registered enroller may issue when it attaches. A configured `agentName` is
-/// an explicit choice and joins only through `scode setup`.
+/// registered enroller may issue when it attaches. scode never claims a
+/// configured `agentName`; the node owner mints those.
 pub fn allow_join(agent: &str) {
     JOINABLE
         .get_or_init(Mutex::default)

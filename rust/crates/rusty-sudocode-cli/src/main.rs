@@ -3139,11 +3139,17 @@ fn a2a_health_tip(
     let priority = engine_core::TipPriority::Important;
     let what = match health.failing.as_slice() {
         [] if health.level == "fail"
+            && binding_error
+                .is_some_and(|error| error.contains(runtime::nexus_mailbox::JOINING_CAUSE)) =>
+        {
+            "joining this machine's node".to_string()
+        }
+        [] if health.level == "fail"
             && binding_error.is_some_and(|error| {
                 error.contains(runtime::nexus_mailbox::MISSING_CREDENTIAL_CAUSE)
             }) =>
         {
-            "not joined; run `scode setup --mode shared` here".to_string()
+            "not joined; /status says how".to_string()
         }
         [] if health.level == "fail" => "node binding unusable".to_string(),
         [] => "receiving not yet recovered".to_string(),

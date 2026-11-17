@@ -57,6 +57,40 @@ pub fn credential_present(agents_dir: &Path, agent: &str) -> bool {
 /// classify a binding error.
 pub const MISSING_CREDENTIAL_CAUSE: &str = "has no credential for agent";
 
+/// The words a binding error carries while this machine's Box is still
+/// confirming an Agent's credential.
+pub const JOINING_CAUSE: &str = "is still confirming the credential for agent";
+
+/// An issuance older than this marker never finished confirming.
+const JOIN_MARKER_STALE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// `<agents_dir>/.joining-<agent>`: written by the local Box owner for the
+/// whole of an issuance, so no session uses a bundle before it is confirmed.
+/// The service-host enrollment writes and removes the same name.
+#[must_use]
+pub fn joining_marker(agents_dir: &Path, agent: &str) -> PathBuf {
+    agents_dir.join(format!(".joining-{agent}"))
+}
+
+/// Refuse a bundle whose issuance is unconfirmed: in progress, or interrupted.
+fn unconfirmed_issuance(agents_dir: &Path, agent: &str) -> Option<String> {
+    let modified = std::fs::metadata(joining_marker(agents_dir, agent))
+        .ok()?
+        .modified()
+        .ok();
+    let stale = modified
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age > JOIN_MARKER_STALE);
+    Some(if stale {
+        format!(
+            "an earlier join for agent '{agent}' did not finish confirming its credential, \
+             so it is not used. Run `scode setup --mode shared` in this workspace to check it"
+        )
+    } else {
+        format!("this machine's node {JOINING_CAUSE} '{agent}'; A2A starts when it finishes")
+    })
+}
+
 /// The cause and the recovery for an Agent the node has not issued yet. One
 /// text for tool results, `/status` and `scode setup --check`.
 #[must_use]
@@ -246,6 +280,9 @@ impl Config {
         };
         let agents_dir = Path::new(&record.agents_dir);
         let bundle = agents_dir.join(agent);
+        if let Some(unconfirmed) = unconfirmed_issuance(agents_dir, agent) {
+            return Err(unconfirmed);
+        }
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
             return Err(missing_credential(agent, &bundle));
         }
@@ -293,6 +330,36 @@ mod tests {
     // transport that did moved to `crate::mailbox`. These tests stay because
     // they pin the WIRE FORMAT, which both transports share.
     use crate::agent_mailbox::MailboxEnvelope;
+
+    #[test]
+    fn an_unconfirmed_issuance_is_never_used() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let agents = std::env::temp_dir().join(format!("scode-join-marker-{nanos}"));
+        std::fs::create_dir_all(&agents).unwrap();
+        assert_eq!(unconfirmed_issuance(&agents, "worker"), None);
+        let marker = joining_marker(&agents, "worker");
+        std::fs::write(&marker, "0").unwrap();
+        let joining = unconfirmed_issuance(&agents, "worker").unwrap();
+        assert!(joining.contains(JOINING_CAUSE), "{joining}");
+        // Another Agent's issuance does not block this one.
+        assert_eq!(unconfirmed_issuance(&agents, "other"), None);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - JOIN_MARKER_STALE * 2)
+            .unwrap();
+        let interrupted = unconfirmed_issuance(&agents, "worker").unwrap();
+        assert!(
+            interrupted.contains("did not finish")
+                && interrupted.contains("scode setup --mode shared"),
+            "{interrupted}"
+        );
+        let _ = std::fs::remove_dir_all(&agents);
+    }
 
     /// Write a minimal minted-bundle dir (manifest + three PEM files) and return
     /// its path - the shape `nexusd-cluster auth mint` produces.

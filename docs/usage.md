@@ -83,14 +83,9 @@ workspace folder name plus a short hash of its path. For a long-lived role, set
 a readable `agentName` when the agent is first created. Renaming an existing
 agent gives it a new identity and leaves its conversations under the old name.
 
-Runtime discovery is separate from these stored descriptions. `agent_list`
-adds one `runtime` row per observed instance, including foreground
-state, a permission/question waiting reason and independent background task
-counts. Several instances can share an Agent name or session ID. Unsupported,
-stale or unreachable observations remain unknown; an empty list is conclusive
-only within its reported discovery coverage. `active_only` retains positively
-online instances and running subagent tasks. See the shared
-[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+Liveness is separate from these stored descriptions. Each `agent_list` row
+carries one `active` bit: a peer seen online in the zone, or a running subagent
+task. `active_only` keeps those rows. `active: false` means not seen online.
 
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest

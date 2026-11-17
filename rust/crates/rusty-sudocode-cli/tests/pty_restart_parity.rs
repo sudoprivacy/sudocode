@@ -119,18 +119,23 @@ fn a_conversation_looks_the_same_after_a_restart() {
         COLUMNS,
     );
     sess.expect("❯").expect("input ready");
+    // The editor empties when a turn is submitted, long before it ends, and
+    // the running turn's spinner is not part of the transcript. Wait for each
+    // turn's completed status, as a slower host otherwise snapshots the
+    // spinner row too.
+    let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{first} ")).unwrap();
     sess.send("\u{1b}[200~alpha line\nbeta line\ngamma line\u{1b}[201~")
         .unwrap();
     wait_for(&sess, "[Pasted text #1");
     sess.send(" thanks\r").unwrap();
-    wait_for(&sess, "gamma line");
-    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "first turn done");
+    common::expect_turn_complete_after(&sess, &marker, common::DEFAULT_TIMEOUT, "first turn done");
 
+    let marker = common::turn_status_marker(&sess);
     let second = env.prompt("Make a todo list.", "todo_write_roundtrip");
     sess.send(&format!("{second}\r")).unwrap();
+    common::expect_turn_complete_after(&sess, &marker, common::DEFAULT_TIMEOUT, "second turn done");
     wait_for(&sess, "todo_write roundtrip complete");
-    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "second turn done");
     let live = transcript(&sess, "Read this paste:");
     sess.send("/exit\r").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);

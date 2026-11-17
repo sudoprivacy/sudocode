@@ -616,3 +616,88 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
         common::terminal_host::assert_success(&output);
     }
 }
+
+/// Prose wraps between words and hangs under its own text: a paragraph's rows
+/// under the response text, a list item's under its first word, a quote's
+/// under the quoted text. Only a word wider than a row is split. The live
+/// preview already shows exactly the rows history keeps.
+#[test]
+fn prose_wraps_between_words_with_hanging_indents() {
+    const WORDS: &str = "alpha bravo charlie delta foxtrot hotel india juliet kilo lima oscar papa quebec romeo sierra tango";
+    const COLS: u16 = 48;
+    let overlong = "0123456789".repeat(6);
+    let document = format!(
+        "ProseStart {WORDS} {WORDS}\n\n- {WORDS} {WORDS}\n\n> {WORDS} {WORDS}\n\nwide {overlong} ProseDone."
+    );
+    let env = TestEnv::new_mock("prose-word-wrap");
+    let mut session = start(&env, COLS);
+    let marker = common::turn_status_marker(&session);
+    session
+        .send(&format!("{}\r", gated_prompt(&env, &document)))
+        .unwrap();
+    common::expect_screen(
+        &session,
+        |s| {
+            s.split_whitespace()
+                .collect::<String>()
+                .contains("ProseDone.")
+                && env.workspace_root().join("prose-ready").exists()
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete source visible before EOF",
+    );
+    let before = body_rows(&session);
+    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+    expect_finalized_with_draft(&session, &marker, "");
+    let rows: Vec<String> = body_rows(&session)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    assert_eq!(
+        before.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+        rows,
+        "the preview shows the rows history keeps"
+    );
+    let dump = rows.join("\n");
+    let vocabulary: Vec<&str> = WORDS.split(' ').collect();
+    for token in rows.iter().flat_map(|row| row.split_whitespace()) {
+        assert!(
+            vocabulary.contains(&token)
+                || ["•", ">", "ProseStart", "wide", "ProseDone."].contains(&token)
+                || (overlong.contains(token) && token.bytes().all(|b| b.is_ascii_digit())),
+            "{token:?} is part of a word split across rows:\n{dump}"
+        );
+    }
+    assert!(
+        !rows.iter().any(|row| row.contains(&overlong)),
+        "a word wider than a row is still split:\n{dump}"
+    );
+    for row in &rows {
+        assert!(
+            row.trim_end().chars().count() <= usize::from(COLS),
+            "{dump}"
+        );
+    }
+    // Each block's continuation rows start where its first row's text starts.
+    for block in rows.split(|row| row.trim().is_empty()) {
+        let Some((first, rest)) = block.split_first() else {
+            continue;
+        };
+        if first.contains("wide") || rest.is_empty() {
+            continue;
+        }
+        // Columns, not bytes: the `•` lead is one column wide.
+        let text_col = first
+            .chars()
+            .position(|c| c.is_ascii_alphabetic())
+            .expect("block text");
+        for row in rest {
+            assert_eq!(
+                row.chars().position(|c| !c.is_whitespace()),
+                Some(text_col),
+                "continuation rows hang under the text:\n{dump}"
+            );
+        }
+    }
+    finish(&mut session);
+}

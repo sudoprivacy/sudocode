@@ -22,6 +22,139 @@ def load(name, path):
     return module
 
 
+def fixture_tool_preparation_code(ci):
+    """Use the actual scoped workflow program, not a second preparation path."""
+    name = "      - name: Prepare trusted tools for the native artifact fixture\n"
+    assert ci.count(name) == 1, "Standalone artifact fixtures need trusted tool preparation"
+    step = ci.split(name, 1)[1].split("      - ", 1)[0]
+    fixture_name = "      - name: Exercise native artifact gates and publication refusal paths\n"
+    assert ci.index(name) < ci.index(fixture_name)
+    fixture = ci.split(fixture_name, 1)[1].split("      - ", 1)[0]
+    condition = "        if: github.event_name == 'pull_request' && steps.scope.outputs.release_artifact_required == 'true'\n"
+    assert condition in step and condition in fixture
+    assert "          GH_TOKEN: ${{ github.token }}\n" in step
+    assert "          TRUSTED_TOOL_REF: ${{ github.event.pull_request.base.sha }}\n" in step
+    assert "GH_TOKEN" not in fixture and "GITHUB_TOKEN" not in fixture
+    body = step.split("        run: |\n", 1)[1]
+    code = "\n".join(line[10:] for line in body.splitlines()) + "\n"
+    ast.parse(code)
+    return code
+
+
+def trusted_fixture_tool_preparation(directory, execute):
+    """Exercise real Git reads, trusted native children and credential refusal."""
+    if any(key.upper() in {"GH_TOKEN", "GITHUB_TOKEN"} for key in os.environ):
+        raise RuntimeError("The candidate artifact fixture must not inherit GitHub credentials")
+    directory.mkdir()
+    # Retain the existing long evidence-path control without asking Git/MSVC
+    # to create their private programs or object names beyond MAX_PATH.
+    workspace = Path(tempfile.mkdtemp(prefix="scode-fixture-tools-")) if os.name == "nt" else directory
+    root = workspace / "project"
+    root.mkdir()
+
+    def git(*arguments):
+        log = directory / f"git-{len(list(directory.glob('git-*.log'))):03d}.log"
+        execute(["git", *arguments], root, log)
+        return log.read_text(encoding="utf-8").strip()
+
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Trusted tool source fixture")
+    git("config", "user.email", "trusted-tools@example.invalid")
+    source = root / ".github/local-acceptance"
+    source.mkdir(parents=True)
+    trusted = '''import json, os
+from pathlib import Path
+assert os.environ.get('GH_TOKEN') == 'SYNTHETIC_TOOL_PREPARATION_TOKEN'
+assert not any(key.upper() == 'GITHUB_TOKEN' for key in os.environ)
+assert Path(__file__).with_name('checks.py').read_text() == 'protected checks\\n'
+assert Path(__file__).with_name('compiler_cache.py').read_text() == 'protected compiler cache\\n'
+Path(os.environ['TRUSTED_PREPARATION_PROOF']).write_text(json.dumps({'trusted': True, 'checks': os.environ['ACCEPTANCE_NATIVE_CHECKS']}))
+'''
+    (source / "prepare_tools.py").write_text(trusted, encoding="utf-8")
+    (source / "checks.py").write_text("protected checks\n", encoding="utf-8")
+    (source / "compiler_cache.py").write_text("protected compiler cache\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-m", "Protected tool source")
+    base = git("rev-parse", "HEAD")
+    (source / "prepare_tools.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['CANDIDATE_PREPARATION_MARKER']).write_text('candidate was executed')\n"
+        "raise SystemExit(97)\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-m", "Candidate tool code must not receive credentials")
+    before = {name: (root / ".git" / name).read_bytes() for name in ["HEAD", "index", "config"]}
+    real_git = shutil.which("git")
+    assert real_git
+    proxy = workspace / "proxy"
+    proxy.mkdir()
+    proxy_source = proxy / "main.rs"
+    proxy_source.write_text('''use std::io::Write;
+fn main() {
+    let leaked = std::env::vars_os().any(|(name, _)| matches!(name.to_string_lossy().to_ascii_uppercase().as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(std::env::var_os("TOOL_PREPARATION_GIT_LOG").unwrap()).unwrap();
+    writeln!(log, "{}", if leaked { "credential" } else { "clean" }).unwrap();
+    let status = std::process::Command::new(std::env::var_os("TOOL_PREPARATION_REAL_GIT").unwrap()).args(std::env::args_os().skip(1)).status().unwrap();
+    std::process::exit(status.code().unwrap_or(125));
+}
+''', encoding="utf-8")
+    proxy_binary = proxy / ("git.exe" if os.name == "nt" else "git")
+    execute(["rustc", "--edition=2021", str(proxy_source), "-o", str(proxy_binary)],
+            proxy, directory / "proxy-build.log")
+    code = fixture_tool_preparation_code((SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8"))
+
+    def invoke(name, program):
+        case = directory / name
+        case.mkdir()
+        scratch = workspace / name
+        if scratch != case:
+            scratch.mkdir()
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.upper().startswith("GIT_")}
+        environment.update(
+            GH_TOKEN="SYNTHETIC_TOOL_PREPARATION_TOKEN", GITHUB_TOKEN="SYNTHETIC_OTHER_TOKEN",
+            TRUSTED_TOOL_REF=base, GITHUB_WORKSPACE=str(root), RUNNER_TEMP=str(scratch),
+            ACCEPTANCE_NATIVE_CHECKS="native-release", ACCEPTANCE_OUTPUT=str(case / "tools"),
+            TRUSTED_PREPARATION_PROOF=str(case / "proof.json"),
+            CANDIDATE_PREPARATION_MARKER=str(case / "candidate-marker"),
+            TOOL_PREPARATION_REAL_GIT=real_git, TOOL_PREPARATION_GIT_LOG=str(case / "git-credentials.txt"),
+            GIT_DIR=str(case / "unrelated-git-directory"),
+            PATH=str(proxy) + os.pathsep + os.environ["PATH"])
+        result = subprocess.run([sys.executable, "-I", "-c", program], cwd=root, env=environment,
+                                capture_output=True, timeout=60)
+        (case / "stdout.log").write_bytes(result.stdout)
+        (case / "stderr.log").write_bytes(result.stderr)
+        return case, result
+
+    def require_trusted(case, result):
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert not (case / "candidate-marker").exists(), "Candidate tool source was executed"
+        assert json.loads((case / "proof.json").read_bytes()) == {"trusted": True, "checks": "native-release"}
+        assert (case / "git-credentials.txt").read_text().splitlines() == ["clean"] * 3, "Credential reached Git object reads"
+
+    case, result = invoke("protected-base", code)
+    require_trusted(case, result)
+    wrong_base = code.replace("reference + ':' + relative", "'HEAD:' + relative")
+    assert wrong_base != code
+    case, result = invoke("candidate-source-mutant", wrong_base)
+    assert result.returncode == 97 and (case / "candidate-marker").is_file()
+    cleanup = "token = os.environ.pop('GH_TOKEN')\nfor key in list(os.environ):\n    if key.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'}:\n        del os.environ[key]"
+    assert code.count(cleanup) == 1
+    leaky = code.replace(cleanup, "token = os.environ['GH_TOKEN']\nfor key in list(os.environ):\n    if key.upper() == 'GITHUB_TOKEN':\n        del os.environ[key]")
+    case, result = invoke("credential-leak-mutant", leaky)
+    try:
+        require_trusted(case, result)
+    except AssertionError as error:
+        assert str(error) == "Credential reached Git object reads"
+    else:
+        raise AssertionError("Missing credential cleanup was not detected")
+    assert (case / "git-credentials.txt").read_text().splitlines() == ["credential"] * 3
+    assert all((root / ".git" / name).read_bytes() == value for name, value in before.items())
+    return {"status": "PASS", "base": base, "actual_workflow_program_sha256": hashlib.sha256(code.encode()).hexdigest(),
+            "controls": ["protected-base", "candidate-source-mutant", "credential-leak-mutant"],
+            "private_program_directory_retained": str(workspace),
+            "scope": "Real private Git/native-process provenance and credential controls; synthetic tokens only. No network, official-tool download or product acceptance."}
+
+
 def workflow_contract():
     """Refuse unfamiliar job/step layouts instead of guessing about publication order."""
     workflow = (SOURCE / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -56,6 +189,7 @@ def workflow_contract():
     assert "github.event_name == 'pull_request'" in fixture
     assert "steps.scope.outputs.release_artifact_required == 'true'" in fixture
     assert "python3 e2e/local-acceptance/release_artifact_acceptance.py --output" in fixture
+    fixture_tool_preparation_code(ci)
     return observed
 
 
@@ -132,6 +266,7 @@ def run(output):
         return execute(arguments, root, output / f"{len(commands):03d}.log", extra)
 
     compiler_environment = windows_compiler_environment(output, execute)
+    tool_preparation = trusted_fixture_tool_preparation(output / "trusted-tool-preparation", execute)
 
     def write(relative, contents):
         path = root / relative
@@ -255,6 +390,7 @@ if os.environ.get('FIXTURE_FAIL_CONTEXT'): raise SystemExit(17)
     record = {"status": "PASS", "controls": results, "commands": commands,
               "cargo_target_directory": str(target), "binary_sha256": original,
               "windows_compiler_environment": compiler_environment,
+              "trusted_tool_preparation": tool_preparation,
               "real_ci_input_scope": scope_controls,
               "workflow_gate_before_packaging": workflow_contract(),
               "scope": "Real Git/Cargo/native entrypoint controls, not product performance or provider coverage."}

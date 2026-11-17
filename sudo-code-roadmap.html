@@ -508,6 +508,15 @@ network disabled before starting either full matrix. Missing offline inputs fail
 during preparation. The compiler tool is also provisioned and corruption-checked
 in that image, then verified offline before the matrices; isolated homes retain
 only verified public tools.</p>
+<p><strong>Standalone release-artifact fixture prerequisites (2026-11-18).</strong>
+CI preflight prepares matching pinned tools through the existing authenticated
+preparer before the artifact fixture runs. Only its three protected-base tool
+files are read into a private temporary directory; no second full checkout is
+added. Git object reads and candidate tests receive no API credential. Real
+Git/native-process controls reject candidate-source substitution and leaked
+credentials. This addresses the observed cold sccache metadata HTTP 403 in the
+fixture entry; it does not change tool pins, release assertions, deadlines or
+product coverage, and does not establish a live quota or latency saving.</p>
 <p>The guard image explicitly selects one compiler job through the executor's
 supported cap and checks that setting at entry. Its two-CPU, 2 GiB and 256-PID
 limits are retained. A compiled canary checks the effective Cargo job count

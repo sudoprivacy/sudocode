@@ -1320,6 +1320,15 @@ candidate subprocess isolation and refusal of a case-sensitive cleanup that leak
 explicit lowercase or mixed-case overrides. These controls
 establish credential transport behavior; they do not measure live GitHub quota.
 
+The standalone release-artifact fixture in CI preflight also prepares its pinned
+tools before running. It reads only `prepare_tools.py`, `checks.py` and
+`compiler_cache.py` from the immutable protected PR base into a private temporary
+directory. Git object reads and the later candidate fixture receive no token;
+only the isolated trusted preparation process receives the step's read-only
+credential. The same real Git/native-process fixture rejects candidate-source
+substitution and missing credential cleanup. Tool pins, the release entrypoint,
+publication refusals and the original artifact assertions remain unchanged.
+
 #### Acceptance contract changes
 
 For ordinary frozen source with complementary native hosts, the protected

@@ -209,6 +209,23 @@ time. The required command prints this split. A real Git/Cargo/native-process
 guard verifies feature compilation, dev execution and refusal of a missing stamp;
 it adds no product journey coverage.
 
+A follow-up push to a branch whose single open PR is ready for review does not
+wait for those checks. The hook publishes the head's signed execution plan, lets
+the push through, and runs the same checks in the background in the branch's
+own worktree under `~/.nexus/local-acceptance/deferred/`, so the author's
+checkout stays free. `LOCAL_ACCEPTANCE_DEFERRED` prints the log path. A newer
+head stops the check for the older one. The required `Local acceptance` status
+stays pending, and merge stays blocked, until that check publishes its signed
+receipt and requests trusted finalization. A first push, a draft PR, a branch
+without complementary native hosts and `SCODE_ACCEPTANCE_PUSH=blocking` keep
+verifying before the push. `python .github/scripts/local_acceptance.py doctor`
+lists this host's prerequisites (Python modules, the signing key's sign/verify
+round trip, gh, PowerShell 7, the MSVC toolchain, the compiler cache and
+Docker) with the fix for each; it grants no acceptance. The checks themselves
+also verify the MSVC toolchain and Docker before joining the host queue, and a
+compiler-cache server that does not answer a probe compile within 20 seconds is
+replaced by plain Cargo for that run.
+
 The queue separates CLI daemon journeys from co-host/search acceptance. CLI
 source changes retain the real pinned daemon, cross-node CLI and authenticated
 sender journeys. The independent co-host duet, VFS search owner/restart and

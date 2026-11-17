@@ -31,6 +31,7 @@ fn prompt(handle: &EngineHandle, calls: &Value) {
 }
 
 fn cancel_input(handle: &EngineHandle, request_id: u64, reason: &str) {
+    eprintln!("Cancelling the pending {reason} request and awaiting status/completion");
     let deadline = Instant::now() + Duration::from_secs(30);
     // Both commands use the public seam in FIFO order. Status must stop
     // asking for input as soon as Cancel retires the request, even if the
@@ -148,6 +149,7 @@ fn cancelling_permission_and_question_releases_input_before_the_turn_drains() {
             },
         );
         let deadline = Instant::now() + Duration::from_secs(30);
+        eprintln!("Awaiting the initial {reason} request");
         let request_id = loop {
             match receive(&handle, deadline) {
                 EngineEvent::PermissionRequest { id, .. } if reason == "permission" => break id,
@@ -166,6 +168,7 @@ fn cancelling_permission_and_question_releases_input_before_the_turn_drains() {
             })
             .unwrap();
         let proof = format!("fresh-{reason}-{}", workspace.path().display());
+        eprintln!("Submitting a fresh turn immediately after cancelled {reason} completion");
         prompt(
             &handle,
             &json!([{"id":"fresh-write", "name":"Write", "input":{

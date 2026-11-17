@@ -405,9 +405,31 @@ enum ShutdownReason {
     Disconnected,
 }
 
-fn forward_engine_commands(
-    cmd_rx: std_mpsc::Receiver<EngineCommand>,
-) -> tokio_mpsc::UnboundedReceiver<EngineCommand> {
+/// One command stream with a single lookahead slot across a turn boundary.
+/// A command received just after the terminal event still belongs to the
+/// next idle dispatch, even if the finalizer task has not returned yet.
+struct SessionCommands {
+    receiver: tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    pending: Option<EngineCommand>,
+}
+
+impl SessionCommands {
+    async fn recv(&mut self) -> Option<EngineCommand> {
+        match self.pending.take() {
+            Some(command) => Some(command),
+            None => self.receiver.recv().await,
+        }
+    }
+
+    fn try_recv(&mut self) -> Result<EngineCommand, tokio_mpsc::error::TryRecvError> {
+        match self.pending.take() {
+            Some(command) => Ok(command),
+            None => self.receiver.try_recv(),
+        }
+    }
+}
+
+fn forward_engine_commands(cmd_rx: std_mpsc::Receiver<EngineCommand>) -> SessionCommands {
     let (tcmd_tx, tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
     std::thread::Builder::new()
         .name("engine-cmd-forward".into())
@@ -420,12 +442,15 @@ fn forward_engine_commands(
         })
         .expect("spawn engine-cmd-forward thread");
 
-    tcmd_rx
+    SessionCommands {
+        receiver: tcmd_rx,
+        pending: None,
+    }
 }
 
 async fn next_session_command(
     delegate: &Arc<dyn EngineDelegate>,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    tcmd_rx: &mut SessionCommands,
     evt_tx: &EventSink,
     controls: &mut InteractionControls,
 ) -> Option<EngineCommand> {
@@ -568,7 +593,7 @@ async fn run_prompt_command(
     delegate: &Arc<dyn EngineDelegate>,
     command: EngineCommand,
     evt_tx: &EventSink,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    tcmd_rx: &mut SessionCommands,
     next_request_id: &Arc<AtomicU64>,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,
@@ -907,6 +932,24 @@ fn finish_turn_worker(
     })
 }
 
+fn report_finalizer_result(
+    result: Result<Result<(), tokio::task::JoinError>, tokio::task::JoinError>,
+    evt_tx: &EventSink,
+) {
+    let failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) | Err(error) => Some(error.to_string()),
+    };
+    if let Some(error) = failure {
+        // A panicked finalizer does not prove that its durable completion
+        // failed. Preserve that uncertainty for recovery.
+        let _ = evt_tx.reject_prompt(format!(
+            "engine completion failed: {error}; inspect the saved session before retrying"
+        ));
+        let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
+    }
+}
+
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
 /// on a blocking task, and concurrently service answer/cancel commands until it
 /// finishes. Returns the shutdown reason if a close or disconnection arrived
@@ -915,7 +958,7 @@ async fn run_one_turn(
     delegate: &Arc<dyn EngineDelegate>,
     input: TurnInput,
     evt_tx: &EventSink,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    tcmd_rx: &mut SessionCommands,
     next_request_id: &Arc<AtomicU64>,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,
@@ -942,13 +985,21 @@ async fn run_one_turn(
     let mut handle = finish_turn_worker(turn, evt_tx, &table, inbox.as_ref(), admitted);
 
     let mut shutdown = None;
+    let mut deferred = None;
     loop {
         if shutdown.is_none() {
             controls.start_next(delegate, evt_tx);
         }
         tokio::select! {
             biased;
-            cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+            cmd = tcmd_rx.recv(), if shutdown.is_none() && deferred.is_none() => match cmd {
+                Some(command) if !evt_tx.inputs.is_running() => {
+                    // EventSink releases the shared input phase only after
+                    // durable terminal processing, before notifying the host.
+                    // Retain the first follow-up in FIFO order and let the
+                    // finalizer return before dispatching it as idle work.
+                    deferred = Some(command);
+                }
                 Some(EngineCommand::Interactions { id, action }) => {
                     controls.command(id, action, true, evt_tx);
                 }
@@ -1003,19 +1054,14 @@ async fn run_one_turn(
             () = tasks.control_changed(), if shutdown.is_none() => controls.retry(),
             () = controls.finished(evt_tx), if controls.is_active() => {}
             result = &mut handle => {
-                let failure = match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) | Err(error) => Some(error.to_string()),
-                };
-                if let Some(error) = failure {
-                    // A panicked finalizer does not prove that its durable
-                    // completion failed. Preserve that uncertainty for recovery.
-                    let _ = evt_tx.reject_prompt(format!("engine completion failed: {error}; inspect the saved session before retrying"));
-                    let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
-                }
+                report_finalizer_result(result, evt_tx);
                 break;
             }
         }
+    }
+    if let Some(command) = deferred {
+        debug_assert!(tcmd_rx.pending.is_none());
+        tcmd_rx.pending = Some(command);
     }
     shutdown
 }
@@ -1159,7 +1205,7 @@ async fn run_direct_tool(
     delegate: &Arc<dyn EngineDelegate>,
     call: DirectCall,
     evt_tx: &EventSink,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    tcmd_rx: &mut SessionCommands,
     next_request_id: &Arc<AtomicU64>,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,

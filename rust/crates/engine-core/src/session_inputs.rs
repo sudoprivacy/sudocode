@@ -360,6 +360,12 @@ impl SessionInputs {
         state.lifecycle_held.is_none() && state.interaction_bindings == 0 && state.queue.can_start()
     }
 
+    /// The shared foreground phase ends at the durable terminal event, which
+    /// can precede the finalizer task's return to the command pump.
+    pub(crate) fn is_running(&self) -> bool {
+        self.lock().queue.is_running()
+    }
+
     pub(crate) fn has_interaction_controls(&self) -> bool {
         self.lock().interaction_controls != 0
     }

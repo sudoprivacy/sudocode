@@ -83,14 +83,9 @@ workspace folder name plus a short hash of its path. For a long-lived role, set
 a readable `agentName` when the agent is first created. Renaming an existing
 agent gives it a new identity and leaves its conversations under the old name.
 
-Runtime discovery is separate from these stored descriptions. `agent_list`
-adds one `runtime` row per observed instance, including foreground
-state, a permission/question waiting reason and independent background task
-counts. Several instances can share an Agent name or session ID. Unsupported,
-stale or unreachable observations remain unknown; an empty list is conclusive
-only within its reported discovery coverage. `active_only` retains positively
-online instances and running subagent tasks. See the shared
-[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+Liveness is separate from these stored descriptions. Each `agent_list` row
+carries one `active` bit: a peer seen online in the zone, or a running subagent
+task. `active_only` keeps those rows. `active: false` means not seen online.
 
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest
@@ -665,6 +660,18 @@ peer/A2A messages remain queued. The cursor starts at the end of the recalled
 text, and further arrow presses use normal cursor navigation. Enter steers with
 the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
+
+Slash commands typed while a turn runs never reach the model:
+
+- `/help` and `/tasks` run at once.
+- `/model` and `/effort` (with or without an argument) choose the setting now.
+  The running turn keeps its model and effort; the choice applies when it
+  ends, before any queued message is sent.
+- Every other command waits in the staging area as `queued: /compact` and runs
+  as a command when the turn ends, in order with queued messages. Esc steers
+  queued messages into the turn but leaves queued commands for its end; ↑
+  brings a queued command back for editing like a queued message.
+- An unknown command is reported at once.
 
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:

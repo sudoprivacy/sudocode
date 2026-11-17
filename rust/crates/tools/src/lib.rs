@@ -1553,11 +1553,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Copy a row's `send_to` exactly into `send.to`. A peer address queues ",
                 "messages durably, including while that peer is offline. ",
                 "A subagent address selects that task; `task_id` is its task handle. ",
-                "An omitted `active` means runtime liveness is unknown. ",
-                "A supported `runtime` row reports one host-scoped instance, presence, ",
-                "freshness, foreground/input reason and independent background counts. ",
-                "Several rows can share an Agent or SID. Check `runtime_discovery` ",
-                "scope and coverage before interpreting a missing row. ",
+                "`active` is true for a peer seen online and for a running subagent task; ",
+                "false means not seen online or not running. ",
                 "Read-only discovery; it starts nothing."
             ),
             input_schema: json!({
@@ -1565,7 +1562,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "active_only": {
                         "type": "boolean",
-                        "description": "When true, list observed online instances and running subagent tasks; omit unknown peers. An idle foreground can still be online."
+                        "description": "When true, list only peers seen online and running subagent tasks."
                     }
                 },
                 "additionalProperties": false
@@ -2145,20 +2142,15 @@ pub fn list_agent_snapshots_from_store_with(
     Ok(out)
 }
 
-/// One addressable peer or subagent task. Peer messages use durable delivery;
-/// task liveness comes from the current process's runtime registry.
+/// One addressable peer or subagent task. Peer messages use durable delivery,
+/// online or not.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentListRow {
-    /// Facts belong to this incarnation, never to the durable peer identity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<runtime::runtime_status::RuntimeObservation>,
     pub name: String,
     /// Exact address accepted by `send.to`.
     pub send_to: String,
-    /// True for observed online instances or running workers; false for a known
-    /// stopped worker. Mailbox-only and unavailable instance liveness is unknown.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active: Option<bool>,
+    /// A peer seen online in the zone, or a running subagent task.
+    pub active: bool,
     /// `peer` = an addressable identity in the mailbox namespace (another
     /// scode/agent); `subagent` = a worker this process spawned.
     pub kind: String,
@@ -2185,6 +2177,7 @@ pub struct AgentListRow {
 /// of the VFS and not a directory on the daemon's disk.
 pub fn collect_agent_list(
     active_only: bool,
+    online: &std::collections::BTreeSet<String>,
     fs: &dyn FsBackend,
 ) -> Result<Vec<AgentListRow>, String> {
     let mailbox = runtime::mailbox::sending_mailbox();
@@ -2203,7 +2196,7 @@ pub fn collect_agent_list(
         .iter()
         .filter_map(|(id, runtime)| runtime.mailbox_root.as_ref().map(|_| id.clone()))
         .collect();
-    let mut rows = merge_agent_list(&peers, subagents, &active_tasks, active_only);
+    let mut rows = merge_agent_list(&peers, online, subagents, &active_tasks, active_only);
     for row in rows.iter_mut().filter(|row| row.kind == "peer") {
         match mailbox
             .description_store(&row.name)
@@ -2224,11 +2217,12 @@ pub fn collect_agent_list(
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
 /// without a real backend. `peers` are the addressable names in the session's
-/// peer namespace, self excluded. `subagents` are saved snapshots;
-/// `active_tasks` supplies runtime evidence.
+/// peer namespace, self excluded, and `online` the zone's Agents seen online.
+/// `subagents` are saved snapshots; `active_tasks` supplies runtime evidence.
 #[must_use]
 pub fn merge_agent_list(
     peers: &[String],
+    online: &std::collections::BTreeSet<String>,
     subagents: Vec<AgentSnapshot>,
     active_tasks: &std::collections::BTreeSet<String>,
     active_only: bool,
@@ -2236,19 +2230,17 @@ pub fn merge_agent_list(
     use std::collections::BTreeMap;
     let mut rows: BTreeMap<(String, String), AgentListRow> = BTreeMap::new();
 
-    // Source 1: addressable peers in the mailbox namespace. Liveness is not
-    // knowable from the namespace alone (a remote backend does not report it),
-    // so `active` is left `None` — the row is addressable, not "running".
+    // Source 1: addressable peers in the mailbox namespace, active when the
+    // zone's presence names them.
     for name in peers {
         if name.is_empty() {
             continue;
         }
         rows.entry(("peer".into(), name.clone()))
             .or_insert_with(|| AgentListRow {
-                runtime: None,
                 name: name.clone(),
                 send_to: name.clone(),
-                active: None,
+                active: online.contains(name),
                 kind: "peer".to_string(),
                 task_id: None,
                 role: None,
@@ -2266,10 +2258,9 @@ pub fn merge_agent_list(
             .or_else(|| (!snap.description.is_empty()).then(|| snap.description.clone()));
         rows.entry(("subagent".into(), snap.agent_id.clone()))
             .or_insert_with(|| AgentListRow {
-                runtime: None,
                 name: snap.name.clone(),
                 send_to: snap.agent_id.clone(),
-                active: Some(active),
+                active,
                 kind: "subagent".to_string(),
                 task_id: Some(snap.agent_id.clone()),
                 role,
@@ -2280,14 +2271,12 @@ pub fn merge_agent_list(
 
     let mut out: Vec<AgentListRow> = rows.into_values().collect();
     if active_only {
-        // Only positively-running rows; unknown-liveness peers are not "active".
-        out.retain(|r| r.active == Some(true));
+        out.retain(|r| r.active);
     }
-    // Positively-active first, then by name for stable output.
+    // Active first, then by name for stable output.
     out.sort_by(|a, b| {
-        let ak = a.active == Some(true);
-        let bk = b.active == Some(true);
-        bk.cmp(&ak)
+        b.active
+            .cmp(&a.active)
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.kind.cmp(&b.kind))
             .then_with(|| a.send_to.cmp(&b.send_to))
@@ -2316,81 +2305,18 @@ pub fn collect_agent_directory(
     host: Option<&dyn runtime::runtime_status::RuntimeObservationHost>,
     attention: Option<&runtime::attention::AttentionState>,
 ) -> Result<Value, String> {
-    // Apply active_only after observation enrichment: a mailbox identity alone
-    // is unknown, while a fresh idle instance is still online.
-    let mut agents = collect_agent_list(false, fs)?;
-    let discovery = match host {
-        Some(host) => match host.discover() {
-            Ok(directory) => {
-                let own_instance = host.instance();
-                let mut runtime_rows = Vec::new();
-                let mut covered_names = std::collections::HashSet::new();
-                let mut scopes = Vec::new();
-                let mut unknown_instances = 0;
-                for inventory in directory.inventories {
-                    scopes.push(inventory.scope);
-                    for observation in inventory.instances {
-                        if own_instance.as_ref() == Some(&observation.instance) {
-                            continue;
-                        }
-                        if observation.presence == runtime::runtime_status::RuntimePresence::Unknown
-                        {
-                            unknown_instances += 1;
-                        }
-                        let mut row = agents
-                            .iter()
-                            .find(|row| row.kind == "peer" && row.name == observation.agent_id)
-                            .cloned()
-                            .unwrap_or_else(|| AgentListRow {
-                                runtime: None,
-                                name: observation.agent_id.clone(),
-                                send_to: observation.agent_id.clone(),
-                                active: None,
-                                kind: "peer".into(),
-                                task_id: None,
-                                role: None,
-                                description: None,
-                                description_updated_at: None,
-                            });
-                        covered_names.insert(row.name.clone());
-                        row.active = (observation.presence
-                            == runtime::runtime_status::RuntimePresence::Online)
-                            .then_some(true);
-                        row.runtime = Some(observation);
-                        runtime_rows.push(row);
-                    }
-                }
-                agents.retain(|row| row.kind != "peer" || !covered_names.contains(&row.name));
-                agents.extend(runtime_rows);
-                json!({"scopes": scopes, "unavailable": directory.unavailable, "unknown_instances": unknown_instances})
-            }
-            Err(error) => json!({"unavailable": [{"reason": error}]}),
-        },
-        None => json!({"unsupported": true}),
-    };
-    if active_only {
-        agents.retain(|row| row.active == Some(true));
-    }
-    agents.sort_by(|left, right| {
-        right
-            .active
-            .cmp(&left.active)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| {
-                left.runtime
-                    .as_ref()
-                    .map(|observation| {
-                        (&observation.instance.registry_id, &observation.instance.pid)
-                    })
-                    .cmp(&right.runtime.as_ref().map(|observation| {
-                        (&observation.instance.registry_id, &observation.instance.pid)
-                    }))
-            })
-    });
+    // A peer the zone's presence does not name was not seen online.
+    let online = host
+        .and_then(|host| {
+            host.online_agents()
+                .map_err(|error| tracing::warn!(%error, "agent presence unavailable"))
+                .ok()
+        })
+        .map_or_default(|presence| presence.online.into_iter().collect());
+    let agents = collect_agent_list(active_only, &online, fs)?;
     Ok(json!({
         "agents": agents,
         "count": agents.len(),
-        "runtime_discovery": discovery,
         "attention": attention.map(|state| json!({"scope":"current_session", "state":state})),
     }))
 }
@@ -10089,12 +10015,15 @@ mod tests {
         }];
 
         let active_tasks = std::collections::BTreeSet::from(["pid-123".to_string()]);
-        let rows = super::merge_agent_list(&peers, subagents, &active_tasks, false);
+        // The zone's presence names bob, and an Agent that is not a peer here.
+        let online = std::collections::BTreeSet::from(["bob".to_string(), "carol".to_string()]);
+        let rows = super::merge_agent_list(&peers, &online, subagents, &active_tasks, false);
         let by: std::collections::BTreeMap<_, _> =
             rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
-        // A peer is addressable; liveness is unknown from the namespace → None.
-        assert_eq!(by["alice"].active, None, "peer liveness unknown");
+        // A peer the presence does not name was not seen online.
+        assert!(!by["alice"].active, "alice was not seen online");
+        assert!(!by.contains_key("carol"), "presence adds no address");
         assert_eq!(by["alice"].kind, "peer");
         assert!(by["alice"].task_id.is_none());
         assert_eq!(
@@ -10102,20 +10031,19 @@ mod tests {
             "a peer is addressed by its bare name"
         );
         assert_eq!(by["bob"].send_to, "bob");
-        assert_eq!(by["bob"].active, None);
-        // A running sub-agent is positively active, with its pid + role.
-        assert_eq!(by["researcher"].active, Some(true));
+        assert!(by["bob"].active, "bob was seen online");
+        // A running sub-agent is active, with its pid + role.
+        assert!(by["researcher"].active);
         assert_eq!(by["researcher"].kind, "subagent");
         assert_eq!(by["researcher"].task_id.as_deref(), Some("pid-123"));
         assert_eq!(by["researcher"].send_to, "pid-123");
         assert_eq!(by["researcher"].role.as_deref(), Some("Explore"));
 
-        // active_only keeps only positively-running rows (not unknown peers).
-        let active = super::merge_agent_list(&peers, Vec::new(), &active_tasks, true);
-        assert!(active.iter().all(|r| r.active == Some(true)));
-        assert!(
-            !active.iter().any(|r| r.name == "alice"),
-            "unknown-liveness peer is not 'active'"
+        // active_only keeps the online peer and nothing else here.
+        let active = super::merge_agent_list(&peers, &online, Vec::new(), &active_tasks, true);
+        assert_eq!(
+            active.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["bob"]
         );
     }
 

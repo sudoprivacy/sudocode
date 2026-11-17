@@ -209,6 +209,16 @@ pub(crate) fn run(
                          workspace joins as '{derived}'"
                     ))
                 } else {
+                    if record
+                        .agents_dir()
+                        .join(format!(".joining-{name}"))
+                        .exists()
+                    {
+                        eprintln!(
+                            "Waiting for an earlier join of '{name}' to finish; this can take up \
+                             to a few minutes."
+                        );
+                    }
                     enroll(&record, &name, owner_root.as_deref())
                 };
                 let mut agent = agent_status(&record, &name);

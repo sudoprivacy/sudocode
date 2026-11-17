@@ -584,8 +584,13 @@ fn issue(
     }
     if !online_receipt(&stderr, agent, profile.local_endpoint) {
         let cause = format!("the node returned no online receipt for '{agent}'");
-        // An explicit offline signature never joins the running Box.
-        if stderr.to_ascii_lowercase().contains("offline") {
+        // An explicit offline signature never joins the running Box. It ends
+        // its line with `-> offline`; a name cannot contain `>`, so no name
+        // forms it.
+        if stderr
+            .lines()
+            .any(|line| line.trim_end().ends_with("-> offline"))
+        {
             return Err(quarantine(profile, bundle, &cause));
         }
         return settle(profile, agent, bundle, &cause, started);
@@ -1357,6 +1362,17 @@ echo "minted agent cert subject=agent:$name via https://$bind -> written" >&2
             calls.iter().all(|call| !call.contains("auth list")),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn a_name_containing_offline_is_settled_rather_than_refused() {
+        let fixture = Fixture::new("unfamiliar");
+        fixture.issue("offline-tools");
+        assert_eq!(
+            fixture.enroll("offline-tools").unwrap(),
+            AgentEnrollment::Joined
+        );
+        assert!(fixture.bundle("offline-tools").exists());
     }
 
     #[test]

@@ -140,6 +140,12 @@ fn nested_cargo_and_explicit_target() {
 
         for index, workspace in enumerate(workspaces):
             target = output / f"target-{index}"
+            # A cold terminal download may outlast the cache daemon idle window.
+            # Verify the same native target before starting this lazy session.
+            if os.name == "nt":
+                command(f"terminal-{index}", [sys.executable, "e2e/terminal-resize/setup_windows.py",
+                        str(Path.home() / ".cache/sudocode-terminal-host"), "--native-target", str(target)], SOURCE)
+                checks.verify_native_terminal(output / f"terminal-{index}.log", target)
             with cache.session(tool, output / f"server-{index}", helper.run_command, output / "objects") as active:
                 env = {"CACHE_COMPILE_INPUT": "alpha", "CARGO_TARGET_DIR": str(target)}
                 build = ["cargo", "build", "--offline", "--locked"]
@@ -155,10 +161,6 @@ fn nested_cargo_and_explicit_target() {
                 command(f"same-layout-cache-hit-{index}", build, workspace, env, active.execute)
                 stats = json.loads(active.tool_command("same-layout-stats", "--show-stats", "--stats-format", "json"))
                 assert sum(stats["stats"]["cache_hits"]["counts"].values()) > 0, stats
-                if os.name == "nt":
-                    command(f"terminal-{index}", [sys.executable, "e2e/terminal-resize/setup_windows.py",
-                            str(Path.home() / ".cache/sudocode-terminal-host"), "--native-target", str(target)], SOURCE)
-                    checks.verify_native_terminal(output / f"terminal-{index}.log", target)
                 command(f"nextest-{index}", [nextest, "nextest", "run", "--offline", "--locked", "--no-tests=fail"],
                         workspace, env, active.execute)
                 if index == 1:

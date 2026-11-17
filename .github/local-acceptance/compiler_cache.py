@@ -265,7 +265,8 @@ class Session:
 
     def __init__(self, tool, directory, execute, cache=None):
         self.tool, self.directory, self.execute_command = tool, Path(directory), execute
-        self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / VERSION)
+        self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / (VERSION + "-v2"))
+        self.control = self.cache.with_name(self.cache.name + ".control")
         self.environment, self.server, self.wrapper = None, None, None
         self.tool_commands, self.records, self.priorities = [], [], {}
         self.server_history = []
@@ -283,7 +284,14 @@ class Session:
     def acquire_storage(self):
         """A local disk cache supports one server; a busy cache adds no wait."""
         self.cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock = (self.cache / ".server.lock").open("a+b")
+        # The backend owns every file under its data root, including eviction.
+        # Never let it evict the lock or retained server-incarnation record.
+        if any((self.cache / name).exists() for name in (".server.lock", ".server-owner.json")):
+            self.disabled = True
+            print("COMPILER_CACHE: legacy control files are inside the managed data root; preserving that store and using original Cargo.", flush=True)
+            return False
+        self.control.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = (self.control / ".server.lock").open("a+b")
         if lock.tell() == 0:
             lock.write(b"\0")
             lock.flush()
@@ -306,7 +314,7 @@ class Session:
             return False
         self.storage_lock = lock
         try:
-            owner = json.loads((self.cache / ".server-owner.json").read_text(encoding="utf-8"))
+            owner = json.loads((self.control / ".server-owner.json").read_text(encoding="utf-8"))
         except FileNotFoundError:
             owner = None
         except (ValueError, OSError):
@@ -341,7 +349,7 @@ class Session:
             return True
 
     def write_owner(self, phase):
-        path = self.cache / ".server-owner.json"
+        path = self.control / ".server-owner.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps({"owner": self.environment["SCODE_COMPILER_CACHE_OWNER"],
                                         "executable": self.tool["executable"], "phase": phase,
@@ -491,7 +499,7 @@ class Session:
             finally:
                 self.tool_command("server-stop", "--stop-server")
             process.wait(timeout=5)
-        owner = self.cache / ".server-owner.json"
+        owner = self.control / ".server-owner.json"
         if owner.exists() and json.loads(owner.read_text(encoding="utf-8"))["owner"] == self.environment["SCODE_COMPILER_CACHE_OWNER"]:
             owner.unlink()
         if self.wrapper is not None:
@@ -499,7 +507,7 @@ class Session:
             print("COMPILER_CACHE_ARGUMENT_FILES=" + json.dumps(self.wrapper["argument_file_units"]), flush=True)
         # Every cached command shares this session. Record it once, on the
         # first command, and bind each command to it by SHA-256.
-        session = {"version": VERSION, "tool": self.tool, "wrapper": self.wrapper, "server": self.server, "stats": stats,
+        session = {"version": VERSION, "storage_layout": {"version": 2, "data": str(self.cache), "control": str(self.control)}, "tool": self.tool, "wrapper": self.wrapper, "server": self.server, "stats": stats,
                    "server_history": self.server_history, "compiler_priorities": self.priorities,
                    "tool_commands": self.tool_commands}
         identity = digest(json.dumps(session, sort_keys=True, separators=(",", ":")).encode())

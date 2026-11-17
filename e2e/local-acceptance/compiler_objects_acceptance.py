@@ -176,6 +176,8 @@ fn main() {
             rows.append({"label": label, "log": str(log), "exit_code": receipt["exit_code"]})
             return log.read_text(encoding="utf-8")
 
+        storage = load("compiler_object_storage_controls", Path(__file__).with_name("compiler_storage_acceptance.py"))
+        storage.run(output / "storage-pressure", cache, tool)
         # An unavailable cache must never break a compiler information query.
         # Compile both the candidate and the restored old routing against the
         # same deliberately missing cache path; no real cache/tool is replaced.

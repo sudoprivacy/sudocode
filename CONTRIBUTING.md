@@ -1448,6 +1448,15 @@ the object cache never supplies a previous test result or a source-freshness
 attestation. Original Cargo arguments and environment settings, including target
 inheritance in nested Cargo and compile-time environment reads, are retained.
 Explicit caller wrappers and sccache settings remain authoritative.
+The v2 storage layout keeps its coordination lock and retained server record
+in a sibling control directory, outside the backend's evictable data tree.
+The active object store retains its 2 GiB limit. The default v2 namespace starts
+cold and leaves the old namespace intact; their combined retained disk usage can
+temporarily exceed 2 GiB. Explicit stores containing legacy control files are
+preserved and bypassed. No prior cache contents attest source freshness.
+The real-process capacity control uses a near-2-GiB sparse file with less than
+1 MiB actual allocation: restoring the inside-data coordination layout must
+fail, while the current layout preserves the live lock and real cache hits.
 Cargo reaches sccache through a small rustc wrapper that each session compiles
 from `compiler_cache.py`. Cargo moves a unit's arguments into one argument file
 when they do not fit on a command line, which Cargo 1.100's per-dependency

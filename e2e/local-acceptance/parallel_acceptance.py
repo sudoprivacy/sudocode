@@ -717,7 +717,11 @@ def plan_admission_controls(output):
         git("config", "core.autocrlf", "false")
         key = directory / "key"
         execute(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
-        for relative in [".github/workflows/local-acceptance.yml",
+        for relative in [".github/local-acceptance/gate.py",
+                         ".github/local-acceptance/publish.py",
+                         ".github/local-acceptance/cross_platform.py",
+                         ".github/workflows/local-acceptance.yml",
+                         ".github/workflows/local-acceptance-workspace.yml",
                          ".github/workflows/local-acceptance-publish.yml"]:
             target = work / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -733,7 +737,8 @@ def plan_admission_controls(output):
         (work / "spec/local_acceptance_signers.json").write_text(json.dumps({"version": 1, "signers": {
             "fixture": {"platform": platform["system"], "public_key": key.with_suffix(".pub").read_text().strip()}}}), encoding="utf-8")
         checks = work / ".github/local-acceptance/checks.py"
-        checks.parent.mkdir(parents=True)
+        checks.parent.mkdir(parents=True, exist_ok=True)
+        (checks.parent / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         checks.write_text('import sys\ndef run(name,root,output,base,execute):\n'
             ' output.mkdir(parents=True,exist_ok=True)\n'
             ' return [execute([sys.executable,"-c","from pathlib import Path;Path(\'native-started\').write_text(\'executed\')"],output,output/"000.log")]\n', encoding="utf-8")

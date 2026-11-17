@@ -8,8 +8,8 @@ mod question;
 pub(crate) mod reasoning;
 pub(crate) mod todo;
 use crate::render::TextRole;
+pub(crate) use a2a::agent_row;
 pub(super) use a2a::summary_preview;
-pub(crate) use a2a::{agent_row, directory_incomplete};
 
 use std::fmt::Write as _;
 

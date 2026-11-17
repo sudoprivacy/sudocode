@@ -371,9 +371,11 @@ after its parent's turn ends, and answering or cancelling removes the request
 from every view.
 
 **Peers** is an on-demand directory snapshot. Open the tab or press **r** to
-refresh it; Enter opens details. Discovery uses the same directory and runtime
-facts as `agent_list`. Missing or stale observations remain unknown. A peer's
-waiting state does not grant permission to answer or interrupt that peer.
+refresh it; Enter opens details. Discovery uses the same directory and zone
+presence as `agent_list`, with one row per addressable peer. **Online** means
+the zone has seen that peer online; it does not establish whether its model is
+running or waiting for input. Discovery grants no authority to answer or
+interrupt that peer.
 The browser does not introduce a periodic discovery poll or a new rendering engine.
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
@@ -885,7 +887,7 @@ firing late. `scode cron tick` fires due jobs once, unless another process is
 already scheduling.
 
 The task browser has a **Scheduled** tab: open it from the footer as above,
-then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
+then use **←/→** to select Scheduled. **↑/↓** selects a job, **Enter** shows its details, **e**
 enables or disables it, **r** runs it now, and **d** deletes it after you
 confirm with **y**. **←/→** switches browser tabs. The footer shows how
 many jobs are enabled. Desktop hosts manage the same jobs through the ACP

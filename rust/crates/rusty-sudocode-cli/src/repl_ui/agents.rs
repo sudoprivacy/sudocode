@@ -1,4 +1,4 @@
-//! Bounded peer navigation. Engine discovery owns identity and runtime facts.
+//! Bounded peer navigation. Engine discovery owns identity and zone presence.
 use crate::{
     cli::format::agent_row,
     render::{text_layout::truncate_to_width, theme, TextRole, RESET},
@@ -20,18 +20,11 @@ impl PeerTab {
         self.loaded = true;
         match result {
             Ok(value) => {
-                self.notice = crate::cli::format::directory_incomplete(&value)
-                    .then(|| "Some runtime observations are unavailable".to_string());
+                self.notice = None;
                 if let Some(rows) = value.get("agents").and_then(Value::as_array) {
                     for row in rows.iter().filter(|row| row["kind"] == "peer") {
                         if let Some(label) = agent_row(row) {
-                            let key = format!(
-                                "{}:{}",
-                                row["send_to"],
-                                row.get("runtime")
-                                    .and_then(|r| r.get("instance"))
-                                    .unwrap_or(&Value::Null)
-                            );
+                            let key = row["send_to"].as_str().unwrap_or_default().to_string();
                             self.rows.push((key, label));
                         }
                     }

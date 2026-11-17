@@ -4397,8 +4397,9 @@ records and remove it on answer, cancellation, failure or session teardown.
 Keep foreground execution, background activity and attention distinct. The
 native renderer, tool results and ACP/MossWork consume that projection; they
 must not infer waiting from prose, spinner state or elapsed output time.
-Unknown or stale peer observations remain unknown, and a peer waiting for
-someone else is not labelled as needing the current user's answer.</p>
+Peer discovery retains the zone-presence contract: one row per addressable
+Agent, with no inferred foreground state. An online peer is not labelled as
+needing the current user's answer. Unknown attention remains unknown.</p>
 <p><b>Presentation.</b> One inline navigation surface groups Subagents and Peers
 without duplicating the existing task registry. Reuse list/detail allocation,
 preserve drafts and terminal scrollback, and retain approval input ownership.

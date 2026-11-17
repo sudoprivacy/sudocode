@@ -254,6 +254,41 @@ fn a_session_command_queued_during_a_turn_runs_between_the_messages_around_it() 
     finish(session, &env);
 }
 
+/// `/compact` runs as its own foreground work. The message queued after it
+/// must wait for that work to finish, not start beside it.
+#[test]
+fn a_queued_compact_finishes_before_the_message_queued_after_it() {
+    let (env, mut session, release) = start_held_turn("turn-commands-compact");
+    queue_command(&mut session, &env, "/compact");
+    queue_message(&mut session, &env, "QUEUED_AFTER_COMPACT");
+    release.now();
+    common::expect_screen(
+        &session,
+        |_| request_with(&env, "QUEUED_AFTER_COMPACT").is_some(),
+        env.timeout(),
+        "the message queued after /compact is sent",
+    );
+    let screen = common::expect_screen(
+        &session,
+        |view| view.contains("Estimated tokens") && !view.contains("queued: "),
+        env.timeout(),
+        "the compaction report is shown and nothing is left queued",
+    );
+    let report = screen.find("Estimated tokens").unwrap();
+    let message = screen.find("QUEUED_AFTER_COMPACT");
+    assert!(
+        message.is_some_and(|message| message > report),
+        "the message ran after the compaction finished:\n{screen}"
+    );
+    assert!(
+        requests(&env)
+            .iter()
+            .all(|body| !body.to_string().contains("/compact")),
+        "the command never reaches the model"
+    );
+    finish(session, &env);
+}
+
 #[test]
 fn esc_steers_queued_messages_and_keeps_a_queued_command_for_the_turn_end() {
     let (env, mut session, release) = start_held_turn("turn-commands-esc");

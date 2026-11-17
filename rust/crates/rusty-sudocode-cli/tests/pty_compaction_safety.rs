@@ -1338,7 +1338,6 @@ fn seed_peer_description(env: &TestEnv) -> (PathBuf, Vec<u8>) {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| json!({}));
     settings["agentName"] = json!("checkpoint-owner");
-    settings["experimental"]["peerDescriptions"] = json!(true);
     std::fs::write(settings_path, settings.to_string()).unwrap();
     let directory =
         runtime::mailbox::local_pair_root_in(env.config_home()).join("agents/checkpoint-owner");

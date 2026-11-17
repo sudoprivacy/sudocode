@@ -2201,20 +2201,18 @@ pub fn collect_agent_list(
         .filter_map(|(id, runtime)| runtime.mailbox_root.as_ref().map(|_| id.clone()))
         .collect();
     let mut rows = merge_agent_list(&peers, subagents, &active_tasks, active_only);
-    if runtime::experiments::is_enabled(runtime::experiments::Experiment::PeerDescriptions) {
-        for row in rows.iter_mut().filter(|row| row.kind == "peer") {
-            match mailbox
-                .description_store(&row.name)
-                .and_then(|store| store.read())
-            {
-                Ok(Some(description)) => {
-                    row.description = Some(description.description);
-                    row.description_updated_at = Some(description.updated_at);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%error, agent = %row.name, "peer description unavailable");
-                }
+    for row in rows.iter_mut().filter(|row| row.kind == "peer") {
+        match mailbox
+            .description_store(&row.name)
+            .and_then(|store| store.read())
+        {
+            Ok(Some(description)) => {
+                row.description = Some(description.description);
+                row.description_updated_at = Some(description.updated_at);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, agent = %row.name, "peer description unavailable");
             }
         }
     }

@@ -1805,6 +1805,9 @@ fn parse_optional_experiments(root: &JsonValue) -> Result<BTreeMap<String, bool>
         .collect();
     let mut flags = BTreeMap::new();
     for (key, value) in entries {
+        if crate::experiments::RETIRED_KEYS.contains(&key.as_str()) {
+            continue;
+        }
         if !known.contains(&key.as_str()) {
             return Err(ConfigError::Parse(format!(
                 "settings `experimental.{key}` is not a known experiment (known: {})",

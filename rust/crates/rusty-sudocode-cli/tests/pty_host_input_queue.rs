@@ -14,10 +14,12 @@ struct Host {
     terminal: PtySession,
     session: String,
     id: u64,
-    /// Everything the last reply's read consumed, the reply and what preceded it.
-    /// An event written concurrently with that reply can be in here and nowhere
-    /// else: the terminal does not show it again.
+    /// Raw reply and preceding events, retained for notification assertions.
+    /// The PTY consumes this prefix; server requests are also queued below.
     last_read: String,
+    /// Server requests can precede a correlated reply in the same PTY read.
+    /// Retain them until their consumer takes them, across status queries.
+    incoming: Vec<Value>,
 }
 
 impl Host {
@@ -42,6 +44,7 @@ impl Host {
             session: String::new(),
             id: 0,
             last_read: String::new(),
+            incoming: Vec::new(),
         };
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
@@ -87,6 +90,7 @@ impl Host {
                 )
             });
         self.last_read.clone_from(&response);
+        self.retain_requests(&response);
         let response: Value = response
             .lines()
             .rev()
@@ -112,19 +116,41 @@ impl Host {
         )).unwrap();
     }
 
+    fn retain_requests(&mut self, text: &str) {
+        self.incoming.extend(
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                .filter(|value| value.get("method").is_some() && value.get("id").is_some()),
+        );
+    }
+
+    #[track_caller]
     fn incoming_request(&mut self, method: &str) -> Value {
-        let message = self
-            .terminal
-            .expect(&format!(
-                r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
-            ))
-            .unwrap();
-        message
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| value["method"] == method)
-            .unwrap_or_else(|| panic!("missing {method} request: {message}"))
+        if let Some(index) = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+        {
+            return self.incoming.remove(index);
+        }
+        let message = match self.terminal.expect(&format!(
+            r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
+        )) {
+            Ok(message) => message,
+            Err(error) => panic!(
+                "missing {method} request: {error}; queued: {:?}; last reply: {}; screen: {}",
+                self.incoming,
+                self.last_read,
+                self.terminal.render(common::screen_contents)
+            ),
+        };
+        self.retain_requests(&message);
+        let index = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+            .unwrap_or_else(|| panic!("missing {method} request: {message}"));
+        self.incoming.remove(index)
     }
 
     fn respond(&mut self, request: &Value, result: &Value) {
@@ -150,6 +176,18 @@ impl Host {
             "_sudocode/session/attention",
             &json!({"sessionId":self.session}),
         )
+    }
+
+    fn wait_for_attention(&mut self, context: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        loop {
+            let state = self.attention();
+            if ready(&state) {
+                return state;
+            }
+            assert!(std::time::Instant::now() < deadline, "{context}: {state}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
     }
 
     fn runtime_status(&mut self) -> Value {
@@ -729,18 +767,9 @@ fn attention_tracks_queued_questions_and_clears_cancelled_requests() {
         "steer",
     );
     let first = host.incoming_request("_scode/ask_user_question");
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    let waiting = loop {
-        let state = host.attention();
-        if state["requests"].as_array().unwrap().len() == 2 {
-            break state;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "second request never queued: {state}"
-        );
-        std::thread::sleep(Duration::from_millis(30));
-    };
+    let waiting = host.wait_for_attention("second request never queued", |state| {
+        state["requests"].as_array().unwrap().len() == 2
+    });
     assert_eq!(waiting["requests"][0]["phase"], "presented");
     assert_eq!(waiting["requests"][1]["phase"], "queued");
     host.respond(&first, &json!({"answers":[{"id":"q1","value":"continue"}]}));
@@ -809,20 +838,42 @@ fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
         &spawn,
         &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
-    if cancel_parent {
+    let queued_child = if cancel_parent {
         let pending_parent = host.incoming_request("session/request_permission");
         assert!(pending_parent["params"]["toolCall"]["rawInput"]
             .as_str()
             .unwrap()
             .contains("ATTENTION_PARENT_HOLD"));
+        // Approving agent_spawn does not mean its child has started yet.
+        // Wait for the child's real queued request before cancelling the
+        // parent; otherwise cancellation may correctly prevent the spawn.
+        let state = host.wait_for_attention("child did not reach its approval request", |state| {
+            state["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["agent"]["background"] == true)
+        });
+        let child = state["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["agent"]["background"] == true)
+            .unwrap();
+        assert_eq!(child["phase"], "queued", "{state}");
         host.cancel();
-    }
+        Some(child["id"].clone())
+    } else {
+        None
+    };
     host.idle();
-    assert_eq!(
-        host.attention()["requests"],
-        json!([]),
-        "child request must happen after the parent ended"
-    );
+    if !cancel_parent {
+        assert_eq!(
+            host.attention()["requests"],
+            json!([]),
+            "child request must happen after the parent ended"
+        );
+    }
     let child = host.incoming_request("session/request_permission");
     assert!(child["params"]["toolCall"]["rawInput"]
         .as_str()
@@ -830,6 +881,9 @@ fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
         .contains(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH));
     let state = host.attention();
     assert_eq!(state["requests"].as_array().unwrap().len(), 1, "{state}");
+    if let Some(id) = queued_child {
+        assert_eq!(state["requests"][0]["id"], id, "{state}");
+    }
     assert_eq!(state["requests"][0]["agent"]["background"], true);
     assert!(state["requests"][0]["agent"]["agent_id"]
         .as_str()
@@ -840,16 +894,8 @@ fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
         &child,
         &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    loop {
-        if host.attention()["requests"] == json!([]) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "answered child request did not clear"
-        );
-        std::thread::sleep(Duration::from_millis(30));
-    }
+    host.wait_for_attention("answered child request did not clear", |state| {
+        state["requests"] == json!([])
+    });
     host.close();
 }

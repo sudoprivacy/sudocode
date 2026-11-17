@@ -6,6 +6,7 @@ mod capabilities;
 mod diagnostics;
 mod local_box;
 mod supervisor;
+pub mod vault_client;
 
 pub use local_box::{enroll_local_agent, register_local_box, AgentEnrollment};
 pub use supervisor::{

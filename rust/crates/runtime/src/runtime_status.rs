@@ -5,11 +5,11 @@
 //! activity from transcripts, output or elapsed time.
 
 pub use contracts::runtime_status::{
-    BackgroundTaskSummary, ForegroundState, InputReason, ListRuntimesRequest,
-    PublishRuntimeRequest, RegisterRuntimeRequest, RuntimeAvailability, RuntimeDirectory,
-    RuntimeFacts, RuntimeIdentity, RuntimeInstanceId, RuntimeInstanceRequest, RuntimeInventory,
-    RuntimeInventoryScope, RuntimeObservation, RuntimeObservationHost, RuntimePresence,
-    RuntimeStatus, RuntimeStatusSource, RuntimeStatusUpdate, RuntimeUnavailableScope,
+    online_agent_names, BackgroundTaskSummary, ForegroundState, InputReason, ListRuntimesRequest,
+    OnlineAgents, PresenceRequest, PublishRuntimeRequest, RegisterRuntimeRequest,
+    RuntimeAvailability, RuntimeFacts, RuntimeIdentity, RuntimeInstanceId, RuntimeInstanceRequest,
+    RuntimeInventory, RuntimeInventoryScope, RuntimeObservation, RuntimeObservationHost,
+    RuntimePresence, RuntimeStatus, RuntimeStatusSource, RuntimeStatusUpdate,
 };
 
 /// A non-owning engine observation. Missing facts must remain unavailable.

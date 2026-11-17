@@ -373,6 +373,13 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
     // workspace path.
     FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
+    // Read only from user settings by the builtin `vault` plugin, which validates
+    // its own schema and refuses a project or local copy by path.
+    FieldSchema::leaf(
+        "vault",
+        FieldType::Object,
+        "Vault operations for the builtin vault plugin (user settings only)",
+    ),
 ];
 
 const IGNORED: &str = "Claude Code setting; scode ignores it";
@@ -383,9 +390,9 @@ const EDITOR_MODE_OPTIONS: &[&str] = &["default", "vim", "emacs"];
 const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 
 /// Children of `experimental`. MUST mirror
-/// `runtime::experiments::Experiment::ALL` — `parse_optional_experiments`
-/// rejects keys outside that registry, so a key listed here but missing
-/// there would validate and then fail to load.
+/// `runtime::experiments::Experiment::ALL` plus `RETIRED_KEYS` —
+/// `parse_optional_experiments` rejects keys outside both, so a key listed
+/// here but missing there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
         "promptViewport",
@@ -395,8 +402,9 @@ const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
         "peerDescriptions",
         FieldType::Bool,
-        "Publish persistent peer descriptions with existing compaction calls",
-    ),
+        "Graduated: peer descriptions are always on; this key is ignored",
+    )
+    .compat_only(),
     FieldSchema::leaf(
         "sharedSessionHistory",
         FieldType::Bool,

@@ -85,7 +85,9 @@ impl TaskSummary {
         let logo = self
             .animates_status()
             .then(|| crate::render::activity::spinner_frame(frame));
-        let logo_width = logo.map_or(0, |logo| display_width(logo) + 1);
+        // The animated mark is this row's marker; without it the label
+        // starts right of the gutter like every other unmarked row.
+        let logo_width = logo.map_or(crate::render::GUTTER_COLS, |logo| display_width(logo) + 1);
         let theme = theme();
         let render = |label: &str, metadata: &str| {
             let mut text = StyledText::default();
@@ -94,6 +96,8 @@ impl TaskSummary {
                     theme.style(TextRole::Brand),
                     &truncate_to_width(&format!("{logo} "), width),
                 );
+            } else {
+                text.plain(crate::render::GUTTER);
             }
             text.push(
                 theme.style(role),
@@ -1170,7 +1174,8 @@ fn tokens(count: u64) -> String {
 
 fn status_color(status: BackgroundTaskStatus) -> crossterm::style::Color {
     match status {
-        BackgroundTaskStatus::Running => theme().color(TextRole::Info),
+        // Running work wears the brand accent, as the status row does.
+        BackgroundTaskStatus::Running => theme().color(TextRole::Brand),
         BackgroundTaskStatus::Stopping | BackgroundTaskStatus::ExecutionUnconfirmed => {
             theme().color(TextRole::Warning)
         }

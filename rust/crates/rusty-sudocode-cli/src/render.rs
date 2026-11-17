@@ -192,6 +192,16 @@ pub(crate) fn force_test_colors() {
 /// the live prompt used `❯`).
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
 
+/// Width of the left gutter. Columns 0–1 hold only markers: the prompt glyph
+/// ([`PROMPT_PREFIX`]), prose leads (`•`, `✻`), `↳` for queued input, choice
+/// markers and frame borders. Every row's text starts at this column — prose,
+/// the status line, todo panel, question heading and footer alike — so the
+/// left edge of text is one straight line. The brand spinner's four-cell mark
+/// is the one marker wider than the gutter.
+pub const GUTTER_COLS: usize = 2;
+/// [`GUTTER_COLS`] spaces: the gutter of a row without a marker.
+pub const GUTTER: &str = "  ";
+
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
@@ -1666,8 +1676,8 @@ impl ResponseGlyphState {
                 let rows = text_layout::wrap_line(
                     text,
                     offset..offset + body.len(),
-                    self.max_col - 2,
-                    self.visible_col.saturating_sub(2),
+                    self.max_col - GUTTER_COLS,
+                    self.visible_col.saturating_sub(GUTTER_COLS),
                 );
                 for (index, (row, col)) in rows.into_iter().enumerate() {
                     if index > 0 {
@@ -1692,11 +1702,11 @@ impl ResponseGlyphState {
                             out.push(theme().style(role), glyph);
                             out.plain(" ");
                         } else {
-                            out.plain("  ");
+                            out.plain(GUTTER);
                         }
                     }
                     out.append(&row);
-                    self.visible_col = col + 2;
+                    self.visible_col = col + GUTTER_COLS;
                 }
             }
             if body.len() < line.len() {

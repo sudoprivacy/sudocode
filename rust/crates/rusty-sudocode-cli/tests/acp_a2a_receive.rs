@@ -28,8 +28,8 @@
 
 #[path = "support/node_home.rs"]
 mod node_home;
-#[path = "acp_a2a_receive/runtime_observation.rs"]
-mod runtime_observation;
+#[path = "acp_a2a_receive/presence.rs"]
+mod presence;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -331,6 +331,30 @@ fn spawn_acp_from_binary_with_args(
     config_home: &tempfile::TempDir,
     args: &[&str],
 ) -> AcpStdio {
+    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .unwrap_or_else(|_| panic!("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<bundle for {agent}>"));
+    spawn_acp_as(
+        binary,
+        endpoint,
+        agent,
+        std::path::Path::new(&receiver_credential),
+        workspace,
+        config_home,
+        args,
+    )
+}
+
+/// `agent` attaches through a node record in its own home, with its OWN minted
+/// credential: `agent` is the name that bundle carries.
+fn spawn_acp_as(
+    binary: &std::ffi::OsStr,
+    endpoint: &str,
+    agent: &str,
+    credential: &std::path::Path,
+    workspace: &tempfile::TempDir,
+    config_home: &tempfile::TempDir,
+    args: &[&str],
+) -> AcpStdio {
     // An isolated config home needs a config: the point of isolating it is the
     // read cursor, not to test scode's behaviour without providers.
     std::fs::write(
@@ -339,16 +363,7 @@ fn spawn_acp_from_binary_with_args(
     )
     .expect("seed the isolated config home");
 
-    // The receiver attaches through a node record in its own home, as `agent`,
-    // with its OWN minted credential: `agent` is the name that bundle carries.
-    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
-        .unwrap_or_else(|_| panic!("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<bundle for {agent}>"));
-    let node_home = node_home::NodeHome::new(
-        "acp-receiver",
-        endpoint,
-        agent,
-        std::path::Path::new(&receiver_credential),
-    );
+    let node_home = node_home::NodeHome::new("acp-receiver", endpoint, agent, credential);
     node_home::pin_agent_name(workspace.path(), agent);
     let mut cmd = Command::new(binary);
     cmd.args(args)

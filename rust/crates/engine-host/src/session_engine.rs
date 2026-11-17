@@ -712,9 +712,10 @@ impl SessionEngine {
         }
     }
 
-    /// Run an explicit `/compact` that a `session/cancel` can abort mid-flight
-    /// (the ACP path; the REPL's [`SessionLifecycle::run_compaction`] is not
-    /// cancellable, since the REPL has no concurrent cancel channel). Compacts
+    /// Run an explicit `/compact` that concurrent cancellation can abort.
+    /// Admitted native REPL and ACP management commands use `compact_admitted`
+    /// after the engine pump resets cancellation. Synchronous lifecycle callers
+    /// use [`SessionLifecycle::run_compaction`] and a signal guard. Compacts
     /// through the strict LLM path, installs + persists
     /// a validated compacted transcript, and records the same
     /// telemetry the ACP `/compact` always did. A cancel during the model

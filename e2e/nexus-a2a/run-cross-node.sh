@@ -140,10 +140,11 @@ RUST_LOG=info \
   >"$DATA_DIR/joiner.log" 2>&1 &
 JOINER_PID=$!
 
-# Ready when it has caught up to the leader's log, not merely when it answered a
-# dial: the tests read a stream the founder created, and a joiner that is up but
-# behind returns not-found.
-authon_wait_log_file "$DATA_DIR/joiner.log" "local raft state caught up to leader" 90
+# Ready when the ConfState naming it is installed and it follows the leader,
+# not merely when it answered a dial: the tests read a stream the founder
+# created, and a joiner that is not yet a member returns not-found. nexus rc.9
+# logs this as "local raft state follows the leader" (rc.8 said "caught up").
+authon_wait_log_file "$DATA_DIR/joiner.log" "local raft state follows the leader" 90
 
 # Observer installation precedes the production data-plane-ready event. The
 # obsolete per-zone "stream-wakeup" log is no longer emitted. The real blocking
@@ -181,10 +182,11 @@ NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RUNTIME_BU
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime \
   --test mailbox_nexus_live live_runtime_call_deadline_covers_transport_admission -- --exact --ignored --nocapture
 
-echo "== [cross-node] runtime observations retain independent CLI instances =="
+echo "== [cross-node] a peer on the other node reads online until it exits =="
 NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_PEER_ENDPOINT="$JOINER_ENDPOINT" \
-  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$RUNTIME_BUNDLE" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$RECEIVER_BUNDLE" \
+  NEXUS_A2A_TEST_SENDER_CREDENTIAL="$SENDER_BUNDLE" \
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_a2a_receive live_runtime_directory_tracks_same_agent_instances_across_nodes -- --ignored --nocapture
+  --test acp_a2a_receive live_presence_names_a_peer_online_across_nodes_until_it_exits -- --ignored --nocapture
 
 echo "CROSS-NODE E2E OK"

@@ -202,6 +202,8 @@ function claudeInstallation(name: string) {
     acp: () => journal(path.join(issuer, 'acp.jsonl')) as Array<{ method: string; params?: any; response?: any }>,
     /** scode reports the unread count again, as on a new peer frame. */
     unread: () => fs.appendFileSync(unread, '.'),
+    /** scode's polled count reads zero for a moment while the frame stays unread. */
+    flicker: () => fs.appendFileSync(unread, '0'),
     advance: (ms: number) => fs.writeFileSync(clock, String(Number(fs.readFileSync(clock, 'utf8')) + ms)),
     async bridge(sessionId: string, entrypoint = 'cli') {
       const transport = new StdioClientTransport({ command: process.execPath,
@@ -313,6 +315,8 @@ async function checkClaudeDelivery(): Promise<void> {
       file_path: claude.spool(sessionId), event: 'change' }), { code: 2, stdout: '', stderr: first.text + '\n' });
     claude.advance(9 * 60_000); claude.unread();
     await quiet(1, 'no redelivery within ten minutes');
+    claude.flicker(); await pause(200); claude.unread();
+    await quiet(1, 'a momentary unread count of zero keeps the ten-minute spacing');
     for (const n of [2, 3]) {
       claude.advance(n === 2 ? 60_000 : 10 * 60_000); claude.unread();
       await until(() => entries().length === n, 5000, `delivery ${n} follows ten minutes after the previous one`);

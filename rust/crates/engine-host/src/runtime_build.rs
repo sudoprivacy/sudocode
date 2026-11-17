@@ -944,12 +944,10 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
-    if runtime::experiments::is_enabled(runtime::experiments::Experiment::PeerDescriptions) {
-        match description_store {
-            Some(Ok(store)) => runtime.set_agent_description_store(store),
-            Some(Err(error)) => tracing::warn!(%error, "peer description store unavailable"),
-            None => {}
-        }
+    match description_store {
+        Some(Ok(store)) => runtime.set_agent_description_store(store),
+        Some(Err(error)) => tracing::warn!(%error, "peer description store unavailable"),
+        None => {}
     }
     // Runtime maintenance and provider requests must share the session's
     // existing local trace sink, including signed-history recovery notices.

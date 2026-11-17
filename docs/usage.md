@@ -52,12 +52,9 @@ when there is no room for a frame and its padding, information appears unboxed.
 
 ## Persistent peer descriptions
 
-Enable `experimental.peerDescriptions` in settings to let model-backed
-compaction publish a short description of each peer's ongoing work:
-
-```json
-{"experimental":{"peerDescriptions":true}}
-```
+Model-backed compaction publishes a short description of each peer's ongoing
+work. This is always on; a leftover `experimental.peerDescriptions` setting is
+accepted and ignored.
 
 The existing compaction call produces optional description metadata alongside
 its checkpoint. It adds no separate summarizer or repair request. New agents
@@ -81,14 +78,14 @@ age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.
 
-Runtime discovery is separate from these stored descriptions. `agent_list`
-adds one `runtime` row per observed instance, including foreground
-state, a permission/question waiting reason and independent background task
-counts. Several instances can share an Agent name or session ID. Unsupported,
-stale or unreachable observations remain unknown; an empty list is conclusive
-only within its reported discovery coverage. `active_only` retains positively
-online instances and running subagent tasks. See the shared
-[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+An agent's name is its identity: the `agentName` setting, or by default the
+workspace folder name plus a short hash of its path. For a long-lived role, set
+a readable `agentName` when the agent is first created. Renaming an existing
+agent gives it a new identity and leaves its conversations under the old name.
+
+Liveness is separate from these stored descriptions. Each `agent_list` row
+carries one `active` bit: a peer seen online in the zone, or a running subagent
+task. `active_only` keeps those rows. `active: false` means not seen online.
 
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest
@@ -353,6 +350,15 @@ remain live. Final turn statistics retain their precise duration.
 Foreground tools use the same row and show available progress first. Quiet
 tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
+Manual and automatic context compaction use this same foreground row:
+`Compacting context…` and elapsed time, without a guessed percentage or ETA.
+Queued messages remain visible above it. With no pending input the footer
+shows `Esc/Ctrl+C cancel`; with pending input it shows `Esc flush` and
+`Ctrl+C cancel` separately. Flushing requests delivery of pending input;
+compaction finishes before that input can reach a model request. Cancellation
+keeps unapplied queued input available for explicit continuation.
+While working or holding pending input, flush/cancel controls lead the other keys and workspace
+position so a long branch name does not hide them on an 80-column terminal.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described
@@ -643,6 +649,18 @@ text, and further arrow presses use normal cursor navigation. Enter steers with
 the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
 
+Slash commands typed while a turn runs never reach the model:
+
+- `/help` and `/tasks` run at once.
+- `/model` and `/effort` (with or without an argument) choose the setting now.
+  The running turn keeps its model and effort; the choice applies when it
+  ends, before any queued message is sent.
+- Every other command waits in the staging area as `queued: /compact` and runs
+  as a command when the turn ends, in order with queued messages. Esc steers
+  queued messages into the turn but leaves queued commands for its end; ↑
+  brings a queued command back for editing like a queued message.
+- An unknown command is reported at once.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 
@@ -727,11 +745,12 @@ tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
 over cache advice. While a turn runs, only urgent tips are shown.
 
-Below the tips, the slot shows where the workspace is, then the keys for the
-current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
-steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
-cancel` in place of the cancel keys when input is queued, and `· Enter send ·
-Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+Below the tips, the slot shows the workspace and the keys for the current turn
+and queue state. Idle without a queue shows `sudocode ⎇ main · /help`.
+With pending input it shows `Esc flush · Enter send · ↑ edit queued` before
+the workspace position. During work, controls also lead the
+workspace: `Esc/Ctrl+C cancel · Enter steer · Tab queue`, or `Esc flush ·
+Ctrl+C cancel · Enter steer · Tab queue` when input is pending. Typing never changes it,
 so keystrokes never redraw the footer; it changes when a turn starts or ends,
 as the rest of the screen does. The repository is named by its shared git
 directory, so every worktree of one repository shows the same name; a detached

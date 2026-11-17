@@ -102,6 +102,7 @@ impl State {
                     draft,
                     context,
                 }),
+                is_command: false,
             };
             if item.input.source == engine_events::InputSource::Human && delivery.is_steer() {
                 self.queue.resume();
@@ -165,6 +166,7 @@ impl State {
                     draft: None,
                     context: None,
                 }),
+                is_command: false,
             };
             // A completion is steered like a human steer: into the running
             // turn at its next model boundary, or queued when no turn can take

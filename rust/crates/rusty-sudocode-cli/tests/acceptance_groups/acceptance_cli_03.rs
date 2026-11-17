@@ -8,6 +8,9 @@
 #[path = "../acp_integration.rs"]
 mod acp_integration;
 
+#[path = "../acp_managed_child.rs"]
+mod acp_managed_child;
+
 #[path = "../pty_a2a_cards.rs"]
 mod pty_a2a_cards;
 

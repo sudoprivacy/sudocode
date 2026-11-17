@@ -1463,9 +1463,6 @@ where
         &self,
         update: Option<&crate::agent_description::DescriptionUpdate>,
     ) {
-        if !crate::experiments::is_enabled(crate::experiments::Experiment::PeerDescriptions) {
-            return;
-        }
         if let Some((store, update)) = self.agent_description_store.as_ref().zip(update) {
             if let Err(error) = store.publish(update) {
                 tracing::warn!(%error, "peer description publication failed; checkpoint remains committed");
@@ -2653,21 +2650,15 @@ where
             }
         }
         let config = self.compaction_retention(&frozen, config);
-        let description = if crate::experiments::is_enabled(
-            crate::experiments::Experiment::PeerDescriptions,
-        ) {
-            self.agent_description_store.as_ref().and_then(|store| {
-                match store.snapshot(&source.session_id) {
-                    Ok(snapshot) => Some(snapshot),
-                    Err(error) => {
-                        tracing::warn!(%error, "peer description unavailable; keeping ordinary checkpoint format");
-                        None
-                    }
+        let description = self.agent_description_store.as_ref().and_then(|store| {
+            match store.snapshot(&source.session_id) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    tracing::warn!(%error, "peer description unavailable; keeping ordinary checkpoint format");
+                    None
                 }
-            })
-        } else {
-            None
-        };
+            }
+        });
         let prepared =
             PreparedCompaction::new(&frozen, config, target, ideal).with_description(description);
         if !prepared.has_source() {

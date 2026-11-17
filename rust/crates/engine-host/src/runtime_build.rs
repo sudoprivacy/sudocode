@@ -304,6 +304,7 @@ pub struct RuntimeConfig {
 }
 
 pub struct BuiltRuntime {
+    pub(crate) agent_directory: runtime::attention::AgentDirectoryReader,
     runtime: Option<ConversationRuntime<EngineApiClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
     plugin_load_outcome: PluginLoadOutcome,
@@ -326,12 +327,14 @@ impl BuiltRuntime {
     }
 
     pub fn new(
+        agent_directory: runtime::attention::AgentDirectoryReader,
         runtime: ConversationRuntime<EngineApiClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
         plugin_load_outcome: PluginLoadOutcome,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
+            agent_directory,
             runtime: Some(runtime),
             plugin_registry,
             plugin_load_outcome,
@@ -843,6 +846,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         .mailbox
         .clone()
         .or_else(|| peer.as_ref().map(crate::peer::Peer::mailbox));
+    let agent_directory = agent_directory_reader(host, mailbox.clone());
     let description_store = mailbox
         .as_ref()
         .map(|mailbox| mailbox.description_store(mailbox.self_id()));
@@ -876,9 +880,26 @@ pub(crate) fn build_runtime_with_plugin_state(
     // injected here.
     cleanup_mcp_on_error(plugin_registry.initialize(), mcp_state.as_deref())?;
     Ok(BuiltRuntime::new(
+        agent_directory,
         runtime,
         plugin_registry,
         plugin_load_outcome,
         mcp_state,
     ))
+}
+
+/// Keep directory reads independent of the model lock while preserving the
+/// tool dispatcher's filesystem, mailbox and runtime-observation authorities.
+fn agent_directory_reader(
+    host: &HostContext,
+    mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
+) -> runtime::attention::AgentDirectoryReader {
+    let fs = host.fs.clone();
+    let observation = host.runtime_observation.clone();
+    let root = host.shell_root.clone();
+    Arc::new(move || {
+        let _workspace = runtime::WorkspaceRootScope::enter(&root);
+        let _mailbox = mailbox.clone().map(runtime::mailbox::MailboxScope::enter);
+        tools::collect_agent_directory(false, fs.as_ref(), observation.as_deref(), None)
+    })
 }

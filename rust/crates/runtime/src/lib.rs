@@ -8,6 +8,7 @@ pub mod agent_color;
 pub mod agent_description;
 pub mod agent_mailbox;
 pub mod agent_types;
+pub mod attention;
 pub mod background_tasks;
 mod bash;
 pub mod bash_validation;
@@ -214,9 +215,10 @@ pub use oauth::{
 };
 pub use permissions::{
     PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
-    PermissionPromptDecision, PermissionPromptSink, PermissionPrompter, PermissionRequest,
-    PromptQueue, PromptReply, PromptText, QuestionField, QuestionKind, QuestionOption,
-    QuestionPresentation, QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
+    PermissionPromptDecision, PermissionPromptOrigin, PermissionPromptSink, PermissionPrompter,
+    PermissionRequest, PromptQueue, PromptReply, PromptText, QuestionField, QuestionKind,
+    QuestionOption, QuestionPresentation, QuestionPromptAnswer, QuestionPromptRequest,
+    QuestionPrompter,
 };
 pub use plugin_lifecycle::{
     DegradedMode, DiscoveryResult, PluginHealthcheck, PluginLifecycle, PluginLifecycleEvent,

@@ -74,8 +74,8 @@ export function registerScodeMcpTools(server: McpServer,
     return binding.mailbox.inbox(input);
   }));
   server.registerTool('scode_send',{
-    description:'Send exact plain text through the owned scode without model inference. Uses native send policy/hooks. No automatic retry; a transport error after submission is Unknown.',
-    inputSchema:z.object({to:z.string().min(1),message:z.string(),summary:z.string().min(1)}).strict(),
+    description:'Send exact plain text through the owned scode without model inference. Uses native send policy/hooks. Delivery steer (default) offers guidance at a supported model boundary; queue waits for the next turn. Neither cancels work or forces a change of direction. No automatic retry; a transport error after submission is Unknown.',
+    inputSchema:z.object({to:z.string().min(1),message:z.string(),summary:z.string().min(1),delivery:z.enum(['steer','queue']).optional()}).strict(),
   },async (input,extra) => external('send',input,extra,connection=>sendScodeMessage(connection,input)));
   server.registerTool('scode_agent_list',{
     description:'Read the owned scode agent directory without model inference: the peers this session can address. It does not report whether a peer is running.',

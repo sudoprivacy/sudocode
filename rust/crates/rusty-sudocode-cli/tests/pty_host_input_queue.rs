@@ -14,10 +14,12 @@ struct Host {
     terminal: PtySession,
     session: String,
     id: u64,
-    /// Everything the last reply's read consumed, the reply and what preceded it.
-    /// An event written concurrently with that reply can be in here and nowhere
-    /// else: the terminal does not show it again.
+    /// Raw reply and preceding events, retained for notification assertions.
+    /// The PTY consumes this prefix; server requests are also queued below.
     last_read: String,
+    /// Server requests can precede a correlated reply in the same PTY read.
+    /// Retain them until their consumer takes them, across status queries.
+    incoming: Vec<Value>,
 }
 
 impl Host {
@@ -26,10 +28,14 @@ impl Host {
     }
 
     fn with_permissions(env: &TestEnv, allow_tools: bool) -> Self {
+        Self::with_options(env, allow_tools, &[])
+    }
+
+    fn with_options(env: &TestEnv, allow_tools: bool, extra: &[(&str, &str)]) -> Self {
         let mut terminal = if allow_tools {
-            env.spawn(&["--dangerously-skip-permissions", "acp"])
+            env.spawn_with_env(&["--dangerously-skip-permissions", "acp"], extra)
         } else {
-            env.spawn(&["--permission-mode", "workspace-write", "acp"])
+            env.spawn_with_env(&["--permission-mode", "workspace-write", "acp"], extra)
         };
         terminal.resize(40, 4096).unwrap();
         terminal.set_default_timeout(common::LIVE_TURN_BUDGET);
@@ -38,10 +44,12 @@ impl Host {
             session: String::new(),
             id: 0,
             last_read: String::new(),
+            incoming: Vec::new(),
         };
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
         assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
+        assert_eq!(init["_meta"]["sudocode"]["attention"]["version"], 1);
         let created = host.request(
             "session/new",
             &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
@@ -82,6 +90,7 @@ impl Host {
                 )
             });
         self.last_read.clone_from(&response);
+        self.retain_requests(&response);
         let response: Value = response
             .lines()
             .rev()
@@ -99,19 +108,49 @@ impl Host {
         self.request(METHOD, &action)
     }
 
+    fn cancel(&mut self) {
+        let newline = if cfg!(windows) { "\r" } else { "\n" };
+        self.terminal.send(&format!(
+            "{}{newline}",
+            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}})
+        )).unwrap();
+    }
+
+    fn retain_requests(&mut self, text: &str) {
+        self.incoming.extend(
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                .filter(|value| value.get("method").is_some() && value.get("id").is_some()),
+        );
+    }
+
+    #[track_caller]
     fn incoming_request(&mut self, method: &str) -> Value {
-        let message = self
-            .terminal
-            .expect(&format!(
-                r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
-            ))
-            .unwrap();
-        message
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| value["method"] == method)
-            .unwrap_or_else(|| panic!("missing {method} request: {message}"))
+        if let Some(index) = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+        {
+            return self.incoming.remove(index);
+        }
+        let message = match self.terminal.expect(&format!(
+            r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
+        )) {
+            Ok(message) => message,
+            Err(error) => panic!(
+                "missing {method} request: {error}; queued: {:?}; last reply: {}; screen: {}",
+                self.incoming,
+                self.last_read,
+                self.terminal.render(common::screen_contents)
+            ),
+        };
+        self.retain_requests(&message);
+        let index = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+            .unwrap_or_else(|| panic!("missing {method} request: {message}"));
+        self.incoming.remove(index)
     }
 
     fn respond(&mut self, request: &Value, result: &Value) {
@@ -130,6 +169,25 @@ impl Host {
 
     fn snapshot(&mut self) -> Value {
         self.input(json!({"action":"snapshot"}))["state"].clone()
+    }
+
+    fn attention(&mut self) -> Value {
+        self.request(
+            "_sudocode/session/attention",
+            &json!({"sessionId":self.session}),
+        )
+    }
+
+    fn wait_for_attention(&mut self, context: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        loop {
+            let state = self.attention();
+            if ready(&state) {
+                return state;
+            }
+            assert!(std::time::Instant::now() < deadline, "{context}: {state}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
     }
 
     fn runtime_status(&mut self) -> Value {
@@ -173,7 +231,9 @@ fn working(env: &TestEnv) -> (Host, Release) {
 fn working_with_mode(env: &TestEnv, background: bool) -> (Host, Release) {
     // Publish readiness only after the progress file can be read. ACP replies
     // may otherwise finish before the shell gets to its first loop iteration.
-    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished\n").unwrap();
+    // Likewise, publish completion only after the full output is written; a
+    // shell redirection creates an empty file before printf fills it.
+    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished.tmp\nmv input-tool-finished.tmp input-tool-finished\n").unwrap();
     let mut host = Host::new(env);
     let input =
         json!({"command":"sh input-work.sh","timeout":180_000,"run_in_background":background});
@@ -282,13 +342,7 @@ fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
         "HOST_AFTER_CANCEL: reply briefly; do not run any tools.",
         "queue",
     );
-    let newline = if cfg!(windows) { "\r" } else { "\n" };
-    host.terminal
-        .send(&format!(
-            "{}{newline}",
-            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":host.session}})
-        ))
-        .unwrap();
+    host.cancel();
     let paused = host.idle();
     assert_eq!(paused["paused"], true, "{paused}");
     assert_eq!(paused["pending"].as_array().unwrap().len(), 1);
@@ -382,6 +436,16 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
     host.submit("permission-input", &prompt, "steer");
     let request = host.incoming_request("session/request_permission");
     assert_eq!(request["params"]["sessionId"], host.session);
+    let attention = host.attention();
+    let requests = attention["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1, "{attention}");
+    assert_eq!(requests[0]["phase"], "presented");
+    assert_eq!(requests[0]["reason"], "permission");
+    assert_eq!(requests[0]["agent"], Value::Null);
+    assert!(requests[0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("HOST_PERMISSION_GRANTED"));
     assert_eq!(
         host.runtime_status()["foreground"],
         json!({"state":"awaiting_input","waiting_for":"permission"})
@@ -395,6 +459,9 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
         &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
     host.idle();
+    let cleared = host.attention();
+    assert_eq!(cleared["requests"], json!([]));
+    assert!(cleared["revision"].as_u64().unwrap() > attention["revision"].as_u64().unwrap());
     assert_eq!(
         fs::read_to_string(env.workspace_root().join("host-permission-proof.txt")).unwrap(),
         "HOST_PERMISSION_GRANTED"
@@ -684,4 +751,151 @@ fn question_wait_keeps_independent_tools_and_background_work_visible() {
     );
     first.close();
     observer.close();
+}
+
+#[test]
+fn attention_tracks_queued_questions_and_clears_cancelled_requests() {
+    let env = TestEnv::new_mock("attention-queued-questions");
+    let mut host = Host::new(&env);
+    let batch = json!([
+        {"id":"one","name":"AskUserQuestion","input":{"questions":[{"id":"q1","prompt":"FIRST_ATTENTION_REQUEST"}]}},
+        {"id":"two","name":"AskUserQuestion","input":{"questions":[{"id":"q2","prompt":"SECOND_ATTENTION_REQUEST"}]}}
+    ]);
+    host.submit(
+        "two-questions",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    let first = host.incoming_request("_scode/ask_user_question");
+    let waiting = host.wait_for_attention("second request never queued", |state| {
+        state["requests"].as_array().unwrap().len() == 2
+    });
+    assert_eq!(waiting["requests"][0]["phase"], "presented");
+    assert_eq!(waiting["requests"][1]["phase"], "queued");
+    host.respond(&first, &json!({"answers":[{"id":"q1","value":"continue"}]}));
+    let _second = host.incoming_request("_scode/ask_user_question");
+    let next = host.attention();
+    assert_eq!(next["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(next["requests"][0]["id"], waiting["requests"][1]["id"]);
+    assert_eq!(next["requests"][0]["phase"], "presented");
+    host.cancel();
+    host.idle();
+    assert_eq!(host.attention()["requests"], json!([]));
+    host.close();
+}
+
+#[test]
+fn attention_background_child_can_request_approval_after_parent_turn_finishes() {
+    assert_background_child_approval(false, false);
+}
+
+#[test]
+fn attention_automatically_backgrounded_child_retains_approval_owner() {
+    assert_background_child_approval(true, false);
+}
+
+#[test]
+fn attention_foreground_cancel_does_not_revoke_a_detached_childs_reply_route() {
+    assert_background_child_approval(false, true);
+}
+
+fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
+    let env = TestEnv::new_mock("attention-background-child");
+    fs::write(
+        env.workspace_root()
+            .join(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH),
+        "CHILD_APPROVAL_CONTENT",
+    )
+    .unwrap();
+    let mut host = Host::with_options(&env, false, &[("SUDOCODE_AGENT_AUTO_BG_SECS", "1")]);
+    host.request(
+        "session/setPermissionMode",
+        &json!({"sessionId":host.session,"permissionMode":"prompt"}),
+    );
+    let mut batch = json!([{"id":"detached-child","name":"agent_spawn","input":{
+        "description":"child approval owner", "subagent_type":"general-purpose", "model":"inherit", "run_in_background":!automatic,
+        "prompt":"PARITY_SCENARIO:subagent_slow_child Read the notes"
+    }}]);
+    if cancel_parent {
+        batch
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"parent-hold","name":"Bash","input":{
+                "command":"echo ATTENTION_PARENT_HOLD"
+            }}));
+    }
+    host.submit(
+        "parent",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    let spawn = host.incoming_request("session/request_permission");
+    assert!(spawn["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains("run_in_background"));
+    host.respond(
+        &spawn,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+    );
+    let queued_child = if cancel_parent {
+        let pending_parent = host.incoming_request("session/request_permission");
+        assert!(pending_parent["params"]["toolCall"]["rawInput"]
+            .as_str()
+            .unwrap()
+            .contains("ATTENTION_PARENT_HOLD"));
+        // Approving agent_spawn does not mean its child has started yet.
+        // Wait for the child's real queued request before cancelling the
+        // parent; otherwise cancellation may correctly prevent the spawn.
+        let state = host.wait_for_attention("child did not reach its approval request", |state| {
+            state["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["agent"]["background"] == true)
+        });
+        let child = state["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["agent"]["background"] == true)
+            .unwrap();
+        assert_eq!(child["phase"], "queued", "{state}");
+        host.cancel();
+        Some(child["id"].clone())
+    } else {
+        None
+    };
+    host.idle();
+    if !cancel_parent {
+        assert_eq!(
+            host.attention()["requests"],
+            json!([]),
+            "child request must happen after the parent ended"
+        );
+    }
+    let child = host.incoming_request("session/request_permission");
+    assert!(child["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH));
+    let state = host.attention();
+    assert_eq!(state["requests"].as_array().unwrap().len(), 1, "{state}");
+    if let Some(id) = queued_child {
+        assert_eq!(state["requests"][0]["id"], id, "{state}");
+    }
+    assert_eq!(state["requests"][0]["agent"]["background"], true);
+    assert!(state["requests"][0]["agent"]["agent_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert_eq!(state["requests"][0]["phase"], "presented");
+    assert_eq!(host.runtime_status()["foreground"]["state"], "idle");
+    host.respond(
+        &child,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+    );
+    host.wait_for_attention("answered child request did not clear", |state| {
+        state["requests"] == json!([])
+    });
+    host.close();
 }

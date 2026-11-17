@@ -152,7 +152,7 @@ impl ReceivedMessage<'_> {
         format!(
             "{RESET}{}Message from {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
             theme().fg_seq(TextRole::Secondary),
-            theme().fg_seq(TextRole::Accent),
+            crate::render::ansi_fg(theme().agent_color(&self.header.sender)),
             theme().fg_seq(TextRole::Secondary),
         )
     }

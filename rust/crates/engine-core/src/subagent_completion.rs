@@ -231,9 +231,11 @@ impl CompletionState {
 /// The pump owns the route; retained host callbacks cannot keep it alive.
 #[derive(Clone)]
 pub(crate) struct EventSink {
+    pub(crate) directory_inflight: Arc<std::sync::atomic::AtomicBool>,
     tx: Weak<std::sync::mpsc::Sender<EngineEvent>>,
     order: Arc<Mutex<()>>,
     state: Arc<Mutex<engine_events::EngineState>>,
+    attention: Arc<Mutex<Arc<engine_events::AttentionState>>>,
     pub(crate) completions: Arc<CompletionState>,
     pub(crate) inputs: Arc<crate::session_inputs::SessionInputs>,
 }
@@ -257,12 +259,36 @@ impl EventSink {
         completions: Arc<CompletionState>,
     ) -> Self {
         Self {
+            directory_inflight: Arc::default(),
             tx: Arc::downgrade(tx),
             completions,
             order: Arc::default(),
             state: Arc::new(Mutex::new(engine_events::EngineState::Idle)),
+            attention: Arc::default(),
             inputs: Arc::default(),
         }
+    }
+
+    pub(crate) fn attention(&self) -> Arc<engine_events::AttentionState> {
+        self.attention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn publish_attention(&self, requests: Vec<engine_events::AttentionRequest>) {
+        let mut current = self
+            .attention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.requests == requests {
+            return;
+        }
+        *current = Arc::new(engine_events::AttentionState {
+            revision: current.revision + 1,
+            requests,
+        });
+        let _ = self.send(EngineEvent::Attention(current.clone()));
     }
 
     pub(crate) fn reject_prompt(

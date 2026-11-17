@@ -5,6 +5,7 @@ author OS; this grants no Linux/macOS/Windows product journey coverage.
 """
 import argparse
 import base64
+import copy
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -439,6 +440,89 @@ def run_case(output, order):
             assert len(started_workers) == 2
             metadata_controls.append({"case": label, "policy": metadata, "accepted": True,
                                       "original_notes_and_processes_reused": True})
+
+        # A maintained responsibility change keeps the author's complete local
+        # work. Only the exact older, fuller CI split may survive unchanged.
+        responsibility_controls = []
+        mixed = {"checks": {"native-workspace": {}, "native-context": {},
+                            "native-sdk": {"targets": ["linux-x64", "linux-arm64", "macos", "windows"]}}}
+        names = list(mixed["checks"])
+        periodic = copy.deepcopy(mixed)
+        periodic["checks"]["native-workspace"]["complementary"] = "periodic"
+        for system in ["windows", "linux", "macos"]:
+            owner = {**platform, "system": system, "architecture": "x64"}
+            full = helper.acceptance_plan(mixed, names, owner)
+            current = helper.acceptance_plan(periodic, names, owner)
+            expected = copy.deepcopy(full)
+            for job in expected["ci"]:
+                job["checks"] = [name for name in job["checks"] if name != "native-workspace"]
+            assert current == expected
+            assert current["local_checks"] == full["local_checks"] == names
+            assert current["local_targets"] == full["local_targets"]
+            assert helper.compatible_acceptance_plan(periodic, names, owner, full)
+            assert not helper.compatible_acceptance_plan(mixed, names, owner, current)
+            for label, mutate in [
+                ("missing complementary host", lambda plan: plan["ci"].pop()),
+                ("missing complementary context", lambda plan: plan["ci"][0]["checks"].remove("native-context")),
+                ("changed complementary timeout", lambda plan: plan["ci"][0].update(timeout=1)),
+                ("missing original author workspace", lambda plan: plan["local_checks"].remove("native-workspace")),
+                ("changed original author", lambda plan: plan["author"].update(system="unknown")),
+                ("claimed deployment", lambda plan: plan.update(deployment_verified=True)),
+            ]:
+                invalid = copy.deepcopy(full)
+                mutate(invalid)
+                assert not helper.compatible_acceptance_plan(periodic, names, owner, invalid), label
+            responsibility_controls.append({"author": system, "full_author_and_other_profiles_retained": True,
+                                            "only_exact_former_full_plan_accepted": True})
+        for name, mode in [("native-workspace", value) for value in [None, False, [], "skip"]] + [
+                ("native-context", "periodic"), ("native-sdk", "periodic")]:
+            invalid = copy.deepcopy(mixed)
+            invalid["checks"][name]["complementary"] = mode
+            try:
+                helper.acceptance_plan(invalid, names, platform)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("Unknown/foreign periodic responsibility was accepted")
+
+        periodic_policy = copy.deepcopy(json.loads(git("show", metadata + ":" + policy_path)))
+        periodic_policy["checks"]["native-workspace"]["complementary"] = "periodic"
+        metadata = protected_commit(policy_path, json.dumps(periodic_policy),
+                                    "Keep full author workspace; make complementary workspace periodic", metadata)
+        assert helper.acceptance_plan(periodic_policy, ["native-workspace"], platform)["ci"] == []
+        assert helper.verify_execution_plan(envelope, head, metadata, metadata) == pending
+        original_completion = helper.verify_envelope(completed, head, metadata, metadata)
+        assert original_completion["plan"] == pending["plan"]
+        publisher_run["head_sha"] = metadata
+        publish({"workflow_run": source_run}, 930)
+        assert statuses[-1]["state"] == "success"
+        helper.start_pr(argparse.Namespace(remote="origin", output=str(output / "periodic-retry"),
+                        title="Parallel fixture", body_file=None), api=http_api)
+        assert not (output / "periodic-retry/execution-plan").exists()
+        assert not (output / "periodic-retry/author").exists()
+        # Original signatures, note objects, logs and executed children stay
+        # identical. A verified scheduling plan still proves no completed work.
+        assert notes_before == (helper.canonical(helper.read_note(head)), helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        for label, mutate in [
+            ("drop original author workspace", lambda plan: plan["local_checks"].clear()),
+            ("incomplete former host split", lambda plan: plan["ci"].pop()),
+            ("changed former host metadata", lambda plan: plan["ci"][0].update(node="18")),
+        ]:
+            invalid = copy.deepcopy(pending)
+            mutate(invalid["plan"])
+            signed = helper.sign_receipt(invalid, output / "periodic-negative" / label.replace(" ", "-"),
+                                         "fixture", key, namespace=helper.NAMESPACE + "-plan")
+            try:
+                helper.verify_execution_plan(signed, head, metadata, metadata)
+            except RuntimeError:
+                refused.append(label)
+            else:
+                raise AssertionError("A signed partial legacy plan was accepted: " + label)
+        metadata_controls.append({"case": "original full signed workspace plan and completion retained",
+                                  "policy": metadata, "accepted": True,
+                                  "original_notes_logs_and_processes_reused": True})
         # The completion verifier already honors protected exact recipe pairs.
         # Scheduling must share that decision without accepting a plan as a
         # test result or changing its original signatures/source responsibility.
@@ -562,6 +646,7 @@ def run_case(output, order):
             "historical_verification_excludes_current_environment": True,
             "outer_setup_included_in_signed_timing": True, "commands": commands, "requests": requests,
             "metadata_controls": metadata_controls,
+            "workspace_responsibility_controls": responsibility_controls,
             "stale_installed_runner_refreshed_from_protected_main": True,
             "protected_new_code_actually_executed": True,
             "original_start_and_output_preserved": True,

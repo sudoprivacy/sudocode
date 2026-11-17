@@ -20,6 +20,8 @@
 # Checksums come from rust/crates/service-host/runtime-artifacts.json. To run
 # against another published release, set VAULT_LIVE_NEXUS_TAG together with
 # VAULT_LIVE_NEXUS_SHA256 (that release's linux-x86_64 archive checksum).
+# run-native.sh runs the same test on a host without a container: macOS arm64,
+# whose Vault plugin has no Linux build.
 #
 # Usage (Linux, macOS, or Git Bash on Windows; needs docker):
 #
@@ -36,11 +38,9 @@
 # the test without running it).
 set -euo pipefail
 
-ARCH=linux-x86_64
 CACHE=/target/vault-live
-
-log() { echo "[vault-live] $*" >&2; }
-die() { echo "[vault-live] $*" >&2; exit 1; }
+# shellcheck source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # ── inside the container ──────────────────────────────────────────────────
 
@@ -56,104 +56,13 @@ prepare_tree() {
     cd /work
 }
 
-nexus_tag() {
-    if [ -n "${VAULT_LIVE_NEXUS_TAG:-}" ]; then
-        echo "$VAULT_LIVE_NEXUS_TAG"
-        return
-    fi
-    local tags
-    tags="$(sed -n 's/.*nexus-vfs?tag=\([^#"]*\)#[0-9a-f]*.*/\1/p' rust/Cargo.lock | sort -u)"
-    [ "$(printf '%s\n' "$tags" | grep -c .)" = 1 ] \
-        || die "rust/Cargo.lock must pin exactly one nexus-vfs tag, found: ${tags:-none}"
-    echo "$tags"
-}
-
-# The value runtime-artifacts.json records for `key`, from a `"key": "value"` line.
-artifact_field() {
-    local key="${1//./\\.}"
-    sed -n "s|^ *\"$key\": *\"\([^\"]*\)\".*|\1|p" rust/crates/service-host/runtime-artifacts.json
-}
-
-# Download `name` from the first URL that answers into the archive cache and
-# require `sha`. A cached archive is re-hashed rather than trusted.
-fetch_verified() {
-    local name="$1" sha="$2" dest="$CACHE/archives/$1"
-    shift 2
-    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "no pinned sha256 for $name"
-    mkdir -p "$CACHE/archives"
-    if [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$sha" ]; then
-        log "cached $name ($sha)"
-        return
-    fi
-    local url
-    for url in "$@"; do
-        log "downloading $url"
-        if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$dest.part" "$url"; then
-            local actual
-            actual="$(sha256sum "$dest.part" | cut -d' ' -f1)"
-            [ "$actual" = "$sha" ] || die "sha256 mismatch for $name: expected $sha, got $actual"
-            mv "$dest.part" "$dest"
-            log "verified $name ($sha)"
-            return
-        fi
-    done
-    die "could not download $name"
-}
-
-# Extract exactly one file called `name` from `archive` into `dir`.
-extract_one() {
-    local archive="$1" name="$2" dir="$3" scratch
-    scratch="$(mktemp -d)"
-    tar -xzf "$archive" -C "$scratch"
-    local found
-    found="$(find "$scratch" -type f -name "$name")"
-    [ "$(printf '%s\n' "$found" | grep -c .)" = 1 ] || die "$archive must hold one $name"
-    install -m 0755 "$found" "$dir/$name"
-    rm -rf "$scratch"
-}
-
 fetch_pass() {
     prepare_tree
-    local channel
+    local channel tag
     channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')"
     rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
-
-    local tag vault_version nexus_sha vault_sha
-    tag="$(nexus_tag)"
-    nexus_sha="$(artifact_field "$tag/nexusd-cluster-$ARCH.tar.gz")"
-    if [ -n "${VAULT_LIVE_NEXUS_SHA256:-}" ]; then
-        [ -z "$nexus_sha" ] || [ "$nexus_sha" = "$VAULT_LIVE_NEXUS_SHA256" ] \
-            || die "VAULT_LIVE_NEXUS_SHA256 disagrees with runtime-artifacts.json for $tag"
-        nexus_sha="$VAULT_LIVE_NEXUS_SHA256"
-    fi
-    vault_version="$(artifact_field nexus-vault)"
-    vault_sha="$(artifact_field "vault-v$vault_version/nexus-vault-$ARCH.tar.gz")"
-    local nexus_archive="nexusd-cluster-$ARCH-$tag.tar.gz"
-    local vault_archive="nexus-vault-$ARCH-$vault_version.tar.gz"
-    local cos=https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com
-    fetch_verified "$nexus_archive" "$nexus_sha" \
-        "$cos/nexus-vfs/release/$tag/nexusd-cluster-$ARCH.tar.gz" \
-        "https://github.com/nexi-lab/nexus-vfs/releases/download/$tag/nexusd-cluster-$ARCH.tar.gz"
-    fetch_verified "$vault_archive" "$vault_sha" \
-        "$cos/nexus-vault/release/v$vault_version/nexus-vault-$ARCH.tar.gz" \
-        "https://github.com/nexi-lab/nexus/releases/download/vault-v$vault_version/nexus-vault-$ARCH.tar.gz"
-
-    local live="$CACHE/$tag"
-    rm -rf "$live"
-    mkdir -p "$live/plugins"
-    extract_one "$CACHE/archives/$nexus_archive" nexusd-cluster "$live"
-    extract_one "$CACHE/archives/$vault_archive" libnexus_vault.so "$live/plugins"
-    extract_one "$CACHE/archives/$vault_archive" libnexus_vault.so.sig "$live/plugins"
-    cat >"$live/artifacts.env" <<EOF
-NEXUS_TAG=$tag
-NEXUS_ARCHIVE_SHA256=$nexus_sha
-NEXUS_BINARY_SHA256=$(sha256sum "$live/nexusd-cluster" | cut -d' ' -f1)
-VAULT_VERSION=$vault_version
-VAULT_ARCHIVE_SHA256=$vault_sha
-VAULT_LIBRARY_SHA256=$(sha256sum "$live/plugins/libnexus_vault.so" | cut -d' ' -f1)
-EOF
+    tag="$(fetch_artifacts linux-x86_64 linux-x86_64 libnexus_vault.so)"
     echo "$tag" >"$CACHE/selected-tag"
-
     (cd rust && cargo fetch --locked)
     log "fetch pass complete for $tag"
 }
@@ -168,21 +77,10 @@ test_pass() {
     {
         echo "SOURCE=${VAULT_LIVE_SOURCE:-unknown}"
         echo "IMAGE=${VAULT_LIVE_IMAGE:-unknown}"
-        cat "$live/artifacts.env"
-        echo "NEXUSD_VERSION=$("$live/nexusd-cluster" --version 2>&1 | head -1)"
-        echo "RUSTC=$(cd rust && rustc -V)"
-        echo "CARGO=$(cd rust && cargo -V)"
+        artifact_versions "$live"
         echo "KERNEL=$(uname -sr)"
     } | tee "$out/versions.env"
-
-    local run=(-- --test-threads=1 --nocapture)
-    [ "${VAULT_LIVE_BUILD_ONLY:-}" = 1 ] && run=(--no-run)
-    [ -n "${VAULT_LIVE_TEST_FILTER:-}" ] && [ "${run[0]}" = -- ] \
-        && run=(-- "$VAULT_LIVE_TEST_FILTER" --test-threads=1 --nocapture)
-    cd rust
-    SUDOCODE_VAULT_LIVE="$live" SUDOCODE_VAULT_LIVE_EVIDENCE="$out" \
-        cargo test --offline --locked -p rusty-sudocode-cli --test pty_vault_live "${run[@]}" \
-        2>&1 | tee "$out/cargo-test.log"
+    run_live_test "$live" "$out"
 }
 
 # ── on the host ───────────────────────────────────────────────────────────
@@ -219,7 +117,7 @@ host_run() {
         -e VAULT_LIVE_TEST_FILTER -e VAULT_LIVE_BUILD_ONLY
         -e VAULT_LIVE_SOURCE="$source" -e VAULT_LIVE_IMAGE="$image@$image_id"
     )
-    local entry=(bash -c 'tr -d "\r" </src/e2e/vault-live/run.sh >/tmp/run.sh && exec bash /tmp/run.sh "$1"' run)
+    local entry=(bash -c 'for f in run.sh lib.sh; do tr -d "\r" </src/e2e/vault-live/$f >/tmp/$f; done && exec bash /tmp/run.sh "$1"' run)
     log "fetch pass (network) with $image"
     docker run "${args[@]}" "$image" "${entry[@]}" fetch
     log "test pass (--network none)"

@@ -136,6 +136,7 @@ path = "tests/acceptance_groups/acceptance_cli_08.rs"
 test = false
 
 # The live Vault acceptance mints with nexus's certgen. Its crate needs protoc,
-# so it is a Linux-only dev-dependency, as in runtime and nexusd-cohost.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+# so it is a Linux-only dev-dependency, as in runtime and nexusd-cohost, plus
+# wherever e2e/vault-live/run-native.sh sets `--cfg vault_live` (macOS).
+[target.'cfg(any(target_os = "linux", vault_live))'.dev-dependencies]
 nexus-raft = { workspace = true }

@@ -1432,6 +1432,16 @@ GitHub's normal bypass protections stay active. The CI migration's explicitly
 authorized temporary admin route was specific to that migration; it is not a
 general approval route for later contract changes.
 
+
+Stage an acceptance-plan schema update before its policy activation. The validator
+stage keeps the current complete per-PR workspace split across all three operating
+systems. Real signed-plan fixtures cover the new schema, exact former-full-plan
+reuse, and malformed or incomplete plan refusals. After that verifier is accepted
+on protected main, the policy activation uses the same maintainer contract-update
+route. Existing signatures and failed publication records remain intact. Only the
+normal exact-source/profile verifier may reuse completed execution; a changed
+plan is never edited into an old signed payload.
+
 Rust caches keep the existing 10 GB quota and three shared main publishers.
 The publisher and complementary native jobs derive their cache paths from
 `.github/local-acceptance/cache_layout.py`. Sources stay in `candidate/rust`,

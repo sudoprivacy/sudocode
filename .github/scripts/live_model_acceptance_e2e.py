@@ -202,6 +202,18 @@ fn print_completes_tool_roundtrip_in_each_output_format() { record("second"); }
         assert marker.read_text() == "first\n", "Failed work must not retry or admit the next command"
         marker.unlink()
         failures.append(category)
+    # A Windows runner's stdout is a pipe in the ANSI code page. A failure whose
+    # log holds text it cannot encode keeps its category and prints its tail.
+    destination = output / "unencodable-tail"
+    result = command(sys.executable, helper, "--suite", "smoke", "--execute", "--output", destination, success=False,
+                     extra={"MODEL_FIXTURE_FAILURE": "upstream quota exceeded \u2502 frame", "PYTHONIOENCODING": "cp1252"})
+    report = json.loads((destination / "result.json").read_text())
+    assert report["failure_kind"] == "quota", report
+    assert "Traceback" not in result.stdout + result.stderr, result.stderr
+    assert "--- last " in result.stdout and "upstream quota exceeded ? frame" in result.stdout, result.stdout
+    assert marker.read_text() == "first\n"
+    marker.unlink()
+    failures.append("unencodable-tail")
     fixture.write_text(fixture.read_text().replace("fn interactive_file_reads_updated_contents_after_resume()",
                                                  "fn deliberately_not_selected()"))
     empty = output / "empty-selection"

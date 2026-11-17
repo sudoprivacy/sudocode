@@ -199,6 +199,15 @@ fn main() {
                 assert result == direct, result
             else:
                 assert "cannot start" in result and "unavailable-cache" in result, result
+        if os.name == "nt":
+            # Finish cold public downloads before a lazy cache server is active.
+            # Use a separate driver target so real Cargo still creates each
+            # consumer target and its CACHEDIR.TAG without fixture-made markers.
+            terminal_target = output / "terminal-prerequisite"
+            command("terminal-prerequisite", [sys.executable, "e2e/terminal-resize/setup_windows.py",
+                    str(Path.home() / ".cache/sudocode-terminal-host"), "--native-target", str(terminal_target)], SOURCE)
+            checks.verify_native_terminal(output / "terminal-prerequisite.log", terminal_target)
+
         for index, workspace in enumerate(workspaces):
             target = output / f"target-{index}"
             with cache.session(tool, output / f"server-{index}", helper.run_command, output / "objects") as active:

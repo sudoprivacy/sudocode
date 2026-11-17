@@ -1145,7 +1145,7 @@ def native_guard_files():
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "a1878e8277dc2ad0d29f198e9411b2681b433245ee8d5dc0840361a4768956ff",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "334b10ffa8a6487155dea70a0012085e583cc7e2125afa25c975f0e033dabae8",
         ".github/local-acceptance/compiler_cache.py": "264abdb814cf645d92d322506c2666c5a74559b87c75acd50f4fc791a624b553",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",

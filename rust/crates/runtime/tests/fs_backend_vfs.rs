@@ -1784,7 +1784,7 @@ fn install_conditional_alias_mounts(
     use nexus_raft::zone_meta_store::ZoneMetaStore;
     use std::time::Duration;
 
-    let zone = manager.create_zone("root", vec![]).unwrap();
+    let zone = manager.create_zone("root").unwrap();
     assert!(zone.wait_for_leader(Duration::from_secs(10)));
     let cas = Arc::new(
         backends::storage::cas_local::CasLocalBackend::new_durable(&root.join("cas")).unwrap(),

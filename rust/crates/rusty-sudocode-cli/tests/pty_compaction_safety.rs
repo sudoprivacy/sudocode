@@ -103,7 +103,9 @@ impl Provider {
         let captured = Arc::clone(&requests);
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
-        let response_released = Arc::new(AtomicBool::new(mode != "budget-revision-conflict"));
+        let response_released = Arc::new(AtomicBool::new(
+            mode != "budget-revision-conflict" && !mode.starts_with("chrome-"),
+        ));
         let release = Arc::clone(&response_released);
         let worker = thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
@@ -194,7 +196,8 @@ fn serve(
     } else {
         0
     };
-    if is_post && compaction && mode == "budget-revision-conflict" {
+    if is_post && compaction && (mode == "budget-revision-conflict" || mode.starts_with("chrome-"))
+    {
         while !response_released.load(Ordering::Relaxed) {
             if stopped.load(Ordering::Relaxed) {
                 return;
@@ -213,7 +216,8 @@ fn serve(
         && streaming
         && (matches!(mode, "success" | "post-error")
             || mode.starts_with("long-summary")
-            || mode.starts_with("budget-"))
+            || mode.starts_with("budget-")
+            || mode.starts_with("chrome-"))
     {
         serve_success_stream(&mut socket);
         return;
@@ -3128,7 +3132,7 @@ fn model_compaction_response(
             "401 Unauthorized",
             json!({"type":"error", "error":{"type":"authentication_error", "message":"fixture auth scheme not supported; cache-safe compaction not supported"}}),
         )
-    } else if matches!(mode, "error" | "post-error") {
+    } else if matches!(mode, "error" | "post-error" | "chrome-error") {
         (
             "400 Bad Request",
             json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
@@ -3241,4 +3245,301 @@ fn compacted_a2a_only_session_continues_without_enabling_filesystem_tools() {
             .count(),
         1
     );
+}
+
+// Hold the actual HTTP checkpoint while the real terminal exercises input.
+// No provider delay or sleep stands in for the operation's admission.
+fn chrome_compaction_session(
+    provider: &Provider,
+    automatic: bool,
+) -> (TestEnv, PathBuf, pty_expect::PtySession) {
+    let env = budget_env("compaction-chrome", provider);
+    let initialized = std::process::Command::new("git")
+        .args([
+            "init",
+            "-q",
+            "-b",
+            "compaction-controls-branch-name-longer-than-the-footer-budget",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_PREFIX")
+        .current_dir(env.workspace_root())
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let path = budget_fixture(&env);
+    if automatic {
+        let mut source = Session::load_from_path(&path).unwrap();
+        let mut messages = source.messages().to_vec();
+        for message in &mut messages {
+            for block in &mut message.blocks {
+                if let ContentBlock::Text { text } = block {
+                    *text = text.repeat(4);
+                }
+            }
+        }
+        source = source.with_messages(messages);
+        source.save_to_path(&path).unwrap();
+    }
+    let mut cli = spawn_scode_in_dir_with_env(
+        env.workspace_root(),
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--resume",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(30),
+        &[
+            ("SUDO_CODE_CONFIG_HOME", env.config_home()),
+            ("HOME", &env.workspace_root().join("home")),
+            (
+                "SUDOCODE_INTERRUPT_QUEUE_MODE",
+                std::path::Path::new("queue"),
+            ),
+        ],
+    )
+    .unwrap();
+    cli.resize(50, 160).unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resumed editor ready");
+    chrome_submit(
+        &mut cli,
+        if automatic {
+            "CHROME_INITIAL_TASK"
+        } else {
+            "/compact"
+        },
+        "\r",
+    );
+    common::expect_screen(
+        &cli,
+        chrome_is_compacting,
+        Duration::from_secs(30),
+        "live compaction phase before provider release",
+    );
+    common::expect_screen(
+        &cli,
+        |_| compaction_request_count(provider) == 1,
+        Duration::from_secs(30),
+        "provider received the held checkpoint",
+    );
+    (env, path, cli)
+}
+
+fn chrome_submit(cli: &mut pty_expect::PtySession, text: &str, key: &str) {
+    cli.send(&format!("\x1b[200~{text}\x1b[201~")).unwrap();
+    common::expect_input_line(cli, text, Duration::from_secs(30), "input reached editor");
+    cli.send(key).unwrap();
+}
+
+fn chrome_is_compacting(view: &str) -> bool {
+    // Only the live row above the composer counts, never old screen history.
+    let mut lines = view.lines().rev();
+    for _ in 0..2 {
+        if lines.find(|line| line.starts_with("──")).is_none() {
+            return false;
+        }
+    }
+    lines
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.contains("Compacting context"))
+}
+
+fn chrome_exit(cli: &mut pty_expect::PtySession) {
+    chrome_submit(cli, "/exit", "\r");
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+}
+
+#[test]
+fn compaction_chrome_keeps_queued_input_and_esc_flush_does_not_cancel() {
+    for automatic in [false, true] {
+        let provider = Provider::new("chrome-success");
+        let (_env, path, mut cli) = chrome_compaction_session(&provider, automatic);
+        common::expect_screen(
+            &cli,
+            |view| chrome_is_compacting(view) && chrome_footer(view).contains("Esc/Ctrl+C cancel"),
+            Duration::from_secs(30),
+            "empty queue advertises cancellation keys",
+        );
+        cli.resize(50, 45).unwrap();
+        common::expect_screen(
+            &cli,
+            chrome_is_compacting,
+            Duration::from_secs(30),
+            "compaction identity fits a narrow terminal",
+        );
+        cli.resize(50, 80).unwrap();
+        chrome_submit(&mut cli, "CHROME_QUEUED_TASK", "\t");
+        common::expect_screen(
+            &cli,
+            |view| {
+                chrome_is_compacting(view)
+                    && view.contains("queued:")
+                    && view.contains("CHROME_QUEUED_TASK")
+                    && chrome_footer(view).contains("Esc flush")
+                    && chrome_footer(view).contains("Ctrl+C cancel")
+                    && !chrome_footer(view).contains("Esc/Ctrl+C cancel")
+            },
+            Duration::from_secs(30),
+            "queued compaction advertises flush separately from cancellation",
+        );
+        cli.send("\x1b").unwrap();
+        common::expect_screen(
+            &cli,
+            |view| {
+                chrome_is_compacting(view)
+                    && view.contains("steering:")
+                    && view.contains("CHROME_QUEUED_TASK")
+            },
+            Duration::from_secs(30),
+            "Esc flush is consumed and keeps checkpoint alive",
+        );
+        assert!(
+            provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(is_compaction_request),
+            "no task request before checkpoint completion"
+        );
+        cli.resize(50, 160).unwrap();
+        provider.response_released.store(true, Ordering::Relaxed);
+        common::expect_screen(
+            &cli,
+            |view| view.contains("ALPHA_CONTEXT_OK") && !chrome_is_compacting(view),
+            Duration::from_secs(30),
+            "task continues after successful checkpoint",
+        );
+        common::expect_screen(
+            &cli,
+            |_| {
+                provider
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| {
+                        !is_compaction_request(r)
+                            && r["messages"].to_string().contains("CHROME_QUEUED_TASK")
+                    })
+                    .count()
+                    == 1
+            },
+            Duration::from_secs(30),
+            "flushed input reaches a model request exactly once",
+        );
+        common::expect_screen(
+            &cli,
+            |view| !chrome_is_compacting(view) && view.contains("/help"),
+            Duration::from_secs(30),
+            "idle footer restored",
+        );
+        if !automatic {
+            common::expect_screen(
+                &cli,
+                |view| {
+                    view.contains("Messages removed")
+                        && view.contains("Messages kept")
+                        && !view.contains("auto-compacted")
+                },
+                Duration::from_secs(30),
+                "manual report retains message counts and its own operation identity",
+            );
+        }
+        chrome_exit(&mut cli);
+        assert!(Session::load_from_path(&path).unwrap().compaction.is_some());
+    }
+}
+
+#[test]
+fn compaction_chrome_cancel_clears_phase_and_preserves_history_and_queue() {
+    for (automatic, queued) in [(false, false), (false, true), (true, true)] {
+        let provider = Provider::new("chrome-success");
+        let (_env, path, mut cli) = chrome_compaction_session(&provider, automatic);
+        let before = Session::load_from_path(&path).unwrap();
+        if queued {
+            chrome_submit(&mut cli, "CHROME_CANCELLED_QUEUE", "\t");
+            common::expect_screen(
+                &cli,
+                |view| {
+                    chrome_is_compacting(view)
+                        && chrome_footer(view).contains("Esc flush")
+                        && chrome_footer(view).contains("Ctrl+C cancel")
+                },
+                Duration::from_secs(30),
+                "queued cancellation hint",
+            );
+        }
+        cli.send(if queued { "\x03" } else { "\x1b" }).unwrap();
+        common::expect_screen(
+            &cli,
+            |view| !chrome_is_compacting(view) && view.contains("history preserved"),
+            Duration::from_secs(30),
+            "cancelled checkpoint reports preserved history and clears phase",
+        );
+        if queued {
+            common::expect_screen(
+                &cli,
+                |view| {
+                    view.contains("CHROME_CANCELLED_QUEUE")
+                        && view.contains("queued:")
+                        && chrome_footer(view).contains("Esc flush")
+                },
+                Duration::from_secs(30),
+                "cancellation retains unapplied input",
+            );
+        }
+        assert!(provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(is_compaction_request));
+        let after = Session::load_from_path(&path).unwrap();
+        assert_eq!(after.messages(), before.messages());
+        assert_eq!(after.compaction, before.compaction);
+        provider.response_released.store(true, Ordering::Relaxed);
+        chrome_exit(&mut cli);
+    }
+}
+
+#[test]
+fn compaction_chrome_failure_clears_phase_and_preserves_history() {
+    let provider = Provider::new("chrome-error");
+    let (_env, path, mut cli) = chrome_compaction_session(&provider, false);
+    let before = Session::load_from_path(&path).unwrap();
+    provider.response_released.store(true, Ordering::Relaxed);
+    common::expect_screen(
+        &cli,
+        |view| !chrome_is_compacting(view) && view.contains("history preserved"),
+        Duration::from_secs(30),
+        "failed checkpoint reports preserved history without stale busy phase",
+    );
+    common::expect_screen(
+        &cli,
+        |view| view.contains("/help"),
+        Duration::from_secs(30),
+        "idle footer restored after failure",
+    );
+    chrome_exit(&mut cli);
+    let after = Session::load_from_path(&path).unwrap();
+    assert_eq!(after.messages(), before.messages());
+    assert_eq!(after.compaction, before.compaction);
+}
+
+fn chrome_footer(view: &str) -> &str {
+    view.lines()
+        .rev()
+        .find(|line| line.contains("⏵⏵"))
+        .unwrap_or_default()
 }

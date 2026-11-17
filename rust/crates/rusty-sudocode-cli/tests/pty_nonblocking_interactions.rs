@@ -122,7 +122,7 @@ fn questions_command_explains_disabled_interactions_without_inference() {
         .expect("/questions requires nonblockingInteractions to be enabled")
         .unwrap();
     common::expect_input_line_cleared(&terminal, env.timeout(), "disabled command returned");
-    assert!(env.captured_message_bodies().is_empty());
+    assert_eq!(env.captured_message_bodies(), Vec::<String>::new());
     submit(&mut terminal, "/exit");
     assert_eq!(terminal.expect_eof().unwrap(), 0);
 }
@@ -195,7 +195,7 @@ fn delegated_interaction(permission: bool, close_before_reply: bool) {
     control(&mut host, json!({"action":"configure", "enabled":true}));
     let parent_prompt = tool_batch(
         &env,
-        json!([
+        &json!([
             {"id":"delegate-human", "name":"agent_spawn", "input":child_input},
             {"id":"parent-independent", "name":"read_file", "input":{"path":"interaction-reference.txt"}}
         ]),
@@ -228,7 +228,7 @@ fn delegated_interaction(permission: bool, close_before_reply: bool) {
     let worker = pending["origin"]["agent_id"].as_str().unwrap();
     let wait_prompt = tool_batch(
         &env,
-        json!([
+        &json!([
             {"id":"wait-for-human-worker", "name":"pid_output", "input":{"pid":worker, "block":true, "timeout_ms":60000}}
         ]),
         &format!("Call pid_output exactly once with pid '{worker}', block true, timeout_ms 60000. Report its returned status and end the turn. Do not retry, poll, answer the worker, or use other tools."),
@@ -257,9 +257,9 @@ fn delegated_interaction(permission: bool, close_before_reply: bool) {
             state["requests"].as_array().unwrap().is_empty(),
             "closed worker request was not retired: {state}"
         );
-        let mut stale = action;
-        stale["sessionId"] = json!(host.session);
-        let rejected = host.response(METHOD, &stale);
+        let mut retired_reply = action;
+        retired_reply["sessionId"] = json!(host.session);
+        let rejected = host.response(METHOD, &retired_reply);
         assert!(
             rejected.get("error").is_some(),
             "old worker approval was accepted: {rejected}"
@@ -284,10 +284,7 @@ fn delegated_interaction(permission: bool, close_before_reply: bool) {
         );
         std::thread::sleep(Duration::from_millis(30));
     }
-    assert!(snapshot(&mut host)["requests"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(snapshot(&mut host)["requests"], json!([]));
     control(&mut host, action);
     if permission {
         assert_eq!(
@@ -445,7 +442,7 @@ fn direct_approval(approved: bool) {
         "reopening cannot resend"
     );
     host.close();
-    assert!(env.captured_message_bodies().is_empty());
+    assert_eq!(env.captured_message_bodies(), Vec::<String>::new());
     // The mock rejects requests lacking a routing marker before capture, so
     // also inspect transport evidence: even a failed inference is forbidden.
     for line in std::fs::read_to_string(&log).unwrap().lines() {
@@ -550,7 +547,7 @@ fn finish_mock_question(env: &TestEnv) {
     }
 }
 
-fn tool_batch(env: &TestEnv, calls: Value, live: &str) -> String {
+fn tool_batch(env: &TestEnv, calls: &Value, live: &str) -> String {
     if env.is_live() {
         return live.to_owned();
     }
@@ -615,7 +612,7 @@ fn plan_review(action: &str) {
             "\n\nMock fixture PARITY_SCENARIO:tool_concurrency TOOL_BATCH:[] continuation.",
         );
     }
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"plan-review", "name":"write_plan", "input":{
             "context":"An isolated approval test.",
             "constraints":"Wait for approval before implementation.",
@@ -696,7 +693,7 @@ fn plan_review(action: &str) {
     assert!(messages.contains("ApprovedImplementationMarker"));
     assert_eq!(messages.contains("DiscardExplorationMarker"), action == "2");
 
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"plan-approved-write", "name":"write_file", "input":{"path":"implementation.txt", "content":"ApprovedImplementationMarker"}}
     ]), "Now implement the approved plan: use write_file to create implementation.txt with exactly ApprovedImplementationMarker. No other tools. Then stop.");
     host.submit("implement-approved-plan", &prompt, "steer");
@@ -736,7 +733,7 @@ fn request_permission(env: &TestEnv, host: &mut Host) -> Value {
         "Work continues while approval waits.",
     )
     .unwrap();
-    let prompt = tool_batch(env, json!([
+    let prompt = tool_batch(env, &json!([
         {"id":"deferred-append", "name":"bash", "input":{"command":"printf approved >> permission-count.txt"}},
         {"id":"permission-independent-read", "name":"read_file", "input":{"path":"permission-reference.txt"}}
     ]), "Use bash exactly once to run `printf approved >> permission-count.txt`. If it needs permission, leave the request pending and do not retry. Independently use read_file on permission-reference.txt and report its contents. On later interaction_reply inputs, report approved_operation_result without executing any more tools.");
@@ -921,7 +918,7 @@ fn terminal_permission_review_preserves_the_draft_and_executes_only_after_approv
     let mut terminal = env.spawn_with_env(&["--permission-mode", "workspace-write"], ENABLED);
     terminal.resize(60, 140).unwrap();
     common::expect_input_line_cleared(&terminal, env.timeout(), "permission chat ready");
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"terminal-append", "name":"bash", "input":{"command":"printf approved >> permission-count.txt"}}
     ]), "Use bash exactly once to run `printf approved >> permission-count.txt`. If permission is pending, do not retry it or ask a question. On a later interaction_reply, report approved_operation_result without further tools.");
     let marker = common::turn_status_marker(&terminal);
@@ -985,7 +982,7 @@ fn terminal_cancel_before_reply_commit_retains_it_without_repeating_the_operatio
     terminal.resize(60, 140).unwrap();
     common::expect_input_line_cleared(&terminal, env.timeout(), "permission chat ready");
     let command = "printf approved >> permission-count.txt; while true; do sleep 1; done";
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"cancelled-append", "name":"bash", "input":{"command":command}}
     ]), &format!("Use bash exactly once to run `{command}`. I will cancel it after the file appears. If approval is pending, end your turn without retrying. On later interaction_reply inputs, report the saved result briefly without using any tools or retrying the operation."));
     let marker = common::turn_status_marker(&terminal);
@@ -1586,10 +1583,7 @@ fn contended_turn_admission(explicit_cancel: bool) {
     control(&mut host, answer(&pending));
     host.input(json!({"action":"flush"}));
     wait_for_delivery(&mut host);
-    assert!(snapshot(&mut host)["requests"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(snapshot(&mut host)["requests"], json!([]));
     if explicit_cancel {
         let bodies = env.captured_message_bodies();
         assert!(bodies.last().unwrap().contains("PreservedLaterInputMarker"));
@@ -1702,7 +1696,7 @@ fn resume(env: &TestEnv, session: &str) -> Host {
         "session/load",
         &json!({"sessionId":session, "cwd":env.workspace_root(), "mcpServers":[]}),
     );
-    resumed.session = session.to_owned();
+    session.clone_into(&mut resumed.session);
     resumed
 }
 
@@ -1722,8 +1716,8 @@ fn another_loaded_context_cannot_overwrite_a_committed_answer() {
         &json!({"sessionId":first.session, "cwd":env.workspace_root(), "mcpServers":[]}),
     );
     stale.session.clone_from(&first.session);
-    let state = control(&mut stale, json!({"action":"configure", "enabled":true}));
-    assert_eq!(state["requests"][0], pending);
+    let restored = control(&mut stale, json!({"action":"configure", "enabled":true}));
+    assert_eq!(restored["requests"][0], pending);
 
     control(&mut first, answer(&pending));
     wait_for_delivery(&mut first);
@@ -1841,7 +1835,7 @@ fn shared_answer_consumption(cancel_before_consumption: bool) {
     std::fs::write(env.workspace_root().join("shared-input.sh"),
         "printf started > shared-input-started\ni=0\nwhile [ ! -f release-shared-input ] && [ $i -lt 1200 ]; do\n sleep 0.1\n i=$((i+1))\ndone\nprintf SharedInputToolFinished\n").unwrap();
     let _release = ReleaseSharedInput(env.workspace_root().to_path_buf());
-    let input = json!({"command":"sh shared-input.sh","timeout":180000,"run_in_background":false});
+    let input = json!({"command":"sh shared-input.sh","timeout":180_000,"run_in_background":false});
     let prompt = if env.is_mock() {
         format!(
             "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
@@ -1900,10 +1894,7 @@ fn shared_answer_consumption(cancel_before_consumption: bool) {
         );
         std::thread::sleep(Duration::from_millis(30));
     }
-    assert!(snapshot(&mut other)["requests"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(snapshot(&mut other)["requests"], json!([]));
     let session = first.session.clone();
     other.close();
     first.close();
@@ -1999,11 +1990,9 @@ fn independently_loaded_context_checks_the_current_plan_before_writing() {
         &json!({"sessionId":first.session,"cwd":env.workspace_root(),"mcpServers":[]}),
     );
     other.session.clone_from(&first.session);
-    assert!(
-        control(&mut other, json!({"action":"configure","enabled":true}))["requests"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        control(&mut other, json!({"action":"configure","enabled":true}))["requests"],
+        json!([])
     );
     let plan_input = json!({"context":"Shared approval authority.","constraints":"Require approval before writes.",
         "acceptance":"shared-plan-effect.txt contains SharedPlanEffectMarker.",
@@ -2095,7 +2084,7 @@ fn a_live_permission_claim_cannot_be_retired_as_an_interruption_by_another_conte
         "printf ClaimedOnce >> shared-permission-count\nprintf started > shared-input-started\ni=0\nwhile [ ! -f release-shared-input ] && [ $i -lt 1200 ]; do\n sleep 0.1\n i=$((i+1))\ndone\nprintf ExactApprovedOperationResult\n").unwrap();
     let mut first = Host::with_options(&env, false, &flags);
     control(&mut first, json!({"action":"configure","enabled":true}));
-    let input = json!({"command":"sh shared-input.sh","timeout":180000,"run_in_background":false});
+    let input = json!({"command":"sh shared-input.sh","timeout":180_000,"run_in_background":false});
     let prompt = if env.is_mock() {
         format!(
             "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
@@ -2217,7 +2206,7 @@ fn publish_plan_review(env: &TestEnv, host: &mut Host, id: &str, content: &str) 
         "constraints":"Require explicit approval before implementation.",
         "acceptance":"The approved effect is written only after the current review is approved.",
         "content":content});
-    let prompt = tool_batch(env, json!([{"id":id,"name":"write_plan","input":input}]),
+    let prompt = tool_batch(env, &json!([{"id":id,"name":"write_plan","input":input}]),
         &format!("Call write_plan exactly once with this literal input: {input}. Do no other work this turn. Leave the review pending. Later interaction replies should only be acknowledged until another explicit instruction."));
     host.submit(id, &prompt, "steer");
     host.idle();
@@ -2271,7 +2260,7 @@ fn dismissed_plan_keeps_write_gate(cancel: bool) {
     };
     control(&mut host, decision);
     wait_for_delivery(&mut host);
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"dismissed-write","name":"write_file","input":{"path":"dismissed-effect.txt","content":"MustNotBeWritten"}},
         {"id":"dismissed-read","name":"read_file","input":{"path":"dismissed-plan-reference.txt"}}
     ]), "Test the current engine policy: attempt write_file once for dismissed-effect.txt with MustNotBeWritten, then read dismissed-plan-reference.txt. Report both actual results. Do not revise the plan, retry a refused write, or use another tool.");
@@ -2341,7 +2330,7 @@ fn superseded_plan_preserves_later_chat(prune: bool) {
     std::fs::write(env.workspace_root().join("shared-input.sh"),
         "printf started > shared-input-started\ni=0\nwhile [ ! -f release-shared-input ] && [ $i -lt 1200 ]; do\n sleep 0.1\n i=$((i+1))\ndone\nprintf OldPlanContextMustSurvive\n").unwrap();
     let _release = ReleaseSharedInput(env.workspace_root().to_path_buf());
-    let input = json!({"command":"sh shared-input.sh","timeout":180000,"run_in_background":false});
+    let input = json!({"command":"sh shared-input.sh","timeout":180_000,"run_in_background":false});
     let shell_prompt = if env.is_mock() {
         format!(
             "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
@@ -2436,10 +2425,13 @@ fn superseded_plan_preserves_later_chat(prune: bool) {
         assert_eq!(pruned["records"].as_array().unwrap().len(), 129);
     }
     assert_ne!(current["id"], old["id"]);
-    let mut stale = old_reply;
-    stale["sessionId"] = json!(first.session);
+    let mut retired_reply = old_reply;
+    retired_reply["sessionId"] = json!(first.session);
     assert!(
-        first.response(METHOD, &stale).get("error").is_some(),
+        first
+            .response(METHOD, &retired_reply)
+            .get("error")
+            .is_some(),
         "the old approval cannot be reused"
     );
     std::fs::write(env.workspace_root().join("release-shared-input"), "release").unwrap();
@@ -2713,7 +2705,7 @@ fn failed_interaction_setup_preserves_plan_gate(wrong_workspace: bool) {
         {"id":"binding-write","name":"write_file","input":{
             "path":"binding-effect.txt","content":"BindingEffectMarker"}}
     ]);
-    let write_prompt = tool_batch(&env, write_calls.clone(), "Attempt exactly one write_file call to create binding-effect.txt with BindingEffectMarker, then stop.");
+    let write_prompt = tool_batch(&env, &write_calls, "Attempt exactly one write_file call to create binding-effect.txt with BindingEffectMarker, then stop.");
     let before = env.captured_message_bodies().len();
     host.submit("work-with-unavailable-journal", &write_prompt, "steer");
     host.idle();
@@ -2760,7 +2752,7 @@ fn failed_interaction_setup_preserves_plan_gate(wrong_workspace: bool) {
         "IndependentBindingRecoveryMarker",
     )
     .unwrap();
-    let prompt = tool_batch(&env, json!([
+    let prompt = tool_batch(&env, &json!([
         {"id":"binding-recovered-write","name":"write_file","input":{
             "path":"binding-effect.txt","content":"BindingEffectMarker"}},
         {"id":"binding-recovered-read","name":"read_file","input":{"path":"binding-reference.txt"}}
@@ -2777,7 +2769,7 @@ fn failed_interaction_setup_preserves_plan_gate(wrong_workspace: bool) {
 
     control(&mut host, plan_reply(&pending, "2"));
     wait_for_delivery(&mut host);
-    let write_prompt = tool_batch(&env, write_calls, "Now create binding-effect.txt with BindingEffectMarker under the approved plan, then stop.");
+    let write_prompt = tool_batch(&env, &write_calls, "Now create binding-effect.txt with BindingEffectMarker under the approved plan, then stop.");
     host.submit("work-after-binding-approval", &write_prompt, "steer");
     host.idle();
     assert_eq!(
@@ -2814,7 +2806,7 @@ fn disabling_interactions_checks_requests_from_another_loaded_context() {
     );
     stale.session.clone_from(&first.session);
     let initial = control(&mut stale, json!({"action":"configure", "enabled":true}));
-    assert!(initial["requests"].as_array().unwrap().is_empty());
+    assert_eq!(initial["requests"], json!([]));
 
     let pending = ask(&env, &mut first);
     let rejected = stale.response(

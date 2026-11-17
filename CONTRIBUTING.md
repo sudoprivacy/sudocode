@@ -1389,6 +1389,13 @@ a whole-lifecycle speedup.
 The preflight plan-admission hook has a further paired observer control. Its
 exact reviewed program layout is registered; modified admission-hook behavior
 still refuses reuse. The original three observations remain separate.
+Plan admission evaluates the exact protected parser in an isolated metadata-only
+Python process, with explicit JSON inputs and no caller runtime namespace,
+credentials or inherited hook selectors. The original three check-entry cases
+remain; real controls compare parser isolation with the previous in-process
+environment leak and refuse a non-boolean parser result before profiles or
+signing. The scheduling selector's unknown dynamic-namespace refusal is unchanged.
+This preflight grants no reuse and does not replace final verification.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and

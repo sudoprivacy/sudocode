@@ -521,6 +521,7 @@ except subprocess.TimeoutExpired:
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
+        "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -2387,14 +2388,43 @@ def preflight_plan_compatibility(plan, names, author, policy_ref, signers_ref):
     """Refuse an unsupported plan before checks; final verification still applies."""
     if policy_ref == signers_ref:
         return
-    path = ".github/scripts/local_acceptance.py"
-    protected = {"__file__": str(ROOT / path), "__name__": "protected_acceptance_planner"}
-    exec(compile(tracked(signers_ref, path), f"{signers_ref}:{path}", "exec"), protected)
-    protected["ROOT"] = ROOT
-    policy = load_policy(policy_ref)
-    compatible = protected.get("compatible_acceptance_plan")
-    supported = (compatible(policy, names, author, plan) if callable(compatible)
-                 else protected["acceptance_plan"](policy, names, author) == plan)
+    # The accepted parser receives metadata, never this executor's namespace,
+    # credentials or hook selectors. Its temporary source comes from immutable
+    # protected Git bytes; no candidate profile or signing operation is loaded.
+    driver = '''import json,runpy,sys
+protected=runpy.run_path(sys.argv[1],run_name="protected_acceptance_planner")
+payload=json.load(sys.stdin)
+compatible=protected.get("compatible_acceptance_plan")
+supported=(compatible(payload["policy"],payload["names"],payload["author"],payload["plan"])
+           if callable(compatible) else
+           protected["acceptance_plan"](payload["policy"],payload["names"],payload["author"])==payload["plan"])
+if type(supported) is not bool:
+    raise TypeError("Protected acceptance planner returned a non-boolean result")
+print("LOCAL_ACCEPTANCE_PLAN_PARSER="+json.dumps({"supported":supported}))
+'''
+    environment = {key: value for key, value in os.environ.items()
+                   if key.upper() in {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PATH", "TEMP", "TMP"}}
+    with tempfile.TemporaryDirectory(prefix="scode-plan-admission-") as temporary:
+        protected = Path(temporary) / "protected_planner.py"
+        protected.write_bytes(tracked(signers_ref, ".github/scripts/local_acceptance.py"))
+        result = subprocess.run([sys.executable, "-I", "-c", driver, str(protected)],
+                                input=canonical({"policy": load_policy(policy_ref), "names": names,
+                                                 "author": author, "plan": plan}),
+                                cwd=temporary, env=environment, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=30)
+    if result.returncode:
+        raise RuntimeError("Protected plan parser preview failed before checks: "
+                           + result.stderr.decode("utf-8", errors="replace")[-4000:])
+    text = result.stdout.decode("utf-8", errors="replace")
+    records = [line.split("=", 1)[1] for line in text.splitlines()
+               if line.startswith("LOCAL_ACCEPTANCE_PLAN_PARSER=")]
+    if len(records) != 1:
+        raise RuntimeError("Protected plan parser preview returned malformed metadata")
+    verdict = json.loads(records[0])
+    if not isinstance(verdict, dict) or set(verdict) != {"supported"} or type(verdict["supported"]) is not bool:
+        raise RuntimeError("Protected plan parser preview returned a non-boolean verdict")
+    print(text, end="", flush=True)
+    supported = verdict["supported"]
     if not supported:
         raise RuntimeError(
             "The protected verifier cannot validate this candidate acceptance plan. "

@@ -19,8 +19,10 @@ const ROWS: u16 = 120;
 /// Wide enough that the status line is one row.
 const COLUMNS: u16 = 160;
 
-/// The first row of chrome under the transcript.
+/// The first row of chrome under the transcript. Chrome text starts right of
+/// the gutter.
 fn is_chrome(text: &str) -> bool {
+    let text = text.trim_start();
     let is_status = text.starts_with('[') && text.contains("] · turn ");
     let is_todo_panel = text
         .split_once(" todos (")

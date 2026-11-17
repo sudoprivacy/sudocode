@@ -261,9 +261,11 @@ fn long_todos_wrap_under_their_label_and_are_cut_to_a_glance() {
         .expect("todo header row");
     let mut items: Vec<Vec<&str>> = Vec::new();
     for row in &rows[header + 1..] {
-        if row.starts_with("  \u{25a0} ") || row.starts_with("  \u{25a1} ") {
+        // The panel sits right of the gutter: markers at column 4, labels
+        // and their continuation rows at column 6, as in the TodoWrite card.
+        if row.starts_with("    \u{25a0} ") || row.starts_with("    \u{25a1} ") {
             items.push(vec![row]);
-        } else if row.starts_with("    ") && !row.starts_with("     ") && !items.is_empty() {
+        } else if row.starts_with("      ") && !row.starts_with("       ") && !items.is_empty() {
             items.last_mut().unwrap().push(row);
         } else {
             break;
@@ -272,10 +274,10 @@ fn long_todos_wrap_under_their_label_and_are_cut_to_a_glance() {
     let rows_per_item: Vec<usize> = items.iter().map(Vec::len).collect();
     assert_eq!(rows_per_item, [3, 2], "rows per item: {rows:#?}");
     assert!(
-        items[0][0].starts_with("  \u{25a0} Doing wire"),
+        items[0][0].starts_with("    \u{25a0} Doing wire"),
         "{items:?}"
     );
-    assert!(items[1][0].starts_with("  \u{25a1} wire"), "{items:?}");
+    assert!(items[1][0].starts_with("    \u{25a1} wire"), "{items:?}");
     for item in &items {
         assert!(
             item.last().unwrap().trim_end().ends_with('\u{2026}'),

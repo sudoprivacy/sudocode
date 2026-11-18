@@ -44,6 +44,76 @@ pub fn node_record_present() -> bool {
     })
 }
 
+/// Whether `agent` already holds a credential bundle under `agents_dir`.
+#[must_use]
+pub fn credential_present(agents_dir: &Path, agent: &str) -> bool {
+    agents_dir
+        .join(agent)
+        .join(AgentCredential::MANIFEST)
+        .is_file()
+}
+
+/// The words every missing-credential report carries, for callers that
+/// classify a binding error.
+pub const MISSING_CREDENTIAL_CAUSE: &str = "has no credential for agent";
+
+/// The words a binding error carries while this machine's Box is still
+/// confirming an Agent's credential.
+pub const JOINING_CAUSE: &str = "is still confirming the credential for agent";
+
+/// An issuance older than this marker never finished confirming.
+const JOIN_MARKER_STALE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// `<agents_dir>/.joining-<agent>`: written by the local Box owner for the
+/// whole of an issuance, so no session uses a bundle before it is confirmed.
+/// The service-host enrollment writes and removes the same name.
+#[must_use]
+pub fn joining_marker(agents_dir: &Path, agent: &str) -> PathBuf {
+    agents_dir.join(format!(".joining-{agent}"))
+}
+
+/// Refuse a bundle whose issuance is unconfirmed: in progress, or interrupted.
+fn unconfirmed_issuance(agents_dir: &Path, agent: &str) -> Option<String> {
+    let marker = joining_marker(agents_dir, agent);
+    let modified = match std::fs::metadata(&marker) {
+        Ok(meta) => meta.modified().ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        // Fail closed: an unreadable marker may still guard an issuance.
+        Err(error) => {
+            return Some(format!(
+                "cannot tell whether {} guards an unconfirmed credential ({error})",
+                marker.display()
+            ));
+        }
+    };
+    let stale = modified
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age > JOIN_MARKER_STALE);
+    Some(if stale {
+        format!(
+            "an earlier join for agent '{agent}' did not finish confirming its credential, \
+             so it is not used until the node confirms it; the next session here, or \
+             `scode setup --mode shared`, asks the node"
+        )
+    } else {
+        format!("this machine's node {JOINING_CAUSE} '{agent}'; A2A starts when it finishes")
+    })
+}
+
+/// The cause and the recovery for an Agent the node has not issued yet. One
+/// text for tool results, `/status` and `scode setup --check`.
+#[must_use]
+pub fn missing_credential(agent: &str, bundle: &Path) -> String {
+    // Keep the recovery near the front: PTY status lines with long temporary
+    // paths (macOS) cut the tail.
+    format!(
+        "this machine's node {MISSING_CREDENTIAL_CAUSE} '{agent}' (expected at {}); ask \
+         the node owner to mint '{agent}', or run `scode setup --mode shared` if it is this \
+         workspace's own name. A running session picks it up without a restart",
+        bundle.display()
+    )
+}
+
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
@@ -103,6 +173,12 @@ impl NodeRecord {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// Directory holding one credential bundle per Agent name.
+    #[must_use]
+    pub fn agents_dir(&self) -> &Path {
+        Path::new(&self.agents_dir)
+    }
 }
 
 /// Resolved TLS material paths for an mTLS dial (all three mandatory - the
@@ -113,6 +189,9 @@ pub struct TlsPaths {
     pub client_cert: String,
     pub client_key: String,
     pub server_name: String,
+    /// The bundle directory these files were named by; its issuance marker
+    /// sits beside it.
+    pub bundle_dir: String,
 }
 
 /// A minted agent credential: the identity + mTLS material scode dials with.
@@ -175,6 +254,7 @@ impl AgentCredential {
                 client_cert: join(&manifest.cert),
                 client_key: join(&manifest.key),
                 server_name: manifest.server_name,
+                bundle_dir: dir.to_string_lossy().into_owned(),
             },
         })
     }
@@ -214,13 +294,17 @@ impl Config {
         let agents_dir = Path::new(&record.agents_dir);
         let bundle = agents_dir.join(agent);
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
-            return Err(format!(
-                "this machine's node has no credential for agent '{agent}' at {}; \
-                 ask the node owner to mint '{agent}'",
-                bundle.display()
-            ));
+            // An issuance that has not written its manifest yet is joining.
+            return Err(unconfirmed_issuance(agents_dir, agent)
+                .unwrap_or_else(|| missing_credential(agent, &bundle)));
         }
-        let credential = AgentCredential::load(&bundle.to_string_lossy())?;
+        let loaded = AgentCredential::load(&bundle.to_string_lossy());
+        // Checked after reading: the marker outlives every unconfirmed bundle,
+        // and a half-written one under it reports as joining, not as broken.
+        if let Some(unconfirmed) = unconfirmed_issuance(agents_dir, agent) {
+            return Err(unconfirmed);
+        }
+        let credential = loaded?;
         if credential.agent != agent {
             return Err(format!(
                 "credential at {} is for agent '{}', but this session is '{agent}'",
@@ -250,6 +334,21 @@ impl Config {
             .map_err(|e| format!("read credential cert {}: {e}", t.client_cert))?;
         let key = std::fs::read(&t.client_key)
             .map_err(|e| format!("read credential key {}: {e}", t.client_key))?;
+        // The local Box may have started confirming, or set aside, this bundle
+        // since it was resolved: use what was read only if no issuance is
+        // unconfirmed and the certificate is still where it was read.
+        let cert_path = Path::new(&t.client_cert);
+        if let Some(agents_dir) = Path::new(&t.bundle_dir).parent() {
+            if let Some(unconfirmed) = unconfirmed_issuance(agents_dir, &self.agent) {
+                return Err(unconfirmed);
+            }
+        }
+        if !cert_path.is_file() {
+            return Err(format!(
+                "the credential at {} was set aside before it was used",
+                cert_path.display()
+            ));
+        }
         let client = NexusVfsClient::connect_tls(&self.endpoint, ca, cert, key, &t.server_name)
             .map_err(|e| format!("mTLS dial {}: {e}", self.endpoint))?;
         Ok(Arc::new(client))
@@ -264,6 +363,67 @@ mod tests {
     // transport that did moved to `crate::mailbox`. These tests stay because
     // they pin the WIRE FORMAT, which both transports share.
     use crate::agent_mailbox::MailboxEnvelope;
+
+    #[test]
+    fn a_bundle_whose_issuance_became_unconfirmed_is_not_dialled() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let agents = std::env::temp_dir().join(format!("scode-join-dial-{nanos}"));
+        let bundle = agents.join("worker");
+        std::fs::create_dir_all(&bundle).unwrap();
+        for name in ["ca.pem", "agent.pem", "agent-key.pem"] {
+            std::fs::write(bundle.join(name), "pem").unwrap();
+        }
+        let path = |name: &str| bundle.join(name).to_string_lossy().into_owned();
+        let config = Config {
+            endpoint: "127.0.0.1:1".into(),
+            agent: "worker".into(),
+            tls: TlsPaths {
+                ca_pem: path("ca.pem"),
+                client_cert: path("agent.pem"),
+                client_key: path("agent-key.pem"),
+                server_name: "nexus-node".into(),
+                bundle_dir: bundle.to_string_lossy().into_owned(),
+            },
+        };
+        // The Box began confirming this bundle after it was resolved.
+        std::fs::write(joining_marker(&agents, "worker"), "1").unwrap();
+        let refused = config.connect().map(|_| ()).unwrap_err();
+        assert!(refused.contains(JOINING_CAUSE), "{refused}");
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    #[test]
+    fn an_unconfirmed_issuance_is_never_used() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let agents = std::env::temp_dir().join(format!("scode-join-marker-{nanos}"));
+        std::fs::create_dir_all(&agents).unwrap();
+        assert_eq!(unconfirmed_issuance(&agents, "worker"), None);
+        let marker = joining_marker(&agents, "worker");
+        std::fs::write(&marker, "0").unwrap();
+        let joining = unconfirmed_issuance(&agents, "worker").unwrap();
+        assert!(joining.contains(JOINING_CAUSE), "{joining}");
+        // Another Agent's issuance does not block this one.
+        assert_eq!(unconfirmed_issuance(&agents, "other"), None);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - JOIN_MARKER_STALE * 2)
+            .unwrap();
+        let interrupted = unconfirmed_issuance(&agents, "worker").unwrap();
+        assert!(
+            interrupted.contains("did not finish")
+                && interrupted.contains("scode setup --mode shared"),
+            "{interrupted}"
+        );
+        let _ = std::fs::remove_dir_all(&agents);
+    }
 
     /// Write a minimal minted-bundle dir (manifest + three PEM files) and return
     /// its path - the shape `nexusd-cluster auth mint` produces.

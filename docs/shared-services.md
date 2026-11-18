@@ -32,7 +32,11 @@ replaces that choice with a second local service. Malformed records report their
 original validation error. Setup preserves the record and its credential bundles;
 the normal session connection checks this Agent's own credentials and the Box's
 TLS identity. Finding a record alone is not successful authentication: inspection
-reports `agentAuthentication:pending`, and setup reports `domainJoinAccepted:false`.
+reports the current workspace Agent's actual `agentAuthentication` (`ready`,
+`missing` with its recovery, or `invalid`), and setup reports
+`domainJoinAccepted:false`. When this OS user owns the registered local Box,
+shared setup and each shared session issue their own missing Agent credential
+through it; see [peer attach](design/nexus-peer-attach.md#federated-attach).
 Cross-domain enrollment and participant authorization remain separate. Agent
 attachment does not add a Nexus node or change Raft voter membership. Automatic
 discovery currently means the saved machine connection, not untrusted LAN peers.

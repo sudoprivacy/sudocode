@@ -1,0 +1,23 @@
+# Fixed search-driver functional acceptance only. The candidate cohost and all
+# release/performance builds retain their own profiles. Both Cargo variants
+# keep debug assertions and overflow checks; the shared crypto exceptions are
+# composed from cohost-plugin-crypto.toml by vfs_search_cache.py.
+[profile.dev]
+opt-level = 0
+debug = 0
+incremental = false
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package."*"]
+opt-level = 0
+
+[profile.test]
+opt-level = 0
+debug = 0
+incremental = false
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package."*"]
+opt-level = 0

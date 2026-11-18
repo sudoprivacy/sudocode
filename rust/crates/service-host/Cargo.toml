@@ -22,7 +22,14 @@ tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "io-util", "io-std"] }
 uuid = { version = "1", features = ["v4"] }
+# Checks that an unconfirmed issuance left this Box's own certificate.
+x509-parser = "0.18"
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+# Issue real certificates from a test CA for the fake Node.
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+time = "0.3"
 
 [build-dependencies]
 serde_json.workspace = true

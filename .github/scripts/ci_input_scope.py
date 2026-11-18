@@ -684,7 +684,8 @@ def main():
                      or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
-    vfs_cache = any(path in {".github/scripts/vfs_search_cache.py", ".github/workflows/rust-ci.yml",
+    vfs_cache = any(path in {".github/ci/cohost-plugin-crypto.toml",
+                             ".github/scripts/vfs_search_cache.py", ".github/workflows/rust-ci.yml",
                              ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
                              "e2e/local-acceptance/vfs_search_cache_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)

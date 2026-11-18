@@ -4987,6 +4987,7 @@ dependencies = [
  "prost-build 0.13.5",
  "prost-types 0.13.5",
  "protoc-bin-vendored",
+ "rcgen",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4994,9 +4995,11 @@ dependencies = [
  "stdin-peek",
  "tar",
  "tempfile",
+ "time",
  "tokio",
  "toml",
  "uuid",
+ "x509-parser",
  "zip",
 ]
 

@@ -58,9 +58,48 @@ node binding even when configuration or credentials cannot yet be loaded:
 Failures retain their specific cause in status and tool results. A malformed
 record, unsupported version, invalid endpoint/directory, missing bundle or
 identity mismatch leaves the selected node unavailable rather than stopping an
-ordinary standalone session or selecting disk. Credentials are minted by the
-node owner; `scode` never mints one. An explicitly Nexus-mounted model still
-needs that node's authenticated filesystem.
+ordinary standalone session or selecting disk. An explicitly Nexus-mounted
+model still needs that node's authenticated filesystem.
+
+Credentials are issued by the node owner; `scode` holds no CA or signing key.
+When the user selected shared mode and this OS user owns the registered local
+Box named by the record, an interactive or ACP session asks that Box to issue
+its own Agent the first time it attaches without a credential. The session
+starts pending and the issuance runs in the background; its tools and receiver
+pick the credential up when it lands. It runs the Box's pinned Node executable,
+whose online `auth mint` goes to the Box's loopback listener under an owner
+lock and never uses `--allow-existing`. Only the name derived from the
+workspace's own path joins, automatically or through `scode setup --mode
+shared`; a configured `agentName`, including one inherited from the user's
+settings, and a directory whose settings are the user's own (the home
+directory by default) are never claimed by scode. A name already
+claimed elsewhere is refused by Nexus, which then writes nothing. While an
+issuance runs, a `.joining-<name>` marker beside the bundle keeps every session
+from using it; sessions check it after reading the bundle and again before
+dialling. The credential is accepted with the Node's online receipt and a
+manifest naming that Agent; an explicit offline signature is never kept. An
+issuance that cannot confirm itself (it timed out, its receipt was unfamiliar,
+or its session quit first and left the marker) is settled by the Node's own
+`auth list`. A listed Agent is kept only if its bundle is this Box's own
+credential for it, issued during that issuance: the Box's CA, a certificate
+for `nexus://agent/<name>` and a key. A listed Agent without one is set aside,
+and only the node owner can issue the name again (`auth mint --allow-existing`;
+revoking never frees a name). An unlisted one is set aside and issued again.
+Set aside means moved to `.unconfirmed-<name>-<time>`, or, if it cannot be
+moved, left blocked by the marker; it is never used. While the Node cannot be
+asked, the bundle stays unused. A fresh leftover marker first gets the
+issuance's own time bound, in case the Node child of a session that quit is
+still writing.
+Any other node, a stopped Box or a refusal leaves the binding pending with that
+cause, the outcome of the join, and the recovery.
+
+Shared mode is the owner's one consent for every workspace. A verified sender
+on this Node therefore means "a session of the Node owner's OS user", not an
+Agent the owner admitted individually: a freshly cloned repository's session
+is verified as that workspace's own Agent too. Peers treat message contents as
+untrusted data either way. Each workspace keeps its identity on the Node;
+retiring one is the node owner's `auth revoke --agent` operation, which leaves
+the name taken.
 
 Namespace selection, including the pending binding, is cached per Agent for the
 process lifetime. Tools and receiver therefore cannot select different stores.

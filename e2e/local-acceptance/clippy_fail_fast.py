@@ -16,6 +16,53 @@ import psutil
 SOURCE = Path(__file__).resolve().parents[2]
 
 
+PRIORITY_WITNESS = r'''
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+use std::process::{self, Command};
+
+#[cfg(unix)]
+fn priority(child: &std::process::Child) -> i64 {
+    unsafe extern "C" { fn getpriority(which: i32, who: u32) -> i32; }
+    // Read before wait/reaping: even an already-exited Unix child retains its
+    // actual process priority until this wrapper collects its exit status.
+    let value = unsafe { getpriority(0, child.id()) };
+    assert!(value >= 0, "Could not read the spawned compiler priority");
+    i64::from(value)
+}
+
+#[cfg(windows)]
+fn priority(child: &std::process::Child) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    unsafe extern "system" { fn GetPriorityClass(process: *mut std::ffi::c_void) -> u32; }
+    let value = unsafe { GetPriorityClass(child.as_raw_handle()) };
+    assert_ne!(value, 0, "Could not read the spawned compiler priority");
+    i64::from(value)
+}
+
+fn main() {
+    let mut arguments = env::args_os().skip(1);
+    let executable = arguments.next().expect("Missing actual compiler executable");
+    let path = fs::canonicalize(&executable).expect("Actual compiler path must exist");
+    let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
+    assert!(matches!(name.as_str(), "rustc" | "rustc.exe" | "clippy-driver" | "clippy-driver.exe"));
+    let mut child = Command::new(path).args(arguments).spawn().expect("Cannot start actual compiler");
+    let observed = priority(&child);
+    let directory = env::var_os("SCODE_LINT_PRIORITY_WITNESS").expect("Missing private witness directory");
+    let file = Path::new(&directory).join(format!("{}-{}.json", process::id(), child.id()));
+    let mut stream = OpenOptions::new().write(true).create_new(true).open(file).unwrap();
+    writeln!(stream, "{{\"pid\":{},\"name\":\"{}\",\"priority\":{},\"spawned_before_wait\":true}}",
+             child.id(), name, observed).unwrap();
+    // Keep stdout, stderr, arguments and the exact real compiler exit status.
+    let status = child.wait().expect("Cannot wait for actual compiler");
+    process::exit(status.code().unwrap_or(1));
+}
+'''
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
@@ -42,10 +89,50 @@ def run(output):
     environment.pop("SCODE_QUEUE_BASE", None)
     subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=project, env=environment,
                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Polling alone can miss the entire lifetime of a tiny successful compiler.
+    # Cargo's normal outer wrapper starts the unmodified Clippy/rustc command,
+    # reads its actual OS priority before reaping, then forwards its exit status.
+    witness_source = output / "compiler-priority-witness.rs"
+    witness_source.write_text(PRIORITY_WITNESS, encoding="utf-8")
+    witness = output / ("compiler-priority-witness.exe" if os.name == "nt" else "compiler-priority-witness")
+    build_witness = ["rustc", "--edition=2021", str(witness_source), "-o", str(witness)]
+    if os.name != "nt":
+        build_witness = ["nice", "-n", "10", *build_witness]
+    with (output / "compiler-priority-witness-build.log").open("wb") as stream:
+        subprocess.run(build_witness, cwd=project, env=environment, check=True, stdout=stream, stderr=stream,
+                       creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0)
+    assert not environment.get("RUSTC_WRAPPER"), "Refuse replacing an inherited compiler wrapper"
+    environment["RUSTC_WRAPPER"] = str(witness)
+    compiler = subprocess.check_output(["rustup", "which", "rustc"], env=environment).decode().strip()
+    witness_controls = []
+    priority_cases = [("short-compiler", True)]
+    if os.name != "nt":
+        # The Windows host lease itself lowers all real compiler descendants.
+        # Do not raise a compiler's priority to manufacture a negative control.
+        priority_cases.append(("wrong-normal-priority", False))
+    for label, lowered in priority_cases:
+        directory = output / label
+        directory.mkdir(exist_ok=False)
+        arguments = [str(witness), compiler, "--version"]
+        if lowered and os.name != "nt":
+            arguments = ["nice", "-n", "10", *arguments]
+        with (directory / "stdout.log").open("wb") as out, (directory / "stderr.log").open("wb") as err:
+            control = subprocess.run(arguments, env={**environment, "SCODE_LINT_PRIORITY_WITNESS": str(directory)},
+                                     stdout=out, stderr=err, check=True,
+                                     creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if lowered and os.name == "nt" else 0)
+        rows = [json.loads(path.read_text(encoding="utf-8")) for path in directory.glob("*.json")]
+        assert len(rows) == 1 and rows[0]["spawned_before_wait"] is True
+        expected = psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 10
+        assert (rows[0]["priority"] == expected) is lowered, rows
+        witness_controls.append({"case": label, "actual_compiler": compiler, "exit_code": control.returncode,
+                                 "record": rows[0], "accepted_as_lowered": lowered})
     # Lint compilation runs no product/test executable. Keep this fixture's
     # Python assertions Normal while its Cargo/compiler process stays below it.
     def invoke(label, arguments, target, compiler_expected=True):
         environment["CARGO_TARGET_DIR"] = str(target)
+        witness_records = output / (label + ".compiler-priorities")
+        witness_records.mkdir(exist_ok=False)
+        environment["SCODE_LINT_PRIORITY_WITNESS"] = str(witness_records)
         if os.name != "nt":
             arguments = ["nice", "-n", "10", *arguments]
         started = time.monotonic()
@@ -66,6 +153,15 @@ def run(output):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
                 time.sleep(0.01)
+        polling_count = len(observed)
+        witness_paths = sorted(witness_records.glob("*.json"))
+        for path in witness_paths:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            assert record["spawned_before_wait"] is True
+            assert record["name"] in {"rustc", "rustc.exe", "clippy-driver", "clippy-driver.exe"}
+            identity = (record["pid"], record["name"])
+            assert identity not in observed or observed[identity] == record["priority"]
+            observed[identity] = record["priority"]
         # The executor's bounded shape: {compiler name: {priority: distinct children}}.
         priorities = {}
         for (_pid, name), priority in observed.items():
@@ -82,6 +178,7 @@ def run(output):
                   and row["message"]["level"] == "error" and row["message"].get("code", {}).get("code") == "unused_variables"]
         artifacts = [row for row in messages if row.get("reason") == "compiler-artifact"]
         return {"command": arguments, "exit_code": process.returncode, "compiler_priorities": priorities,
+                "polling_compiler_observations": polling_count, "spawn_priority_records": len(witness_paths),
                 "elapsed_seconds": round(time.monotonic() - started, 3),
                 "failed_packages": sorted({row["package_id"] for row in errors}),
                 "artifacts": artifacts, "scope": scopes[0] if scopes else None,
@@ -282,6 +379,7 @@ def run(output):
             assert selection["daemon_required"] == "false" and selection["live_required"] == "false", selection
             selections.append({"event": event_name, "head": head, "clippy_required": required})
     result = {"status": "PASS", "first_failure": fast, "previous_keep_going": continuing,
+              "actual_compiler_priority_controls": witness_controls,
               "clean_workspace": passing,
               "grouped_workspace": grouped, "grouped_restored": grouped_final, "controls": controls,
               "original_all_targets": original_targets, "grouped_manual_excluded": manual_excluded,

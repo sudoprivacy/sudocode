@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 
-exports.prepare = async function ({ root, executable, library, internals, env, receipt, restartBeforeAck = false, burst = false, truncation = false }) {
+exports.prepare = async function ({ root, executable, previousScode, library, internals, env, receipt, restartBeforeAck = false, burst = false, truncation = false }) {
   const { connectScode, sendScodeMessage } = require(library);
   const { openCodexMailboxOwner, openScodeMailbox } = require(internals);
   const evidence = receipt.realMailbox = { scope: 'Real local-pair append/offer/ACK, not authenticated Nexus Node enrollment or release acceptance',
@@ -116,15 +116,17 @@ exports.prepare = async function ({ root, executable, library, internals, env, r
   }), { mode: 0o600, flag: 'wx' });
   const scrubbed = Object.fromEntries(Object.keys(process.env).map(key => [key, null]));
   Object.assign(scrubbed, env, { SUDO_CODE_CONFIG_HOME: configHome, NO_COLOR: '1' });
-  const connect = async (name, acpSessionId) => {
+  const connect = async (name, acpSessionId, legacyExecutable) => {
     const workspace = path.join(root, name);
     fs.mkdirSync(path.join(workspace, '.nexus/sudocode'), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(workspace, '.nexus/sudocode/settings.json'), JSON.stringify({ agentName: name }), { mode: 0o600 });
     const connection = await connectScode({ workspace, env: scrubbed, ...(acpSessionId ? { acpSessionId } : {}),
-      scodeArgv: [executable, '--auth', 'api-key', '--model', 'sonnet', '--permission-mode', 'workspace-write', 'acp'],
-      peerInputVersion: 3, onPeerUnread: event => { evidence.unreadEvents.push({ actor: name, ...event }); },
+      scodeArgv: [legacyExecutable ?? executable, '--auth', 'api-key', '--model', 'sonnet', '--permission-mode', 'workspace-write', 'acp'],
+      ...(legacyExecutable
+        ? { peerInputVersion: 2, onPeerMessage: () => { throw new Error('Legacy receiver saw a message before the first send'); } }
+        : { peerInputVersion: 3, onPeerUnread: event => { evidence.unreadEvents.push({ actor: name, ...event }); } }),
       stderrLog: path.join(root, name+'.stderr'), startupTimeoutMs: 15000, closeTimeoutMs: 6000 });
-    evidence.children.push({ actor: name, pid: connection.pid, sessionId: connection.sessionId, initialized: connection.initialized });
+    if (!legacyExecutable) evidence.children.push({ actor: name, pid: connection.pid, sessionId: connection.sessionId, initialized: connection.initialized });
     return connection;
   };
   let ack, burstTokens, duplicateIssued = false, calls = 0;
@@ -160,7 +162,22 @@ exports.prepare = async function ({ root, executable, library, internals, env, r
     fs.unlinkSync(path.join(root, 'mailbox-bridge.json'));
     if (errors.length) throw new AggregateError(errors, 'Private scode cleanup failed');
   };
-  try { receiver = await connect(actor); sender = await connect(peer); }
+  try {
+    if (previousScode) {
+      receiver = await connect(actor, undefined, previousScode);
+      const previous = evidence.previousReceiver = { actor, pid: receiver.pid, sessionId: receiver.sessionId,
+        peerInputVersion: receiver.initialized._meta?.sudocode?.peerInput?.version };
+      assert.equal(previous.peerInputVersion, 2);
+      await receiver.close();
+      previous.exit = await receiver.exited;
+      assert.deepEqual(previous.exit, { code: 0, signal: null });
+      receiver = undefined;
+      receiver = await connect(actor, previous.sessionId);
+      assert.equal(receiver.sessionId, previous.sessionId, 'v3 must load the session created by v2');
+      assert.equal(receiver.initialized._meta?.sudocode?.peerInput?.version, 3);
+    } else receiver = await connect(actor);
+    sender = await connect(peer);
+  }
   catch (error) { await close(); throw error; }
   return {
     bound,

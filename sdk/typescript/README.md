@@ -741,8 +741,15 @@ npm run test:codex-mailbox -- --codex /absolute/native/codex \
   --output /absolute/new-evidence-directory
 ```
 
-This fixture currently supports macOS. It starts an isolated native app-server
-and an ordinary CLI in a real PTY, with a deterministic loopback Responses
+The fixture supports macOS and Windows. On Windows, also pass `--driver` with
+JSON argv for Python and the existing `test/fixtures/nativeCodexTui.windows.py`
+ConPTY driver, and `--process-probe` with JSON argv for Python and
+`test/fixtures/nativeWindowsProcess.py`. The latter binds each original model
+connection to its actual native PID through Windows APIs. `--temp-root` selects a private temporary parent when needed for
+Windows socket-path limits. The receipt pins the driver and records the host;
+a result on one OS does not qualify another. Windows fixture-server cleanup is
+recorded separately and does not establish graceful shared-daemon shutdown.
+It starts an isolated native app-server and an ordinary CLI in a real PTY, with a deterministic loopback Responses
 endpoint. The `real-mailbox` case also starts two actual scode processes in a
 private local-pair namespace. It sends a large frame, verifies all UTF-8
 windows byte-for-byte in the model-facing requests before acknowledging it,
@@ -752,7 +759,10 @@ commits nothing. The private scode provider refuses requests; startup
 the case. The receipt records exact binaries, source inputs, model requests,
 queue submissions, turns and process cleanup. It does not use a real Node or
 qualify enrollment, a published artifact, a production admission provider or
-live receiver ownership. The `real-mailbox-restart` variant closes and joins
+live receiver ownership. With `--case real-mailbox-restart`, an optional
+`--previous-scode /absolute/v2/scode` creates the private receiver session on
+the previous executable and joins its exit. The selected v3 executable must
+load that same session before the first peer send. The `real-mailbox-restart` variant closes and joins
 the receiving scode after the model reads every window, loads the same ACP
 session in a new process, and submits the original ACK token. It verifies the
 persistent token authority, unchanged unread delivery identity and one commit;

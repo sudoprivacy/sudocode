@@ -149,6 +149,7 @@ pub struct CompactionOutcome {
 pub struct SessionEngine {
     interaction_journal:
         std::sync::Mutex<Option<std::sync::Arc<runtime::session_interactions::InteractionJournal>>>,
+    agent_directory: std::sync::RwLock<runtime::attention::AgentDirectoryReader>,
     /// Observation metadata stays readable while a turn owns the model mutex.
     /// The session handle remains its writer, through `rebuild_locked` below.
     runtime_identity: std::sync::Arc<std::sync::RwLock<runtime::runtime_status::RuntimeIdentity>>,
@@ -233,6 +234,7 @@ impl SessionEngine {
         };
         Ok(Self {
             interaction_journal: std::sync::Mutex::default(),
+            agent_directory: std::sync::RwLock::new(session.runtime.agent_directory.clone()),
             runtime_observation: session.host.runtime_observation.clone(),
             runtime_identity: std::sync::Arc::new(std::sync::RwLock::new(runtime_identity)),
             host_context_required: std::sync::atomic::AtomicBool::new(false),
@@ -590,6 +592,10 @@ impl SessionEngine {
             Some(known) => runtime.with_session_known_date(known),
             None => runtime,
         };
+        *self
+            .agent_directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime.agent_directory.clone();
         session.runtime = runtime;
         session.handle = handle;
         self.runtime_identity
@@ -1132,6 +1138,15 @@ impl engine_core::EngineDelegate for SessionEngine {
         *current = Some(journal.clone());
         Ok(Some(journal))
     }
+    fn agent_directory(&self) -> Result<serde_json::Value, String> {
+        let read = self
+            .agent_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        read()
+    }
+
     fn observe_runtime_status(
         &self,
         read: runtime::runtime_status::RuntimeStatusReader,

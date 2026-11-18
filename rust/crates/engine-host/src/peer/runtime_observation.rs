@@ -2,7 +2,7 @@
 
 use super::{NodeBinding, NodeState};
 use runtime::runtime_status::{
-    PublishRuntimeRequest, RegisterRuntimeRequest, RuntimeDirectory, RuntimeInstanceId,
+    OnlineAgents, PublishRuntimeRequest, RegisterRuntimeRequest, RuntimeInstanceId,
     RuntimeInstanceRequest, RuntimeObservationHost, RuntimeStatusSource,
 };
 use serde::de::DeserializeOwned;
@@ -259,22 +259,22 @@ impl RuntimeObservationHost for NodeRuntimeHost {
         instance
     }
 
-    fn discover(&self) -> Result<RuntimeDirectory, String> {
+    fn online_agents(&self) -> Result<OnlineAgents, String> {
         let client = self.binding.runtime_client(false)?;
         // RustService responses are raw JSON, unlike the generic result envelope.
         let payload = client
             .call_with_deadline(
-                "runtime_directory.list_v1",
+                "runtime_directory.presence_v1",
                 b"{}",
                 "",
                 Duration::from_secs(2),
             )
             .map_err(|error| error.to_string())?;
-        let directory: RuntimeDirectory =
+        let online: OnlineAgents =
             serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
-        if directory.version != 1 {
-            return Err("unsupported runtime directory version".into());
+        if online.version != 1 {
+            return Err("unsupported presence version".into());
         }
-        Ok(directory)
+        Ok(online)
     }
 }

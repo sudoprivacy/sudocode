@@ -87,6 +87,21 @@ impl ColorTheme {
         self.style_for(role, ColorSupport::detect())
     }
 
+    /// Agent identity is stable across peer cards and navigation. Palette and
+    /// contrast come from this theme; legacy wire color names are only hints.
+    #[inline]
+    pub fn agent_color(self, id: &str) -> Color {
+        const PALETTE: [TextRole; 6] = [
+            TextRole::Accent,
+            TextRole::Info,
+            TextRole::Usage,
+            TextRole::Model,
+            TextRole::ProseStrong,
+            TextRole::Branch,
+        ];
+        self.color(PALETTE[runtime::agent_color::identity_index(id, PALETTE.len())])
+    }
+
     pub fn style_for(self, role: TextRole, support: ColorSupport) -> ContentStyle {
         static STYLES: [[OnceLock<ContentStyle>; ROLE_COUNT]; 8] =
             [const { [const { OnceLock::new() }; ROLE_COUNT] }; 8];

@@ -600,6 +600,8 @@ impl EngineEventRenderer {
             | EngineEvent::HostContextRequest { .. }
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
+            | EngineEvent::Attention(_)
+            | EngineEvent::AgentDirectory(_)
             | EngineEvent::InputState(_)
             | EngineEvent::Interactions(_)
             | EngineEvent::InteractionInput(_)

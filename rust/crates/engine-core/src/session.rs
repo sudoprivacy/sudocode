@@ -38,8 +38,7 @@
 //! on completion or cancellation. Synchronous compatibility callers use the
 //! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -47,9 +46,9 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::oneshot;
 
 use engine_events::{
-    ContentBlock, EngineCommand, EngineEvent, EngineState, InputReason, PermissionMode,
+    ContentBlock, EngineCommand, EngineEvent, EngineState, PermissionMode,
     PermissionPromptDecision, PermissionRequest, QuestionPromptAnswer, QuestionPromptRequest,
-    RequestId, TurnComplete,
+    TurnComplete,
 };
 use runtime::{
     HookAbortSignal, PermissionPrompter, QuestionPrompter, RuntimeError, RuntimeObserver,
@@ -57,6 +56,7 @@ use runtime::{
 };
 
 use crate::interaction_control::InteractionControls;
+use crate::requests::{PendingAnswer, RequestTable};
 use crate::subagent_completion::{CompletionState, EventSink};
 
 /// The engine-side contract: one live session's worth of "things a turn can do".
@@ -76,6 +76,10 @@ pub trait EngineDelegate: Send + Sync + 'static {
     ) -> Result<Option<Arc<runtime::session_interactions::InteractionJournal>>, String> {
         Ok(None)
     }
+    fn agent_directory(&self) -> Result<serde_json::Value, String> {
+        Err("Agent directory is unavailable for this host".into())
+    }
+
     /// Whether this session requires fresh caller-owned context before each turn.
     fn requires_host_context(&self) -> bool {
         false
@@ -313,92 +317,6 @@ impl EngineSession {
     }
 }
 
-/// One in-flight request awaiting a renderer answer. Keyed by [`RequestId`] in
-/// the shared table so the pump can route the matching answer command back to
-/// the blocked prompter.
-enum PendingAnswer {
-    HostContext(oneshot::Sender<Result<String, String>>),
-    Permission(oneshot::Sender<PermissionPromptDecision>),
-    Question(oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>),
-}
-
-/// Shared awaiting table + id allocator, threaded through the prompt adapters
-/// and the pump for a single turn.
-#[derive(Clone, Default)]
-struct RequestTable {
-    requests: Arc<Mutex<RequestState>>,
-    next_id: Arc<AtomicU64>,
-    interaction: runtime::PromptQueue,
-    interactions: Arc<crate::interactions::SessionInteractions>,
-}
-
-#[derive(Default)]
-struct RequestState {
-    pending: HashMap<RequestId, PendingRequest>,
-    cancelled: bool,
-}
-
-struct PendingRequest {
-    // An answered user request retains input ownership until its lease ends.
-    answer: Option<PendingAnswer>,
-    input_reason: Option<InputReason>,
-}
-
-impl RequestTable {
-    fn alloc(&self) -> RequestId {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn take(&self, id: RequestId) -> Option<PendingAnswer> {
-        self.requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .get_mut(&id)?
-            .answer
-            .take()
-    }
-
-    fn answer(&self, command: EngineCommand) {
-        match command {
-            EngineCommand::PermissionAnswer { id, decision } => {
-                if let Some(PendingAnswer::Permission(tx)) = self.take(id) {
-                    let _ = tx.send(decision);
-                }
-            }
-            EngineCommand::QuestionAnswer { id, answers } => {
-                if let Some(PendingAnswer::Question(tx)) = self.take(id) {
-                    let _ = tx.send(answers);
-                }
-            }
-            EngineCommand::HostContextAnswer { id, context } => {
-                if let Some(PendingAnswer::HostContext(tx)) = self.take(id) {
-                    let _ = tx.send(context);
-                }
-            }
-            _ => unreachable!("answer command"),
-        }
-    }
-
-    /// Dropping answer senders wakes host-context and user-prompt waits. Input
-    /// ownership ends now, while the turn may still drain.
-    fn cancel_all(&self, tx: &EventSink) {
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        requests.cancelled = true;
-        let had_input = requests
-            .pending
-            .values()
-            .any(|request| request.input_reason.is_some());
-        requests.pending.clear();
-        if had_input {
-            let _ = tx.send(EngineEvent::State(EngineState::Running));
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ShutdownReason {
     ExplicitClose,
@@ -492,7 +410,7 @@ async fn drive(
 
     // A cancelled prompt can reply after the next turn starts. Never reuse
     // its id for a new question or permission request in this engine session.
-    let next_request_id = Arc::new(AtomicU64::new(0));
+    let requests = RequestTable::new(Arc::new(AtomicU64::new(0)));
     // Bridge the std command receiver into a Tokio channel so the per-turn pump
     // can `select!` on it. A tiny forwarder thread does the blocking `recv`.
     let mut tcmd_rx = forward_engine_commands(cmd_rx);
@@ -507,6 +425,10 @@ async fn drive(
         match cmd {
             EngineCommand::Interactions { id, action } => {
                 controls.command(id, action, false, &evt_tx);
+            }
+            EngineCommand::RefreshAgents => refresh_agents(&delegate, &evt_tx),
+            EngineCommand::Attention { request_id } => {
+                handle_attention(request_id, &evt_tx);
             }
             EngineCommand::RuntimeStatus { request_id } => {
                 handle_runtime_status(request_id, &tasks, &evt_tx);
@@ -528,7 +450,7 @@ async fn drive(
                     command,
                     &evt_tx,
                     &mut tcmd_rx,
-                    &next_request_id,
+                    &requests,
                     &tasks,
                     &mut controls,
                 )
@@ -554,7 +476,7 @@ async fn drive(
                     call,
                     &evt_tx,
                     &mut tcmd_rx,
-                    &next_request_id,
+                    &requests,
                     &tasks,
                     &mut controls,
                 )
@@ -572,9 +494,9 @@ async fn drive(
                 }
                 delegate.abort_signal().abort();
             }
-            EngineCommand::PermissionAnswer { .. }
+            command @ (EngineCommand::PermissionAnswer { .. }
             | EngineCommand::QuestionAnswer { .. }
-            | EngineCommand::HostContextAnswer { .. } => {}
+            | EngineCommand::HostContextAnswer { .. }) => requests.answer(command, &evt_tx),
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
                 break;
@@ -586,6 +508,7 @@ async fn drive(
     }
     delegate.abort_signal().abort();
     controls.close(&evt_tx).await;
+    requests.cancel_all(&evt_tx);
     finish_engine_session(delegate.as_ref(), shutdown);
 }
 
@@ -594,7 +517,7 @@ async fn run_prompt_command(
     command: EngineCommand,
     evt_tx: &EventSink,
     tcmd_rx: &mut SessionCommands,
-    next_request_id: &Arc<AtomicU64>,
+    requests: &RequestTable,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,
 ) -> Option<ShutdownReason> {
@@ -609,16 +532,7 @@ async fn run_prompt_command(
         return None;
     }
     let input = TurnInput::from_command(command);
-    run_one_turn(
-        delegate,
-        input,
-        evt_tx,
-        tcmd_rx,
-        next_request_id,
-        tasks,
-        controls,
-    )
-    .await
+    run_one_turn(delegate, input, evt_tx, tcmd_rx, requests, tasks, controls).await
 }
 
 fn finish_engine_session(delegate: &dyn EngineDelegate, shutdown: ShutdownReason) {
@@ -671,6 +585,11 @@ fn change_setting(delegate: &dyn EngineDelegate, command: EngineCommand, sink: &
             let _ = sink.send(EngineEvent::Error { message });
         }
     }
+}
+
+fn handle_attention(id: u64, sink: &EventSink) {
+    let result = serde_json::to_value(sink.attention().as_ref()).map_err(|error| error.to_string());
+    let _ = sink.send(EngineEvent::CommandResult { id, result });
 }
 
 fn handle_runtime_status(
@@ -918,7 +837,7 @@ fn finish_turn_worker(
     tokio::spawn(async move {
         let result = turn.await;
         tokio::task::spawn_blocking(move || {
-            finish_table.cancel_all(&finish_sink);
+            finish_table.close_turn(&finish_sink);
             if let Some(inbox) = &finish_inbox {
                 let unapplied = inbox.finish();
                 if !unapplied.is_empty() {
@@ -959,15 +878,11 @@ async fn run_one_turn(
     input: TurnInput,
     evt_tx: &EventSink,
     tcmd_rx: &mut SessionCommands,
-    next_request_id: &Arc<AtomicU64>,
+    requests: &RequestTable,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,
 ) -> Option<ShutdownReason> {
-    let table = RequestTable {
-        next_id: Arc::clone(next_request_id),
-        interactions: Arc::clone(&evt_tx.interactions),
-        ..RequestTable::default()
-    };
+    let table = requests.turn();
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
@@ -1005,7 +920,7 @@ async fn run_one_turn(
                 }
                 Some(EngineCommand::Input { id, action }) => {
                     if handle_input(delegate.as_ref(), id, action, evt_tx, controls) {
-                        table.cancel_all(evt_tx);
+                        table.close_turn(evt_tx);
                     }
                 }
                 Some(EngineCommand::Steer { inputs }) => {
@@ -1019,9 +934,11 @@ async fn run_one_turn(
                 }
                 Some(command @ (EngineCommand::PermissionAnswer { .. }
                     | EngineCommand::QuestionAnswer { .. }
-                    | EngineCommand::HostContextAnswer { .. })) => table.answer(command),
+                    | EngineCommand::HostContextAnswer { .. })) => table.answer(command, evt_tx),
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
                 Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
+                Some(EngineCommand::RefreshAgents) => refresh_agents(delegate, evt_tx),
+                Some(EngineCommand::Attention { request_id }) => handle_attention(request_id, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => controls.completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 // Both paths abort and reap; only explicit Close persists.
@@ -1034,7 +951,7 @@ async fn run_one_turn(
                     });
                     tasks.begin_shutdown();
                     abort.abort();
-                    table.cancel_all(evt_tx);
+                    table.close_turn(evt_tx);
                 }
                 // Cancel aborts the in-flight turn; it then
                 // finishes (cancelled) and we fall through to the `result` arm.
@@ -1043,7 +960,7 @@ async fn run_one_turn(
                         let _ = evt_tx.send(EngineEvent::InputState(state));
                     }
                     abort.abort();
-                    table.cancel_all(evt_tx);
+                    table.close_turn(evt_tx);
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 // A Prompt arriving mid-turn is a renderer bug (renderers serialize
@@ -1206,7 +1123,7 @@ async fn run_direct_tool(
     call: DirectCall,
     evt_tx: &EventSink,
     tcmd_rx: &mut SessionCommands,
-    next_request_id: &Arc<AtomicU64>,
+    requests: &RequestTable,
     tasks: &runtime::background_tasks::BackgroundTasks,
     controls: &mut InteractionControls,
 ) -> Option<ShutdownReason> {
@@ -1229,11 +1146,7 @@ async fn run_direct_tool(
         }
         return None;
     }
-    let table = RequestTable {
-        next_id: Arc::clone(next_request_id),
-        interactions: evt_tx.interactions.clone(),
-        ..RequestTable::default()
-    };
+    let table = requests.turn();
     let abort = delegate.abort_signal();
     abort.reset();
     let mut handle = spawn_direct_worker(delegate, call, receipt, &table, evt_tx);
@@ -1246,18 +1159,22 @@ async fn run_direct_tool(
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
                 Some(EngineCommand::Input { id, action }) => {
-                    if handle_input(delegate.as_ref(), id, action, evt_tx, controls) { table.cancel_all(evt_tx); }
+                    if handle_input(delegate.as_ref(), id, action, evt_tx, controls) { table.close_turn(evt_tx); }
                 }
+                Some(command @ (EngineCommand::PermissionAnswer { .. }
+                    | EngineCommand::QuestionAnswer { .. }
+                    | EngineCommand::HostContextAnswer { .. })) => table.answer(command, evt_tx),
                 Some(EngineCommand::Interactions { id, action }) => {
                     controls.command(id, action, true, evt_tx);
                 }
-                Some(command @ EngineCommand::PermissionAnswer { .. }) => table.answer(command),
                 Some(EngineCommand::Steer { inputs }) => {
                     let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
                 Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
+                Some(EngineCommand::RefreshAgents) => refresh_agents(delegate, evt_tx),
+                Some(EngineCommand::Attention { request_id }) => handle_attention(request_id, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => controls.completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 command @ (Some(EngineCommand::Close) | None) => {
@@ -1268,14 +1185,14 @@ async fn run_direct_tool(
                         ShutdownReason::Disconnected
                     });
                     abort.abort();
-                    table.cancel_all(evt_tx);
+                    table.close_turn(evt_tx);
                 }
                 Some(EngineCommand::Cancel) => {
                     if let Some(state) = evt_tx.inputs.cancel() {
                         let _ = evt_tx.send(EngineEvent::InputState(state));
                     }
                     abort.abort();
-                    table.cancel_all(evt_tx);
+                    table.close_turn(evt_tx);
                 }
                 // The host serializes turns and direct calls on one lane, so a
                 // prompt arriving here is a renderer bug. Ignore it, as a turn
@@ -1285,7 +1202,7 @@ async fn run_direct_tool(
             () = tasks.control_changed(), if shutdown.is_none() => controls.retry(),
             () = controls.finished(evt_tx), if controls.is_active() => {}
             result = &mut handle => {
-                table.cancel_all(evt_tx);
+                table.close_turn(evt_tx);
                 let result = direct_result(result, request_id.is_some());
                 // A permission prompt moves the reported state; the session is
                 // idle again either way. Say so before the reply, while the
@@ -1621,7 +1538,7 @@ impl PermissionPrompter for PrompterAdapter {
         request: &PermissionRequest,
         origin: runtime::session_interactions::InteractionOrigin,
     ) -> Result<Option<runtime::session_interactions::Interaction>, String> {
-        self.table.interactions.submit_from(
+        self.tx.interactions.submit_from(
             source,
             engine_events::InteractionRequest::Permission(request.clone()),
             origin,
@@ -1630,24 +1547,39 @@ impl PermissionPrompter for PrompterAdapter {
     }
 
     fn check_session_gate(&self, tool_name: &str, required: PermissionMode) -> Result<(), String> {
-        self.table.interactions.check_plan_gate(tool_name, required)
+        self.tx.interactions.check_plan_gate(tool_name, required)
     }
     fn delegation_sink(&self) -> Option<runtime::PermissionPromptSink> {
-        match self.table.interactions.worker_sink(self.tx.clone()) {
+        let bridge = self.clone();
+        let attention = self.tx.clone();
+        let changed = self.clone();
+        let legacy = runtime::PermissionPromptSink::new(
+            move |request, agent| bridge.permission(request, agent),
+            move || attention.attention(),
+            move || changed.table.refresh(&changed.tx),
+        );
+        match self
+            .tx
+            .interactions
+            .worker_sink(self.tx.clone(), legacy.clone())
+        {
             Ok(Some(sink)) => return Some(sink),
             Ok(None) => {}
             Err(reason) => {
-                return Some(runtime::PermissionPromptSink::new(move |_| {
-                    Box::pin(std::future::ready(PermissionPromptDecision::Deny {
-                        reason: reason.clone(),
-                    }))
-                }))
+                let attention = self.tx.clone();
+                let changed = self.clone();
+                return Some(runtime::PermissionPromptSink::new(
+                    move |_, _| {
+                        Box::pin(std::future::ready(PermissionPromptDecision::Deny {
+                            reason: reason.clone(),
+                        }))
+                    },
+                    move || attention.attention(),
+                    move || changed.table.refresh(&changed.tx),
+                ));
             }
         }
-        let bridge = self.clone();
-        Some(runtime::PermissionPromptSink::new(move |request| {
-            bridge.clone().begin_decision(&request)
-        }))
+        Some(legacy)
     }
 
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -1659,21 +1591,31 @@ impl PermissionPrompter for PrompterAdapter {
         &mut self,
         request: &PermissionRequest,
     ) -> runtime::PromptReply<PermissionPromptDecision> {
-        let table = self.table.clone();
-        let tx = self.tx.clone();
-        let request = request.clone();
-        self.table.interaction.enqueue(move || async move {
-            let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.begin_request(&tx, PendingAnswer::Permission(answer_tx), |id| {
-                EngineEvent::PermissionRequest { id, request }
-            });
-            answer_rx
-                .await
-                .unwrap_or_else(|_| PermissionPromptDecision::Deny {
-                    reason: "engine session closed before the permission prompt was answered"
-                        .into(),
-                })
-        })
+        self.permission(request.clone(), None)
+    }
+}
+
+impl PrompterAdapter {
+    fn permission(
+        &self,
+        request: PermissionRequest,
+        agent: Option<runtime::PermissionPromptOrigin>,
+    ) -> runtime::PromptReply<PermissionPromptDecision> {
+        let (answer_tx, answer_rx) = oneshot::channel();
+        self.table.enqueue(
+            &self.tx,
+            PendingAnswer::Permission(answer_tx),
+            agent,
+            |id| EngineEvent::PermissionRequest { id, request },
+            async move {
+                answer_rx
+                    .await
+                    .unwrap_or_else(|_| PermissionPromptDecision::Deny {
+                        reason: "engine session closed before the permission prompt was answered"
+                            .into(),
+                    })
+            },
+        )
     }
 }
 
@@ -1690,7 +1632,7 @@ impl QuestionPrompter for QuestionAdapter {
         source: &str,
         request: &QuestionPromptRequest,
     ) -> Result<Option<runtime::session_interactions::Interaction>, String> {
-        self.table
+        self.tx
             .interactions
             .submit_question(source, request, &self.tx)
     }
@@ -1707,83 +1649,35 @@ impl QuestionPrompter for QuestionAdapter {
         &mut self,
         request: &QuestionPromptRequest,
     ) -> runtime::PromptReply<Result<Vec<QuestionPromptAnswer>, String>> {
-        let table = self.table.clone();
-        let tx = self.tx.clone();
         let request = request.clone();
-        self.table.interaction.enqueue(move || async move {
-            let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = table.begin_request(&tx, PendingAnswer::Question(answer_tx), |id| {
-                EngineEvent::QuestionRequest { id, request }
-            });
-            answer_rx.await.unwrap_or_else(|_| {
-                Err("engine session closed before the question was answered".to_string())
-            })
-        })
+        let (answer_tx, answer_rx) = oneshot::channel();
+        self.table.enqueue(
+            &self.tx,
+            PendingAnswer::Question(answer_tx),
+            None,
+            |id| EngineEvent::QuestionRequest { id, request },
+            async move {
+                answer_rx.await.unwrap_or_else(|_| {
+                    Err("engine session closed before the question was answered".to_string())
+                })
+            },
+        )
     }
 }
 
-/// Removes the request and releases any user-input ownership even if its
-/// future is dropped on cancellation or a provider stream failure.
-struct RequestLease {
-    table: RequestTable,
-    tx: EventSink,
-    id: RequestId,
-}
-
-impl Drop for RequestLease {
-    fn drop(&mut self) {
-        let mut requests = self
-            .table
-            .requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if requests
-            .pending
-            .remove(&self.id)
-            .is_some_and(|request| request.input_reason.is_some())
-            && !requests.cancelled
-        {
-            let _ = self.tx.send(EngineEvent::State(EngineState::Running));
-        }
+/// One bounded discovery at a time, never on the command pump or render thread.
+fn refresh_agents(delegate: &Arc<dyn EngineDelegate>, sink: &EventSink) {
+    use std::sync::atomic::Ordering;
+    if sink.directory_inflight.swap(true, Ordering::AcqRel) {
+        return;
     }
-}
-
-impl RequestTable {
-    fn begin_request(
-        &self,
-        tx: &EventSink,
-        answer: PendingAnswer,
-        event: impl FnOnce(RequestId) -> EngineEvent,
-    ) -> RequestLease {
-        let id = self.alloc();
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Admission, cancellation and lifecycle publication share this lock.
-        // A queued prompt cannot publish AwaitingInput after cancellation.
-        if !requests.cancelled {
-            let input_reason = match &answer {
-                PendingAnswer::HostContext(_) => None,
-                PendingAnswer::Permission(_) => Some(InputReason::Permission),
-                PendingAnswer::Question(_) => Some(InputReason::Question),
-            };
-            requests.pending.insert(
-                id,
-                PendingRequest {
-                    answer: Some(answer),
-                    input_reason,
-                },
-            );
-            if let Some(reason) = input_reason {
-                let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
-            }
-            let _ = tx.send(event(id));
-        }
-        RequestLease {
-            table: self.clone(),
-            tx: tx.clone(),
-            id,
-        }
-    }
+    let delegate = delegate.clone();
+    let sink = sink.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || delegate.agent_directory())
+            .await
+            .unwrap_or_else(|error| Err(format!("Agent directory failed: {error}")));
+        sink.directory_inflight.store(false, Ordering::Release);
+        let _ = sink.send(EngineEvent::AgentDirectory(result));
+    });
 }

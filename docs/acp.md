@@ -483,29 +483,20 @@ error. Disconnects or unsupported hosts do not establish that an Agent is
 offline. Counts and foreground state are observations of independently moving
 work, not a grant of human control; use the pause/fence protocol for takeover.
 
-The `agent_list` tool also exposes `runtime` on observed instance rows and
-`runtime_discovery` on its result. Several rows can have the same Agent name
-or SID. Only the current running instance is excluded, using its registry
-scope and registration incarnation. SID and operating-system PID are
-diagnostic fields; neither is an instance identity or an authorization grant.
+`agent_list` gives each row one `active` bit: a peer seen online in the zone,
+or a running subagent task. `activeOnly` keeps the active rows. A peer is
+online while one of its instances keeps its registration fresh, and every
+member of the zone may read that bit, as it may list the zone's Agents; no
+other runtime fact is shared with peers. `active: false` means not seen
+online, which includes a node that did not answer.
 
-Each observation separates `presence` (`online` or `unknown`) from
-`availability` (`fresh`, `stale`, `unsupported`, or `unavailable`). Only fresh
-facts include an `update`; stale work is never rendered as idle. Heartbeats
-can confirm attendance while the foreground and counts remain unknown.
-`activeOnly` retains positively online peer instances and active workers;
-`unknown_instances` and unavailable scopes retain incomplete coverage even
-when that filter returns no rows. An incomplete empty result does not prove
-that every Agent is offline.
-
-Standalone hosts expose weak engine readers through a process-owned local
-directory. Its private filesystem entries contain routing and read-only
-connection material, never mutable activity or session output. Native
-ownership release retires a crashed process's route. A selected Nexus node
-uses its existing authenticated client and scoped registry instead, with no
-disk-namespace fallback. Cohosted engines bind the same facts reader directly
-to their existing managed registry instance. All three paths consume the
-engine lifecycle and task registry used by `_sudocode/session/status`.
+A selected Nexus node answers presence from its registry and its zone's
+peers, through its existing authenticated client. Standalone hosts answer it
+from a process-owned local directory whose private entries contain routing
+and read-only connection material only; native ownership release retires a
+crashed process's route. Cohosted engines use their managed registry
+instance. The facts behind `_sudocode/session/status` stay with the session
+that owns them.
 
 ### Closing a peer session
 
@@ -1331,3 +1322,45 @@ The task extension retains each migrated sub-agent source, frozen payload,
 publication ordinal, ACK and context. Protocol capability negotiation controls
 which completion payloads the controller can handle; the storage binding
 controls writer compatibility.
+
+### Outstanding request attention (v1)
+
+`initialize.result._meta.sudocode.attention.version = 1` advertises a read-only
+projection of the live engine's request table. Query
+`_sudocode/session/attention` with `{ "sessionId": "…" }`; updates arrive as
+`_sudocode/session/attention_update` with `{ "sessionId": "…", "update": state }`.
+Both return the same shape:
+
+```json
+{"revision": 3, "requests": [{"id": 7, "reason": "permission", "phase": "presented", "agent": null, "summary": "Bash · {\"command\":\"cargo check\"}"}]}
+```
+
+- IDs are unique within the live engine session, including cancelled turns.
+  Revisions advance only when the projection changes. Scope caches to the actual
+  connection/incarnation and session; discard them on disconnect or replacement.
+- `reason` is `permission` or `question`; `phase` is `queued` or `presented`.
+  Only one request can own the input surface. Queued requests remain visible but
+  cannot be answered ahead of the presented request.
+- `agent: null` identifies the current session. A child includes the runtime's
+  existing `SubagentIdentity` (including `agent_id`, `name`, and `background`).
+  This is runtime provenance, not an identity parsed from message text.
+- Full details and answers use the existing permission/question RPCs.
+  Permission `toolCall._meta.sudocode.attention.requestId` and question
+  `requestId` correlate those RPCs with this list. Reading the list grants no
+  authority to approve, answer, or cancel a peer.
+- Answer, request cancellation, dropped request futures and session close remove
+  the entry. Parent-turn completion or foreground cancellation retains requests
+  owned by still-running detached children, including automatic background
+  handoff; an idle parent can still present and answer them. Foreground execution
+  and attention are separate facts: an idle parent with a waiting child is not a
+  running model.
+- Older agents or unavailable connections have unknown attention, not an empty
+  request list. No output-timing or spinner heuristic substitutes for this data.
+
+The direct A2A capability additionally advertises `directA2a.delivery = 1`.
+`_sudocode/a2a/send` accepts optional `delivery: "steer" | "queue"`, matching the
+model's `send` tool. Omission preserves the existing default. Neither option
+cancels the recipient's turn or overrides its judgement about the message.
+Eligible idle inputs already wake the engine; there is no `wake_if_idle` option.
+Explicit human pause fences still apply. SDK callers specifying delivery must
+negotiate this capability rather than silently dropping their chosen intent.

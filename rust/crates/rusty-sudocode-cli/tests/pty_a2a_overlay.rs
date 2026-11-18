@@ -548,7 +548,10 @@ fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<Str
             .unwrap();
         assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
         assert_eq!(format!("{:?}", header.bgcolor()), "Default");
-        assert!(!header.dim(), "peer identity must keep its blue contrast");
+        assert!(
+            !header.dim(),
+            "peer identity must retain its theme contrast"
+        );
         let body = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 2)
@@ -590,12 +593,14 @@ fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<Str
 
 #[test]
 fn a2a_received_while_idle_surfaces_in_scrollback() {
-    receive_and_resume("15;0", "Rgb(99, 168, 248)", false);
+    // The fixed sender `mac-ai` resolves to the shared ProseStrong identity
+    // role. Keep concrete terminal colors as an independent rendering oracle.
+    receive_and_resume("15;0", "Rgb(243, 139, 168)", false);
 }
 
 #[test]
 fn a2a_received_light_theme_and_replay() {
-    receive_and_resume("0;15", "Rgb(28, 100, 200)", false);
+    receive_and_resume("0;15", "Rgb(210, 15, 57)", false);
 }
 
 #[test]

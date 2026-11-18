@@ -18,6 +18,7 @@ mod init;
 mod input_queue;
 mod render;
 mod render_engine;
+mod repl_prompts;
 mod repl_ui;
 mod startup;
 mod stderr_capture;
@@ -29,6 +30,10 @@ use engine_core::{
     EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession, TurnComplete,
 };
 use render_engine::{EngineEventRenderer, RenderOutcome};
+use repl_prompts::{
+    cancel_pending_question_answer, consume_pending_question_answer, PendingQuestionAnswer,
+    SessionPrompts,
+};
 
 use std::env;
 use std::fs;
@@ -2432,31 +2437,6 @@ impl Drop for SignalCancelGuard {
     }
 }
 
-/// iocraft-based REPL dispatch. Spawns the iocraft render loop on a
-/// dedicated thread and runs the coordinator loop on the current thread.
-/// The coordinator reads `InputEvent`s from the iocraft UI and dispatches
-/// turns on runner threads, with iocraft owning stdin+stdout.
-type PendingQuestionAnswer = Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>;
-
-fn consume_pending_question_answer(pending: &PendingQuestionAnswer, text: String) -> bool {
-    let Some(tx) = pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    else {
-        return false;
-    };
-    let _ = tx.send(text);
-    true
-}
-
-fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
-    let _ = pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-}
-
 /// Callback type for interactive slash commands that need user selection
 /// via iocraft's InputSlot (replaces dialoguer FuzzySelect/Select in the
 /// iocraft REPL path).
@@ -2607,143 +2587,6 @@ fn show_effort_selection(
             None
         },
     ))
-}
-
-/// Keep the event pump draining while the existing input owner awaits a reply.
-/// The engine serializes interactions, so at most one reply worker is parked.
-fn relay_prompt_reply<T: Send + 'static>(
-    commands: mpsc::Sender<EngineCommand>,
-    reply: runtime::PromptReply<T>,
-    answer: impl FnOnce(T) -> EngineCommand + Send + 'static,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let _ = commands.send(answer(futures::executor::block_on(reply)));
-    })
-}
-
-#[derive(Clone)]
-struct IocraftQuestionPrompter {
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ui: repl_ui::UiCommandSender,
-    pending_answer: PendingQuestionAnswer,
-}
-
-impl IocraftQuestionPrompter {
-    fn new(ui: repl_ui::UiCommandSender, pending_answer: PendingQuestionAnswer) -> Self {
-        Self {
-            ui,
-            pending_answer,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
-    }
-
-    fn show_field(
-        &self,
-        request: &runtime::QuestionPromptRequest,
-        index: usize,
-        earlier: Option<&runtime::QuestionPromptAnswer>,
-    ) {
-        self.ui
-            .show_turn_question(cli::interactions::question_field(request, index, earlier));
-    }
-
-    fn prepare_answer_receiver(&self) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        {
-            let mut pending = self
-                .pending_answer
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("question prompt cancelled".into());
-            }
-            if pending.is_some() {
-                return Err("question prompt already pending".to_string());
-            }
-            *pending = Some(tx);
-        }
-        Ok(rx)
-    }
-
-    fn answer_for_field(
-        field: &runtime::QuestionField,
-        raw_answer: String,
-    ) -> runtime::QuestionPromptAnswer {
-        cli::interactions::answer_for_field(field, raw_answer)
-    }
-}
-
-impl runtime::QuestionPrompter for IocraftQuestionPrompter {
-    fn cancel_pending(&mut self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        cancel_pending_question_answer(&self.pending_answer);
-        self.ui.clear_turn_question();
-    }
-
-    fn ask(
-        &mut self,
-        request: &runtime::QuestionPromptRequest,
-    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
-        futures::executor::block_on(self.begin_question(request))
-    }
-
-    fn begin_question(
-        &mut self,
-        request: &runtime::QuestionPromptRequest,
-    ) -> runtime::PromptReply<Result<Vec<runtime::QuestionPromptAnswer>, String>> {
-        let this = self.clone();
-        let request = request.clone();
-        Box::pin(async move {
-            // Answers are kept per question so going back restores them.
-            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
-                vec![None; request.fields.len()];
-            let mut index = 0;
-            while index < request.fields.len() {
-                let rx = this.prepare_answer_receiver()?;
-                this.show_field(&request, index, answers[index].as_ref());
-                let Ok(raw) = rx.await else {
-                    this.ui.clear_turn_question();
-                    return Err("question prompt cancelled".into());
-                };
-                if raw == repl_ui::QUESTION_BACK {
-                    index = index.saturating_sub(1);
-                    continue;
-                }
-                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
-                index += 1;
-            }
-            this.ui.clear_turn_question();
-            Ok(answers.into_iter().flatten().collect())
-        })
-    }
-}
-
-impl runtime::PermissionPrompter for IocraftQuestionPrompter {
-    fn decide(
-        &mut self,
-        request: &runtime::PermissionRequest,
-    ) -> runtime::PermissionPromptDecision {
-        futures::executor::block_on(self.begin_decision(request))
-    }
-
-    fn begin_decision(
-        &mut self,
-        request: &runtime::PermissionRequest,
-    ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
-        let question = cli::interactions::permission_question(request);
-        let reply = runtime::QuestionPrompter::begin_question(self, &question);
-        Box::pin(async move {
-            match reply.await {
-                Ok(answers) if answers.first().is_some_and(|a| a.value == "allow") => {
-                    runtime::PermissionPromptDecision::Allow
-                }
-                _ => runtime::PermissionPromptDecision::Deny {
-                    reason: "tool permission denied or cancelled".into(),
-                },
-            }
-        })
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -3357,6 +3200,11 @@ fn run_repl_iocraft_dispatch(
     let completion_tx = coord_tx.clone();
     let task_ui = repl_ui_cmd.clone();
     let activity = repl_spinner.clone();
+    let mut prompts = SessionPrompts::new(
+        repl_ui_cmd.clone(),
+        pending_question_answer.clone(),
+        commands.clone(),
+    );
     thread::Builder::new()
         .name("repl-engine-events".into())
         .spawn(move || {
@@ -3365,6 +3213,9 @@ fn run_repl_iocraft_dispatch(
             // pre-deduped event, so that state stays here.
             let mut background = background_completion::Completions::default();
             while let Ok(event) = engine_events.recv() {
+                if prompts.observe(&event) {
+                    continue;
+                }
                 // Background work keeps publishing while the parent is idle.
                 // Its UI uses the same seam as every other engine consumer.
                 match &event {
@@ -3388,6 +3239,10 @@ fn run_repl_iocraft_dispatch(
                             id: *id,
                             result: result.clone(),
                         });
+                        continue;
+                    }
+                    EngineEvent::AgentDirectory(result) => {
+                        task_ui.agent_directory(result.clone());
                         continue;
                     }
                     EngineEvent::State(state) => activity.observe_engine_state(*state),
@@ -3654,7 +3509,6 @@ fn run_repl_iocraft_dispatch(
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
-                        Arc::clone(&pending_question_answer),
                         coord_tx.clone(),
                     ));
                 }
@@ -3731,7 +3585,6 @@ fn run_repl_iocraft_dispatch(
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
-                        Arc::clone(&pending_question_answer),
                         coord_tx.clone(),
                     ));
                 } else {
@@ -3817,6 +3670,9 @@ fn run_repl_iocraft_dispatch(
                         // A queue held for the picker goes on.
                         let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                     }
+                }
+                repl_ui::InputEvent::RefreshAgents => {
+                    let _ = commands.send(EngineCommand::RefreshAgents);
                 }
                 repl_ui::InputEvent::BackgroundTask(action) => {
                     let _ = commands.send(EngineCommand::BackgroundTask { action });
@@ -4087,7 +3943,6 @@ fn run_repl_iocraft_dispatch(
                                 repl_output.clone(),
                                 repl_ui_cmd.clone(),
                                 repl_spinner.clone(),
-                                Arc::clone(&pending_question_answer),
                                 coord_tx.clone(),
                             ));
                             true
@@ -4153,7 +4008,6 @@ fn run_repl_iocraft_dispatch(
                             repl_output.clone(),
                             repl_ui_cmd.clone(),
                             repl_spinner.clone(),
-                            Arc::clone(&pending_question_answer),
                             coord_tx.clone(),
                         ));
                     } else {
@@ -4409,7 +4263,6 @@ fn spawn_iocraft_turn(
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
     spinner: render::activity::ActivityState,
-    pending_question_answer: PendingQuestionAnswer,
     done_tx: mpsc::Sender<CoordinatorEvent>,
 ) -> thread::JoinHandle<()> {
     // The engine owns the abort signal (reset at the start of each turn, fired
@@ -4427,13 +4280,7 @@ fn spawn_iocraft_turn(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
             }
-            let is_failed = match cli.run_turn_iocraft(
-                &work,
-                &output,
-                &ui,
-                &spinner,
-                pending_question_answer,
-            ) {
+            let is_failed = match cli.run_turn_iocraft(&work, &output, &ui, &spinner) {
                 Ok(committed) => !committed,
                 Err(error) => {
                     output.println(&format!(
@@ -4993,7 +4840,7 @@ impl LiveCli {
 
     /// Drive one turn across the seam: send the prompt, pump events into the
     /// renderer, and answer permission / question requests using the supplied
-    /// prompters (the SAME `CliPermissionPrompter` / `IocraftQuestionPrompter`
+    /// prompters (the SAME `CliPermissionPrompter` / session prompt relay
     /// the old paths installed on the runtime — now consulted above the seam).
     /// `output` routes the renderer to the iocraft `OutputSender` or bare stdout
     /// (`None`). Returns the captured `TurnComplete` (`None` on error before
@@ -5060,7 +4907,6 @@ impl LiveCli {
         self.engine_handle.commands.send(command)?;
 
         let mut outcome = TurnOutcome::default();
-        let mut prompt_replies = Vec::new();
         let shown = match request {
             TurnRequest::Prompt { shown, .. } => *shown,
             TurnRequest::Compact => &[],
@@ -5211,16 +5057,6 @@ impl LiveCli {
             match action {
                 RenderOutcome::Continue => {}
                 RenderOutcome::NeedPermission { id, request } => {
-                    if ui.is_some() {
-                        let reply = permission_prompter.begin_decision(&request);
-                        let commands = self.engine_handle.commands.clone();
-                        prompt_replies.push(relay_prompt_reply(commands, reply, move |decision| {
-                            EngineCommand::PermissionAnswer { id, decision }
-                        }));
-                        continue;
-                    }
-                    // The prompter reads stdin (cooked mode); pause the sync-REPL
-                    // key monitor so it doesn't steal the approval keystrokes.
                     if let Some(monitor) = cancel_monitor {
                         monitor.suspend();
                     }
@@ -5239,14 +5075,6 @@ impl LiveCli {
                         .send(EngineCommand::PermissionAnswer { id, decision })?;
                 }
                 RenderOutcome::NeedQuestion { id, request } => {
-                    if ui.is_some() {
-                        let reply = question_prompter.begin_question(&request);
-                        let commands = self.engine_handle.commands.clone();
-                        prompt_replies.push(relay_prompt_reply(commands, reply, move |answers| {
-                            EngineCommand::QuestionAnswer { id, answers }
-                        }));
-                        continue;
-                    }
                     if let Some(monitor) = cancel_monitor {
                         monitor.suspend();
                     }
@@ -5264,12 +5092,6 @@ impl LiveCli {
                 }
                 RenderOutcome::Done => break,
             }
-        }
-        // Release cancelled receivers and drain their UI cleanup before the
-        // next turn can install a new question in the same input slot.
-        question_prompter.cancel_pending();
-        for reply in prompt_replies {
-            let _ = reply.join();
         }
         Ok(outcome)
     }
@@ -5481,7 +5303,6 @@ impl LiveCli {
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
-        pending_question_answer: PendingQuestionAnswer,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let input = match work {
             ReplWork::Prompt(next) => next
@@ -5512,10 +5333,8 @@ impl LiveCli {
         spinner_state.prepare_turn(model.as_str(), token_budget);
         let spinner_ref = render::SpinnerRef::from_activity_state(spinner_state);
 
-        let mut question_prompter =
-            IocraftQuestionPrompter::new(ui.clone(), pending_question_answer);
-
-        let mut permission_prompter = question_prompter.clone();
+        let mut question_prompter = NoopQuestionPrompter;
+        let mut permission_prompter = AutoDenyPermissionPrompter;
 
         let outcome = self.drive_turn(
             &request,

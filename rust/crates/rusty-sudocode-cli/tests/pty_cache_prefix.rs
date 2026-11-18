@@ -1371,8 +1371,8 @@ fn assert_peer_description_discovery(env: &TestEnv, capture: &Capture, descripti
         .unwrap();
     assert_eq!(author["description"], description["description"]);
     assert_eq!(author["description_updated_at"], description["updated_at"]);
-    assert!(
-        author.get("active").is_none(),
+    assert_eq!(
+        author["active"], false,
         "description freshness does not assert runtime liveness"
     );
     assert!(peers

@@ -1,0 +1,161 @@
+name: Compiler cache tool
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/compiler-cache/**
+      - .github/scripts/compiler_cache_tool.py
+      - .github/workflows/compiler-cache-tool.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Qualify current accepted source or publish an already qualified artifact
+        required: true
+        default: qualify
+        type: choice
+        options: [qualify, publish]
+      qualified_run_id:
+        description: Successful same-recipe qualification run, required only for publication
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Qualify Windows compiler tool
+    if: (github.event_name == 'pull_request' && !github.event.pull_request.draft) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify' && github.ref == 'refs/heads/main')
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          # Immutable accepted original-tool/runner source, independent of the candidate.
+          ref: f591e11aea780a1947de56df0724b2e551518cc4
+          path: .trusted-acceptance
+          persist-credentials: false
+      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain
+        with:
+          toolchain-file: .trusted-acceptance/rust-toolchain.toml
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the existing acceptance observer dependencies
+        run: python -m pip install psutil jsonschema
+      - name: Prepare the original pinned tool using the trusted API helper
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_OUTPUT: ${{ runner.temp }}/compiler-cache-baseline/tool-preparation
+        shell: python
+        run: |
+          import importlib.util, json, os
+          from pathlib import Path
+          source = Path('.trusted-acceptance/.github/local-acceptance/checks.py').resolve()
+          spec = importlib.util.spec_from_file_location('trusted_original_compiler_tool', source)
+          checks = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(checks)
+          output = Path(os.environ['BASELINE_OUTPUT'])
+          output.mkdir(parents=True)
+          _, tool = checks.prepare_compiler_cache(output)
+          if tool is None:
+              raise RuntimeError('Original compiler-tool control was not prepared')
+          (output / 'receipt.json').write_text(json.dumps({'compiler_cache': tool}, indent=2), encoding='utf-8')
+      - name: Materialize the pinned source and minimal upstream backport
+        run: python .github/scripts/compiler_cache_tool.py prepare --output "${{ runner.temp }}/compiler-cache-tool"
+      - name: Resolve private compiler-tool cache paths
+        id: cache-paths
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          source = temporary / 'compiler-cache-tool/source/sccache-965c01943a40c9df96264474bbe28ba98f2e1487'
+          target = temporary / 'compiler-cache-tool-target'
+          relative_target = Path(os.path.relpath(target, source))
+          assert (source / relative_target).resolve() == target.resolve()
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('workspaces=' + Path(os.path.relpath(source)).as_posix() + ' -> ' + relative_target.as_posix() + '\n')
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache-paths.outputs.workspaces }}
+          shared-key: compiler-cache-tool-019-responsefiles-rust1100
+          key: ${{ hashFiles('.github/compiler-cache/response-files.patch') }}
+          cache-workspace-crates: false
+          cache-on-failure: true
+          save-if: true
+      - name: Run the original upstream gates and real long-command controls
+        run: >-
+          python .github/scripts/compiler_cache_tool.py qualify
+          --output "${{ runner.temp }}/compiler-cache-tool"
+          --target-dir "${{ runner.temp }}/compiler-cache-tool-target"
+          --baseline-tool "${{ runner.temp }}/compiler-cache-baseline/tool-preparation/receipt.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-cache-tool-windows-x64
+          path: ${{ runner.temp }}/compiler-cache-tool/artifacts
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compiler-cache-tool-evidence
+          path: ${{ runner.temp }}/compiler-cache-tool/evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  verify-publication:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the accepted source and original successful artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFIED_RUN_ID: ${{ inputs.qualified_run_id }}
+        run: python .github/scripts/compiler_cache_tool.py verify-run --run-id "$QUALIFIED_RUN_ID" --output "$RUNNER_TEMP/verified-tool"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-compiler-cache-tool
+          path: ${{ runner.temp }}/verified-tool
+          if-no-files-found: error
+
+  publish:
+    needs: verify-publication
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-compiler-cache-tool
+          path: ${{ runner.temp }}/verified-tool
+      - name: Publish the exact qualified bytes without rebuilding or replacing a tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/compiler_cache_tool.py publish --output "$RUNNER_TEMP/verified-tool"

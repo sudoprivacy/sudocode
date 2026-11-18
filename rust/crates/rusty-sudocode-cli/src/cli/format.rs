@@ -8,6 +8,7 @@ mod question;
 pub(crate) mod reasoning;
 pub(crate) mod todo;
 use crate::render::TextRole;
+pub(crate) use a2a::agent_row;
 pub(super) use a2a::summary_preview;
 
 use std::fmt::Write as _;

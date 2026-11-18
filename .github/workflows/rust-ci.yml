@@ -589,6 +589,41 @@ jobs:
       - name: Install focused executor observer dependencies
         if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true' || steps.scope.outputs.release_artifact_required == 'true')
         run: python3 -m pip install psutil
+      - name: Prepare trusted tools for the native artifact fixture
+        if: github.event_name == 'pull_request' && steps.scope.outputs.release_artifact_required == 'true'
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_TOOL_REF: ${{ github.event.pull_request.base.sha }}
+          ACCEPTANCE_NATIVE_CHECKS: native-release
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/preflight-native-tools
+        run: |
+          import hashlib, json, os, re, subprocess, sys, tempfile
+          from pathlib import Path
+          token = os.environ.pop('GH_TOKEN')
+          for key in list(os.environ):
+              if key.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'}:
+                  del os.environ[key]
+          reference = os.environ['TRUSTED_TOOL_REF']
+          if not re.fullmatch(r'[0-9a-f]{40}', reference):
+              raise RuntimeError('Native fixture tools require the immutable protected base')
+          root = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          directory = Path(tempfile.mkdtemp(prefix='trusted-release-tools-', dir=os.environ['RUNNER_TEMP']))
+          git_environment = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}
+          git_environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+          sources = {}
+          for name in ['prepare_tools.py', 'checks.py', 'compiler_cache.py']:
+              relative = '.github/local-acceptance/' + name
+              contents = subprocess.check_output(
+                  ['git', '--no-replace-objects', 'show', '--no-ext-diff', '--no-textconv', reference + ':' + relative],
+                  cwd=root, env=git_environment)
+              destination = directory / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes(contents)
+              sources[relative] = hashlib.sha256(contents).hexdigest()
+          print('TRUSTED_NATIVE_FIXTURE_TOOL_SOURCE=' + json.dumps({'base': reference, 'files': sources}), flush=True)
+          subprocess.run([sys.executable, '-I', str(directory / '.github/local-acceptance/prepare_tools.py')],
+                         cwd=directory, env={**git_environment, 'GH_TOKEN': token}, check=True)
       - name: Exercise acceptance executors with real Cargo, Git and Docker
         # Only changed executor/fixture inputs, once on the PR. Queue/main
         # reuse this result instead of rebuilding the same tiny fixture.

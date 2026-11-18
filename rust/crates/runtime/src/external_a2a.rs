@@ -86,7 +86,7 @@ impl ExternalA2aCall {
             "send" => {
                 fields
                     .keys()
-                    .all(|key| matches!(key.as_str(), "to" | "message" | "summary"))
+                    .all(|key| matches!(key.as_str(), "to" | "message" | "summary" | "delivery"))
                     && fields
                         .get("to")
                         .and_then(serde_json::Value::as_str)
@@ -97,6 +97,9 @@ impl ExternalA2aCall {
                     && fields
                         .get("summary")
                         .is_none_or(serde_json::Value::is_string)
+                    && fields.get("delivery").is_none_or(|value| {
+                        crate::turn_input::InputDelivery::deserialize(value).is_ok()
+                    })
             }
             "agent_list" => {
                 fields.keys().all(|key| key == "active_only")

@@ -45,6 +45,11 @@ impl ConnectionState {
     }
 }
 
+struct InteractionTask {
+    task: tokio::task::JoinHandle<()>,
+    is_attention: bool,
+}
+
 pub(crate) struct SessionDriver {
     commands: std::sync::mpsc::Sender<EngineCommand>,
     handle: Mutex<Option<EngineHandle>>,
@@ -56,7 +61,7 @@ pub(crate) struct SessionDriver {
     next_request: AtomicU64,
     bridge_stopped: Mutex<std::sync::mpsc::Receiver<()>>,
     abort: Mutex<runtime::HookAbortSignal>,
-    interactive: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    interactive: Mutex<HashMap<engine_core::RequestId, InteractionTask>>,
     input_turn: AtomicU64,
     native_input: AtomicBool,
     input_state: tokio::sync::watch::Sender<Option<engine_core::engine_events::InputState>>,
@@ -86,7 +91,7 @@ impl SessionDriver {
             next_request: AtomicU64::new(1),
             bridge_stopped: Mutex::new(stopped_rx),
             abort: Mutex::new(runtime::HookAbortSignal::default()),
-            interactive: Mutex::new(Vec::new()),
+            interactive: Mutex::new(HashMap::new()),
             input_turn: AtomicU64::new(0),
             native_input: AtomicBool::new(false),
             input_state: tokio::sync::watch::channel(None).0,
@@ -124,7 +129,38 @@ impl SessionDriver {
         driver
     }
 
+    fn retain_interactions(&self, keep: impl Fn(engine_core::RequestId, &InteractionTask) -> bool) {
+        self.interactive
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id, pending| {
+                let retained = !pending.task.is_finished() && keep(*id, pending);
+                if !retained {
+                    pending.task.abort();
+                }
+                retained
+            });
+    }
+
     fn on_event(self: &Arc<Self>, session_id: &str, event: EngineEvent) {
+        if let EngineEvent::Attention(state) = &event {
+            // Request removal, including cancellation, owns reply teardown.
+            // A parent turn ending does not cancel detached-child questions.
+            self.retain_interactions(|id, pending| {
+                !pending.is_attention || state.requests.iter().any(|request| request.id == id)
+            });
+            if let Some(connection) = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .connection
+                .clone()
+            {
+                let _ = connection
+                    .send_notification(crate::attention_control::notification(session_id, state));
+            }
+            return;
+        }
         if let EngineEvent::State(state) = &event {
             if let Some(factory) = self
                 .hosted_factory
@@ -145,14 +181,7 @@ impl SessionDriver {
                 | EngineEvent::TurnFailed { .. }
                 | EngineEvent::PromptRejected { .. }
         ) {
-            for task in self
-                .interactive
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .drain(..)
-            {
-                task.abort();
-            }
+            self.retain_interactions(|_, pending| pending.is_attention);
         }
         let input_update = self.input_update(&event);
         if let Some(update) = input_update {
@@ -273,8 +302,14 @@ impl SessionDriver {
                 .interactive
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            interactive.retain(|task| !task.is_finished());
-            interactive.push(task);
+            interactive.retain(|_, pending| !pending.task.is_finished());
+            interactive.insert(
+                id,
+                InteractionTask {
+                    task,
+                    is_attention: false,
+                },
+            );
             return true;
         }
         // Requests belong to the session, including automatically resumed queued turns.
@@ -289,21 +324,16 @@ impl SessionDriver {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .connection
                 .clone();
-            let abort = self
-                .abort
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             if let Some(connection) = connection {
                 let answer = match &event {
                     EngineEvent::PermissionRequest { id, request } => {
                         crate::acp_sdk_server::answer_permission(
-                            session_id, *id, request, self, abort, connection,
+                            session_id, *id, request, self, connection,
                         )
                     }
                     EngineEvent::QuestionRequest { id, request } => {
                         crate::acp_sdk_server::answer_question(
-                            session_id, *id, request, self, abort, connection,
+                            session_id, *id, request, self, connection,
                         )
                     }
                     _ => unreachable!(),
@@ -312,8 +342,19 @@ impl SessionDriver {
                     .interactive
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                interactive.retain(|task| !task.is_finished());
-                interactive.push(tokio::spawn(answer));
+                interactive.retain(|_, pending| !pending.task.is_finished());
+                let id = match event {
+                    EngineEvent::PermissionRequest { id, .. }
+                    | EngineEvent::QuestionRequest { id, .. } => *id,
+                    _ => unreachable!(),
+                };
+                interactive.insert(
+                    id,
+                    InteractionTask {
+                        task: tokio::spawn(answer),
+                        is_attention: true,
+                    },
+                );
             } else {
                 match event {
                     EngineEvent::PermissionRequest { id, .. } => {
@@ -568,13 +609,14 @@ impl SessionDriver {
         .map_err(|e| e.to_string())?
     }
 
-    pub(crate) async fn runtime_status(self: &Arc<Self>) -> Result<Value, String> {
+    pub(crate) async fn observation(
+        self: &Arc<Self>,
+        command: fn(u64) -> EngineCommand,
+    ) -> Result<Value, String> {
         let driver = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            driver.request(|request_id| EngineCommand::RuntimeStatus { request_id })
-        })
-        .await
-        .map_err(|error| error.to_string())?
+        tokio::task::spawn_blocking(move || driver.request(command))
+            .await
+            .map_err(|error| error.to_string())?
     }
 
     pub(crate) async fn interactions(

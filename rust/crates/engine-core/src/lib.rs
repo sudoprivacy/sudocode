@@ -70,6 +70,18 @@
 //! [`EngineAttachment`] installs that model at composition time on its existing
 //! handle. Renderers translate transport requests and raw receipts.
 //!
+//! # Attention ownership
+//!
+//! The session request table owns queued/presented permission and question
+//! requests, their reply channels and cancellation. `EngineEvent::Attention`
+//! and `EngineCommand::Attention` expose the same revisioned projection to
+//! every consumer. Request guards remove entries on completion or drop.
+//! A normal parent-turn completion retains detached-child requests; actual
+//! automatic handoffs update that ownership, including descendants.
+//! Foreground execution and outstanding attention remain separate facts.
+//! `RefreshAgents` reads the host-bound tool directory asynchronously; it
+//! cannot start a model turn or grant control over discovered peers.
+//!
 //! # What else this crate owns
 //!
 //! The pure (non-rendering) `ApiClient` the engine uses, and the
@@ -93,6 +105,7 @@ pub mod background_completion;
 pub mod input_queue;
 mod interaction_control;
 mod interactions;
+mod requests;
 mod session;
 mod session_inputs;
 pub mod subagent_completion;

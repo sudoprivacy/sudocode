@@ -663,8 +663,10 @@ preflight checks actual conflicts against its supplied base and fetched
 paths and recovery step without changing the checkout or index. Clean branches
 may stay behind main. Preflight stages the exact hash-pinned checker from its
 protected policy, so an older author branch does not need a source update to
-receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays required
-in CI preflight; editing it alone skips unrelated native product builds.
+receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture remains
+required when its reviewed inputs change or a full manual CI run is requested;
+editing it alone skips unrelated native product builds. The actual PR history
+check and protected integrated-history gate stay required.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
 resolver 2 and normal workspace settings must stay unchanged. For the standard
@@ -1146,7 +1148,29 @@ the combined Git history. No unique product test is removed by this consolidatio
 After merge, main reuses those completed integrity checks and does not start
 another Rust CI preflight. Independent cache/package publishers retain their
 own main-push triggers. PR, queue, legacy development-branch pushes and explicit
-runs retain the full preflight; no product assertion is removed.
+runs retain all actual current-source checks; no product assertion is removed.
+
+Independent policy self-tests now have explicit source selection. Only ordinary
+Rust production `.rs` files under a crate/vendor `src/`, registered root docs and
+Markdown/HTML/JSON under `docs/` can omit their replay. The selector requires a
+clean workflow checkout, its actual declared Git identity and exact reviewed Git
+blob/mode identities for all 23 self-test programs, first-party dependencies,
+workflow/toolchain and checkout-layout inputs. It checks the running combined
+workflow tree, not merely the PR head. Changed/deleted/linked inputs, tests,
+configuration, infrastructure, unknown layouts, empty/unknown history and any
+unreviewed fixture version retain the entire original self-test group. Manual
+CI runs retain it too. A registry refresh itself selects full execution.
+
+The original history/boundary/pin/format/schema checks still inspect every
+current source; the canonical pin check precedes the self-test group so bad
+input fails before repeated fixture work. This deliberately reduces per-PR
+self-test coverage of unchanged infrastructure. A change in the hosted runtime
+outside committed inputs may first surface in an infrastructure/manual run.
+Omission is reported as omitted, never as a cached test pass or product coverage.
+The original seven command bodies, assertions, deadlines and native/provider
+selection remain. Observed original self-test step totals of roughly 13-19s are
+not a controlled saving or proof of the whole-lifecycle one-tenth target.
+
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.

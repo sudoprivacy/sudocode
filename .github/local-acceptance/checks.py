@@ -464,7 +464,7 @@ def compiler_cache_profiles():
 def prepare_compiler_cache(output):
     """Bind the separate cache implementation before loading or executing it."""
     contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
-    if hashlib.sha256(contents).hexdigest() != "71d13667e6e74224bcfdd199a824d89018ccfb93608ad818793afe9a9c5d2b47":
+    if hashlib.sha256(contents).hexdigest() != "0f30e494f369ee25f715ef533dc1ff7249ecfe0b5b4e9a93080427ec46577731":
         raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
                            f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
                            "prepare_compiler_cache, then rerun the original supported contract-update command. "
@@ -1176,7 +1176,7 @@ def native_guard_files():
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
-        ".github/local-acceptance/compiler_cache.py": "71d13667e6e74224bcfdd199a824d89018ccfb93608ad818793afe9a9c5d2b47",
+        ".github/local-acceptance/compiler_cache.py": "0f30e494f369ee25f715ef533dc1ff7249ecfe0b5b4e9a93080427ec46577731",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",

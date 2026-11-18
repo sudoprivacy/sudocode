@@ -517,7 +517,7 @@ class Session:
         stats = json.loads(self.tool_command("initial-stats", "--show-stats", "--stats-format", "json"))
         if stats["max_cache_size"] != 2 * 1024**3:
             raise RuntimeError("Compiler-cache disk limit differs from the declared 2 GiB")
-        if not self.answers_probe():
+        if not self.answers_probe() or not self.forget_probe():
             # A server that takes requests but never answers would hold the
             # first cached compile until its idle timeout, then fail it.
             self.fall_back(f"the cache server did not answer a probe compile within {PROBE_SECONDS}s")
@@ -542,6 +542,16 @@ class Session:
                                      "--crate-type", "lib", "--emit", "metadata", "--out-dir", str(probe),
                                      str(probe / "probe.rs")], cwd=probe, env={**os.environ, **self.environment},
                                     capture_output=True, timeout=PROBE_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
+
+    def forget_probe(self):
+        """Reset the new server's statistics, so they count only the session's own compilations."""
+        try:
+            result = subprocess.run([self.tool["executable"], "--zero-stats"], cwd=self.directory,
+                                    env={**os.environ, **self.environment}, capture_output=True,
+                                    timeout=PROBE_SECONDS)
         except subprocess.TimeoutExpired:
             return False
         return result.returncode == 0

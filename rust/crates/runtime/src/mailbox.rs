@@ -908,12 +908,14 @@ impl Mailbox {
         // said that a second time". Guarded on 0 so a caller that supplies its
         // own time (a relay preserving the original) keeps it, which is also why
         // `append_envelope_via`'s identical guard stays a no-op after this.
-        if envelope.timestamp == 0 {
+        let assign_timestamp = envelope.timestamp == 0;
+        if assign_timestamp {
             envelope.timestamp = crate::agent_mailbox::now_secs();
         }
         // This logical send's identity (see `MailboxEnvelope::send_id`),
         // guarded like the timestamp so a retransmission keeps it.
-        if envelope.send_id.is_none() {
+        let existing_send_id = envelope.send_id.is_some();
+        if !existing_send_id {
             envelope.send_id = Some(uuid::Uuid::new_v4().to_string());
         }
         let path = self.transcript_path(&envelope.to);
@@ -926,6 +928,14 @@ impl Mailbox {
 
         if self.backend_frames(&path)? {
             let backend = self.backend.resolve()?;
+            // A live reader can consume our frame before append returns. Only a
+            // pre-append cursor is a lower bound for a newly allocated send ID.
+            // A caller-supplied ID can refer to an earlier attempt.
+            let check_from = if existing_send_id {
+                0
+            } else {
+                self.read_position(&envelope.to).ok().flatten().unwrap_or(0)
+            };
             let bytes = envelope.to_bytes();
             return match backend.append(&path, &bytes) {
                 Ok(()) => Ok(()),
@@ -937,7 +947,14 @@ impl Mailbox {
                 {
                     Err(format!("mailbox send to {path}: {error}"))
                 }
-                Err(error) => self.reconcile_append(backend.as_ref(), &path, &envelope, &error),
+                Err(error) => self.reconcile_append(
+                    backend.as_ref(),
+                    &path,
+                    check_from,
+                    &envelope,
+                    assign_timestamp,
+                    &error,
+                ),
             };
         }
 
@@ -965,7 +982,7 @@ impl Mailbox {
     /// twice. Only this send's identity proves that it landed: two sends of
     /// the same words in the same second are byte-identical, so matching bytes
     /// would report a send that wrote nothing as delivered. The check reads
-    /// the conversation from this agent's read position under one deadline
+    /// the conversation from the captured lower bound under one deadline
     /// and one byte budget. Not finding the message proves nothing (the commit
     /// may still land), so every way the check can end without finding it
     /// says the outcome is unconfirmed, never that nothing was sent.
@@ -973,7 +990,9 @@ impl Mailbox {
         &self,
         backend: &dyn FsBackend,
         path: &str,
+        mut cursor: u64,
         sent: &MailboxEnvelope,
+        assigned_timestamp: bool,
         error: &std::io::Error,
     ) -> Result<(), String> {
         // `send` set it; an unset one matches nothing and ends unconfirmed.
@@ -985,7 +1004,6 @@ impl Mailbox {
             ))
         };
         let deadline = std::time::Instant::now() + RECONCILE_DEADLINE;
-        let mut cursor = self.read_position(&sent.to).ok().flatten().unwrap_or(0);
         let mut scanned = 0usize;
         let mut wait_ms = 0;
         loop {
@@ -999,12 +1017,19 @@ impl Mailbox {
                 }
             };
             scanned += data.len();
-            if envelopes_in(&data)
-                .iter()
-                .any(|env| env.send_id.as_deref() == Some(send_id) && env.from == sent.from)
-            {
-                tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
-                return Ok(());
+            for mut observed in envelopes_in(&data) {
+                if observed.send_id.as_deref() == Some(send_id) && observed.from == sent.from {
+                    if assigned_timestamp {
+                        // A caller retrying the same ID may leave the timestamp
+                        // for send() to fill again. Preserve all caller-supplied fields.
+                        observed.timestamp = sent.timestamp;
+                    }
+                    if &observed != sent {
+                        return unconfirmed("the same send ID has different content");
+                    }
+                    tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
+                    return Ok(());
+                }
             }
             let advanced = next > cursor;
             if advanced {

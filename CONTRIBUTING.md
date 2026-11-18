@@ -325,18 +325,27 @@ only that revision and retains every compiler/environment binding. Before
 switching a restored source pin, the helper verifies its old Git tree and saved
 compiler identity, fetches the required revision with checkout hooks disabled,
 cleans old workspace outputs, and verifies the new Git tree. Registry and Git
-dependency artifacts remain available to normal Cargo. An old producer's exact
-current-pin key is recognized for the one-time cache format migration; unrelated
-legacy keys are excluded. A missing main key restores compatible inputs before
+dependency artifacts remain available to normal Cargo. The functional compiler recipe excludes optimized-profile legacy keys. Its
+compatible prefix retains the complete functional/profile/crypto binding; an
+unbound nonempty target is refused before compilation. A missing main key restores compatible inputs before
 prewarming, even when the initial lookup did not download a cache.
 The required interface reports the actual restored key. Refusal messages identify
 that key for recovery rather than telling an agent to delete a missing new key.
 Source bytes are checked against the pinned Git tree before use, including same-mtime edits
 and unexpected files. Every invocation still asks Cargo to build normally and
 runs the original search authorization/restart case against the current
-checkout's co-host, outside this cache. The fixed driver and plugin retain their
-original optimization profiles. Cache hits never substitute a previous test
-result. The required command prints builds and stores timings and failure logs.
+checkout's co-host, outside this cache. The fixed driver and plugin use one
+private Cargo-home configuration for both outer test and nested dev builds:
+workspace/dependency optimization 0, debug 0, incremental disabled, debug
+assertions and overflow checks enabled. This configuration is composed from
+`.github/actions/vfs-search-cache/functional.toml` and the existing host crypto
+package overrides. Both dev/test variants retain crypto optimization 2 for
+signing the complete plugin file. The configuration bytes and source hashes bind
+the compiler key. Linked, legacy or changed cached Cargo configurations refuse
+before metadata/build execution; global/user Cargo settings are untouched.
+The candidate cohost and all release/performance profiles retain their original
+settings, and the original search case, assertions and 90s bounds remain.
+Cache hits never substitute a previous test result. The required command prints builds and stores timings and failure logs.
 The main publisher alone performs explicit prewarming. Consumers invoke normal
 `cargo test`, which compiles its driver and runs the original case's plugin build.
 The required job refuses a redundant pre-test build directory; this avoids extra
@@ -345,7 +354,8 @@ Outer builds use the cluster package metadata that Cargo supplies to the test's
 nested plugin build. This prevents native dependencies such as ring from
 rebuilding solely because inherited Cargo package variables flip between unset
 and test values. Each build script still receives its own package metadata;
-compiler flags and optimization profiles remain unchanged.
+both Cargo variants use that selected functional configuration and keep their
+original command arguments.
 Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
 refusal; they add no product journey credit. The actual cache footprint and
 cold/warm product timings must be measured before claiming a lifecycle saving.
@@ -955,6 +965,14 @@ macOS process-name fallback failure. One compiler worker, lowered compiler prior
 Normal test priority, commands and budgets remain unchanged; protected equivalence
 pins retain successful earlier evidence for those unchanged commands. The new native
 guard always needs its own actual run, including a refused process-name query.
+The CI lint fixture also records the real compiler child's OS priority immediately
+after spawning it and before collecting its exit status. This private Cargo wrapper
+preserves the original compiler arguments, streams and exit code. It keeps the
+priority assertion meaningful for compiler processes shorter than the polling
+interval; real short-process controls run on both hosts and Linux retains an
+actual wrong-priority control. Windows never raises a compiler above its existing
+host supervisor's enforced priority to manufacture that control. No
+production compiler wrapper, lint case or deadline is changed.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.

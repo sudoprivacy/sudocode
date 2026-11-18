@@ -8,6 +8,7 @@ on:
       - rust-toolchain.toml
       - .github/actions/rust-toolchain/**
       - .github/scripts/vfs_search_cache.py
+      - .github/ci/cohost-plugin-crypto.toml
       - .github/actions/vfs-search-cache/**
       - .github/workflows/ci-vfs-search-cache.yml
 

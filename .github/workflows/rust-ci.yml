@@ -400,6 +400,7 @@ jobs:
           --test conditional_content -- --nocapture
 
       - name: Checkout the VFS contract used by the co-host
+        id: vfs-cache
         if: needs.one-nexus-vfs-pin.outputs.cohost_required == 'true'
         uses: ./.github/actions/vfs-search-cache
 
@@ -444,6 +445,29 @@ jobs:
         working-directory: rust
         run: cargo check -p nexusd-cohost --features daemon,driver-ai,egress-gate-presidio --bin nexusd-cohost --locked
 
+      - name: Export the successful queue compiler inputs
+        run: >-
+          python3 .github/scripts/vfs_search_publication.py export
+          --journey "$RUNNER_TEMP/vfs-search-journey" --output "$RUNNER_TEMP/vfs-queue-compiler"
+          --include-archive "${{ steps.vfs-cache.outputs.exact-hit != 'true' || needs.one-nexus-vfs-pin.outputs.vfs_cache_required == 'true' }}"
+      - name: Upload queue compiler identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-search-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vfs-queue-compiler/identity/manifest.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload queue compiler data
+        if: steps.vfs-cache.outputs.exact-hit != 'true' || needs.one-nexus-vfs-pin.outputs.vfs_cache_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-search-compiler-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vfs-queue-compiler/data/compiler.tar.gz
+          # Already streamed with gzip level 1; do not recompress it in upload.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
   one-nexus-vfs-pin:
     if: ${{ !inputs.cache_only }}
     name: CI preflight
@@ -454,6 +478,7 @@ jobs:
       daemon_required: ${{ steps.scope.outputs.daemon_required }}
       a2a_required: ${{ steps.scope.outputs.a2a_required }}
       cohost_required: ${{ steps.scope.outputs.cohost_required }}
+      vfs_cache_required: ${{ steps.scope.outputs.vfs_cache_required }}
       clippy_required: ${{ steps.scope.outputs.clippy_required }}
     defaults:
       run:

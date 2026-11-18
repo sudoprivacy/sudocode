@@ -698,6 +698,12 @@ and its ACP profile before connecting. While the selected thread is unloaded
 the owner has no attached receiver. The scoped owner leaves other roots'
 enrollment records untouched.
 
+The MCP stdio client accepts an optional `--registration-id UUID`. Its MCP
+server description then reports `SCode registration UUID` on that connection.
+An operator can use thread-scoped MCP inventory to identify which registration
+the native thread loaded. Presentation limits and recipient identity require
+independent verification.
+
 For that path, the elected owner obtains a fresh no-ACK offer immediately
 before submission and queues its text verbatim after a fixed peer-data
 provenance line. Offer sizing accounts for the provenance, identity and JSON

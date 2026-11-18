@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { WebSocketServer } from 'ws';
@@ -15,7 +15,7 @@ import { CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 const sdk = path.resolve(__dirname, '../..');
 const threadId = '33333333-3333-3333-3333-333333333333';
 const otherThread = '77777777-7777-4777-8777-777777777777';
-const { connectCodexAutojoin, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectCodexAutojoin, runCodexMcp, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
 const rows = (file: string): any[] => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(row => JSON.parse(row)) : [];
 const hash = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -90,7 +90,18 @@ async function main() {
   fs.writeFileSync(runtime, JSON.stringify({ version: 1, mode: 'codex-autojoin', native, stateDirectory, auditLog: audit,
     peers: [], peerPolicy: 'node-namespace', enrollmentArgv: [process.execPath, __filename, '--enroll', directory],
     endpoint: { port: ownerAddress.port, token: '12'.repeat(32) } }), { mode: 0o600 });
-  const open = async (existingBinding?: CodexMailboxAdmission['existingBinding']) => {
+  const attach = async (registrationId?: string) => {
+    const transport = new StdioClientTransport({ command: process.execPath, stderr: 'inherit',
+      args: [path.join(sdk, 'dist/server.cjs'), '--codex', '--config', runtime,
+        ...(registrationId ? ['--registration-id', registrationId] : [])] });
+    const attached = new Client({ name: 'mailbox-owner-client', version: '1' });
+    try {
+      await attached.connect(transport);
+      assert.equal(attached.getServerVersion()?.description, registrationId ? 'SCode registration ' + registrationId : undefined);
+      return attached;
+    } catch (error) { await attached.close(); throw error; }
+  };
+  const open = async (existingBinding?: CodexMailboxAdmission['existingBinding'], registrationId?: string) => {
     const offset = rows(audit).length;
     // Only this private fixture supplies an artificial qualification verdict.
     owner = runCodexMcpOwner(runtime, { encodedResultBytes: 8192, encodedSubmissionBytes: 4096, existingBinding,
@@ -100,9 +111,7 @@ async function main() {
       if (performance.now() >= deadline) throw new Error('Elected owner did not finish its initial inventory');
       await Promise.race([pause(20), owner.then(() => { throw new Error('Elected owner exited during startup'); })]);
     }
-    const transport = new StdioClientTransport({ command: process.execPath,
-      args: [path.join(sdk, 'dist/server.cjs'), '--codex', '--config', runtime], stderr: 'inherit' });
-    client = new Client({ name: 'mailbox-owner-client', version: '1' }); await client.connect(transport);
+    client = await attach(registrationId);
     assert.ok((await client.listTools()).tools.some(tool => tool.name === 'scode_inbox'));
   };
   const close = async () => {
@@ -121,6 +130,7 @@ async function main() {
     assert.equal(queue.length, size);
   };
   try {
+    await assert.rejects(runCodexMcp(runtime, __filename, 'broken'), /Invalid MCP registration ID/);
     await assert.rejects(connectCodexAutojoin({ native, stateDirectory, peers: [],
       mailbox: { encodedResultBytes: 8192, encodedSubmissionBytes: 4096, qualified: async () => true },
       async resolveAgent() { throw new Error('must not enroll'); } }),
@@ -182,7 +192,13 @@ async function main() {
           qualified: async () => true }, async resolveAgent() { throw new Error('Unexpected enrollment'); } }),
       /original ready thread, actor and ACP session/);
     }
-    await open(existingBinding);
+    const registrationId = randomUUID();
+    await open(existingBinding, registrationId);
+    const otherClient = await attach(randomUUID());
+    try {
+      assert.notEqual(otherClient.getServerVersion()?.description, client!.getServerVersion()?.description);
+      assert.equal(client!.getServerVersion()?.description, 'SCode registration ' + registrationId);
+    } finally { await otherClient.close(); }
     assert.equal((await call('scode_inbox')).isError, undefined);
     assert.equal(rows(path.join(directory, 'enrollment.jsonl')).length, 1, 'ready binding retains actor, operation and ACP session');
     assert.equal(offers().at(-1).params.legacy, undefined, 'restart retains completed migration outcomes');

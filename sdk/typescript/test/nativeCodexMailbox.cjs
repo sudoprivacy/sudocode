@@ -67,7 +67,7 @@ const library = path.resolve(__dirname, '../dist/index.cjs');
 const internals = path.resolve(__dirname, '../dist/testing/nativeMailboxInternals.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../manifest.json')));
 assert.equal(manifest.files['dist/index.cjs'].sha256, sha(library));
-const { connectCodex, CodexRequestError } = require(library);
+const { connectCodex, CodexRequestError, runCodexMcpOwner, shutdownCommand } = require(library);
 const { openCodexMailboxWake, readCodexMailboxSnapshot, mailboxSubmissionTextBudget,
   CODEX_MAILBOX_DELIVERY_PROVENANCE } = require(internals);
 const env = {};
@@ -104,6 +104,11 @@ const fillBudget = (prefix, suffix, bytes) => {
   return content+'\u0001'.repeat(bytes-Buffer.byteLength(content+suffix))+suffix;
 };
 let phase = 'seed', expectedDelivery, expectedWindow, callIssued = false, server, serverExit, tui, tuiExit, client, wake, realMailbox;
+let sdkOwner, sdkStartupError;
+const sdkRuntime = path.join(root, 'sdk-runtime.json');
+const sdkEntry = path.join(path.dirname(library), 'server.cjs');
+const sdkRegistration = id => ({ command: process.execPath, required: true,
+  args: [sdkEntry, '--codex', '--config', sdkRuntime, '--registration-id', id] });
 let realToolSequence = 0, realModelCompleted = false;
 let nativeStderr = '', tuiStderr = '', tuiBuffer = '';
 const tuiEvents = [];
@@ -265,8 +270,29 @@ const endpoint = http.createServer((req, res) => {
       const params = { cwd: work, threadSource: 'user',
         config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 64 } };
       if (settingsResume) {
+        assert.equal(manifest.files['dist/server.cjs'].sha256, sha(sdkEntry));
+        receipt.inputs[sdkEntry] = sha(sdkEntry);
+        const listener = require('node:net').createServer();
+        listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
+        const port = listener.address().port;
+        await new Promise(resolve => listener.close(resolve));
+        const auditLog = path.join(root, 'sdk-owner.jsonl');
+        fs.writeFileSync(sdkRuntime, JSON.stringify({ version: 1, mode: 'codex-autojoin',
+          native: { codexArgv: [options.codex], socket, env }, auditLog, stateDirectory: path.join(root, 'sdk-state'),
+          peers: [], peerPolicy: 'node-namespace', endpoint: { port, token: crypto.randomBytes(32).toString('hex') },
+          enrollmentArgv: [process.execPath, '-e', 'process.exit(1)'] }), {flag:'wx',mode:0o600});
+        // Inspect registration only. The measured tool payload still comes
+        // from mailbox_probe. This owner cannot enroll or open an ACP receiver.
+        sdkOwner = runCodexMcpOwner(sdkRuntime, { encodedResultBytes: 4096, encodedSubmissionBytes: 4096,
+          qualified: async () => false });
+        sdkOwner.catch(error => { sdkStartupError = error; });
+        await wait(() => {
+          if (sdkStartupError) throw sdkStartupError;
+          return fs.existsSync(auditLog) && fs.readFileSync(auditLog, 'utf8').includes('"phase":"native_inventory"');
+        }, 5000, 'Packaged SDK owner observes its private native server');
         expectedGeneration = crypto.randomUUID();
         params.config['mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION'] = expectedGeneration;
+        params.config['mcp_servers.nexus_scode'] = sdkRegistration(expectedGeneration);
         if (coldSettingsResume) params.config.thread_unload_delay_secs = 0;
       }
       const started = await client.request('thread/start', params);
@@ -287,7 +313,14 @@ const endpoint = http.createServer((req, res) => {
           const list = await request('mcpServerStatus/list', { threadId: settingsThread, serverName: 'mailbox_probe', detail: 'full' });
           assert.equal(list.data.length, 1);
           assert.equal(list.data[0].runtimeStatus, 'connected');
-          return list.data[0].serverInfo.version;
+          const id = list.data[0].serverInfo.version;
+          const sdk = await request('mcpServerStatus/list', { threadId: settingsThread, serverName: 'nexus_scode', detail: 'full' });
+          assert.equal(sdk.data.length, 1);
+          assert.equal(sdk.data[0].runtimeStatus, 'connected');
+          assert.equal(sdk.data[0].serverInfo.name, 'nexus-scode');
+          assert.equal(sdk.data[0].serverInfo.description, 'SCode registration ' + id);
+          assert(Object.hasOwn(sdk.data[0].tools, 'scode_inbox'));
+          return id;
         };
         assert.equal(await status(), expectedGeneration, 'Original native registration reports its launch generation');
         const originalGeneration = expectedGeneration;
@@ -304,7 +337,8 @@ const endpoint = http.createServer((req, res) => {
         const requestedGeneration = crypto.randomUUID();
         const resumed = await request('thread/resume', { threadId: settingsThread,
           config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 4096,
-            'mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION': requestedGeneration } });
+            'mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION': requestedGeneration,
+            'mcp_servers.nexus_scode': sdkRegistration(requestedGeneration) } });
         assert.equal(resumed.thread.id, settingsThread);
         const resumedRollout = fs.statSync(resumed.thread.path, { bigint: true });
         assert.deepEqual([resumedRollout.dev, resumedRollout.ino], [originalRollout.dev, originalRollout.ino],
@@ -367,7 +401,12 @@ const endpoint = http.createServer((req, res) => {
       assert(executableRows.some(file => fs.realpathSync(file) === executable), 'Diagnostics PID must map to the measured native executable');
       const configuration = await request('config/read', { cwd: work, includeLayers: true });
       const inventory = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'mailbox_probe', detail: 'full' });
-      if (settingsResume) assert.equal(inventory.data[0].serverInfo.version, expectedGeneration);
+      if (settingsResume) {
+        assert.equal(inventory.data[0].serverInfo.version, expectedGeneration);
+        const sdk = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'nexus_scode', detail: 'full' });
+        assert.equal(sdk.data[0].serverInfo.description, 'SCode registration ' + expectedGeneration);
+        receipt.resumeRegistration.actualSdkDescription = sdk.data[0].serverInfo.description;
+      }
       receipt.settingsProbe = { diagnostics, executable, executableSha256: sha(executable),
         diskToolOutputTokens: 4096, threadStartOverrideToolOutputTokens: 64, configuration, inventory,
         boundary: 'Read-only loaded-thread settings diagnosis; no production admission or real mailbox ACK claim.' };
@@ -706,6 +745,7 @@ const endpoint = http.createServer((req, res) => {
       // fixture child does not qualify a shared daemon's graceful shutdown.
       if (process.platform === 'win32') receipt.notProven = ['graceful native server shutdown'];
     });
+    if (sdkOwner) await cleanup('packaged-sdk-owner', async () => { await shutdownCommand(); await sdkOwner; });
     endpoint.closeAllConnections(); await new Promise(resolve => endpoint.close(resolve));
     receipt.endpointFailure = endpointFailure; receipt.tuiEvents = tuiEvents; receipt.tuiStderr = tuiStderr; receipt.nativeStderr = nativeStderr;
     receipt.finishedAt = new Date().toISOString(); save(); console.log(receipt.status, path.join(output, 'receipt.json'));

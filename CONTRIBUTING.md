@@ -367,6 +367,17 @@ Only this existing main workflow saves the cache; no second cache writer, compil
 image alias, acceptance signer or cached test-result authority is introduced.
 Archive transfer/storage costs and a subsequent matching-image consumer must be
 measured before claiming warm savings; local fixture success alone is insufficient.
+PR #1497 supplied actual hosted publication after its full native/Docker contract
+and original queue journeys passed. Main verified the accepted producer data,
+skipped prewarming, and saved a persistent 773,897,615-byte cache under the
+unchanged producer key. Both actual images were `20261111.196.1`; this run
+does not prove cross-image behavior. Its original cold search command took
+193.735s; a later matching-key warm consumer remains unqualified. The linked
+39 job records, including unallocated skips, total 33.600 known hosted
+runner-minutes; local failures and interruptions are retained separately. See
+[the original source/publication/cost records](docs/ci-vfs-queue-publication-20261118.json).
+These engineering costs are not recurring savings or proof of the lifecycle
+one-tenth target.
 The required job refuses a redundant pre-test build directory; this avoids extra
 switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's

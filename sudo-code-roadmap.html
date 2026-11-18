@@ -2301,6 +2301,27 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       adds no test-result reuse, image-equivalence waiver or second cache writer.
       Source/local controls and actual hosted publication/warm consumption remain
       separate milestones; transfer cost and whole-lifecycle savings need evidence.
+      <p><strong>Queue-to-main publication delivered:</strong>
+      <a href="https://github.com/sudoprivacy/sudocode/pull/1497">PR #1497</a>
+      normally merged <code>ef550200</code> with the exact qualified tree and all
+      eleven owned blobs unchanged. Full native/Docker contract and the original
+      current co-host/A2A queue jobs passed. Main then verified 883 pinned source
+      files and a 956,046,468-byte compiler archive, skipped prewarming, and
+      actually saved persistent cache <code>10720544088</code>: 773,897,615 bytes
+      under the producer's unchanged exact key. Imported programs and old test
+      results were not executed/reused. Both actual runner images were
+      <code>20261111.196.1</code>; actual cross-image behavior and a later
+      matching-key warm consumer remain unqualified. The original queue search
+      command was cold and took 193.735s, not a measured warm saving.</p>
+      <p>The complete bounded source/queue/main/status-publisher snapshot has
+      39 unique job records including unallocated skips and 33.600 known hosted
+      runner-minutes, with no unknown interval among those records. Original
+      source-pin/fixture failures, foreground interruption and its owned-container
+      cleanup remain separate local engineering costs. PR creation to merge was
+      829s; it excludes preceding source development and author qualification.
+      <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-vfs-queue-publication-20261118.json">Original source, cache and cost records</a>.
+      No new infrastructure PR enters the fixed Rust population, which remains
+      1/20; no whole-lifecycle one-tenth proof or net saving is claimed.</p>
       A fallback may share dependencies across source pins only under the same
       compiler context. The old Git tree and saved identity are verified before
       fetching the required pin with hooks disabled. Old workspace outputs are
@@ -2318,10 +2339,10 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       time, with different runners/current runtime hashes, not a controlled causal,
       full-job or whole-lifecycle speedup. Its original one case passed; 21 filtered
       cases are not additional executions.</p>
-      <p>The completed main publisher records a 721,722,007-byte cache. Its
+      <p>The earlier PR #1493 main publisher recorded a 721,722,007-byte cache. Its
       <code>20261111.82.6</code> runner image differs from the consumer's
       <code>20261111.196.1</code>, so keys differ and an actual matching-image warm
-      consumer hit remains unqualified. No compiler identity was relaxed or cache
+      consumer hit was unqualified at that snapshot. No compiler identity was relaxed or cache
       aliased. The identified 52 source/queue/main/status-publisher job records
       have 24.717 known hosted runner-minutes, including the failed source; all
       identified real intervals are known, but unlinked failed-publisher discovery

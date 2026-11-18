@@ -146,26 +146,31 @@ def baseline_tool(path, config):
     return tool
 
 
+def normal_driver_priority():
+    import psutil
+    process = psutil.Process()
+    before = process.nice()
+    # Hosted shells do not promise Normal inheritance. Change only this driver;
+    # the existing command runner still lowers actual compiler/linker workers.
+    process.nice(psutil.NORMAL_PRIORITY_CLASS)
+    after = process.nice()
+    assert after == psutil.NORMAL_PRIORITY_CLASS
+    return {'pid': process.pid, 'birth': process.create_time(), 'before': int(before), 'after': int(after)}
+
+
 def qualify(args):
     import _thread
     import psutil
     import threading
 
     config = configuration()
-    assert not any(key.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'} for key in os.environ), 'Tool builds must not receive GitHub credentials'
     prepared = json.loads((args.output / 'prepared.json').read_bytes())
     project = Path(prepared['project'])
-    assert source_manifest(project) == prepared['source_manifest']
-    assert input_hashes() == prepared['source_inputs']
-    assert psutil.Process().nice() == psutil.NORMAL_PRIORITY_CLASS
-    assert os.name == 'nt', 'This artifact qualifies only Windows x64'
     evidence = args.output / 'evidence'
     evidence.mkdir()
-    helper, runner_hash = original_runner(config, evidence)
-    baseline = baseline_tool(args.baseline_tool, config)
     state = {'started_at': datetime.now(timezone.utc).isoformat(), 'complete': False, 'passed': False,
              'producer_head': prepared['producer_head'], 'source_inputs': prepared['source_inputs'],
-             'runner_ref': config['baseline_helper_ref'], 'runner_sha256': runner_hash,
+              'runner_ref': config['baseline_helper_ref'],
              'source_tree_sha256': prepared['source_tree_sha256'], 'commands': [],
              'attempt': {'active_profile': 'compiler-cache-tool-qualification'},
              'normal_product_acceptance': False, 'whole_lifecycle_tenth_proven': False}
@@ -198,6 +203,14 @@ def qualify(args):
         return receipt
 
     try:
+        assert not any(key.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'} for key in os.environ), 'Tool builds must not receive GitHub credentials'
+        assert os.name == 'nt', 'This artifact qualifies only Windows x64'
+        assert source_manifest(project) == prepared['source_manifest']
+        assert input_hashes() == prepared['source_inputs']
+        state['driver_priority'] = normal_driver_priority()
+        helper, runner_hash = original_runner(config, evidence)
+        state['runner_sha256'] = runner_hash
+        baseline = baseline_tool(args.baseline_tool, config)
         os.environ.clear()
         os.environ.update(clean_environment_from(ambient))
         os.environ.update(RUSTUP_TOOLCHAIN=config['rust_toolchain'], CARGO_BUILD_JOBS='1',

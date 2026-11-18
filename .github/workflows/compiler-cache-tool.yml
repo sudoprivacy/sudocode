@@ -79,8 +79,10 @@ jobs:
           temporary = Path(os.environ['RUNNER_TEMP'])
           source = temporary / 'compiler-cache-tool/source/sccache-965c01943a40c9df96264474bbe28ba98f2e1487'
           target = temporary / 'compiler-cache-tool-target'
+          relative_target = Path(os.path.relpath(target, source))
+          assert (source / relative_target).resolve() == target.resolve()
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write('workspaces=' + Path(os.path.relpath(source)).as_posix() + ' -> ' + Path(os.path.relpath(target)).as_posix() + '\n')
+              output.write('workspaces=' + Path(os.path.relpath(source)).as_posix() + ' -> ' + relative_target.as_posix() + '\n')
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ steps.cache-paths.outputs.workspaces }}

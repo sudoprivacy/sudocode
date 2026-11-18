@@ -8,6 +8,7 @@ export * from './codexCallback';
 export * from './codexNativeQueue';
 export * from './codexAutojoin';
 export type { CodexMailboxAdmission } from './codexMailboxOwner';
+export { CodexMailboxPresentation } from './codexMailboxPresentation';
 export * from './codexMcp';
 export * from './codexSetup';
 export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles, type ProfileRefresh } from './codexEnrollment';

@@ -316,15 +316,15 @@ queue. On unload or owner exit, it drains an ACK already in flight before
 closing its ACP child. Legacy v2 inboxes remain immutable, with cutover outcomes
 in a separate hash-only ledger after the old owner has exited.
 
-Production admission must bind both encoded queue-submission and MCP-result
-limits to the actual native executable and effective loaded-thread settings,
-and recheck that evidence on every call. A fixture callback returning true is
-not admission. This path has no runtime JSON or installer enable switch; the
-existing installer still requires its durable queue capability. In an isolated
-Codex 0.169.0 process, `config/read` reported the disk's 4096-token limit while a
-loaded root retained a temporary 64-token limit and truncated a tool result.
-That API and the thread-specific MCP catalog do not establish the effective
-limit. A production qualification provider remains outstanding.
+Runtime JSON `peerInputVersion: 3` selects this path (initializer flag
+`--peer-input-version 3`, with `--peer-policy node-namespace`); 2, the default,
+keeps the durable callback. The owner then admits each thread with
+`codexMailboxAdmission`: one 8192-byte bound for MCP results and queue
+submissions, and a check that the thread's actual server answers its mailbox
+methods, as [Native admission](peer-mailbox-delivery.md#native-admission)
+describes. This path uses the stock app-server queue, so its installer
+preflight connects to the server without requiring durableQueueAddOnce and
+reports `checkedAt: "attach"`.
 
 The [native mailbox fixture](../../sdk/typescript/README.md#native-mailbox-presentation-fixture)
 records actual PTY, native and scode evidence using a deterministic loopback

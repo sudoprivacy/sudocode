@@ -23,9 +23,9 @@ function submission(threadId: string, clientUserMessageId: string, text: string)
     input: [{ type: 'text', text: CODEX_MAILBOX_DELIVERY_PROVENANCE + '\n' + text }] };
 }
 
-/** A separate qualified bound for encoded queue-add params, including the
- * provenance, identity and JSON escaping. Tool-result qualification alone
- * does not prove that the native queue preserves a model-facing input. */
+/** A separate bound for encoded queue-add params, including the provenance,
+ * identity and JSON escaping. The tool-result bound alone does not cover the
+ * model-facing input the native queue carries. */
 export function mailboxSubmissionTextBudget(actor: string, threadId: string, encodedSubmissionBytes: number): number {
   nonempty.parse(actor); nonempty.parse(threadId);
   if (!Number.isSafeInteger(encodedSubmissionBytes) || encodedSubmissionBytes < 4096 || encodedSubmissionBytes > 65536) {
@@ -105,9 +105,9 @@ export interface CodexMailboxWakeStatus {
 }
 
 /** Internal controller: the caller must hold the shared owner's exclusive
- * lifetime bind, and qualify this actual native connection plus presentation
- * settings. Production attachment wiring remains gated on that qualification.
- * The controller never reconnects, starts a queue, starts a turn or retries an ID. */
+ * lifetime bind and admit this actual native connection and its presentation
+ * bounds. The controller never reconnects, starts a queue, starts a turn or
+ * retries an ID. */
 export function openCodexMailboxWake(options: {
   actor: string; threadId: string; journal: string; native: CodexConnection;
   encodedSubmissionBytes: number;

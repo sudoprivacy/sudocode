@@ -289,10 +289,11 @@ node /absolute/package/dist/server.cjs --check-codex-native \
 This connects through the runtime's exact native argv, environment and socket,
 then closes only its own proxy. It does not start a daemon, change configuration,
 enroll an actor, load a thread or submit input. It exits nonzero on missing
-capability or connection/cleanup failure. The check is for the current v2
-receiver contract, not mailbox-v3 native/model qualification. Every receiver
-connection still checks admission; a successful preflight cannot qualify a
-future updated daemon.
+capability or connection/cleanup failure. A v2 runtime requires
+durableQueueAddOnce (`checkedAt: "preflight"`); a v3 runtime requires a
+reachable server, and each thread's mailbox inventory is checked when it
+attaches (`checkedAt: "attach"`). Every receiver connection still checks
+admission; a successful preflight cannot vouch for a future updated daemon.
 
 This configures **new Codex launches**. A shell function already loaded in an
 existing terminal can still shadow the selected disk entry; verify resolution
@@ -677,14 +678,15 @@ final handling, global idle, or exactly-once tool side effects. This recovery
 protocol does not restart a native server, change credentials, create threads
 or override approvals.
 
-The draft programmatic `CodexAutojoinConfig.mailbox` path uses negotiated scode
-`peerInput` v3 offers and model acknowledgements. It is not enabled by runtime
-JSON or by the v2 installer preflight. Its admission provider must qualify the
-actual owning native executable and effective thread settings on every call,
-including two separate measured bounds: `encodedSubmissionBytes` for native
-queue-add params and `encodedResultBytes` for an MCP tool result (each 4096–65536
-bytes). Both require evidence from the actual model-endpoint request. A fixture
-provider returning `true` is not production admission.
+The `CodexAutojoinConfig.mailbox` path uses negotiated scode `peerInput` v3
+offers and model acknowledgements. Runtime JSON `peerInputVersion: 3` (with
+`peerPolicy: "node-namespace"`) enables it with `codexMailboxAdmission()`, which
+sets both bounds, `encodedSubmissionBytes` for native queue-add params and
+`encodedResultBytes` for an MCP tool result, to 8192 bytes and admits a thread
+once its actual server answers `thread/queue/list`, `thread/turns/list` and
+`thread/read` for it. A programmatic provider may set other bounds within
+4096–65536 bytes. The v3 preflight requires a reachable server, not
+durableQueueAddOnce.
 
 For that path, the elected owner obtains a fresh no-ACK offer immediately
 before submission and queues its text verbatim after a fixed peer-data

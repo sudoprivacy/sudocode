@@ -226,6 +226,7 @@ async function main() {
     assert.ok(Date.now()<readyDeadline,'MCP owner did not attach its native observer');
     await new Promise(resolve=>setTimeout(resolve,25));
   }
+  assert.ok(!(await mcp.listTools()).tools.some(tool=>tool.name==='scode_inbox'),'the v2 callback presents no mailbox tool');
   holdReads=true;loaded=[ids[0]];
   const sending=mcp.callTool({name:'scode_send',arguments:{to:'fixture-peer',message:'first resumed send',summary:'one append'},
     _meta:{threadId:ids[0]}});

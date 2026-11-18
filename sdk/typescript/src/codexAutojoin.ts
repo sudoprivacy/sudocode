@@ -51,8 +51,8 @@ export interface CodexAutojoinConfig {
   peers: string[];
   /** Explicitly admit peer data from the verified Node namespace; default is the fixed allowlist. */
   peerPolicy?: 'allowlist' | 'node-namespace';
-  /** Explicit v3 composition. Requires an operator's actual-server admission
-   * provider; JSON runtime configuration does not enable this draft path. */
+  /** v3 composition; runtime JSON `peerInputVersion: 3` selects
+   * `codexMailboxAdmission`. */
   mailbox?: CodexMailboxAdmission;
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;

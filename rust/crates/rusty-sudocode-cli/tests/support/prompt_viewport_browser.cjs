@@ -23,6 +23,7 @@ const routes = {
   '/xterm.js': ['text/javascript', require.resolve(modulePath('@xterm/xterm'))],
   '/xterm.css': ['text/css', path.join(path.dirname(require.resolve(modulePath('@xterm/xterm'))), '../css/xterm.css')],
   '/unicode.js': ['text/javascript', require.resolve(modulePath('@xterm/addon-unicode11'))],
+  '/shade-rows.js': ['text/javascript', path.join(shared, 'shade-rows.js')],
 };
 const server = http.createServer((request, response) => {
   const route = routes[new URL(request.url, 'http://localhost').pathname];

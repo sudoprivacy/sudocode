@@ -10,6 +10,7 @@
 <div id="terminal"></div>
 <script src="/xterm.js"></script>
 <script src="/unicode.js"></script>
+<script src="/shade-rows.js"></script>
 <script>
   const options = JSON.parse(new URLSearchParams(location.search).get('options'));
   const activated = [], hovered = [], activationEvents = [], keyboard = [];
@@ -33,7 +34,7 @@
   let input, inputReady, finishInput;
   const lines = (start = 0) => {
     const buffer = terminal.buffer.active;
-    return Array.from({ length: buffer.length - start }, (_, i) => buffer.getLine(start + i).translateToString(true));
+    return Array.from({ length: buffer.length - start }, (_, i) => shadeRows.rowText(buffer.getLine(start + i), terminal.cols));
   };
   const viewport = () => lines(terminal.buffer.active.baseY).join('\n');
   const pixelBounds = () => {

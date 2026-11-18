@@ -32,6 +32,7 @@ async function run(config) {
     '/xterm.js': ['text/javascript', require.resolve('@xterm/xterm')],
     '/xterm.css': ['text/css', path.join(path.dirname(require.resolve('@xterm/xterm')), '../css/xterm.css')],
     '/unicode.js': ['text/javascript', require.resolve('@xterm/addon-unicode11')],
+    '/shade-rows.js': ['text/javascript', path.join(__dirname, 'shade-rows.js')],
   };
   const server = http.createServer((req, res) => {
     const route = routes[new URL(req.url, 'http://localhost').pathname];

@@ -86,6 +86,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
+            Experiment::SharedSessionHistory => None,
         }
     }
 }

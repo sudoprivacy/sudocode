@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use agent_client_protocol::role::acp::Client;
 use agent_client_protocol::ConnectionTo;
-use agent_client_protocol_schema::{ClientRequest, ExtRequest};
+use agent_client_protocol_schema::{AgentNotification, ClientRequest, ExtRequest};
 use engine_core::engine_events::{CompletionAction, CompletionReceipt};
 use engine_core::{
     EngineAttachment, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
@@ -142,6 +142,18 @@ impl SessionDriver {
             });
     }
 
+    fn notify_client(&self, notification: AgentNotification) {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
+        if let Some(connection) = connection {
+            let _ = connection.send_notification(notification);
+        }
+    }
+
     fn on_event(self: &Arc<Self>, session_id: &str, event: EngineEvent) {
         if let EngineEvent::Attention(state) = &event {
             // Request removal, including cancellation, owns reply teardown.
@@ -149,16 +161,7 @@ impl SessionDriver {
             self.retain_interactions(|id, pending| {
                 !pending.is_attention || state.requests.iter().any(|request| request.id == id)
             });
-            if let Some(connection) = self
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .connection
-                .clone()
-            {
-                let _ = connection
-                    .send_notification(crate::attention_control::notification(session_id, state));
-            }
+            self.notify_client(crate::attention_control::notification(session_id, state));
             return;
         }
         if let EngineEvent::State(state) = &event {
@@ -185,44 +188,19 @@ impl SessionDriver {
         }
         let input_update = self.input_update(&event);
         if let Some(update) = input_update {
-            if let Some(connection) = self
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .connection
-                .clone()
-            {
-                let _ = connection
-                    .send_notification(crate::input_control::notification(session_id, &update));
-            }
+            self.notify_client(crate::input_control::notification(session_id, &update));
         }
         match event {
             EngineEvent::Interactions(snapshot) => {
-                if let Some(connection) = self
-                    .connection
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .connection
-                    .clone()
-                {
-                    let _ = connection.send_notification(crate::interaction_control::notification(
-                        session_id, &snapshot,
-                    ));
-                }
+                self.notify_client(crate::interaction_control::notification(
+                    session_id, &snapshot,
+                ));
                 return;
             }
             EngineEvent::InteractionError { message } => {
-                if let Some(connection) = self
-                    .connection
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .connection
-                    .clone()
-                {
-                    let _ = connection.send_notification(
-                        crate::interaction_control::error_notification(session_id, &message),
-                    );
-                }
+                self.notify_client(crate::interaction_control::error_notification(
+                    session_id, &message,
+                ));
                 return;
             }
             EngineEvent::CommandResult { id, result } => {

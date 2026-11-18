@@ -324,10 +324,15 @@ impl SessionInputs {
                 token,
                 allow_inputs,
             } => {
-                if state.lifecycle_held.is_some()
-                    || state.queue.is_running()
-                    || state.interaction_controls != 0
-                {
+                // Ordinary host prompts share the same admission rule as the
+                // native input queue: receipt work may overlap, binding changes
+                // may not. Destructive management retains the full fence.
+                let controls = if allow_inputs {
+                    state.interaction_bindings
+                } else {
+                    state.interaction_controls
+                };
+                if state.lifecycle_held.is_some() || state.queue.is_running() || controls != 0 {
                     return Err(
                         "Session is busy; wait for the current turn or cancel it first".into(),
                     );
@@ -390,8 +395,13 @@ impl SessionInputs {
         binding: bool,
     ) -> Result<InteractionControlLease, String> {
         let mut state = self.lock();
-        if matches!(state.lifecycle_held, Some(Lifecycle::Host { .. }))
-            || (binding && (state.lifecycle_held.is_some() || state.queue.is_running()))
+        if matches!(
+            state.lifecycle_held,
+            Some(Lifecycle::Host {
+                allow_inputs: false,
+                ..
+            })
+        ) || (binding && (state.lifecycle_held.is_some() || state.queue.is_running()))
         {
             return Err("Session control is changing; retry the interaction request".into());
         }

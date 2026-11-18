@@ -520,6 +520,61 @@ fn ask(env: &TestEnv, host: &mut Host) -> Value {
     pending
 }
 
+#[test]
+fn legacy_prompt_accepts_a_durable_reply_while_its_tool_is_running() {
+    let env = TestEnv::new_mock("legacy-prompt-durable-reply");
+    let mut host = Host::with_options(&env, true, ENABLED);
+    control(&mut host, json!({"action":"configure", "enabled":true}));
+    let prompted = host.request(
+        "session/prompt",
+        &json!({
+            "sessionId":host.session,
+            "prompt":[{"type":"text","text":question_prompt(&env)}]
+        }),
+    );
+    assert_eq!(prompted["stopReason"], "end_turn");
+    finish_mock_question(&env);
+    let pending = snapshot(&mut host)["requests"][0].clone();
+    assert_eq!(pending["status"], "pending");
+
+    std::fs::write(env.workspace_root().join("shared-input.sh"),
+        "printf started > shared-input-started\ni=0\nwhile [ ! -f release-shared-input ] && [ $i -lt 1200 ]; do\n sleep 0.1\n i=$((i+1))\ndone\nprintf LegacyPromptToolFinished\n").unwrap();
+    let _release = ReleaseSharedInput(env.workspace_root().to_path_buf());
+    let prompt = tool_batch(
+        &env,
+        &json!([{"id":"legacy-held-tool","name":"bash","input":{
+            "command":"sh shared-input.sh","timeout":180_000,"run_in_background":false
+        }}]),
+        "",
+    );
+    let running = host.send_request(
+        "session/prompt",
+        &json!({
+            "sessionId":host.session,"prompt":[{"type":"text","text":prompt}]
+        }),
+    );
+    common::expect_screen(
+        &host.terminal,
+        |_| env.workspace_root().join("shared-input-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "legacy prompt is executing its independent tool",
+    );
+    let replied = control(&mut host, answer(&pending));
+    assert_eq!(replied["requests"][0]["status"], "resolved", "{replied}");
+    assert!(!env.workspace_root().join("release-shared-input").exists());
+    assert_eq!(host.runtime_status()["foreground"]["state"], "running");
+    finish_mock_question(&env);
+    std::fs::write(env.workspace_root().join("release-shared-input"), "release").unwrap();
+    let finished = host.receive(running);
+    assert_eq!(finished["result"]["stopReason"], "end_turn", "{finished}");
+    wait_for_delivery(&mut host);
+    assert!(env
+        .captured_message_bodies()
+        .iter()
+        .any(|body| { body.contains("interaction_reply") && body.contains("blue") }));
+    host.close();
+}
+
 fn question_prompt(env: &TestEnv) -> String {
     std::fs::write(
         env.workspace_root().join("interaction-reference.txt"),

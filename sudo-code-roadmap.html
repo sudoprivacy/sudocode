@@ -2310,9 +2310,22 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       actually saved persistent cache <code>10720544088</code>: 773,897,615 bytes
       under the producer's unchanged exact key. Imported programs and old test
       results were not executed/reused. Both actual runner images were
-      <code>20261111.196.1</code>; actual cross-image behavior and a later
-      matching-key warm consumer remain unqualified. The original queue search
-      command was cold and took 193.735s, not a measured warm saving.</p>
+      <code>20261111.196.1</code>. This qualified publication with matching
+      images. Cross-image behavior remains unqualified.</p>
+      <p><strong>First observed matching-key consumer:</strong>
+      <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44300701626/job/134789845637">PR #1496's real merge-queue job</a>
+      restored cache <code>10720544088</code> under its original key on the same
+      image revision. Normal Cargo ran the unchanged search, authorization and
+      restart case against the newly built co-host. The command took
+      <strong>17.598s</strong> versus the preceding cold <strong>193.735s</strong>,
+      or 9.08% of the earlier command time. One case passed and 21 were filtered.
+      The queue exported only identity metadata, and the following main job
+      found the exact key and skipped the download, import and save.
+      Different runner instances and co-host hashes make this an observed
+      command comparison. The queue job took 325s including all its other
+      steps. The full comparable PR lifecycle target remains unproved.
+      PR #1496 changed release manifests and notes without a Rust source file,
+      so it stays outside the predefined Rust comparison cohort.</p>
       <p>The complete bounded source/queue/main/status-publisher snapshot has
       39 unique job records including unallocated skips and 33.600 known hosted
       runner-minutes, with no unknown interval among those records. Original

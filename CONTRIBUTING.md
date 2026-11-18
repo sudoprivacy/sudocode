@@ -371,13 +371,22 @@ PR #1497 supplied actual hosted publication after its full native/Docker contrac
 and original queue journeys passed. Main verified the accepted producer data,
 skipped prewarming, and saved a persistent 773,897,615-byte cache under the
 unchanged producer key. Both actual images were `20261111.196.1`; this run
-does not prove cross-image behavior. Its original cold search command took
-193.735s; a later matching-key warm consumer remains unqualified. The linked
+qualifies publication under the matching image only. The linked
 39 job records, including unallocated skips, total 33.600 known hosted
 runner-minutes; local failures and interruptions are retained separately. See
 [the original source/publication/cost records](docs/ci-vfs-queue-publication-20261118.json).
 These engineering costs are not recurring savings or proof of the lifecycle
 one-tenth target.
+
+PR #1496's actual merge queue restored that exact main cache key on image
+`20261111.196.1` and ran the same VFS search and restart case against its
+newly built co-host. The command elapsed time was 17.598s versus the previous
+cold 193.735s (9.08%). The warm run passed one case and filtered 21. Its queue
+exported only identity metadata, and the following main publisher found the
+existing exact key and skipped the archive download, import and save. Different
+runner instances and co-host revisions limit the timing comparison to those
+two observed commands. The queue job, PR lifecycle and cross-image behavior
+need their own measurements.
 The required job refuses a redundant pre-test build directory; this avoids extra
 switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's

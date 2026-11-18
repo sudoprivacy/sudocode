@@ -13606,6 +13606,40 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_question_multi_select_returns_one_answer_per_chosen_option() {
+        use std::io::Cursor;
+
+        let request = super::parse_question_request(json!({
+            "questions": [
+                {"id":"cleanup", "prompt":"Delete which?", "kind":"multi_select", "allowCustomInput":false,
+                 "options":[{"label":"Worktree", "value":"worktree"}, {"label":"Target", "value":"target"},
+                            {"label":"Outputs", "value":"outputs"}]}
+            ]
+        })).expect("valid question request");
+
+        let mut output = Vec::new();
+        let mut input_reader = Cursor::new(
+            b"3, 1
+"
+            .to_vec(),
+        );
+        let result =
+            super::ask_user_question::run_with_io(&request, &mut output, &mut input_reader)
+                .expect("AskUserQuestion should succeed");
+        let json: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(json["questions"][0]["kind"], "multi_select");
+        assert_eq!(
+            json["answers"],
+            json!([{"id":"cleanup", "value":"outputs", "label":"Outputs"},
+                   {"id":"cleanup", "value":"worktree", "label":"Worktree"}])
+        );
+        assert!(String::from_utf8(output)
+            .expect("utf8")
+            .contains("Your choices (option numbers such as 1,3)"));
+    }
+
+    #[test]
     fn ask_user_question_requires_non_empty_questions() {
         let error = super::parse_question_request(json!({"questions": []}))
             .expect_err("empty questions should fail");

@@ -270,6 +270,105 @@ fn a_boolean_question_offers_yes_and_no() {
     assert_eq!(sess.expect_eof().unwrap(), 0);
 }
 
+/// A `multi_select` question lets the user choose several options: Space or a
+/// digit toggles one, Enter sends all of them, going back restores them, and
+/// each chosen option reaches the model as its own answer. The long list
+/// (filterable picker) supports the same choosing.
+#[test]
+fn a_multi_select_question_sends_every_chosen_option() {
+    let env = TestEnv::new("question-multi-select");
+    if !env.is_mock() {
+        return;
+    }
+    let few = json!([{"label":"OptionAlpha","value":"alpha"}, {"label":"OptionBeta","value":"beta"},
+                     {"label":"OptionGamma","value":"gamma"}, {"label":"OptionDelta","value":"delta"}]);
+    let many = (1..=12)
+        .map(|n| json!({"label":format!("ManyOption{n}"), "value":format!("many{n}")}))
+        .collect::<Vec<_>>();
+    let input = json!({"questions":[
+        {"id":"few", "prompt":"PICK_SEVERAL", "kind":"multi_select", "allowCustomInput":false, "options":few},
+        {"id":"many", "prompt":"PICK_FROM_MANY", "kind":"multi_select", "allowCustomInput":false, "options":many}
+    ]});
+    let prompt = env.tool_batch_prompt(
+        &json!([{"id":"question-multi", "name":"AskUserQuestion", "input":input}]),
+    );
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "read-only",
+        "--allowedTools",
+        "AskUserQuestion",
+    ]);
+    // Wide enough to keep the hint line on one row.
+    sess.resize(60, 160).unwrap();
+    common::expect_input_line_cleared(&sess, env.timeout(), "initial prompt");
+    let turn = common::turn_status_marker(&sess);
+    sess.send(&format!("{prompt}\r")).unwrap();
+
+    let dialog = expect_question(&env, &sess, "PICK_SEVERAL");
+    assert!(
+        dialog.contains("Space/1-4 choose") && dialog.contains("(0 chosen)"),
+        "multi-select hints:\n{dialog}"
+    );
+    // Space chooses the highlighted option; a digit chooses its option without
+    // sending the answer.
+    sess.send(" ").unwrap();
+    expect_area(&env, &sess, "(1 chosen)");
+    sess.send("3").unwrap();
+    let chosen = expect_area(&env, &sess, "(2 chosen)");
+    let marked: Vec<&str> = chosen
+        .lines()
+        .filter(|line| line.contains('\u{25c9}'))
+        .map(str::trim)
+        .collect();
+    assert!(
+        marked.len() == 2
+            && marked[0].ends_with("OptionAlpha")
+            && marked[1].ends_with("OptionGamma"),
+        "chosen rows are marked:\n{chosen}"
+    );
+    sess.send("\r").unwrap();
+
+    // Going back restores the chosen options.
+    expect_question(&env, &sess, "PICK_FROM_MANY");
+    sess.send(LEFT).unwrap();
+    expect_question(&env, &sess, "PICK_SEVERAL");
+    expect_area(&env, &sess, "(2 chosen)");
+    sess.send("\r").unwrap();
+
+    // The filterable list chooses with Space too.
+    let long = expect_question(&env, &sess, "PICK_FROM_MANY");
+    assert!(long.contains("(0 chosen)"), "long list hints:\n{long}");
+    sess.send(&format!("{DOWN} {DOWN} ")).unwrap();
+    expect_area(&env, &sess, "(2 chosen)");
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &turn, env.timeout(), "multi-select answered");
+
+    let result = result_value(&tool_result(&question_requests(&env), "question-multi"));
+    assert_eq!(
+        result["answers"],
+        json!([
+            {"id":"few", "value":"alpha", "label":"OptionAlpha"},
+            {"id":"few", "value":"gamma", "label":"OptionGamma"},
+            {"id":"many", "value":"many2", "label":"ManyOption2"},
+            {"id":"many", "value":"many3", "label":"ManyOption3"}
+        ])
+    );
+    assert_eq!(result["questions"][0]["kind"], "multi_select");
+    sess.send("/exit\r").unwrap();
+    assert_eq!(sess.expect_eof().unwrap(), 0);
+}
+
+/// Wait until the live input area contains `text`, and return that area.
+fn expect_area(env: &TestEnv, sess: &PtySession, text: &str) -> String {
+    let screen = common::expect_screen(
+        sess,
+        |screen| common::input_and_footer_of(screen).is_some_and(|area| area.contains(text)),
+        env.timeout(),
+        text,
+    );
+    common::input_and_footer_of(&screen).unwrap()
+}
+
 fn expect_question(env: &TestEnv, sess: &PtySession, prompt: &str) -> String {
     let screen = common::expect_screen(
         sess,

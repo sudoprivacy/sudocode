@@ -25,7 +25,7 @@ pub(crate) fn input_schema() -> Value {
                         "prompt": { "type": "string" },
                         "kind": {
                             "type": "string", "enum": ["single_select", "multi_select", "text", "boolean"],
-                            "description": "boolean is a yes/no question: without options it offers Yes (value \"true\") and No (value \"false\")."
+                            "description": "boolean is a yes/no question: without options it offers Yes (value \"true\") and No (value \"false\"). multi_select lets the user choose several options; each chosen option comes back as its own answer with the question's id."
                         },
                         "required": { "type": "boolean" },
                         "allowCustomInput": {
@@ -203,7 +203,10 @@ pub(crate) fn run_with_io(
             for (index, option) in field.options.iter().enumerate() {
                 writeln!(out, "  {}. {}", index + 1, option.label)?;
             }
-            if field.allow_custom_input {
+            let multi_select = field.kind == QuestionKind::MultiSelect;
+            if multi_select {
+                write!(out, "Your choices (option numbers such as 1,3): ")?;
+            } else if field.allow_custom_input {
                 write!(out, "Your answer (choose an option or type your own): ")?;
             } else {
                 write!(out, "Enter choice (1-{}): ", field.options.len())?;
@@ -212,6 +215,14 @@ pub(crate) fn run_with_io(
             let mut answer = String::new();
             reader.read_line(&mut answer)?;
             let answer = answer.trim();
+            if let Some(chosen) = field.numbered_choices(answer).filter(|_| multi_select) {
+                answers.extend(chosen.into_iter().map(|option| QuestionPromptAnswer {
+                    id: field.id.clone(),
+                    value: option.value.clone(),
+                    label: Some(option.label.clone()),
+                }));
+                continue;
+            }
             let matched = answer
                 .parse::<usize>()
                 .ok()

@@ -269,6 +269,63 @@ pub struct QuestionField {
     pub options: Vec<QuestionOption>,
 }
 
+#[cfg(test)]
+mod numbered_choice_tests {
+    use super::{QuestionField, QuestionKind, QuestionOption};
+
+    #[test]
+    fn option_numbers_choose_options_in_the_order_given() {
+        let field = QuestionField {
+            id: "q".into(),
+            prompt: "Pick".into(),
+            kind: QuestionKind::MultiSelect,
+            required: true,
+            allow_custom_input: false,
+            custom_input_hint: None,
+            options: ["a", "b", "c"]
+                .map(|value| QuestionOption {
+                    label: value.to_uppercase(),
+                    value: value.into(),
+                    description: None,
+                    recommended: false,
+                })
+                .into(),
+        };
+        let values = |answer: &str| {
+            field.numbered_choices(answer).map(|chosen| {
+                chosen
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(values("3,1"), Some(vec!["c", "a"]));
+        assert_eq!(values(" 2  3 "), Some(vec!["b", "c"]));
+        assert_eq!(values("1,4"), None, "every number must name an option");
+        assert_eq!(values("a"), None);
+        assert_eq!(values(""), None);
+    }
+}
+
+impl QuestionField {
+    /// The options a typed list of option numbers such as `1,3` or `1 3`
+    /// chooses, in that order; `None` unless every entry names an option.
+    #[must_use]
+    pub fn numbered_choices(&self, answer: &str) -> Option<Vec<&QuestionOption>> {
+        let chosen = answer
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.parse::<usize>()
+                    .ok()
+                    .and_then(|number| number.checked_sub(1))
+                    .and_then(|index| self.options.get(index))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!chosen.is_empty()).then_some(chosen)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionKind {
     SingleSelect,

@@ -604,7 +604,7 @@ def publish(args):
                        "This is a compiler-tool artifact, not a SudoCode release or proof of population latency savings.\n").encode())
     assets = [str(path) for path in args.output.iterdir() if path.name not in {notes.name, 'tag-create.stdout', 'tag-create.stderr'}]
     subprocess.run(['gh', 'release', 'create', manifest['release_tag'], *assets, '--repo', REPOSITORY,
-                    '--verify-tag', '--title', 'sccache0.19.0 Windows response-file fix',
+                    '--verify-tag', '--latest=false', '--title', 'sccache0.19.0 Windows response-file fix',
                     '--notes-file', str(notes)], cwd=ROOT, check=True)
 
 

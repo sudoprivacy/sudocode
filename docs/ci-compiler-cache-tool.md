@@ -8,7 +8,7 @@ maintained artifact for the Windows response-file defect fixed by upstream
 The source is the immutable upstream 0.19.0 commit. Its archive, minimal backport
 and original/patched Rust modules are SHA-256 pinned in
 `.github/compiler-cache/response-files.json`. The production hunks come from the
-merged upstream fix; only the older test-helper interfaces are adapted. No Cargo
+merged upstream fix; the older module import and test-helper interfaces are adapted. No Cargo
 dependency or release-profile setting is changed. The upstream tool's tests are
 dependency qualification, not a new SudoCode unit-test layer or product coverage.
 The patch uses zero context to avoid whitespace-only patch context lines; both
@@ -34,7 +34,8 @@ dispatch. Publication is a separate main-only dispatch with `mode=publish` and
 `qualified_run_id`. A read-only job checks the original successful run, accepted
 source ancestry, exact recipe input hashes, archive contents and real probe
 results. A separate write job publishes those bytes without rebuilding them.
-It refuses an existing release/tag instead of replacing assets. Producer source
+It refuses an existing release/tag instead of replacing assets and explicitly
+keeps the compiler tool out of the product's Latest release selection. Producer source
 and qualification identities remain original, even when a normal merge adds
 unrelated accepted source.
 

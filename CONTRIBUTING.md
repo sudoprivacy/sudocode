@@ -965,6 +965,14 @@ macOS process-name fallback failure. One compiler worker, lowered compiler prior
 Normal test priority, commands and budgets remain unchanged; protected equivalence
 pins retain successful earlier evidence for those unchanged commands. The new native
 guard always needs its own actual run, including a refused process-name query.
+The CI lint fixture also records the real compiler child's OS priority immediately
+after spawning it and before collecting its exit status. This private Cargo wrapper
+preserves the original compiler arguments, streams and exit code. It keeps the
+priority assertion meaningful for compiler processes shorter than the polling
+interval; real short-process controls run on both hosts and Linux retains an
+actual wrong-priority control. Windows never raises a compiler above its existing
+host supervisor's enforced priority to manufacture that control. No
+production compiler wrapper, lint case or deadline is changed.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.

@@ -2319,7 +2319,14 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       <td>Coverage unchanged; cached compiler outputs never replace the real
       journey or authorize reuse of a passing result. Infrastructure fixtures add
       no product journey credit. Cache footprint and cold/warm product measurements
-      are required before a lifecycle speedup claim.</td>
+      are required before a lifecycle speedup claim. The original PR1493 hosted
+      lint fixture missed every compiler during a real 0.08s clean build and failed
+      its priority assertion before VFS acceptance. Its private launch witness now
+      records actual compiler priority before process reaping, preserving all
+      original lint assertions and compiler arguments; real short-process controls
+      on both hosts and a Linux wrong-priority control cover the observation
+      boundary. Windows retains its enforced lowered compiler priority. That original
+      failure is retained, not called a VFS or product runtime verdict.</td>
       <td><code>vfs_search_cache.py</code> / <code>ci-vfs-search-cache.yml</code> /
       <code>vfs_search_cache_acceptance.py</code></td>
     </tr>

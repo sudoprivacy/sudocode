@@ -1647,14 +1647,43 @@ environments match the main publisher; net timing and hit rates still require
 hosted observation. The optimization target is measured end-to-end CI latency
 at most 10% of the historical baseline, not merely fewer runner minutes.</p>
 
+<p><strong>Source-bound policy self-tests.</strong> The required preflight still
+runs actual formatting, schema, branding, history, architecture-boundary and
+published-pin checks on current source. Only independent policy self-test replay
+can be omitted for ordinary crate/vendor Rust <code>src/*.rs</code> and registered
+documentation edits. The actual clean combined workflow checkout must match 23
+reviewed Git blob/mode inputs, including programs, first-party dependencies,
+workflow/toolchain and Git layout. Tests, configuration, infrastructure,
+unknown/missing/linked inputs, unreviewed program versions and manual runs retain
+the complete original group. The canonical pin check now precedes fixture work.
+This reduces per-PR self-testing of unchanged infrastructure; an external hosted
+runtime change may first surface in an infrastructure/manual run. Omission is
+explicit and supplies no cached pass, source-freshness proof or product coverage
+credit. Original commands/assertions/deadlines and native/provider selection stay
+unchanged. The original 13-19s step observations are not net or population savings.</p>
+
+<p>PR1491 normally merged with the same qualified tree, the original full
+native/Docker guard, three-platform Clippy and both real daemon journeys.
+<a href="docs/ci-preflight-policy-delivery-20261118.json">Original delivery evidence</a>
+records 35 physical jobs and 38.700 known hosted runner-minutes: 2.633 source,
+35.917 queue composition and 0.150 post-merge. These are engineering occupancy,
+with no unknown intervals at that snapshot, and are separate from recurring Rust
+PR measurements. A Git TLS publication failure is retained; supported recovery
+reused both signed profiles with zero test reruns or host-lease acquisitions.
+The existing required cohost run recorded a 598.987s search journey, a current
+cache miss and a different driver pin/image context; it is distinct from the
+older exact-key-hit rebuild. No extra benchmark, cache change or causal/net
+saving is claimed, and the overall tenth target remains unproved.</p>
+
 <p>Local preflight checks actual merge conflicts with its supplied base and
 fetched <code>origin/main</code> before product compilation or benchmark leases.
 It prints conflicting paths and the next step at the mandatory interface;
 the checkout and index stay untouched, and clean branches may remain behind main.
 The checker comes from the hash-pinned protected policy, including on older
 author branches; no source update is needed just to acquire the check.
-The actual-Git history regression stays required in CI preflight. Editing only
-<code>e2e/pr-history/run.py</code> skips unrelated three-OS product builds;
+The actual-Git history regression remains required when its reviewed inputs
+change and on full manual CI runs; the actual PR/integrated-history checks remain
+required for current source. Editing only <code>e2e/pr-history/run.py</code> skips unrelated three-OS product builds;
 mixed product changes, unknown fixtures and renames across that boundary retain
 native coverage. This catches avoidable work before a full gate; it does not
 prove the 10% latency target or detect main changes after the check.</p>

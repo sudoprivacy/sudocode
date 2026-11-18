@@ -492,56 +492,6 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: python3 .github/scripts/check_pr_history.py "$BASE" HEAD
-      - name: Exercise real Git histories
-        run: python3 e2e/pr-history/run.py
-      - name: Exercise queue cancellation completion races
-        run: python3 e2e/local-acceptance/queue_maintenance_acceptance.py
-      - name: Every committed shell script must be executable
-        shell: bash
-        # `core.filemode=false` on a Windows checkout means a new script is
-        # committed 100644 and nobody notices until a runner reports
-        # `Permission denied` with exit 126 — which reads as a missing file.
-        # It has cost two rounds now, so the mode is asserted rather than
-        # remembered.
-        run: |
-          set -euo pipefail
-          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
-          if [ -n "$bad" ]; then
-            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
-            echo "$bad"
-            exit 1
-          fi
-          echo "all committed shell scripts are executable"
-
-      - name: Renderer crates must not name engine-internal streaming types
-        run: bash .github/scripts/check_engine_boundary.sh
-      - name: Exercise real Git boundary violations and scanner failures
-        run: python3 e2e/engine-boundary/run.py
-      - name: Exercise interrupted publication and real installer
-        run: python3 e2e/release-mirror/run.py
-      - name: Exercise provider probe contracts
-        run: node --test .github/scripts/probe_live_usage.test.cjs
-      - name: Exercise explicit model selection and shared native runner without a key
-        run: python3 .github/scripts/live_model_acceptance_e2e.py --output "${{ runner.temp }}/live-model-policy"
-      # Seconds, no build: this is the invariant the co-host rests on, and it is
-      # cheap enough to answer before anything compiles.
-      #
-      # A co-hosted agent takes the daemon's `Arc<Kernel>` and hands back a
-      # `SpawnTask<Kernel>` adapter. Two nexus-vfs revs in one graph are two `Kernel`
-      # types, and the seam stops unifying — but NOT reliably at compile time: a
-      # probe with `kernel` at one tag and the daemon crate at another compiled
-      # fine, because the type system only objects where a type actually crosses
-      # and Cargo is content to carry both revs. So the graph can hold two kernels
-      # in silence, and the real guarantee is the one this checks — the rev is
-      # named ONCE, in `[workspace.dependencies]`, and the lockfile resolved it to
-      # one commit.
-      #
-      # A TAG, not a rev: `e2e/nexus-a2a/fetch-daemon.sh` downloads the published
-      # daemon matching the pin, and a pin between releases has no daemon to match
-      # (it fails loud saying so). The tag recorded in the lock must be the tag the
-      # manifest asked for.
-      - name: Exercise exact published pin tags and refusal paths
-        run: python3 .github/scripts/nexus_pin_workflow_e2e.py --workflow .github/workflows/rust-ci.yml --output "${{ runner.temp }}/nexus-pin-policy"
       - name: Canonical Nexus contract and daemon resolve one published pin
         id: pin
         run: |
@@ -580,11 +530,72 @@ jobs:
           echo "one nexus-vfs pin: $MANIFEST_TAGS ($LOCK_COMMITS)"
           echo "commit=$LOCK_COMMITS" >> "$GITHUB_OUTPUT"
 
+
+
       - name: Select expensive checks from changed inputs
         id: scope
         run: |
           python3 .github/scripts/ci_input_scope.py
           echo "::notice::Native acceptance retains per-host lint. Queue Clippy checks all features on three platforms. Ordinary/shared inputs retain all-targets; isolated CLI test edits select changed originals and their groups. Missing history or dirty inputs retain full lint. Feature-only errors may first appear there. Main reuses completed queue preflight."
+
+
+      - name: Exercise real Git histories
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 e2e/pr-history/run.py
+      - name: Exercise queue cancellation completion races
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 e2e/local-acceptance/queue_maintenance_acceptance.py
+      - name: Every committed shell script must be executable
+        shell: bash
+        # `core.filemode=false` on a Windows checkout means a new script is
+        # committed 100644 and nobody notices until a runner reports
+        # `Permission denied` with exit 126 — which reads as a missing file.
+        # It has cost two rounds now, so the mode is asserted rather than
+        # remembered.
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
+          if [ -n "$bad" ]; then
+            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all committed shell scripts are executable"
+
+      - name: Renderer crates must not name engine-internal streaming types
+        run: bash .github/scripts/check_engine_boundary.sh
+      - name: Exercise real Git boundary violations and scanner failures
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 e2e/engine-boundary/run.py
+      - name: Exercise interrupted publication and real installer
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 e2e/release-mirror/run.py
+      - name: Exercise provider probe contracts
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: node --test .github/scripts/probe_live_usage.test.cjs
+      - name: Exercise explicit model selection and shared native runner without a key
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 .github/scripts/live_model_acceptance_e2e.py --output "${{ runner.temp }}/live-model-policy"
+      # Seconds, no build: this is the invariant the co-host rests on, and it is
+      # cheap enough to answer before anything compiles.
+      #
+      # A co-hosted agent takes the daemon's `Arc<Kernel>` and hands back a
+      # `SpawnTask<Kernel>` adapter. Two nexus-vfs revs in one graph are two `Kernel`
+      # types, and the seam stops unifying — but NOT reliably at compile time: a
+      # probe with `kernel` at one tag and the daemon crate at another compiled
+      # fine, because the type system only objects where a type actually crosses
+      # and Cargo is content to carry both revs. So the graph can hold two kernels
+      # in silence, and the real guarantee is the one this checks — the rev is
+      # named ONCE, in `[workspace.dependencies]`, and the lockfile resolved it to
+      # one commit.
+      #
+      # A TAG, not a rev: `e2e/nexus-a2a/fetch-daemon.sh` downloads the published
+      # daemon matching the pin, and a pin between releases has no daemon to match
+      # (it fails loud saying so). The tag recorded in the lock must be the tag the
+      # manifest asked for.
+      - name: Exercise exact published pin tags and refusal paths
+        if: steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 .github/scripts/nexus_pin_workflow_e2e.py --workflow .github/workflows/rust-ci.yml --output "${{ runner.temp }}/nexus-pin-policy"
 
       - name: Install focused executor observer dependencies
         if: github.event_name == 'pull_request' && (steps.scope.outputs.benchmark_required == 'true' || steps.scope.outputs.container_required == 'true' || steps.scope.outputs.clippy_executor_required == 'true' || steps.scope.outputs.gzip_codec_required == 'true' || steps.scope.outputs.release_artifact_required == 'true')

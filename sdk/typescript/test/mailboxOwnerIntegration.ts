@@ -8,11 +8,13 @@ import { createServer } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { CodexMailboxAdmission } from '../src/index';
 import { journalHash } from '../src/codexJournal';
 import { CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 
 const sdk = path.resolve(__dirname, '../..');
 const threadId = '33333333-3333-3333-3333-333333333333';
+const otherThread = '77777777-7777-4777-8777-777777777777';
 const { connectCodexAutojoin, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
 const rows = (file: string): any[] => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(row => JSON.parse(row)) : [];
 const hash = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -53,7 +55,7 @@ async function main() {
   const env: NodeJS.ProcessEnv = { ...process.env, SCODE_NATIVE_ENV_SENTINEL: 'owned-proxy' }; delete env.CODEX_THREAD_ID;
   const native = { codexArgv: [process.execPath, path.join(sdk, 'test/fixtures/codex-stdio-proxy.mjs'), String(address.port), 'normal'],
     socket: 'fixture-native.sock', env: env as Record<string, string>, closeTimeoutMs: 900 };
-  let loaded = true, failure: unknown;
+  let loaded = true, otherLoaded = false, failure: unknown;
   const calls: any[] = [], queue: any[] = [];
   endpoint.on('connection', socket => socket.on('message', bytes => {
     try {
@@ -61,8 +63,8 @@ async function main() {
       if (call.id === undefined) return;
       let result: unknown;
       if (call.method === 'initialize') result = { userAgent: 'unqualified-fixture-without-addOnce' };
-      else if (call.method === 'thread/loaded/list') result = { data: loaded ? [threadId] : [], nextCursor: null };
-      else if (call.method === 'thread/read') result = { thread: { id: threadId, cwd: directory,
+      else if (call.method === 'thread/loaded/list') result = { data: [...(loaded ? [threadId] : []), ...(otherLoaded ? [otherThread] : [])], nextCursor: null };
+      else if (call.method === 'thread/read') result = { thread: { id: call.params.threadId, cwd: directory,
         status: { type: 'idle' }, parentThreadId: null, threadSource: 'user', ephemeral: false, canAcceptDirectInput: true, turns: [] } };
       else if (call.method === 'thread/turns/list') result = call.params.cursor ? { data: [{ id: 'old-native-turn', status: 'completed',
         items: [{ type: 'userMessage', clientId: legacy[0] }] }], nextCursor: null } : { data: [], nextCursor: 'page-two' };
@@ -88,10 +90,10 @@ async function main() {
   fs.writeFileSync(runtime, JSON.stringify({ version: 1, mode: 'codex-autojoin', native, stateDirectory, auditLog: audit,
     peers: [], peerPolicy: 'node-namespace', enrollmentArgv: [process.execPath, __filename, '--enroll', directory],
     endpoint: { port: ownerAddress.port, token: '12'.repeat(32) } }), { mode: 0o600 });
-  const open = async () => {
+  const open = async (existingBinding?: CodexMailboxAdmission['existingBinding']) => {
     const offset = rows(audit).length;
     // Only this private fixture supplies an artificial qualification verdict.
-    owner = runCodexMcpOwner(runtime, { encodedResultBytes: 8192, encodedSubmissionBytes: 4096,
+    owner = runCodexMcpOwner(runtime, { encodedResultBytes: 8192, encodedSubmissionBytes: 4096, existingBinding,
       qualified: async (_, id) => id === threadId && fs.readFileSync(path.join(directory, 'qualified'), 'utf8') === 'yes' });
     const deadline = performance.now() + 5000;
     while (!rows(audit).slice(offset).some(row => row.phase === 'native_inventory')) {
@@ -163,7 +165,24 @@ async function main() {
     assert.equal(offers().length, before, 'changed native/settings refuse before ACK reaches scode');
     await close();
     fs.writeFileSync(path.join(directory, 'qualified'), 'yes');
-    await open();
+    const originalBindingFile = path.join(stateDirectory, threadId + '.json');
+    const ready = JSON.parse(fs.readFileSync(originalBindingFile, 'utf8'));
+    const originalBindingHash = hash(originalBindingFile);
+    const existingBinding = {threadId, actor: ready.actor, acpSessionId: ready.acp.sessionId};
+    const otherFile = path.join(stateDirectory, otherThread + '.json');
+    fs.writeFileSync(otherFile, JSON.stringify({ version: 2, origin: 'enrollment', operationId: legacy[0],
+      threadId: otherThread, actor: 'unrelated-agent', workspace: directory, canonicalWorkspace: ready.canonicalWorkspace,
+      state: 'provisioning' }), {flag: 'wx', mode: 0o600});
+    const otherHash = hash(otherFile);
+    otherLoaded = true;
+    for (const mismatch of [{ actor: 'different' }, { acpSessionId: 'different' }, { threadId: legacy[2] },
+      { threadId: otherThread, actor: 'unrelated-agent' }]) {
+      await assert.rejects(connectCodexAutojoin({ native, stateDirectory, peers: [], peerPolicy: 'node-namespace',
+        mailbox: { encodedResultBytes: 4096, encodedSubmissionBytes: 4096, existingBinding: { ...existingBinding, ...mismatch },
+          qualified: async () => true }, async resolveAgent() { throw new Error('Unexpected enrollment'); } }),
+      /original ready thread, actor and ACP session/);
+    }
+    await open(existingBinding);
     assert.equal((await call('scode_inbox')).isError, undefined);
     assert.equal(rows(path.join(directory, 'enrollment.jsonl')).length, 1, 'ready binding retains actor, operation and ACP session');
     assert.equal(offers().at(-1).params.legacy, undefined, 'restart retains completed migration outcomes');
@@ -171,6 +190,10 @@ async function main() {
     loaded = false;
     assert.equal((await call('scode_inbox')).isError, true);
     assert.deepEqual(await status(), []);
+    assert.equal((await call('scode_inbox', {}, otherThread)).isError, true);
+    assert.equal(hash(otherFile), otherHash, 'Another loaded root retains its original in-flight enrollment record');
+    assert.equal(hash(originalBindingFile), originalBindingHash, 'Adoption kept the original actor, operation and session');
+    assert.ok(!calls.some(call => call.method === 'thread/read' && call.params.threadId === otherThread));
     assert.equal(failure, undefined);
     assert.ok(!calls.some(call => ['thread/queue/addOnce', 'thread/queue/start', 'turn/start', 'turn/steer'].includes(call.method)));
     assert.deepEqual(oldFiles.map(hash), originalHashes);

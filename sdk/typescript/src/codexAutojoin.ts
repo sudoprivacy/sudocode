@@ -120,6 +120,15 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     throw new Error('Invalid Codex autojoin configuration');
   }
   const bindings = readBindings(config.stateDirectory);
+  const selected = config.mailbox?.existingBinding;
+  const existing = selected && bindings.get(selected.threadId);
+  if (selected !== undefined) {
+    if (!selected || !existing || existing.state !== 'ready' || existing.actor !== selected.actor
+        || !existing.acp || existing.acp.sessionId !== selected.acpSessionId) {
+      throw new Error('Selected mailbox requires the original ready thread, actor and ACP session binding');
+    }
+    boundProfile(existing);
+  }
   const owners = new Map<string, Owner>();
   let closed = false;
   let chain = Promise.resolve();
@@ -128,7 +137,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   let inventoryError: string | undefined;
   const report = (error: unknown) => { try { config.onError?.(error); } catch { /* Observer only. */ } };
   const save = (binding: Binding, create = false) => writeBinding(config.stateDirectory, binding, create);
-  await settleInterruptedBindings(config.stateDirectory, bindings);
+  if (!existing) await settleInterruptedBindings(config.stateDirectory, bindings);
   const stopOwner = async (owner: Owner) => {
     // An ACK already sent to scode must settle before its transport closes.
     // Join the child even when a delivery owner reports a drain failure.
@@ -138,7 +147,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
     if (failed?.status === 'rejected') throw failed.reason;
   };
   const open = async (thread: Thread) => {
-    const binding = await claimBinding(config.stateDirectory, bindings, { id: thread.id, cwd: thread.cwd, frontend: 'codex' });
+    const binding = existing ?? await claimBinding(config.stateDirectory, bindings, { id: thread.id, cwd: thread.cwd, frontend: 'codex' });
     const owner: Owner = { binding };
     owners.set(thread.id, owner);
     const pending: Array<{ message: ScodePeerMessage; resolve(): void; reject(error: unknown): void }> = [];
@@ -228,6 +237,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
       const threads = new Map<string, Thread>();
       for (const id of loaded) {
         if (closed) return;
+        if (existing && id !== existing.threadId) continue;
         let thread: Thread;
         try {
           ({thread} = await native.request<{thread: Thread}>('thread/read', {threadId:id,includeTurns:false}));

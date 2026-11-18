@@ -692,6 +692,12 @@ stdio clients then discover `scode_inbox` on the existing owner connection.
 Each call resolves the native caller thread and uses that thread's admitted
 receiver. The standard CLI owner invocation still selects the v2 path.
 
+To adopt one previously bound session, supply its `threadId`, `actor` and
+`acpSessionId` in `admission.existingBinding`. Startup checks the ready binding
+and its ACP profile before connecting. While the selected thread is unloaded
+the owner has no attached receiver. The scoped owner leaves other roots'
+enrollment records untouched.
+
 For that path, the elected owner obtains a fresh no-ACK offer immediately
 before submission and queues its text verbatim after a fixed peer-data
 provenance line. Offer sizing accounts for the provenance, identity and JSON

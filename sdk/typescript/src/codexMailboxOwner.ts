@@ -11,6 +11,9 @@ import type { ScodeConnection } from './scodeAcp';
 export interface CodexMailboxAdmission {
   encodedResultBytes: number;
   encodedSubmissionBytes: number;
+  /** Adopt one already bound session. Other loaded roots and their enrollment
+   * operations stay outside this owner's scope. */
+  existingBinding?: Readonly<{ threadId: string; actor: string; acpSessionId: string }>;
   qualified(native: CodexConnection, threadId: string): Promise<boolean>;
 }
 

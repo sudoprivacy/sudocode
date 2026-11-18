@@ -3898,18 +3898,20 @@ serves them; <strong>non-Claude models</strong> get <strong>Full</strong>
 (conservative v1 — CC never runs them, so full scaffolding is the safe start;
 capable ones can graduate later with eval evidence). Structure first; the per-tier
 <em>content</em> decision — <strong>去糟粕取精华</strong> against CC (keep the
-essence, drop the dross; <em>not</em> mirror) — is in progress in the worksheets
-below.</p>
+essence, drop the dross; <em>not</em> mirror) — is made block by block in the
+worksheets below.</p>
 
-<p class="table-title"><strong>Table — scode tier assignment</strong> (Claude tiers captured from CC&nbsp;2.1.250, 2026-08-23; content unchanged since 2.1.233).</p>
+<p class="table-title"><strong>Table — scode tier assignment</strong> (Claude tiers as CC&nbsp;2.1.325 serves them. CC picks a model's prompt from capability flags in its built-in model catalog; every catalog model was captured to confirm the grouping. Sizes are the <code>system</code> field.)</p>
 
 <table>
   <thead><tr><th>Model</th><th>scode tier</th><th>Basis</th></tr></thead>
   <tbody>
-    <tr><td><code>opus-4-8</code></td><td data-status="covered"><strong>Lean</strong> (~6.3&nbsp;KB)</td><td>= CC</td></tr>
-    <tr><td><code>opus-5</code></td><td data-status="gap-l2"><strong>Mid</strong> (~9.7&nbsp;KB)</td><td>= CC (Lean + <code># Delivering work</code> + <code># Corrections</code>)</td></tr>
-    <tr><td><code>fable-5</code></td><td data-status="gap-l2"><strong>Mid</strong> (~10.8&nbsp;KB)</td><td>= CC (Lean + <code># Communicating</code>)</td></tr>
-    <tr><td><code>opus-4-6</code> (default), <code>opus-4-5</code>, <code>sonnet-*</code>, <code>haiku-*</code></td><td data-status="gap"><strong>Full</strong> (~27.8&nbsp;KB)</td><td>= CC — the default stays Full, so zero-risk for default users</td></tr>
+    <tr><td><code>opus-4-8</code>, <code>opus-5-5</code>, <code>sonnet-5-5</code>, <code>haiku-5-5</code></td><td data-status="covered"><strong>Lean</strong> (~6&nbsp;KB)</td><td>= CC; <code>haiku-5-5</code> adds an early-stopping block (~8.7&nbsp;KB)</td></tr>
+    <tr><td><code>opus-5</code></td><td data-status="gap-l2"><strong>Mid</strong> (~9.3&nbsp;KB)</td><td>= CC (Lean + <code># Delivering work</code> + <code># Corrections</code>)</td></tr>
+    <tr><td><code>fable-5</code>, <code>mythos-5</code></td><td data-status="gap-l2"><strong>Mid</strong> (~10.2&nbsp;KB)</td><td>= CC (Lean + <code># Communicating with the user</code>)</td></tr>
+    <tr><td><code>fable-5-1</code></td><td data-status="gap-l2"><strong>Mid</strong> (~12.0&nbsp;KB)</td><td>= CC (Lean + <code># Delivering work</code> + <code># Writing for the user</code>)</td></tr>
+    <tr><td><code>fable-5-2</code></td><td data-status="gap-l2"><strong>Mid</strong> (~10.7&nbsp;KB)</td><td>= CC (Lean + <code># Finishing work</code> + <code># Memory, notes and feedback</code>)</td></tr>
+    <tr><td><code>opus-4-6</code> (default), <code>opus-4-5</code>, <code>opus-4-7</code>, <code>sonnet-4-5</code>, <code>sonnet-4-6</code>, <code>sonnet-5</code>, <code>haiku-4-5</code></td><td data-status="gap"><strong>Full</strong> (~27.5&nbsp;KB)</td><td>= CC — the default stays Full, so zero-risk for default users</td></tr>
     <tr><td><strong>non-Claude</strong> — GPT / qwen / DeepSeek / local</td><td data-status="gap"><strong>Full</strong></td><td>conservative v1 default (no CC to mirror)</td></tr>
   </tbody>
 </table>
@@ -3919,19 +3921,25 @@ worksheets (each = CC's verbatim prompt on the left, scode's current prompt
 block-aligned on the right, with a per-block keep/drop decision) live in the
 private repo <a href="https://github.com/sudoprivacy/scode-prompt-alignment"><code>sudoprivacy/scode-prompt-alignment</code></a>.
 That repo is <strong>access-controlled</strong> because it holds CC's verbatim
-prompts (kept off this public repo). Each worksheet is independently verified
-<strong>100% coverage on both sides</strong> against CC&nbsp;2.1.250 (CC
-re-captured byte-identical across 2.1.233→2.1.250). This replaces the earlier four analysis tables,
-which were an exploration artifact and have been retired. The worksheets are also
-published (password-protected, comment-enabled) for review:</p>
+prompts (kept off this public repo). A worksheet covers everything each agent tells
+its model, not only the <code>system</code> field: the context messages sent
+alongside it, every tool description including tools loaded on demand through
+<code>ToolSearch</code>, and the surfaces that appear only in some modes —
+agent-to-agent messaging, sub-agents, compaction and background-task notices.
+Both sides are captured from the live requests of CC&nbsp;2.1.325 and scode
+<code>main</code>, and each worksheet is independently verified at
+<strong>100% coverage on both sides</strong>. The worksheets are also published
+(password-protected, comment-enabled) for review:</p>
 
 <table>
   <thead><tr><th>Tier</th><th>Worksheet</th><th>Models</th></tr></thead>
   <tbody>
-    <tr><td><strong>Full</strong></td><td><a href="https://s.shareone.vip/s/scode-align-full">scode-align-full</a></td><td><code>opus-4-6</code> (default) / <code>opus-4-5</code> / <code>sonnet-*</code> / <code>haiku-*</code> / all non-Claude</td></tr>
-    <tr><td><strong>Lean</strong></td><td><a href="https://s.shareone.vip/s/scode-align-lean">scode-align-lean</a></td><td><code>opus-4-8</code></td></tr>
+    <tr><td><strong>Full</strong></td><td><a href="https://s.shareone.vip/s/scode-align-full">scode-align-full</a></td><td><code>opus-4-6</code> (default) / <code>opus-4-5</code> / <code>opus-4-7</code> / <code>sonnet-4-5</code> / <code>sonnet-4-6</code> / <code>sonnet-5</code> / <code>haiku-4-5</code> / all non-Claude</td></tr>
+    <tr><td><strong>Lean</strong></td><td><a href="https://s.shareone.vip/s/scode-align-lean">scode-align-lean</a></td><td><code>opus-4-8</code> / <code>opus-5-5</code> / <code>sonnet-5-5</code> / <code>haiku-5-5</code></td></tr>
     <tr><td><strong>Mid</strong></td><td><a href="https://s.shareone.vip/s/scode-align-mid-opus5">scode-align-mid-opus5</a></td><td><code>opus-5</code> (+ <code># Delivering work</code> + <code># Corrections</code>)</td></tr>
-    <tr><td><strong>Mid</strong></td><td><a href="https://s.shareone.vip/s/scode-align-mid-fable5">scode-align-mid-fable5</a></td><td><code>fable-5</code> (+ <code># Communicating</code>)</td></tr>
+    <tr><td><strong>Mid</strong></td><td><a href="https://s.shareone.vip/s/scode-align-mid-fable5">scode-align-mid-fable5</a></td><td><code>fable-5</code> / <code>mythos-5</code> (+ <code># Communicating with the user</code>)</td></tr>
+    <tr><td><strong>Mid</strong></td><td><a href="https://s.shareone.vip/s/scode-align-mid-fable5-1">scode-align-mid-fable5-1</a></td><td><code>fable-5-1</code> (+ <code># Delivering work</code> + <code># Writing for the user</code>)</td></tr>
+    <tr><td><strong>Mid</strong></td><td><a href="https://s.shareone.vip/s/scode-align-mid-fable5-2">scode-align-mid-fable5-2</a></td><td><code>fable-5-2</code> (+ <code># Finishing work</code> + <code># Memory, notes and feedback</code>)</td></tr>
   </tbody>
 </table>
 <p class="table-caption">Access is password-controlled (the worksheets carry CC

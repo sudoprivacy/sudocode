@@ -351,6 +351,22 @@ the existing release/performance gates are unchanged.
 Cache hits never substitute a previous test result. The required command prints builds and stores timings and failure logs.
 The main publisher alone performs explicit prewarming. Consumers invoke normal
 `cargo test`, which compiles its driver and runs the original case's plugin build.
+The same main publisher can instead retain compiler inputs from the newest
+successful current attempt of its exact accepted merge-group head. The original
+co-host/search/feature steps and uploads must all succeed; source hashes, original
+Cargo command/log, artifact digest and bounded archive inventory are checked.
+The producer's complete original key, including `ImageVersion`, is retained.
+Transferring that archive across runner images does not authorize compiling or
+executing it on the publishing image. The publisher only verifies/stores it;
+future consumers still require their own exact compiler context and real journey.
+An exact warm queue key exports only small identity data; a missing key exports
+the compiler archive. Cache-infrastructure changes also exercise the data path.
+Absent older exports retain the existing main prewarm fallback. A present corrupt,
+foreign, stale-attempt or mismatched export refuses instead of masking the error.
+Only this existing main workflow saves the cache; no second cache writer, compiler
+image alias, acceptance signer or cached test-result authority is introduced.
+Archive transfer/storage costs and a subsequent matching-image consumer must be
+measured before claiming warm savings; local fixture success alone is insufficient.
 The required job refuses a redundant pre-test build directory; this avoids extra
 switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's

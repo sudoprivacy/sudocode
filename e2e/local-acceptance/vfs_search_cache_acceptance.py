@@ -85,6 +85,7 @@ def run(output):
         shutil.copyfile(SOURCE / relative, target)
     environment = {"CARGO_HOME": str(source / ".ci-cache/cargo"),
                    "CARGO_TARGET_DIR": str(source / ".ci-cache/target"), "CARGO_INCREMENTAL": "0",
+                   "ImageVersion": "20261111.196.1", "ImageOS": "ubuntu24",
                    "CARGO_NET_OFFLINE": "true", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
     def command(*args, cwd=root, success=True, extra=None):
@@ -333,6 +334,10 @@ def run(output):
     invoke("build", "after-nested-build")
     after_nested = json.loads((output / "after-nested-build/commands.json").read_text())
     assert all(row["compiler_artifacts"] and all(item["fresh"] for item in row["compiler_artifacts"]) for row in after_nested), after_nested
+    publication = load("fixture_publication", SOURCE / "e2e/local-acceptance/vfs_search_publication_acceptance.py")
+    publication.run(SOURCE, root, output / "publication", consumer_temp / "vfs-search-journey", command,
+                    {**environment, **key_report["inputs"]["environment"],
+                     "NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime)})
     configuration = source / ".git/config"
     configuration_bytes = configuration.read_bytes()
     outside_config = root / "outside-config"

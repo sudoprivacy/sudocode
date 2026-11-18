@@ -603,7 +603,8 @@ def main():
                            ".github/scripts/live_model_evidence.cjs", ".github/scripts/model_compat.py"]
             daemon_inputs = ["rust/**", "e2e/nexus-a2a/**", "e2e/shared-services/**", ".github/ci/**",
                              ".github/local-acceptance/parallel_guard.py", ".github/scripts/local_acceptance.py",
-                             ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/**",
+                             ".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
+                             ".github/actions/vfs-search-cache/**",
                              ".github/workflows/ci-vfs-search-cache.yml", *queue_inputs]
             # Acceptance metadata changes execution authorization, not provider
             # requests. Keep these identities with the acceptance authority.
@@ -646,7 +647,7 @@ def main():
                 daemon_paths.append(executor_path)
             # These helpers only prepare the separate fixed search driver.
             # They cannot change the CLI, its pinned daemon or A2A harness.
-            a2a = any(path not in {".github/scripts/vfs_search_cache.py",
+            a2a = any(path not in {".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
                                   ".github/workflows/ci-vfs-search-cache.yml"}
                       and not path.startswith(".github/actions/vfs-search-cache/")
                       for path in daemon_paths)
@@ -684,9 +685,11 @@ def main():
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
     vfs_cache = any(path in {".github/ci/cohost-plugin-crypto.toml",
-                             ".github/scripts/vfs_search_cache.py", ".github/workflows/rust-ci.yml",
+                             ".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
+                             ".github/workflows/rust-ci.yml",
                              ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
-                             "e2e/local-acceptance/vfs_search_cache_acceptance.py"}
+                             "e2e/local-acceptance/vfs_search_cache_acceptance.py",
+                             "e2e/local-acceptance/vfs_search_publication_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
     policy_fixtures = {}
     policy_fixtures_required = policy_fixture_scope(paths, name, policy_fixtures)

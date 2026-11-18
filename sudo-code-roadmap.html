@@ -2290,6 +2290,17 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       <td>The Linux queue restores a pinned checkout with isolated Cargo inputs
       and outputs; only main pushes publish missing exact keys. Compiler, runner
       image, recipe, paths and codegen settings bind the key.
+      The existing main publisher may transport compiler inputs from its exact
+      accepted queue head's newest successful attempt under that producer's
+      unchanged image-specific key. It checks source/provenance, the original
+      successful journey, artifact digest and a bounded regular-file archive;
+      imported programs never execute during publication. Warm queues emit small
+      identity data; cold queues export compiler data, with explicit data-path
+      qualification for infrastructure changes. Missing older exports retain
+      normal main prewarming; corrupt or stale present exports refuse. This
+      adds no test-result reuse, image-equivalence waiver or second cache writer.
+      Source/local controls and actual hosted publication/warm consumption remain
+      separate milestones; transfer cost and whole-lifecycle savings need evidence.
       A fallback may share dependencies across source pins only under the same
       compiler context. The old Git tree and saved identity are verified before
       fetching the required pin with hooks disabled. Old workspace outputs are

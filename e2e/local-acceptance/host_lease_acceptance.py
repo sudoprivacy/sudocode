@@ -667,7 +667,7 @@ spec = importlib.util.spec_from_file_location("inventory_fixture_executor", repo
 executor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(executor)
 executor.ROOT = repository
-print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", ["native-release", "native-context"])))
+print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(sys.argv[2]))))
 '''
 
     def inventory_policy(label, inventory):
@@ -688,8 +688,10 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", ["native-rel
                         and target.id == "expected" for target in node.targets)
                         and isinstance(node.value, ast.Dict)
                         and "native-release" in [getattr(key, "value", None) for key in node.value.keys])
-        recipes = json.loads(subprocess.check_output([sys.executable, "-c", recipe_reader, str(repository)],
+        names = [key.value for key in expected.keys]
+        recipes = json.loads(subprocess.check_output([sys.executable, "-c", recipe_reader, str(repository), json.dumps(names)],
                                                       cwd=repository, env=environment))
+        assert set(recipes) == set(names), "Bind every recipe declared by the actual staged guard"
         for key, old in zip(expected.keys, expected.values):
             candidate = candidate.replace(old.value, recipes[key.value])
         path.write_text(candidate, encoding="utf-8")

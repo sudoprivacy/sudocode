@@ -464,7 +464,7 @@ def compiler_cache_profiles():
 def prepare_compiler_cache(output):
     """Bind the separate cache implementation before loading or executing it."""
     contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
-    if hashlib.sha256(contents).hexdigest() != "70798375283ff9cf21ad7cca72badb9daaeefba80e60d400ea5dd24932a87b6c":
+    if hashlib.sha256(contents).hexdigest() != "d6e9def1fea00707ee7ec6c20b5f13f1fd7b09f8960e70f987220494613d0afa":
         raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
                            f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
                            "prepare_compiler_cache, then rerun the original supported contract-update command. "
@@ -607,6 +607,24 @@ def git_for_windows_bash(path=None):
     return None
 
 
+def native_service_tool_result(log):
+    """Read one explicit result while retaining unrelated raw diagnostics."""
+    prefix = b"NATIVE_SERVICE_TOOL="
+    records = [line[len(prefix):] for line in log.read_bytes().splitlines() if line.startswith(prefix)]
+    if len(records) != 1:
+        raise RuntimeError("NATIVE_SERVICE_TOOL_RESULT_REFUSED: expected exactly one tool result; "
+                           f"found {len(records)}. Original diagnostics: {log}")
+    try:
+        tool = json.loads(records[0])
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError(f"NATIVE_SERVICE_TOOL_RESULT_REFUSED: malformed tool result in {log}") from error
+    if (not isinstance(tool, dict) or set(tool) != {"executable", "version", "sha256"}
+            or not all(isinstance(value, str) and value for value in tool.values())
+            or not re.fullmatch(r"[a-f0-9]{64}", tool["sha256"])):
+        raise RuntimeError(f"NATIVE_SERVICE_TOOL_RESULT_REFUSED: invalid tool result fields in {log}")
+    return tool
+
+
 def native_services_tool(root, output, execute):
     """Resolve the existing service client before compilation, retaining its bytes."""
     bash = git_for_windows_bash() if os.name == "nt" else shutil.which("bash")
@@ -617,8 +635,8 @@ from pathlib import Path
 binary = Path(sys.argv[1]).resolve(strict=True)
 version = subprocess.check_output([str(binary), "--version"], stderr=subprocess.STDOUT,
                                   text=True, timeout=5).strip()
-print(json.dumps({"executable": str(binary), "version": version,
-                  "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
+print("NATIVE_SERVICE_TOOL=" + json.dumps({"executable": str(binary), "version": version,
+                                        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}))
 '''
     # Git for Windows can check shell helpers out as CRLF. Its Bash provides
     # igncr; keep the original helper's location and normal Unix invocation.
@@ -628,7 +646,7 @@ print(json.dumps({"executable": str(binary), "version": version,
                  sys.executable.replace("\\", "/"), probe]
     log = output / "000.log"
     result = execute(arguments, root, log)
-    tool = json.loads(log.read_text(encoding="utf-8"))
+    tool = native_service_tool_result(log)
     return {"root": str(root.resolve()), "command": result, "tool": tool, "log": str(log)}
 
 
@@ -1123,11 +1141,12 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/local-acceptance/compiler_storage_acceptance.py": "cd2e11371bcb7f2fd741a5678b54709c78036cea289a9e750bc844fd004d65a7",
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "9204c1233d29819bbbfa57c85d508257e9354ae326a198091060448889675e88",
-        ".github/local-acceptance/compiler_cache.py": "70798375283ff9cf21ad7cca72badb9daaeefba80e60d400ea5dd24932a87b6c",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
+        ".github/local-acceptance/compiler_cache.py": "d6e9def1fea00707ee7ec6c20b5f13f1fd7b09f8960e70f987220494613d0afa",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
@@ -1135,10 +1154,10 @@ def native_guard_files():
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
-        "e2e/local-acceptance/release_artifact_acceptance.py": "2566e98db948594841380607640cceed6d350639e624e012af838848fe1f2cf3",
-        "rust/crates/rusty-sudocode-cli/build.rs": "6220e21b120f2b38e91f707b902f5e46a455aceb2263e092bbeb16bb4eeb6baa",
-        ".github/scripts/ci_input_scope.py": "cbe5627fe8e9252db7435dee0249d2aa22a10cbe2ddd0fbae0f352d7fd38efa4",
-        ".github/workflows/rust-ci.yml": "ae1265f67729d74e9cbd3091b1776c0046d23cccf7bf6efef17311781ddcf468",
+        "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
+        "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
+        ".github/scripts/ci_input_scope.py": "51c72a0115e1802fbe2c18259424986438ec0580f52007245ab6dd73a98d57f2",
+        ".github/workflows/rust-ci.yml": "814e0a94e4338f950f79d1c3624e69be0af2e230519f1e9d1a1ed5b6cd3b4816",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
         ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
@@ -1149,11 +1168,12 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "2cb642e6710d67282f1e778fc60ddb2d820d7327e590589cecc6d5b13845c372",
+        ".github/scripts/local_acceptance.py": "93d591cbd0ccb7da2b3dea321c62950ef62c3a3412d0cd726726c459a49c377b",
         ".github/scripts/vfs_search_cache.py": "410727c5e215727b688e536dc932e86f65ecb661924c88a2cb23705ccd2fcd0a",
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",
+        ".github/workflows/local-acceptance-workspace.yml": "c501c66c31ba758329fbf2424e85834b741d2cb5c15807fa900c98171e4a9418",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
@@ -1161,20 +1181,20 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/host_lease_acceptance.py": "6b5f2f0cc9c8653f33ea4d2f43b403ac8e77aaffdb84bccc42782713c6940656",
+        "e2e/local-acceptance/host_lease_acceptance.py": "630e47774a2e3e003b7d3d5524c6f2e19ffcbe79bc541a949353a07628df29f2",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "378a8fde4d2d3f9f3c04a690aa7bfa226300a67a6584f9f11860f63905a8958f",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
-        "e2e/local-acceptance/parallel_acceptance.py": "8c1a4e022558bf2fe9b6aa619baa029fbc06afaf44f7efed7ee193d6c0cf04e9",
+        "e2e/local-acceptance/parallel_acceptance.py": "ac3e9f6409f4145dccdbb5958fbd4784d8e10438c36ae8c2626955b239c6ac9a",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
-        "e2e/local-acceptance/release_acceptance.py": "761d53538601b59832c17ad1b71d9691ddb4c83baf1ca8c09128df0bea78d309",
-        "e2e/local-acceptance/resource_scheduling_acceptance.py": "cc1ff8e34a12ebcac284330497a26c4ea5af336cd208e1ab2a8531e83180eeb0",
+        "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
+        "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "453b4bca68e242e4635490e97e45dbb0124195b78c43c2e0a71ac5f4fa24cd66",
+        "e2e/local-acceptance/run.py": "0769c75cbc199c29facf6418effeb9af325bc5b4d4aaafebef480cdf4c6faee4",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "2b6dbee011188630ea87e07bdc9e988934cefbd9f85df5aa8d588bf08091b444",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1218,7 +1238,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     selection = {key: policy[key] for key in ["version", "repository", "checks"]}
     data = json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()
     actual_scope = hashlib.sha256(data).hexdigest()
-    if actual_scope != "0c1cb7ce5f5b521161c767176fdbfb2074c52e71bcdc03d53094e8a49c9ec1cf":
+    if actual_scope != "c6c1d5e3a6bd79558005d11d9a6c1f16842021c221963f3c03ef513ad6d002ec":
         raise RuntimeError(f"Native grouping scope policy changed: SHA256 {actual_scope}. "
                            "Update the selection digest in .github/local-acceptance/checks.py stage_profile_executor, "
                            "then rerun contract-update through the installed hook. No grouping guard has started.")
@@ -1231,11 +1251,12 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '91a0c3502c2006d5de4fa18df1cac4f8fc1e502ea4505b1972d7edc1543fc8a9', 'native-context': '0f16d4130ec57729a848a57728a02b4162d8bb40c69989bb81b1ce4f24a40520'}
+    expected = {'native-release': 'c70c87f9439a2440c1177626adb68c7094a6ef890ac1f0ab2bbf11c2e3be34b4', 'native-context': '6d19351f6b9aada98a3982e772d32da330c879807ec7b97b72fcba318ff86fab', 'native-services': 'd6334ef395ca07197e8b6a3a6cd1cb326888d24dd6c77ffaf195fbe1e10e9222'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
-            label = "Native release" if name == "native-release" else "Native compiler-context"
+            label = {"native-release": "Native release", "native-context": "Native compiler-context",
+                     "native-services": "Native service tool"}[name]
             raise RuntimeError(f"{label} guard recipe changed; update its protected execution pin")
     (policy_root / ".github/local-acceptance/checks.py").write_bytes(subprocess.check_output(
         ["git", "show", f"{policy_ref}:.github/local-acceptance/checks.py"], cwd=root))

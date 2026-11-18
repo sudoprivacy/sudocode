@@ -1,0 +1,336 @@
+//! Session-owned input surfaces, driven by outstanding engine requests.
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+
+use crate::repl_ui;
+use engine_core::{EngineCommand, EngineEvent};
+use runtime::{PermissionPrompter, QuestionPrompter};
+
+pub(crate) type PendingQuestionAnswer = Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>;
+
+pub(crate) fn consume_pending_question_answer(
+    pending: &PendingQuestionAnswer,
+    text: String,
+) -> bool {
+    let Some(tx) = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return false;
+    };
+    let _ = tx.send(text);
+    true
+}
+
+pub(crate) fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
+    let _ = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+}
+
+/// Keep the event pump draining while the existing input owner awaits a reply.
+/// The engine serializes interactions, so at most one reply worker is parked.
+fn relay_prompt_reply<T: Send + 'static>(
+    commands: mpsc::Sender<EngineCommand>,
+    reply: runtime::PromptReply<T>,
+    answer: impl FnOnce(T) -> EngineCommand + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let _ = commands.send(answer(futures::executor::block_on(reply)));
+    })
+}
+
+#[derive(Clone)]
+struct IocraftQuestionPrompter {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ui: repl_ui::UiCommandSender,
+    pending_answer: PendingQuestionAnswer,
+    agent: Option<String>,
+}
+
+impl IocraftQuestionPrompter {
+    fn new(ui: repl_ui::UiCommandSender, pending_answer: PendingQuestionAnswer) -> Self {
+        Self {
+            ui,
+            pending_answer,
+            agent: None,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn show_field(
+        &self,
+        request: &runtime::QuestionPromptRequest,
+        index: usize,
+        earlier: Option<&runtime::QuestionPromptAnswer>,
+    ) {
+        let field = &request.fields[index];
+        self.ui.show_turn_question(repl_ui::QuestionPromptView {
+            presentation: request.presentation.clone(),
+            title: match (&self.agent, &request.title) {
+                (Some(agent), Some(title)) => Some(format!("{agent} · {title}")),
+                (Some(agent), None) => Some(agent.clone()),
+                (None, title) => title.clone(),
+            },
+            description: request.description.clone(),
+            index,
+            total: request.fields.len(),
+            prompt: field.prompt.clone(),
+            options: field
+                .options
+                .iter()
+                .map(|option| repl_ui::QuestionOptionView {
+                    label: option.label.clone(),
+                    value: option.value.clone(),
+                    description: option.description.clone(),
+                    recommended: option.recommended,
+                    is_navigable: false,
+                })
+                .collect(),
+            allow_custom_input: field.allow_custom_input,
+            custom_input_hint: field.custom_input_hint.clone(),
+            force_fuzzy_select: false,
+            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
+            initial_value: earlier.map(|answer| answer.value.clone()),
+        });
+    }
+
+    fn prepare_answer_receiver(&self) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self
+                .pending_answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("question prompt cancelled".into());
+            }
+            if pending.is_some() {
+                return Err("question prompt already pending".to_string());
+            }
+            *pending = Some(tx);
+        }
+        Ok(rx)
+    }
+
+    fn answer_for_field(
+        field: &runtime::QuestionField,
+        raw_answer: String,
+    ) -> runtime::QuestionPromptAnswer {
+        let matched = field
+            .options
+            .iter()
+            .find(|option| option.value == raw_answer);
+        let label = matched
+            .map(|option| option.label.clone())
+            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
+        runtime::QuestionPromptAnswer {
+            id: field.id.clone(),
+            value: raw_answer,
+            label,
+        }
+    }
+}
+
+impl runtime::QuestionPrompter for IocraftQuestionPrompter {
+    fn cancel_pending(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_pending_question_answer(&self.pending_answer);
+        self.ui.clear_turn_question();
+    }
+
+    fn ask(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        futures::executor::block_on(self.begin_question(request))
+    }
+
+    fn begin_question(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> runtime::PromptReply<Result<Vec<runtime::QuestionPromptAnswer>, String>> {
+        let this = self.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            // Answers are kept per question so going back restores them.
+            let mut answers: Vec<Option<runtime::QuestionPromptAnswer>> =
+                vec![None; request.fields.len()];
+            let mut index = 0;
+            while index < request.fields.len() {
+                let rx = this.prepare_answer_receiver()?;
+                this.show_field(&request, index, answers[index].as_ref());
+                let Ok(raw) = rx.await else {
+                    this.ui.clear_turn_question();
+                    return Err("question prompt cancelled".into());
+                };
+                if raw == repl_ui::QUESTION_BACK {
+                    index = index.saturating_sub(1);
+                    continue;
+                }
+                answers[index] = Some(Self::answer_for_field(&request.fields[index], raw));
+                index += 1;
+            }
+            this.ui.clear_turn_question();
+            Ok(answers.into_iter().flatten().collect())
+        })
+    }
+}
+
+impl runtime::PermissionPrompter for IocraftQuestionPrompter {
+    fn decide(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        futures::executor::block_on(self.begin_decision(request))
+    }
+
+    fn begin_decision(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
+        let question = runtime::QuestionPromptRequest {
+            presentation: runtime::QuestionPresentation::Question,
+            title: Some(format!("Approve {}?", request.tool_name)),
+            description: Some(
+                format!(
+                    "{}\n{}",
+                    request.input,
+                    request.reason.as_deref().unwrap_or_default()
+                )
+                .into(),
+            ),
+            fields: vec![runtime::QuestionField {
+                id: "permission".into(),
+                prompt: "Allow this tool call?".into(),
+                kind: runtime::QuestionKind::SingleSelect,
+                required: true,
+                allow_custom_input: false,
+                custom_input_hint: None,
+                options: vec![
+                    runtime::QuestionOption {
+                        label: "Allow once".into(),
+                        value: "allow".into(),
+                        description: None,
+                        recommended: false,
+                    },
+                    runtime::QuestionOption {
+                        label: "Deny".into(),
+                        value: "deny".into(),
+                        description: None,
+                        recommended: false,
+                    },
+                ],
+            }],
+        };
+        let reply = runtime::QuestionPrompter::begin_question(self, &question);
+        Box::pin(async move {
+            match reply.await {
+                Ok(answers) if answers.first().is_some_and(|a| a.value == "allow") => {
+                    runtime::PermissionPromptDecision::Allow
+                }
+                _ => runtime::PermissionPromptDecision::Deny {
+                    reason: "tool permission denied or cancelled".into(),
+                },
+            }
+        })
+    }
+}
+
+struct ActivePrompt {
+    id: engine_core::RequestId,
+    prompter: IocraftQuestionPrompter,
+    worker: thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionPrompts {
+    ui: repl_ui::UiCommandSender,
+    pending: PendingQuestionAnswer,
+    commands: mpsc::Sender<EngineCommand>,
+    attention: Arc<engine_events::AttentionState>,
+    active: Option<ActivePrompt>,
+}
+
+impl SessionPrompts {
+    pub(crate) fn new(
+        ui: repl_ui::UiCommandSender,
+        pending: PendingQuestionAnswer,
+        commands: mpsc::Sender<EngineCommand>,
+    ) -> Self {
+        Self {
+            ui,
+            pending,
+            commands,
+            attention: Arc::default(),
+            active: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        if let Some(mut active) = self.active.take() {
+            active.prompter.cancel_pending();
+            let _ = active.worker.join();
+        }
+    }
+
+    /// Consume requests even when no foreground turn renderer is running.
+    pub(crate) fn observe(&mut self, event: &EngineEvent) -> bool {
+        if let EngineEvent::Attention(state) = event {
+            if self
+                .active
+                .as_ref()
+                .is_some_and(|active| !state.requests.iter().any(|request| request.id == active.id))
+            {
+                self.clear();
+            }
+            self.attention = state.clone();
+            self.ui.attention(state.clone());
+            return true;
+        }
+        let id = match event {
+            EngineEvent::PermissionRequest { id, .. } | EngineEvent::QuestionRequest { id, .. } => {
+                *id
+            }
+            _ => return false,
+        };
+        self.clear();
+        let mut prompter = IocraftQuestionPrompter::new(self.ui.clone(), self.pending.clone());
+        // Provenance comes from the request owner, never from generated text.
+        prompter.agent = self
+            .attention
+            .requests
+            .iter()
+            .find(|request| request.id == id)
+            .and_then(|request| request.agent.as_ref())
+            .map(|agent| agent.name.clone());
+        let commands = self.commands.clone();
+        let worker = match event {
+            EngineEvent::PermissionRequest { request, .. } => relay_prompt_reply(
+                commands,
+                prompter.begin_decision(request),
+                move |decision| EngineCommand::PermissionAnswer { id, decision },
+            ),
+            EngineEvent::QuestionRequest { request, .. } => {
+                relay_prompt_reply(commands, prompter.begin_question(request), move |answers| {
+                    EngineCommand::QuestionAnswer { id, answers }
+                })
+            }
+            _ => unreachable!(),
+        };
+        self.active = Some(ActivePrompt {
+            id,
+            prompter,
+            worker,
+        });
+        true
+    }
+}
+
+impl Drop for SessionPrompts {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}

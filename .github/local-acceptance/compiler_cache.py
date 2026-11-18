@@ -25,6 +25,17 @@ ARCHIVES = {
     ("darwin", "x86_64"): ("x86_64-apple-darwin", "tar.gz", "2db7344bb96de350df79cd9f0124dd4e9baa47b3de2fac1e63e1346b66b20684"),
     ("darwin", "aarch64"): ("aarch64-apple-darwin", "tar.gz", "a35a0b7d622618774bc1bb8102d72562dfb21e619f88b153b370d7f89bc286af"),
 }
+RESPONSE_FILE_VARIANT = "scode-responsefiles.1"
+WINDOWS_RESPONSE_FILE_TOOL = {
+    "variant": RESPONSE_FILE_VARIANT,
+    "repository": "sudoprivacy/sudocode",
+    "release_tag": "ci-sccache-v0.19.0-responsefiles.1",
+    "filename": "sccache-v0.19.0-scode-responsefiles.1-x86_64-pc-windows-msvc.zip",
+    "sha256": "f38c6dc470d04a28372f621c88bb74096d57e77083adcedd4b7b739ca9021562",
+    "member": "sccache-v0.19.0-scode-responsefiles.1-x86_64-pc-windows-msvc/sccache.exe",
+    "cache_namespace": VERSION + "-" + RESPONSE_FILE_VARIANT,
+    "response_files": True,
+}
 
 # Cargo's rustc wrapper during a session. Session.start compiles it with the
 # host's rustc and builds in the verified sccache path.
@@ -33,18 +44,19 @@ WRAPPER_SOURCE = r"""//! Cargo's RUSTC_WRAPPER for the local compiler-object cac
 //! Cargo passes `<compiler> <arguments>`, or `<compiler> @<file>` once the
 //! operating system refused the arguments inline. sccache 0.17 and later reads
 //! that file and starts rustc with every argument inline again, which Windows
-//! refuses past 32,767 characters (mozilla/sccache#2787). Arguments that do not
-//! fit inline therefore reach the compiler in a file, uncached; every other
-//! unit goes through sccache.
+//! refuses past 32,767 characters (mozilla/sccache#2787). The registered fixed
+//! Windows tool can cache eligible files; official tools retain the direct
+//! path. Queries and other non-cacheable probes keep the direct compiler path.
 use std::env::{args_os, current_exe};
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{exit, Command, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The sccache executable this session verified.
 const CACHE: &str = include_str!("cache-tool");
+const CACHE_RESPONSE_FILES: &str = include_str!("cache-response-files");
 
 fn main() {
     let mut arguments: Vec<OsString> = args_os().skip(1).collect();
@@ -52,14 +64,109 @@ fn main() {
         fail("Cargo passes the compiler as the first argument");
     }
     let compiler = arguments.remove(0);
-    if arguments.iter().any(|argument| argument.as_encoded_bytes().starts_with(b"@")) {
+    if arguments
+        .iter()
+        .any(|argument| argument.as_encoded_bytes().starts_with(b"@"))
+    {
+        if CACHE_RESPONSE_FILES == "1" && cacheable_response_compilation(&arguments) {
+            match Command::new(CACHE).arg(&compiler).args(&arguments).status() {
+                Err(error) if too_long(&error) => {
+                    record("cargo");
+                    finish(&compiler, Command::new(&compiler).args(&arguments).status());
+                }
+                result => {
+                    record("cargo_cached");
+                    finish(CACHE.as_ref(), result);
+                }
+            }
+        }
         record("cargo");
+        finish(&compiler, Command::new(&compiler).args(&arguments).status());
+    }
+    // Compiler queries and non-cacheable probes must keep rustc's direct path.
+    if !cacheable_compilation(&arguments) {
         finish(&compiler, Command::new(&compiler).args(&arguments).status());
     }
     match Command::new(CACHE).arg(&compiler).args(&arguments).status() {
         Err(error) if too_long(&error) => direct(&compiler, &arguments, &error),
         result => finish(CACHE.as_ref(), result),
     }
+}
+
+/// Inspect eligibility only; forward the original files and arguments unchanged.
+fn cacheable_response_compilation(arguments: &[OsString]) -> bool {
+    let mut expanded = Vec::new();
+    for argument in arguments {
+        let Some(text) = argument.to_str() else {
+            return false;
+        };
+        let Some(path) = text.strip_prefix('@') else {
+            expanded.push(argument.clone());
+            continue;
+        };
+        let Ok(file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let mut contents = String::new();
+        if file
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_string(&mut contents)
+            .is_err()
+            || contents.len() > 16 * 1024 * 1024
+        {
+            return false;
+        }
+        // Match rustc's line/trim/empty rules, as the pinned tool does. A nested
+        // @ token is literal to rustc, so leave that case on its original path.
+        for line in contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if line.starts_with('@') {
+                return false;
+            }
+            expanded.push(OsString::from(line));
+        }
+    }
+    cacheable_compilation(&expanded)
+}
+
+/// Forward only Cargo-style link emissions to the compiler-object cache.
+fn cacheable_compilation(arguments: &[OsString]) -> bool {
+    let mut crate_name = false;
+    let mut output_directory = false;
+    let mut link = false;
+    let mut iter = arguments.iter();
+    while let Some(argument) = iter.next() {
+        let Some(text) = argument.to_str() else {
+            return false;
+        };
+        if matches!(
+            text,
+            "-" | "-o" | "-V" | "-vV" | "-Vv" | "--version" | "-h" | "--help" | "--print"
+        ) || text.starts_with("--print=")
+        {
+            return false;
+        }
+        if text == "--crate-name" {
+            crate_name = iter.next().is_some();
+        } else if text.starts_with("--crate-name=") {
+            crate_name = text.len() > 13;
+        } else if text == "--out-dir" {
+            output_directory = iter.next().is_some();
+        } else if text.starts_with("--out-dir=") {
+            output_directory = text.len() > 10;
+        } else if text == "--emit" {
+            link = iter
+                .next()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.split(',').any(|item| item == "link"));
+        } else if let Some(value) = text.strip_prefix("--emit=") {
+            link = value.split(',').any(|item| item == "link");
+        }
+    }
+    crate_name && output_directory && link
 }
 
 /// ERROR_FILENAME_EXCED_RANGE on Windows and E2BIG elsewhere, the errors on
@@ -81,7 +188,9 @@ fn direct(compiler: &OsStr, arguments: &[OsString], error: &io::Error) -> ! {
                 contents.push_str(text);
                 contents.push('\n');
             }
-            _ => fail(&format!("cannot start {CACHE}: {error}; an argument has no argument-file form")),
+            _ => fail(&format!(
+                "cannot start {CACHE}: {error}; an argument has no argument-file form"
+            )),
         }
     }
     let file = directory().join(format!("{}.args", unique()));
@@ -124,7 +233,10 @@ fn unique() -> String {
 fn finish(program: &OsStr, result: io::Result<ExitStatus>) -> ! {
     match result {
         Ok(status) => exit(status.code().unwrap_or(101)),
-        Err(error) => fail(&format!("cannot start {}: {error}", program.to_string_lossy())),
+        Err(error) => fail(&format!(
+            "cannot start {}: {error}",
+            program.to_string_lossy()
+        )),
     }
 }
 
@@ -144,16 +256,26 @@ def configured(*environments):
                for environment in environments for key in environment)
 
 
-def archive_definition(system=None, machine=None):
+def archive_definition(system=None, machine=None, variant=None):
     system = (system or platform.system()).lower()
     machine = (machine or platform.machine()).lower()
     machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     if (system, machine) not in ARCHIVES:
         return None
+    if variant is None:
+        variant = RESPONSE_FILE_VARIANT if (system, machine) == ("windows", "x86_64") else "official"
+    if variant == RESPONSE_FILE_VARIANT:
+        if (system, machine) != ("windows", "x86_64"):
+            raise RuntimeError("No registered response-file tool for this platform")
+        return {"version": VERSION, "target": "x86_64-pc-windows-msvc", **WINDOWS_RESPONSE_FILE_TOOL}
+    if variant != "official":
+        raise RuntimeError("Unknown compiler-cache tool variant")
     target, suffix, expected = ARCHIVES[system, machine]
     directory = f"sccache-v{VERSION}-{target}"
     return {"version": VERSION, "target": target, "filename": directory + "." + suffix,
-            "sha256": expected, "member": directory + "/sccache" + (".exe" if system == "windows" else "")}
+            "sha256": expected, "member": directory + "/sccache" + (".exe" if system == "windows" else ""),
+            "repository": "mozilla/sccache", "release_tag": "v" + VERSION,
+            "variant": "official", "cache_namespace": VERSION, "response_files": False}
 
 
 def executable_bytes(archive, definition):
@@ -173,23 +295,23 @@ def executable_bytes(archive, definition):
         return packed.extractfile(entries[0]).read()
 
 
-def prepare(download, cache=None):
+def prepare(download, cache=None, *, variant=None):
     """Verify archive/member bytes before executing a cached compiler tool."""
     if configured(os.environ):
         print("COMPILER_CACHE: preserving existing wrapper/cache configuration; no additional tool download.", flush=True)
         return None
-    definition = archive_definition()
+    definition = archive_definition(variant=variant)
     if definition is None:
         return None
     cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/tools/sccache")
-    directory = cache / VERSION / definition["target"]
+    directory = cache / definition["cache_namespace"] / definition["target"]
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / definition["filename"]
     binary = directory / Path(definition["member"]).name
     if archive.is_symlink() or binary.is_symlink():
         raise RuntimeError("Compiler-cache tool inputs must be regular private cache files")
     if not archive.exists():
-        download("mozilla/sccache", "v" + VERSION, definition["filename"], archive)
+        download(definition["repository"], definition["release_tag"], definition["filename"], archive)
     expected = executable_bytes(archive, definition)
     if binary.exists():
         if binary.read_bytes() != expected:
@@ -215,12 +337,14 @@ class Session:
 
     def __init__(self, tool, directory, execute, cache=None):
         self.tool, self.directory, self.execute_command = tool, Path(directory), execute
-        self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / VERSION)
+        self.cache = Path(cache or Path.home() / ".cache/sudocode-local-acceptance/compiler-objects" / (tool["cache_namespace"] + "-v2"))
+        self.control = self.cache.with_name(self.cache.name + ".control")
         self.environment, self.server, self.wrapper = None, None, None
         self.tool_commands, self.records, self.priorities = [], [], {}
         self.server_history = []
         self.storage_lock = None
         self.disabled = False
+        self.definition = None
 
     def tool_command(self, name, *arguments):
         if self.server is not None:
@@ -233,7 +357,14 @@ class Session:
     def acquire_storage(self):
         """A local disk cache supports one server; a busy cache adds no wait."""
         self.cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock = (self.cache / ".server.lock").open("a+b")
+        # The backend owns every file under its data root, including eviction.
+        # Never let it evict the lock or retained server-incarnation record.
+        if any((self.cache / name).exists() for name in (".server.lock", ".server-owner.json")):
+            self.disabled = True
+            print("COMPILER_CACHE: legacy control files are inside the managed data root; preserving that store and using original Cargo.", flush=True)
+            return False
+        self.control.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = (self.control / ".server.lock").open("a+b")
         if lock.tell() == 0:
             lock.write(b"\0")
             lock.flush()
@@ -256,7 +387,7 @@ class Session:
             return False
         self.storage_lock = lock
         try:
-            owner = json.loads((self.cache / ".server-owner.json").read_text(encoding="utf-8"))
+            owner = json.loads((self.control / ".server-owner.json").read_text(encoding="utf-8"))
         except FileNotFoundError:
             owner = None
         except (ValueError, OSError):
@@ -291,7 +422,7 @@ class Session:
             return True
 
     def write_owner(self, phase):
-        path = self.cache / ".server-owner.json"
+        path = self.control / ".server-owner.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps({"owner": self.environment["SCODE_COMPILER_CACHE_OWNER"],
                                         "executable": self.tool["executable"], "phase": phase,
@@ -350,12 +481,13 @@ class Session:
         return process
 
     def start(self):
-        definition = archive_definition()
-        if self.tool["sha256"] != definition["sha256"] or self.tool["target"] != definition["target"]:
+        definition = archive_definition(variant=self.tool.get("variant", "official"))
+        if definition is None or any(self.tool.get(name) != value for name, value in definition.items()):
             raise RuntimeError("Compiler-cache tool record does not match this pinned platform")
         expected = executable_bytes(Path(self.tool["archive"]), definition)
         if digest(expected) != self.tool["executable_sha256"] or Path(self.tool["executable"]).read_bytes() != expected:
             raise RuntimeError("Prepared compiler-cache tool changed before use")
+        self.definition = definition
         if not self.acquire_storage():
             return False
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -388,18 +520,20 @@ class Session:
         source.mkdir(mode=0o700)
         (source / "main.rs").write_bytes(WRAPPER_SOURCE.encode("utf-8"))
         (source / "cache-tool").write_bytes(self.tool["executable"].encode("utf-8"))
+        (source / "cache-response-files").write_bytes(b"1" if self.definition["response_files"] else b"0")
         (self.directory / "argument-files").mkdir(mode=0o700)
         executable = self.directory / ("rustc-wrapper" + (".exe" if os.name == "nt" else ""))
         receipt = self.execute_command(["rustc", "--edition=2021", "-C", "opt-level=1", "--crate-name", "rustc_wrapper",
                                         str(source / "main.rs"), "-o", str(executable)],
                                        self.directory, self.directory / "wrapper-build.log")
         self.wrapper = {"source_sha256": digest(WRAPPER_SOURCE.encode("utf-8")), "executable": str(executable.resolve()),
-                        "executable_sha256": digest(executable.read_bytes()), "build": receipt}
+                        "executable_sha256": digest(executable.read_bytes()), "build": receipt,
+                        "response_files_capable": self.definition["response_files"]}
         return self.wrapper["executable"]
 
     def argument_file_units(self):
         """Units the wrapper gave the compiler in an argument file: Cargo's, or its own."""
-        units = {"cargo": 0, "wrapper": 0}
+        units = {"cargo": 0, "wrapper": 0, "cargo_cached": 0}
         for path in (self.directory / "argument-files").iterdir():
             if path.suffix[1:] in units:
                 units[path.suffix[1:]] += 1
@@ -441,7 +575,7 @@ class Session:
             finally:
                 self.tool_command("server-stop", "--stop-server")
             process.wait(timeout=5)
-        owner = self.cache / ".server-owner.json"
+        owner = self.control / ".server-owner.json"
         if owner.exists() and json.loads(owner.read_text(encoding="utf-8"))["owner"] == self.environment["SCODE_COMPILER_CACHE_OWNER"]:
             owner.unlink()
         if self.wrapper is not None:
@@ -449,7 +583,7 @@ class Session:
             print("COMPILER_CACHE_ARGUMENT_FILES=" + json.dumps(self.wrapper["argument_file_units"]), flush=True)
         # Every cached command shares this session. Record it once, on the
         # first command, and bind each command to it by SHA-256.
-        session = {"version": VERSION, "tool": self.tool, "wrapper": self.wrapper, "server": self.server, "stats": stats,
+        session = {"version": VERSION, "storage_layout": {"version": 2, "data": str(self.cache), "control": str(self.control)}, "tool": self.tool, "wrapper": self.wrapper, "server": self.server, "stats": stats,
                    "server_history": self.server_history, "compiler_priorities": self.priorities,
                    "tool_commands": self.tool_commands}
         identity = digest(json.dumps(session, sort_keys=True, separators=(",", ":")).encode())

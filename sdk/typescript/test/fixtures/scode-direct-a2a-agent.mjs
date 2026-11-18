@@ -23,7 +23,8 @@ const frame = (hash, value) => {
 };
 const inputDigest = (tool, params) => {
   const input = tool === 'send' ? { to: params.to, message: params.message,
-    ...(params.summary === undefined ? {} : { summary: params.summary }) }
+    ...(params.summary === undefined ? {} : { summary: params.summary }),
+    ...(params.delivery === undefined ? {} : { delivery: params.delivery }) }
     : params.activeOnly === undefined ? {} : { active_only: params.activeOnly };
   const hash = createHash('sha256').update('sudocode.direct-a2a.input.v1\0');
   frame(hash, tool);
@@ -60,7 +61,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     log({ method: 'initialize', peerOwned });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
-        version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
+        version: 1, hostAudit: 1, ...(scenario === 'legacy-delivery' ? {} : { delivery: 1 }), ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
       }, ...(peerOwned ? { peerInput: { version: peerOwned } } : {}) } } }),
     };
   })

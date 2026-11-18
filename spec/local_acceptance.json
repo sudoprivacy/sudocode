@@ -41,6 +41,7 @@
       ]
     },
     "native-workspace": {
+      "complementary": "periodic",
       "include": [
         ".github/local-acceptance/compiler_cache.py",
         "rust/**",

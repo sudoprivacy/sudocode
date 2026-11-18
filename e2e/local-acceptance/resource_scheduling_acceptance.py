@@ -93,10 +93,13 @@ def verify_unreviewed_resource_context(output, source, command):
     effect = ('os.environ["SCODE_SYNTHETIC_WAIT_OBSERVER"] = '
               '"changed" if "TimeoutExpired" in run_command.__code__.co_names else "baseline"')
     callback = '\ndef eager_completion_observer():\n    ' + effect + '\neager_completion_observer()\n'
+    entry = 'def preflight_plan_compatibility(plan, names, author, policy_ref, signers_ref):\n'
+    assert source.count(entry) == 1
     pairs = [
         ("eager-module", source.replace('\ndef read_note(', callback + '\ndef read_note(', 1)),
         ("command-consumer", source.replace('def sha(data):\n', 'def sha(data):\n    ' + effect + '\n', 1)),
         ("outer-producer", source.replace('def main():\n', 'def main():\n    ' + effect + '\n', 1)),
+        ("plan-entry", source.replace(entry, entry + '    ' + effect + '\n', 1)),
     ]
     driver = '''import importlib.util,sys
 from pathlib import Path
@@ -104,6 +107,8 @@ path,log,kind=sys.argv[1:]
 spec=importlib.util.spec_from_file_location("observed",path)
 helper=importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
 helper.ROOT=Path.cwd()
+if kind=="plan-entry":
+    helper.preflight_plan_compatibility({},[],{},"same-protected-policy","same-protected-policy")
 if kind=="outer-producer":
     sys.argv=[path,"--help"]
     try: helper.main()

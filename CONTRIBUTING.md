@@ -64,9 +64,11 @@ the code first.
   are forbidden by rule. See [Test policy](#test-policy) below for
   the rationale. (See ROADMAP § Goal 1 → "Test layer policy".)
 
-- **No in-CLI multi-agent dashboard.** sudocode is an agent unit,
-  not a hub. Multi-agent orchestration UI belongs in sudowork /
-  your tmux — not inside scode. (See ROADMAP § Goal 4.)
+- **Agent navigation shares engine facts.** An inline agent browser may
+  expose child tasks and peers in distinct groups. Reuse the existing task
+  browser and engine command/event seam; do not introduce a second scheduler,
+  transcript owner or permission authority. MossWork consumes the same facts
+  and operations. (See ROADMAP § Goal 4.)
 
 - **No CLA, no copyright assignment, no closed-source escape
   hatch.** Contributors retain their copyright; their code is
@@ -183,15 +185,28 @@ Never commit a private key. Installation preserves existing hooks by refusing to
 overwrite them; compose an existing hook explicitly. Protected-main updates refresh
 the installed runner automatically, including when pushing an older worktree.
 
-The hook runs applicable real checks before a branch push. A Windows author runs
-the Windows workspace, resize, release and service checks locally; CI runs Linux
-and macOS. A Mac author runs macOS locally; CI runs Linux and Windows. A Linux
-author runs Linux locally; CI runs Windows and macOS. Co-host build verification
-follows the same host split when its inputs change. SDK changes additionally
+The hook runs applicable real checks before a branch push. The original author
+runs the selected native-workspace profile locally, retaining its existing
+source selection, lint, build, test and doctest commands. CI runs the other
+platforms' selected resize, service, context, example and co-host profiles;
+release checks retain their existing selection. A Windows author supplies
+Windows, a Mac author macOS, and a Linux author Linux. SDK changes additionally
 require both Linux x64 and ARM64: a Linux author supplies only their own CPU
 target, and CI supplies the other. Each supported OS remains covered; macOS and
 Windows source acceptance is by OS, not every CPU architecture on every PR.
 Actual tagged co-host releases retain their five-platform artifact builds.
+Full three-platform workspace execution runs weekly and on manual main dispatch
+through `local-acceptance-workspace.yml`, using the original trusted native
+executor with no changed-test selection. A ready PR changing that workflow
+also runs its three-platform matrix. This deliberately reduces per-PR coverage:
+workspace cases specific to another OS may first fail after merge in periodic
+regression. Selected complementary native journeys and three-platform queue
+Clippy remain required. Periodic runner time must be included in future
+lifecycle cost comparisons; no net saving is inferred from omitted commands.
+An authenticated older full complementary plan remains valid only when it is
+the exact former generated plan. Its original source, author, signatures,
+commands, dispatcher, workflow and full host responsibilities remain bound;
+it is retained without rewriting notes or rerunning completed profiles.
 Ordinary Windows Rust PTYs use the same checksum-pinned ConPTY distribution as
 the visual and performance journeys. The shared installer provisions native
 sidecars in the dev-profile target's `debug/deps`, which nextest puts on the
@@ -1307,6 +1322,15 @@ candidate subprocess isolation and refusal of a case-sensitive cleanup that leak
 explicit lowercase or mixed-case overrides. These controls
 establish credential transport behavior; they do not measure live GitHub quota.
 
+The standalone release-artifact fixture in CI preflight also prepares its pinned
+tools before running. It reads only `prepare_tools.py`, `checks.py` and
+`compiler_cache.py` from the immutable protected PR base into a private temporary
+directory. Git object reads and the later candidate fixture receive no token;
+only the isolated trusted preparation process receives the step's read-only
+credential. The same real Git/native-process fixture rejects candidate-source
+substitution and missing credential cleanup. Tool pins, the release entrypoint,
+publication refusals and the original artifact assertions remain unchanged.
+
 #### Acceptance contract changes
 
 For ordinary frozen source with complementary native hosts, the protected
@@ -1373,6 +1397,16 @@ and proof children use the existing isolated command environment, including
 when outer hooks export Git repository/index selectors. They add
 no product journey coverage. Measured individual command costs do not establish
 a whole-lifecycle speedup.
+The preflight plan-admission hook has a further paired observer control. Its
+exact reviewed program layout is registered; modified admission-hook behavior
+still refuses reuse. The original three observations remain separate.
+Plan admission evaluates the exact protected parser in an isolated metadata-only
+Python process, with explicit JSON inputs and no caller runtime namespace,
+credentials or inherited hook selectors. The original three check-entry cases
+remain; real controls compare parser isolation with the previous in-process
+environment leak and refuse a non-boolean parser result before profiles or
+signing. The scheduling selector's unknown dynamic-namespace refusal is unchanged.
+This preflight grants no reuse and does not replace final verification.
 
 The local hook and CI verifier reject a candidate that changes the protected
 acceptance contract relative to trusted main. This includes adding checks and
@@ -1440,18 +1474,48 @@ Real Cargo/native-process acceptance checks both layouts, dependency reuse,
 fresh candidate execution and refusal of a conflicting target. It adds no product
 journey coverage; real hosted restores establish remote cache hits and timings.
 Native Rust profiles also use checksum-pinned sccache 0.19.0 with a local
-2 GiB compiler-object cache. Cargo outputs remain in their original target;
+2 GiB compiler-object cache. Windows x64 selects the normally published
+`scode-responsefiles.1` backport described in
+[`docs/ci-compiler-cache-tool.md`](docs/ci-compiler-cache-tool.md); the other
+registered platforms retain their official tools. Cargo outputs remain in their original target;
 the object cache never supplies a previous test result or a source-freshness
 attestation. Original Cargo arguments and environment settings, including target
 inheritance in nested Cargo and compile-time environment reads, are retained.
 Explicit caller wrappers and sccache settings remain authoritative.
+The v2 storage layout keeps its coordination lock and retained server record
+in a sibling control directory, outside the backend's evictable data tree.
+The active object store retains its 2 GiB limit. Versioned tool-variant namespaces
+leave old namespaces intact; their combined retained disk usage can
+temporarily exceed 2 GiB. Explicit stores containing legacy control files are
+preserved and bypassed. No prior cache contents attest source freshness.
+The real-process capacity control uses a near-2-GiB sparse file with less than
+1 MiB actual allocation: restoring the inside-data coordination layout must
+fail, while the current layout preserves the live lock and real cache hits.
 Cargo reaches sccache through a small rustc wrapper that each session compiles
 from `compiler_cache.py`. Cargo moves a unit's arguments into one argument file
 when they do not fit on a command line, which Cargo 1.100's per-dependency
-`-L` paths make common for the largest crates on Windows. sccache 0.19 would
-expand that file onto one command line again (mozilla/sccache#2787), so the
-wrapper gives such units to rustc with the file, uncached, and records how many
-in the session's `argument_file_units`.
+`-L` paths make common for the largest crates on Windows. Official sccache 0.19
+would expand that file onto one command line again (mozilla/sccache#2787).
+The wrapper enables eligible file-based compilations only for the exact
+registered fixed tool. Official tools retain the original uncached compiler path.
+Eligibility inspection follows rustc's line rules and forwards the original
+arguments/files unchanged. Unknown, unreadable, nested or non-cacheable forms
+keep the direct compiler path. Separate `cargo`, `wrapper` and `cargo_cached`
+counters in `argument_file_units` distinguish direct and cache-attempted units;
+they do not prove cache hits.
+Compiler information queries (including version/configuration), metadata-only
+probes and commands without Cargo's cacheable link-emission shape run directly
+through the original compiler. They retain arguments, output and exit status
+without depending on cache availability. Actual cacheable compilation errors
+still fail normally. The real-process guard compares direct/wrapped build-script
+queries and metadata bytes, and restores the old query routing as a negative
+control against an unavailable cache. The original cache-hit, invalidation,
+argument-file, native PTY and ownership controls remain required. The fixed
+Windows consumer additionally requires actual long Cargo argument-file misses
+and hits, linked values and Clippy, plus the restored old bypass and unsafe
+query-routing controls. Unknown/forged tool variants and capabilities refuse
+before storage or execution. These are executor controls, not product coverage
+or a source-freshness witness.
 Each profile owns a private server and stops it on success or failure. A retained
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned
@@ -1486,6 +1550,12 @@ not constrain the executor's automatic host-sized budget.
 Protected profile modules and their compiler-cache companion are materialized
 from the same frozen Git policy. A candidate's working-tree companion is never
 an execution source. The original cache tests also exercise this managed loader.
+Before local profiles start, the candidate compares its proposed plan with
+the current protected parser. An unsupported policy schema refuses before
+profile-module materialization, signing-key use or host queue acquisition.
+Stage a compatible protected verifier with production policy unchanged first.
+This metadata admission does not authorize execution or replace any required
+check, signature, source binding or final publication verification.
 Scheduling plans and completed receipts share the existing exact recipe approval
 lookup in protected policy, including the source-without-test-groups condition.
 Original signatures, source/tree/base, author/platform responsibility, required
@@ -2183,7 +2253,7 @@ Before opening a PR:
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).
 - [ ] The change does **not** introduce `ratatui`, alternate-screen
-      mode, a `--tui` flag, or any in-CLI multi-agent UI (see
+      mode, a `--tui` flag, or a second agent scheduler (see
       [Design principles](#design-principles-you-must-respect)).
 - [ ] If the change is parity work, the PR description leads with a
       CCB validation section (see

@@ -167,32 +167,9 @@ pub(super) fn agent_list_card(
     }
     let mut rows = Vec::new();
     for agent in agents.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
-        let name = text(agent, "name").unwrap_or_default();
-        let address = text(agent, "send_to").unwrap_or_default();
-        let kind = text(agent, "kind").unwrap_or_default();
-        let mut row = format!("{kind}  {name}");
-        if address != name {
-            let _ = write!(row, " · send_to={address}");
-        }
-        if let Some(description) = text(agent, "description") {
-            let _ = write!(row, " · {}", truncate_for_summary(description, 160));
-            if let Some(age) = text(agent, "description_updated_at")
-                .and_then(runtime::agent_description::relative_age)
-            {
-                let _ = write!(row, " · updated {age}");
-            }
-        }
-        match (kind, agent.get("active").and_then(Value::as_bool)) {
-            ("peer", Some(true)) => row.push_str(" · online"),
-            ("peer", _) => {}
-            (_, Some(active)) => row.push_str(if active { " · active" } else { " · inactive" }),
-            (_, None) => {}
-        }
-        for key in ["role", "task_id"] {
-            if let Some(value) = text(agent, key).filter(|value| *value != address) {
-                let _ = write!(row, " · {key}={}", truncate_for_summary(value, 80));
-            }
-        }
+        let Some(row) = agent_row(agent) else {
+            return generic_tool_card("agent_list", input, Some(output), status);
+        };
         rows.push(row);
     }
     if agents.len() > rows.len() {
@@ -202,4 +179,39 @@ pub(super) fn agent_list_card(
         ));
     }
     ToolCardContent::new(header, rows.join("\n"))
+}
+
+/// The tool card and peer navigator share directory wording and theme roles.
+pub(crate) fn agent_row(agent: &Value) -> Option<String> {
+    let name = text(agent, "name")?;
+    let address = text(agent, "send_to")?;
+    let kind = text(agent, "kind")?;
+    let mut row = format!(
+        "{kind}  {}{name}{}",
+        crate::render::ansi_fg(crate::render::theme().agent_color(address)),
+        crate::render::RESET
+    );
+    if address != name {
+        let _ = write!(row, " · send_to={address}");
+    }
+    if let Some(description) = text(agent, "description") {
+        let _ = write!(row, " · {}", truncate_for_summary(description, 160));
+        if let Some(age) =
+            text(agent, "description_updated_at").and_then(runtime::agent_description::relative_age)
+        {
+            let _ = write!(row, " · updated {age}");
+        }
+    }
+    match (kind, agent.get("active").and_then(Value::as_bool)) {
+        ("peer", Some(true)) => row.push_str(" · online"),
+        ("peer", _) => {}
+        (_, Some(active)) => row.push_str(if active { " · active" } else { " · inactive" }),
+        (_, None) => {}
+    }
+    for key in ["role", "task_id"] {
+        if let Some(value) = text(agent, key).filter(|value| *value != address) {
+            let _ = write!(row, " · {key}={}", truncate_for_summary(value, 80));
+        }
+    }
+    Some(row)
 }

@@ -38,7 +38,7 @@
 //! on completion or cancellation. Synchronous compatibility callers use the
 //! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1056,7 +1056,7 @@ fn spawn_direct_worker(
                 .map(Some),
             DirectCall::Resolved { receipt } => {
                 let journal = prompter
-                    .table
+                    .tx
                     .interactions
                     .journal()
                     .map_err(DirectToolError::Refused)?
@@ -1667,7 +1667,6 @@ impl QuestionPrompter for QuestionAdapter {
 
 /// One bounded discovery at a time, never on the command pump or render thread.
 fn refresh_agents(delegate: &Arc<dyn EngineDelegate>, sink: &EventSink) {
-    use std::sync::atomic::Ordering;
     if sink.directory_inflight.swap(true, Ordering::AcqRel) {
         return;
     }

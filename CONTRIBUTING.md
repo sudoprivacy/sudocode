@@ -1474,15 +1474,18 @@ Real Cargo/native-process acceptance checks both layouts, dependency reuse,
 fresh candidate execution and refusal of a conflicting target. It adds no product
 journey coverage; real hosted restores establish remote cache hits and timings.
 Native Rust profiles also use checksum-pinned sccache 0.19.0 with a local
-2 GiB compiler-object cache. Cargo outputs remain in their original target;
+2 GiB compiler-object cache. Windows x64 selects the normally published
+`scode-responsefiles.1` backport described in
+[`docs/ci-compiler-cache-tool.md`](docs/ci-compiler-cache-tool.md); the other
+registered platforms retain their official tools. Cargo outputs remain in their original target;
 the object cache never supplies a previous test result or a source-freshness
 attestation. Original Cargo arguments and environment settings, including target
 inheritance in nested Cargo and compile-time environment reads, are retained.
 Explicit caller wrappers and sccache settings remain authoritative.
 The v2 storage layout keeps its coordination lock and retained server record
 in a sibling control directory, outside the backend's evictable data tree.
-The active object store retains its 2 GiB limit. The default v2 namespace starts
-cold and leaves the old namespace intact; their combined retained disk usage can
+The active object store retains its 2 GiB limit. Versioned tool-variant namespaces
+leave old namespaces intact; their combined retained disk usage can
 temporarily exceed 2 GiB. Explicit stores containing legacy control files are
 preserved and bypassed. No prior cache contents attest source freshness.
 The real-process capacity control uses a near-2-GiB sparse file with less than
@@ -1491,10 +1494,15 @@ fail, while the current layout preserves the live lock and real cache hits.
 Cargo reaches sccache through a small rustc wrapper that each session compiles
 from `compiler_cache.py`. Cargo moves a unit's arguments into one argument file
 when they do not fit on a command line, which Cargo 1.100's per-dependency
-`-L` paths make common for the largest crates on Windows. sccache 0.19 would
-expand that file onto one command line again (mozilla/sccache#2787), so the
-wrapper gives such units to rustc with the file, uncached, and records how many
-in the session's `argument_file_units`.
+`-L` paths make common for the largest crates on Windows. Official sccache 0.19
+would expand that file onto one command line again (mozilla/sccache#2787).
+The wrapper enables eligible file-based compilations only for the exact
+registered fixed tool. Official tools retain the original uncached compiler path.
+Eligibility inspection follows rustc's line rules and forwards the original
+arguments/files unchanged. Unknown, unreadable, nested or non-cacheable forms
+keep the direct compiler path. Separate `cargo`, `wrapper` and `cargo_cached`
+counters in `argument_file_units` distinguish direct and cache-attempted units;
+they do not prove cache hits.
 Compiler information queries (including version/configuration), metadata-only
 probes and commands without Cargo's cacheable link-emission shape run directly
 through the original compiler. They retain arguments, output and exit status
@@ -1502,7 +1510,12 @@ without depending on cache availability. Actual cacheable compilation errors
 still fail normally. The real-process guard compares direct/wrapped build-script
 queries and metadata bytes, and restores the old query routing as a negative
 control against an unavailable cache. The original cache-hit, invalidation,
-argument-file, native PTY and ownership controls remain required.
+argument-file, native PTY and ownership controls remain required. The fixed
+Windows consumer additionally requires actual long Cargo argument-file misses
+and hits, linked values and Clippy, plus the restored old bypass and unsafe
+query-routing controls. Unknown/forged tool variants and capabilities refuse
+before storage or execution. These are executor controls, not product coverage
+or a source-freshness witness.
 Each profile owns a private server and stops it on success or failure. A retained
 ownership record prevents reuse of storage after an interrupted parent while
 its server is still alive; the tool's 10-minute idle timeout bounds orphaned

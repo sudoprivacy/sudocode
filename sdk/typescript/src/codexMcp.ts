@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import type { CodexMailboxAdmission } from './codexMailboxOwner';
 import { runEnrollmentCommand } from './enrollmentCommand';
 import { validateCodexConnectionConfig, CodexCleanupUnknownError, type CodexConnectionConfig } from './codexConnection';
 import { ScodeCleanupUnknownError } from './scodeAcp';
@@ -203,8 +204,10 @@ export async function enroll(argv: string[], claim: CodexAgentClaim): Promise<Co
 
 /** One per-user owner, elected by an exclusive loopback bind. It owns the native
  * observer and all Agent receivers; stdio clients only forward the MCP stream.
+ * An embedding operator can supply v3 admission here. The same provider gates
+ * the selected receiver and its inbox calls. It never comes from a stdio client.
  */
-export async function runCodexMcpOwner(file: string): Promise<void> {
+export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmission): Promise<void> {
   const {config,sha256} = readConfig(file);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
     ...entry as object,at:new Date().toISOString(),provenance:'codex-autojoin-owner',pid:process.pid,
@@ -257,11 +260,18 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     socket.on('error',()=>{});
     socket.once('close',()=>{sockets.delete(socket);scheduleExit();});
     void (async()=>{
-      const hello = await timeout(readHeader(socket),3000,'Local MCP authentication') as {token?: unknown;configSha256?: unknown};
+      const hello = await timeout(readHeader(socket),3000,'Local MCP authentication') as {
+        token?: unknown; configSha256?: unknown; registrationId?: unknown;
+      };
       if(!equal(hello?.token,config.endpoint.token) || !equal(hello?.configSha256,sha256)) {
         throw new Error('Local MCP owner configuration/authentication mismatch');
       }
-      const server = new McpServer({name:'nexus-scode',version:'1.0.0'});
+      const registrationId = hello.registrationId;
+      if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
+      // This public ID identifies the registration used by this particular
+      // stdio client. It confers no mailbox or thread authority.
+      const server = new McpServer({name:'nexus-scode',version:'1.0.0',
+        ...(registrationId ? { description: 'SCode registration ' + registrationId } : {})});
       registerScodeMcpTools(server,async extra=>{
         if(!network)throw new ScodeA2aError('Native inventory is not ready; no A2A command was submitted','not_submitted');
         // A resumed root may precede the periodic poll. Finish its attachment
@@ -271,8 +281,8 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
           mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
-        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}));
-      socket.write(JSON.stringify({ready:true})+'\n');
+        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), mailbox !== undefined);
+      socket.write(JSON.stringify({ready:true,registrationId})+'\n');
       await server.connect(new StdioServerTransport(socket,socket));
       socket.resume();
     })().catch(()=>socket.destroy());
@@ -286,7 +296,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     process.on('uncaughtExceptionMonitor',onCrash);
     scheduleExit();
     networkTask = connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
-      peerPolicy:config.peerPolicy,
+      peerPolicy:config.peerPolicy,mailbox,
       onClosed:()=>{void stop('native_connection_closed').catch(error=>observe({phase:'cleanup_unknown',error:String(error)}));},
       onInventory:observation=>{
         const value=JSON.stringify(observation);
@@ -318,7 +328,8 @@ async function dial(port: number): Promise<Socket> {
 /** A global Codex MCP entry. Startup performs no inference and never infers a
  * thread from cwd/env. Host tool-call _meta is passed through byte for byte.
  */
-export async function runCodexMcp(file: string, entry: string): Promise<void> {
+export async function runCodexMcp(file: string, entry: string, registrationId?: string): Promise<void> {
+  if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
   const {config,sha256} = readConfig(file);
   let socket: Socket;
   try {socket=await dial(config.endpoint.port);}
@@ -347,8 +358,9 @@ export async function runCodexMcp(file: string, entry: string): Promise<void> {
   socket.on('error',()=>{});
   try {
     const welcome=readHeader(socket);
-    socket.write(JSON.stringify({token:config.endpoint.token,configSha256:sha256})+'\n');
-    if((await timeout(welcome,3000,'Local MCP owner handshake') as {ready?:unknown})?.ready!==true)throw new Error('Invalid local MCP owner');
+    socket.write(JSON.stringify({token:config.endpoint.token,configSha256:sha256,registrationId})+'\n');
+    const reply = await timeout(welcome,3000,'Local MCP owner handshake') as {ready?:unknown;registrationId?:unknown};
+    if(reply?.ready!==true || reply.registrationId!==registrationId)throw new Error('Invalid local MCP owner or registration');
     process.stdin.pipe(socket);socket.pipe(process.stdout);socket.resume();
     await new Promise<void>((resolve,reject)=>{
       socket.once('close',()=>resolve());socket.once('error',reject);

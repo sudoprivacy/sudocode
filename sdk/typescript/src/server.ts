@@ -46,6 +46,7 @@ async function main(): Promise<void> {
     verify: { type: 'boolean' }, init: { type: 'boolean' }, scode: { type: 'string' },
     workspace: { type: 'string' }, 'session-id': { type: 'string' },
     codex: { type: 'boolean' }, 'codex-owner': { type: 'boolean' },
+    'registration-id': { type: 'string' },
     'prepare-codex-owner': { type: 'boolean' },
     'launch-codex': {type:'boolean'},
     'install-codex': {type:'boolean'}, 'command-entry': {type:'string'},
@@ -59,9 +60,14 @@ async function main(): Promise<void> {
     'claude-watch': {type:'boolean'}, 'claude-deliver': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
   } });
+  if (values['registration-id'] !== undefined && (!values.codex
+      || Object.keys(values).some(key => !['config','codex','registration-id'].includes(key)))) {
+    throw new Error('--registration-id applies only to the configured Codex MCP client');
+  }
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
     console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
+      + 'scode-acp-bridge --codex --config FILE [--registration-id UUID]  (MCP stdio client)\n'
       + 'scode-acp-bridge --capture-receiver-owner PID  (read-only Windows identity; place once in private config receiverOwner)\n'
       + 'scode-acp-bridge --verify | --version\n'
       + 'scode-acp-bridge --init --config FILE --scode EXECUTABLE --workspace DIRECTORY --session-id EXISTING_ID\n'
@@ -190,7 +196,7 @@ async function main(): Promise<void> {
   installCommandShutdownSignals();
   if(values.codex && values['codex-owner'])throw new Error('Select one Codex entry mode');
   if(values['codex-owner'])await runCodexMcpOwner(values.config);
-  else if(values.codex)await runCodexMcp(values.config,__filename);
+  else if(values.codex)await runCodexMcp(values.config,__filename,values['registration-id']);
   else await runScodeMcp(values.config);
 }
 

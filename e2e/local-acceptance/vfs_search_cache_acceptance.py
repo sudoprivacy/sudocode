@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -11,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -68,6 +70,19 @@ def run(output):
     source.mkdir(parents=True)
     helper.ROOT = root
     records = []
+    profile_sources = [".github/actions/vfs-search-cache/functional.toml", ".github/ci/cohost-plugin-crypto.toml"]
+    publisher = (SOURCE / ".github/workflows/ci-vfs-search-cache.yml").read_text(encoding="utf-8").splitlines()
+    start = publisher.index("    paths:") + 1
+    triggers = []
+    for line in publisher[start:]:
+        if not line.startswith("      - "):
+            break
+        triggers.append(line[len("      - "):])
+    assert all(any(fnmatch.fnmatchcase(path, pattern) for pattern in triggers) for path in profile_sources), triggers
+    for relative in profile_sources:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SOURCE / relative, target)
     environment = {"CARGO_HOME": str(source / ".ci-cache/cargo"),
                    "CARGO_TARGET_DIR": str(source / ".ci-cache/target"), "CARGO_INCREMENTAL": "0",
                    "CARGO_NET_OFFLINE": "true", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -99,6 +114,19 @@ def run(output):
     (dependency / "Cargo.toml").write_text('[package]\nname="stable-driver-support"\nversion="0.0.1"\nedition="2021"\n')
     (dependency / "src").mkdir()
     (dependency / "src/lib.rs").write_text('pub fn value() -> u32 { 42 }\n')
+    # These tiny actual Git dependencies expose Cargo's compiled opt-level;
+    # they are profile markers, not replacements for the real crypto acceptance.
+    (dependency / "build.rs").write_text('fn main() { println!("cargo:rustc-env=SEEN_OPT_LEVEL={}", std::env::var("OPT_LEVEL").unwrap()); }\n')
+    with (dependency / "src/lib.rs").open("a") as stream:
+        stream.write('pub fn optimization() -> &\'static str { env!("SEEN_OPT_LEVEL") }\n')
+    for name, version in [("ed25519-dalek", "0.0.1"), ("sha2", "0.10.9"), ("curve25519-dalek", "0.0.1")]:
+        package = dependency / "profile-markers" / name
+        (package / "src").mkdir(parents=True)
+        (package / "Cargo.toml").write_text(f'[package]\nname="{name}"\nversion="{version}"\nedition="2021"\n')
+        (package / "build.rs").write_text((dependency / "build.rs").read_text())
+        (package / "src/lib.rs").write_text('pub fn optimization() -> &\'static str { env!("SEEN_OPT_LEVEL") }\n')
+    with (dependency / "Cargo.toml").open("a") as stream:
+        stream.write('\n[workspace]\nmembers=["profile-markers/*"]\n')
     command("git", "add", ".", cwd=dependency)
     command("git", "commit", "-m", "Immutable compiled dependency", cwd=dependency)
     dependency_revision = command("git", "rev-parse", "HEAD", cwd=dependency).read_text().strip()
@@ -120,10 +148,27 @@ def run(output):
           'println!("cargo:rerun-if-env-changed={key}");\n}\n}\n')
     write("rust/cluster/Cargo.toml", '[package]\nname="nexus-cluster"\nversion="0.0.0"\nedition="2021"\n'
           f'[dependencies]\nstable-driver-support={{git="{dependency.as_uri()}",rev="{dependency_revision}"}}\n')
+    for package in ["ed25519-dalek", "sha2", "curve25519-dalek"]:
+        for manifest in ["rust/cluster/Cargo.toml", "rust/plugin/Cargo.toml"]:
+            with (source / manifest).open("a") as stream:
+                if manifest.endswith("plugin/Cargo.toml") and package == "ed25519-dalek":
+                    stream.write("\n[dependencies]\n")
+                stream.write(f'{package}={{git="{dependency.as_uri()}",rev="{dependency_revision}"}}\n')
+    # The actual pinned cluster has no build script. Its emitted Cargo profile
+    # and linked dependency values below verify the outer compiler settings.
+    build = source / "rust/plugin/build.rs"
+    text = build.read_text()
+    assert text.endswith("}\n")
+    build.write_text(text[:-2] + 'assert_eq!(std::env::var("OPT_LEVEL").unwrap(), "0", "expected-functional-profile");\n}\n')
     write("rust/cluster/src/lib.rs", 'pub fn value() -> u32 { stable_driver_support::value() }\n')
     write("rust/cluster/tests/user_runtime.rs", '#[test] fn ' + cache.CASE + '() {\n'
           'assert!(std::process::Command::new(env!("CARGO")).args(["build","-p","nexus-search-plugin"]).status().unwrap().success());\n'
           'assert_eq!(nexus_cluster::value(),42);\n'
+          'assert!(cfg!(debug_assertions));\n'
+          'assert_eq!(stable_driver_support::optimization(),"0","functional dependency optimization");\n'
+          'assert_eq!(ed25519_dalek::optimization(),"2","shared crypto optimization");\n'
+          'assert_eq!(sha2::optimization(),"2","shared crypto optimization");\n'
+          'assert_eq!(curve25519_dalek::optimization(),"2","shared crypto optimization");\n'
           'let output=std::process::Command::new(std::env::var("NEXUS_SEARCH_USER_RUNTIME_BINARY").unwrap()).output().unwrap();\n'
           'assert!(output.status.success());\n'
           'assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),"runtime-42");\n}\n')
@@ -146,7 +191,9 @@ def run(output):
         return command(sys.executable, str(entry), name, "--root", str(root), "--output", str(output / label),
                        success=success, extra={"NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime), **(extra or {})})
 
-    key = json.loads(command(sys.executable, str(entry), "key", "--root", str(root)).read_text())["key"]
+    key_report = json.loads(command(sys.executable, str(entry), "key", "--root", str(root)).read_text())
+    key = key_report["key"]
+    assert key_report["restore_keys"] == [key.rsplit("-", 1)[0] + "-"]
     # Captured from the real #1088 Linux consumer. Preserve the exact legacy
     # producer format, not just a second implementation of the new prefix.
     captured = {"pin": "4fd2005d9cdb4ec3aa72983429a4417dbb753ddb",
@@ -170,6 +217,80 @@ def run(output):
     runtime_value(42)
     invoke("build", "cold-build")
     invoke("test", "cold-test")
+    cold = json.loads((output / "cold-build/commands.json").read_text())
+    actual_profiles = {item["name"]: item for row in cold for item in row["compiler_artifacts"]
+                       if item["name"] != "build_script_build"}
+    for name in ["nexus_search_plugin", "nexus_cluster", "stable_driver_support", "user_runtime"]:
+        assert actual_profiles[name]["opt_level"] == "0" and actual_profiles[name]["debug_assertions"], actual_profiles[name]
+    for name in ["ed25519_dalek", "sha2", "curve25519_dalek"]:
+        assert actual_profiles[name]["opt_level"] == "2" and actual_profiles[name]["debug_assertions"], actual_profiles[name]
+    cargo_profile = source / ".ci-cache/cargo/config.toml"
+    profile_bytes = cargo_profile.read_bytes()
+    assert hashlib.sha256(profile_bytes).hexdigest() == key_report["inputs"]["functional_profile"]["configuration_sha256"]
+    identity_path = source / ".ci-cache/source-identity.json"
+    completed_identity = identity_path.read_bytes()
+    identity_path.unlink()
+    refused = invoke("build", "same-pin-unbound-compiler-outputs", success=False)
+    assert "requires a bound compiler-input identity" in refused.read_text()
+    identity_path.write_bytes(completed_identity)
+    parsed_profile = tomllib.loads(profile_bytes.decode("utf-8"))
+    assert set(parsed_profile["profile"]) == {"dev", "test"}
+    profile_source = root / profile_sources[0]
+    input_bytes = profile_source.read_bytes()
+    profile_source.write_bytes(input_bytes + b"# changed reviewed profile input\n")
+    changed_profile_key = json.loads(command(sys.executable, str(entry), "key", "--root", str(root)).read_text())["key"]
+    assert changed_profile_key != key
+    refused = invoke("build", "changed-functional-profile-input", success=False)
+    assert "Restored VFS compiler context differs" in refused.read_text()
+    profile_source.write_bytes(input_bytes)
+    cargo_profile.write_bytes(profile_bytes + b'\n[build]\nrustc-wrapper="unreviewed-wrapper"\n')
+    refused = invoke("build", "unreviewed-cargo-profile", success=False)
+    assert "Cargo profile differs" in refused.read_text()
+    cargo_profile.write_bytes(profile_bytes)
+    legacy_config = cargo_profile.with_name("config")
+    legacy_config.write_text('[alias]\nprobe="unreviewed"\n')
+    refused = invoke("build", "unreviewed-legacy-cargo-profile", success=False)
+    assert "unreviewed legacy Cargo configuration" in refused.read_text()
+    legacy_config.unlink()
+    outside_profile = root / "outside-profile.toml"
+    outside_profile.write_bytes(profile_bytes)
+    cargo_profile.unlink()
+    cargo_profile.symlink_to(outside_profile)
+    refused = invoke("build", "linked-cargo-profile", success=False)
+    assert "Cargo profile differs" in refused.read_text()
+    assert outside_profile.read_bytes() == profile_bytes
+    cargo_profile.unlink()
+    cargo_profile.write_bytes(profile_bytes)
+
+    def old_profile_control(label, mutation, expected):
+        control = output / label
+        control.mkdir()
+        fixed = control / ".native-vfs"
+        command("git", "clone", "--no-hardlinks", str(source), str(fixed))
+        (control / "rust").mkdir()
+        shutil.copyfile(root / "rust/Cargo.lock", control / "rust/Cargo.lock")
+        for relative in profile_sources:
+            target = control / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SOURCE / relative, target)
+        altered = control / ".github/scripts/vfs_search_cache.py"
+        altered.parent.mkdir(parents=True, exist_ok=True)
+        text = entry.read_text(encoding="utf-8")
+        assert text.count(mutation[0]) == 1
+        altered.write_text(text.replace(*mutation))
+        command("cargo", "fetch", "--locked", "--manifest-path", str(fixed / "Cargo.toml"),
+                extra={"CARGO_HOME": str(fixed / ".ci-cache/cargo"), "CARGO_NET_OFFLINE": "false"})
+        log = command(sys.executable, str(altered), "test", "--root", str(control),
+                      "--output", str(control / "result"), success=False,
+                      extra={"NEXUS_SEARCH_USER_RUNTIME_BINARY": str(runtime)})
+        assert expected in log.read_text(), log.read_text()
+
+    old_profile_control("restored-original-optimized-profile",
+                        ("    configure_functional_profile(source)\n", "    # original optimized Cargo profiles\n"),
+                        "expected-functional-profile")
+    old_profile_control("missing-shared-crypto-profile",
+                        ("        for name in sorted(packages):\n", "        for name in []:\n"),
+                        "shared crypto optimization")
     refused = invoke("build", "same-pin-wrong-context", success=False,
                      extra={"CARGO_PROFILE_DEV_OPT_LEVEL": "0"})
     assert "Restored VFS compiler context differs" in refused.read_text()
@@ -311,11 +432,15 @@ def run(output):
               "changed_pin_rebuilds_current_driver_with_fresh_immutable_dependencies": True,
               "unbound_or_incompatible_pin_restore_refused": True, "restored_checkout_hooks_never_execute": True,
               "missing_upstream_revision_refused_without_source_replacement": True,
+              "functional_recipe_excludes_legacy_optimized_restores": True,
               "legacy_real_CI_key_preserved": True, "actual_restore_export_and_exact_key_recovery_verified": True,
               "new_pin_native_plugin_abi_verified": True,
               "same_pin_compiler_mismatch_and_linked_git_config_refused": True,
               "nested_cargo_preserves_native_metadata_fingerprints": True,
               "actual_required_workflow_runs_the_native_case": True,
+              "functional_dev_and_test_profiles_and_shared_crypto_compiled": True,
+              "unreviewed_or_linked_cargo_profiles_refused": True,
+              "original_optimized_and_missing_crypto_recipe_counterexamples": True,
               "actual_required_workflow_refuses_redundant_build_before_test": True,
               "scope": "Real Git/Cargo/tar/native infrastructure fixture; no production VFS journey coverage."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")

@@ -2294,12 +2294,22 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       compiler context. The old Git tree and saved identity are verified before
       fetching the required pin with hooks disabled. Old workspace outputs are
       cleaned, and the new tree is verified before normal compilation. An exact
-      current-pin legacy key is accepted for format migration. A missing main key
-      downloads compatible inputs before prewarming; queue consumers never publish.
+      functional-profile key excludes legacy optimized compiler outputs and refuses
+      an unbound nonempty target. A missing main key downloads compatible inputs
+      before prewarming; queue consumers never publish.
       Refusal messages name the actual restored cache key for recovery. Source bytes
       are verified before normal Cargo builds. The original authorization/restart
-      case still runs against the current co-host outside the cache, with unchanged
-      optimization profiles and assertions. Command logs and timings are retained.
+      case still runs against the current co-host outside the cache. Only its fixed
+      driver/plugin use the registered functional dev/test configuration: optimization
+      0 for workspace/dependencies, debug 0, no incremental output, with debug
+      assertions and overflow checks retained. Shared host crypto overrides are
+      composed into both variants at optimization 2 for whole-file signing.
+      The private Cargo-home configuration is inherited by the original nested
+      <code>cargo build</code>, bound into the compiler key, and refused if linked,
+      changed or accompanied by a legacy Cargo configuration. The candidate host,
+      release/performance profiles, test case/assertions and 90s bounds stay
+      unchanged. Command logs retain actual compiler profile metadata and timings;
+      savings still require the original real current-host journey.
       Outer and nested Cargo calls share the real test package metadata to avoid
       repeated native dependency rebuilds caused by inherited environment changes.
       Main alone explicitly prewarms compiler outputs. Consumers use normal

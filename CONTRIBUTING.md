@@ -308,6 +308,15 @@ results; the outer harness still closes its private daemon. Daemon
 restart and SIGSTOP stay serial, outside the batch. Real native control
 processes verify overlap, failure and missing/non-ignored-case refusal;
 they add no product coverage. The same seven real daemon cases still run in CI.
+The Linux A2A queue can start the original managed CLI and mock-service bin
+build after the serial CLI lane completes, while the previously prepared fault
+tests run. Both lanes keep the original four-worker allocation. The early step
+only builds binaries. After the join and post-join daemon checks, the original
+managed command verifies freshness with Cargo and runs all managed tests on its
+private daemon. Custom runs keep the original schedule unless explicitly opted
+in. The command artifact records the early build and the CI log marks the later
+freshness check. Compare both timings and the full queue job before crediting a
+saving.
 Changes confined to the A2A shell/Python harness leave the native Rust workspace
 unchanged. They skip its Cargo/PTY product reruns on the author and complementary
 hosts; the Linux queue still executes the changed real-daemon harness. Author

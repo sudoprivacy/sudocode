@@ -2256,6 +2256,12 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       remain; restart stays before both lanes and SIGSTOP stays after both pass.
       Original per-lane logs and command receipts remain in the fault artifact;
       an existing result directory is refused before either lane starts.
+      The Linux A2A job can start the managed CLI and mock-service bin build
+      after the serial CLI lane completes, while prepared fault binaries still
+      run. The original four test slots remain. The two Cargo writers stay
+      serial. After the full join, the original managed harness checks the bin
+      build with Cargo and runs its original real-daemon tests. Record the early
+      build and later check separately before crediting a queue saving.
       Cargo preparation and ignored-case enumeration finish before the lanes
       start. The fixed nextest executor then uses those same build metadata and
       binaries without reacquiring the CLI build lock. Source contents, helper,

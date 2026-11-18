@@ -185,8 +185,14 @@ PYTHON_BIN="$(python3_bin)"
 MAILBOX_FAULT_OUTPUT="${NEXUS_A2A_FAULT_OUTPUT:-$AUTHON_DATA_DIR/mailbox-faults}"
 export AUTHON_DATA_DIR AUTHON_PORT AUTHON_ZONE AUTHON_NEXUSD_BIN RUST_DIR ENDPOINT
 export CLIENT_BUNDLE DIRECT_SENDER_BUNDLE DIRECT_RECEIVER_BUNDLE
+MANAGED_PREPARE=()
+if [[ "${NEXUS_A2A_EARLY_MANAGED_BUILD:-0}" == 1 && "$(uname -s)" == Linux \
+      && "${SCODE_ACCEPTANCE_TEST_THREADS:-4}" == 4 \
+      && "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 && -z "${SUDOROUTER_API_KEY:-}" ]]; then
+  MANAGED_PREPARE=(--managed-prepare-script "$(native_path "$(pwd)/run-managed-subprocess.sh")")
+fi
 "$PYTHON_BIN" ./cli_mailbox_stages.py --manifest "$(native_path "$RUST_DIR/Cargo.toml")" \
-  --output "$(native_path "$MAILBOX_FAULT_OUTPUT")"
+  --output "$(native_path "$MAILBOX_FAULT_OUTPUT")" "${MANAGED_PREPARE[@]}"
 
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #

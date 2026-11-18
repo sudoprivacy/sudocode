@@ -343,6 +343,9 @@ struct DirectAgentListRequest {
 struct DirectA2aResponse {
     content: String,
     is_error: bool,
+    /// Present when the operation has not executed and awaits a durable decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_interaction: Option<engine_core::engine_events::InteractionReceipt>,
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     meta: Option<serde_json::Value>,
 }
@@ -398,16 +401,7 @@ pub struct SessionSubagents {
 }
 
 impl SessionSubagents {
-    /// Must run inside the ACP server's Tokio runtime (it spawns the task that
-    /// writes background events to the connection).
-    fn start(
-        _session_id: String,
-        connection: ConnectionTo<Client>,
-        completion: Option<Arc<Delivery>>,
-    ) -> Arc<Self> {
-        if let Some(delivery) = &completion {
-            delivery.bind(connection);
-        }
+    fn new(completion: Option<Arc<Delivery>>) -> Arc<Self> {
         Arc::new(Self { completion })
     }
 
@@ -415,10 +409,14 @@ impl SessionSubagents {
         self.completion.clone()
     }
 
-    fn set_connection(&self, connection: ConnectionTo<Client>) {
+    async fn set_connection(&self, connection: ConnectionTo<Client>) -> Result<(), AcpError> {
         if let Some(delivery) = &self.completion {
-            delivery.bind(connection);
+            delivery
+                .bind(connection)
+                .await
+                .map_err(AcpError::internal)?;
         }
+        Ok(())
     }
 }
 
@@ -655,6 +653,14 @@ async fn drive_prompt(
         )
         .await
         .map_err(AcpError::invalid_params)?;
+    let session_cwd = registry.cwd(&sid);
+    let cwd_lease = registry.cwd_lease();
+    let subagents = registry.subagents(&sid);
+    if let Some(subagents) = &subagents {
+        subagents.set_connection(cx_inner.clone()).await?;
+    }
+    // Connection setup can yield. Stop or replacement during that wait must
+    // still invalidate the original prompt admission.
     let Some(engine) = registry.engine(&sid) else {
         return Err(AcpError::invalid_params(format!(
             "unknown sessionId: {sid}"
@@ -665,12 +671,6 @@ async fn drive_prompt(
         return Err(AcpError::invalid_params(
             "Session control changed while the prompt was queued",
         ));
-    }
-    let session_cwd = registry.cwd(&sid);
-    let cwd_lease = registry.cwd_lease();
-    let subagents = registry.subagents(&sid);
-    if let Some(subagents) = &subagents {
-        subagents.set_connection(cx_inner.clone());
     }
     let expected = expected_prompt_context(&req)?;
     let is_slash_command = prompt_text.starts_with('/');
@@ -1692,6 +1692,12 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("inputDelivery".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("hostContext".to_string(), json!({ "version": 1 }));
     sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
+    if runtime::experiments::is_enabled(runtime::experiments::Experiment::NonblockingInteractions) {
+        sudocode_ns.insert(
+            "interactions".to_string(),
+            json!({ "version": 1, "experimental": true }),
+        );
+    }
     sudocode_ns.insert("attention".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
@@ -3364,13 +3370,16 @@ pub(crate) async fn run_acp_on_transport(
                                         .and_then(|status| status.get("storageRef").cloned()),
                                     None => None,
                                 };
-                                let subagents = subagent_events.then(|| {
-                                    SessionSubagents::start(
-                                        session_id.clone(),
-                                        cx_notify.clone(),
-                                        completion,
-                                    )
-                                });
+                                let subagents =
+                                    subagent_events.then(|| SessionSubagents::new(completion));
+                                if let Some(route) = &subagents {
+                                    if let Err(error) =
+                                        route.set_connection(cx_notify.clone()).await
+                                    {
+                                        responder.respond_with_error(acp_error_to_sdk(&error))?;
+                                        return Ok(());
+                                    }
+                                }
                                 let register = Arc::clone(&registry);
                                 let registered_id = session_id.clone();
                                 if let Err(error) = tokio::task::spawn_blocking(move || {
@@ -3752,16 +3761,17 @@ pub(crate) async fn run_acp_on_transport(
                                     None => (None, None),
                                 };
                                 let subagents = subagent_events.then(|| {
-                                    registry.subagents(&session_id).unwrap_or_else(|| {
-                                        SessionSubagents::start(
-                                            session_id.clone(),
-                                            cx_notify.clone(),
-                                            completion,
-                                        )
-                                    })
+                                    registry
+                                        .subagents(&session_id)
+                                        .unwrap_or_else(|| SessionSubagents::new(completion))
                                 });
                                 if let Some(route) = &subagents {
-                                    route.set_connection(cx_notify.clone());
+                                    if let Err(error) =
+                                        route.set_connection(cx_notify.clone()).await
+                                    {
+                                        responder.respond_with_error(acp_error_to_sdk(&error))?;
+                                        return Ok(());
+                                    }
                                 }
                                 let register = Arc::clone(&registry);
                                 let registered_id = session_id.clone();
@@ -3840,7 +3850,9 @@ pub(crate) async fn run_acp_on_transport(
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
                         match result {
                             Ok((route, status)) => {
-                                route.bind(sender);
+                                route.bind(sender).await.map_err(|message| {
+                                    acp_error_to_sdk(&AcpError::internal(message))
+                                })?;
                                 responder.respond(status)?;
                             }
                             Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
@@ -3879,7 +3891,9 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((route, response)) => {
                                 if let Some(route) = route {
-                                    route.bind(sender);
+                                    route.bind(sender).await.map_err(|message| {
+                                        acp_error_to_sdk(&AcpError::internal(message))
+                                    })?;
                                 }
                                 responder.respond(response)?;
                             }
@@ -3919,7 +3933,9 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((route, response)) => {
                                 if let Some(route) = route {
-                                    route.bind(sender);
+                                    route.bind(sender).await.map_err(|message| {
+                                        acp_error_to_sdk(&AcpError::internal(message))
+                                    })?;
                                 }
                                 responder.respond(response)?;
                             }
@@ -3959,7 +3975,9 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((route, response)) => {
                                 if let Some(route) = route {
-                                    route.bind(sender);
+                                    route.bind(sender).await.map_err(|message| {
+                                        acp_error_to_sdk(&AcpError::internal(message))
+                                    })?;
                                 }
                                 responder.respond(response)?;
                             }
@@ -4231,6 +4249,37 @@ pub(crate) async fn run_acp_on_transport(
                                     .map_err(|error| acp_error_to_sdk(&error)),
                                 Err(error) => Err(error),
                             };
+                            responder.respond_with_result(result)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder)
+                        if crate::interaction_control::InteractionRequest::matches_method(
+                            message.method(),
+                        ) =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let connection = cx.clone();
+                        cx.spawn(async move {
+                            let (method, params) = message.into_parts();
+                            let result = async {
+                                let request =
+                                    crate::interaction_control::InteractionRequest::parse_message(
+                                        &method, &params,
+                                    )?;
+                                let driver =
+                                    registry.driver(&request.session_id).ok_or_else(|| {
+                                        acp_error_to_sdk(&AcpError::invalid_params(
+                                            "Unknown session",
+                                        ))
+                                    })?;
+                                driver
+                                    .interactions(request.action, connection)
+                                    .await
+                                    .map_err(|error| acp_error_to_sdk(&AcpError::internal(error)))
+                            }
+                            .await;
                             responder.respond_with_result(result)?;
                             Ok(())
                         })?;

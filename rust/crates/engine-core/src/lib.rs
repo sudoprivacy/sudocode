@@ -103,6 +103,8 @@ mod engine_client;
 pub use attachment::{CompletionRetirement, EngineAttachment};
 pub mod background_completion;
 pub mod input_queue;
+mod interaction_control;
+mod interactions;
 mod requests;
 mod session;
 mod session_inputs;

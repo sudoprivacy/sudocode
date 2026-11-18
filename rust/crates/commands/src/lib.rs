@@ -215,6 +215,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: true,
     },
     SlashCommandSpec {
+        name: "questions",
+        aliases: &[],
+        summary: "Review pending questions and approvals (experimental)",
+        argument_hint: Some("[request-id] | cancel <request-id>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
         name: "status",
         aliases: &[],
         summary: "Show current session status",
@@ -1210,6 +1217,10 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
     Help,
+    Questions {
+        interaction_id: Option<String>,
+        cancel: bool,
+    },
     Status,
     Sandbox,
     Compact,
@@ -1408,6 +1419,7 @@ impl SlashCommand {
     pub fn slash_name(&self) -> &'static str {
         match self {
             Self::Help => "/help",
+            Self::Questions { .. } => "/questions",
             Self::Clear { .. } => "/clear",
             Self::Compact { .. } => "/compact",
             Self::Cost => "/cost",
@@ -1505,6 +1517,22 @@ pub fn validate_slash_command_input(
         "help" => {
             validate_no_args(command, &args)?;
             SlashCommand::Help
+        }
+        "questions" => {
+            let (interaction_id, cancel) = match args.as_slice() {
+                [] => (None, false),
+                ["cancel", id] => (Some((*id).to_owned()), true),
+                [id] if *id != "cancel" => (Some((*id).to_owned()), false),
+                _ => {
+                    return Err(SlashCommandParseError::new(
+                        "Usage: /questions [request-id] | /questions cancel <request-id>",
+                    ))
+                }
+            };
+            SlashCommand::Questions {
+                interaction_id,
+                cancel,
+            }
         }
         "status" => {
             validate_no_args(command, &args)?;
@@ -2277,12 +2305,11 @@ pub fn slash_command_turn_policy(command: &SlashCommand) -> TurnPolicy {
 
 fn slash_command_category(name: &str) -> &'static str {
     match name {
-        "help" | "status" | "cost" | "resume" | "session" | "version" | "usage" | "stats"
-        | "rename" | "clear" | "compact" | "history" | "tokens" | "cache" | "exit" | "summary"
-        | "tag" | "thinkback" | "copy" | "share" | "feedback" | "rewind" | "pin" | "unpin"
-        | "bookmarks" | "context" | "files" | "focus" | "unfocus" | "retry" | "stop" | "undo" => {
-            "Session"
-        }
+        "help" | "questions" | "status" | "cost" | "resume" | "session" | "version" | "usage"
+        | "stats" | "rename" | "clear" | "compact" | "history" | "tokens" | "cache" | "exit"
+        | "summary" | "tag" | "thinkback" | "copy" | "share" | "feedback" | "rewind" | "pin"
+        | "unpin" | "bookmarks" | "context" | "files" | "focus" | "unfocus" | "retry" | "stop"
+        | "undo" => "Session",
         "model" | "permissions" | "auth" | "account" | "config" | "memory" | "theme" | "vim"
         | "voice" | "color" | "effort" | "fast" | "brief" | "output-style" | "keybindings"
         | "privacy-settings" | "stickers" | "language" | "profile" | "max-tokens"
@@ -5071,6 +5098,7 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
+        | SlashCommand::Questions { .. }
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Commit
         | SlashCommand::Pr { .. }

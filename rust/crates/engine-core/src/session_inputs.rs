@@ -1,6 +1,6 @@
 //! Session-owned input delivery behind the existing command/event boundary.
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use engine_events::{
     ContentBlock, EngineCommand, EngineEvent, InputAction, InputState, PendingInput, PromptContext,
@@ -25,10 +25,18 @@ struct State {
     native: bool,
     background_watched: bool,
     background: crate::background_completion::Completions,
-    lifecycle_held: Option<(u64, bool)>,
+    lifecycle_held: Option<Lifecycle>,
     active_turn_id: Option<u64>,
     /// The session's turn inbox, for steering a completion into the running turn.
     inbox: Option<TurnInputInbox>,
+    interaction_controls: usize,
+    interaction_bindings: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Lifecycle {
+    Host { token: u64, allow_inputs: bool },
+    Direct,
 }
 
 impl Default for State {
@@ -42,6 +50,8 @@ impl Default for State {
             background: crate::background_completion::Completions::default(),
             lifecycle_held: None,
             active_turn_id: None,
+            interaction_controls: 0,
+            interaction_bindings: 0,
             inbox: None,
         }
     }
@@ -50,7 +60,45 @@ impl Default for State {
 #[derive(Default)]
 pub(crate) struct SessionInputs(Mutex<State>, tokio::sync::Notify);
 
+pub(crate) struct InteractionControlLease {
+    inputs: Arc<SessionInputs>,
+    binding: bool,
+}
+
+impl Drop for InteractionControlLease {
+    fn drop(&mut self) {
+        let mut state = self.inputs.lock();
+        state.interaction_controls -= 1;
+        state.interaction_bindings -= usize::from(self.binding);
+        self.inputs.1.notify_one();
+    }
+}
+
 impl State {
+    fn recall_human(&mut self) -> Value {
+        let items = self.queue.recall_human();
+        let mut recalled = Vec::with_capacity(items.len());
+        for item in items {
+            let meta = item.receipt.expect("session input receipt");
+            self.accepted.remove(&meta.client_id);
+            let mut content = vec![json!({"type":"text", "text": item.input.text})];
+            content.extend(
+                item.input
+                    .attachments
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { data, mime_type } => {
+                            Some(json!({"type":"image", "data": data, "mimeType": mime_type}))
+                        }
+                        _ => None,
+                    }),
+            );
+            recalled
+                .push(json!({"clientId":meta.client_id, "content":content, "draft":meta.draft}));
+        }
+        json!(recalled)
+    }
+
     fn snapshot(&self) -> InputState {
         let mut pending: Vec<_> = self
             .queue
@@ -214,14 +262,18 @@ impl SessionInputs {
         inbox: Option<&TurnInputInbox>,
     ) -> Result<(Value, Option<InputState>, bool), String> {
         let mut state = self.lock();
-        if state
-            .lifecycle_held
-            .is_some_and(|(_, allow_inputs)| !allow_inputs)
-            && matches!(
-                action,
-                InputAction::Submit { .. } | InputAction::Flush | InputAction::FlushOrCancel
+        if state.lifecycle_held.is_some_and(|owner| {
+            matches!(
+                owner,
+                Lifecycle::Host {
+                    allow_inputs: false,
+                    ..
+                }
             )
-        {
+        }) && matches!(
+            action,
+            InputAction::Submit { .. } | InputAction::Flush | InputAction::FlushOrCancel
+        ) {
             return Err("Session control is changing; input was not admitted".into());
         }
         if !matches!(
@@ -250,7 +302,7 @@ impl SessionInputs {
                 )?);
             }
             InputAction::Flush | InputAction::FlushOrCancel => {
-                if state.queue.has_pending_input() {
+                if state.queue.has_pending_followup() {
                     state.queue.resume();
                     if state.queue.can_deliver() {
                         let inputs = state.queue.flush();
@@ -265,40 +317,35 @@ impl SessionInputs {
                 receipt["cancelled"] = json!(cancel);
             }
             InputAction::Recall => {
-                let items = state.queue.recall_human();
-                let mut recalled = Vec::with_capacity(items.len());
-                for item in items {
-                    let meta = item.receipt.expect("session input receipt");
-                    state.accepted.remove(&meta.client_id);
-                    let mut content = vec![json!({"type":"text", "text": item.input.text})];
-                    content.extend(item.input.attachments.into_iter().filter_map(
-                        |block| match block {
-                            ContentBlock::Image { data, mime_type } => {
-                                Some(json!({"type":"image", "data": data, "mimeType": mime_type}))
-                            }
-                            _ => None,
-                        },
-                    ));
-                    recalled.push(
-                        json!({"clientId":meta.client_id, "content":content, "draft":meta.draft}),
-                    );
-                }
-                receipt["recalled"] = json!(recalled);
+                receipt["recalled"] = state.recall_human();
             }
             InputAction::Snapshot => {}
             InputAction::AcquireLifecycle {
                 token,
                 allow_inputs,
             } => {
-                if state.lifecycle_held.is_some() || state.queue.is_running() {
+                // Ordinary host prompts share the same admission rule as the
+                // native input queue: receipt work may overlap, binding changes
+                // may not. Destructive management retains the full fence.
+                let controls = if allow_inputs {
+                    state.interaction_bindings
+                } else {
+                    state.interaction_controls
+                };
+                if state.lifecycle_held.is_some() || state.queue.is_running() || controls != 0 {
                     return Err(
                         "Session is busy; wait for the current turn or cancel it first".into(),
                     );
                 }
-                state.lifecycle_held = Some((token, allow_inputs));
+                state.lifecycle_held = Some(Lifecycle::Host {
+                    token,
+                    allow_inputs,
+                });
             }
             InputAction::ReleaseLifecycle { token } => {
-                if state.lifecycle_held.is_some_and(|(held, _)| held == token) {
+                if state.lifecycle_held.is_some_and(
+                    |owner| matches!(owner, Lifecycle::Host { token: held, .. } if held == token),
+                ) {
                     state.lifecycle_held = None;
                 }
             }
@@ -311,6 +358,97 @@ impl SessionInputs {
 
     pub(crate) async fn changed(&self) {
         self.1.notified().await;
+    }
+
+    pub(crate) fn can_start_direct(&self) -> bool {
+        let state = self.lock();
+        state.lifecycle_held.is_none() && state.interaction_bindings == 0 && state.queue.can_start()
+    }
+
+    /// The shared foreground phase ends at the durable terminal event, which
+    /// can precede the finalizer task's return to the command pump.
+    pub(crate) fn is_running(&self) -> bool {
+        self.lock().queue.is_running()
+    }
+
+    pub(crate) fn has_interaction_controls(&self) -> bool {
+        self.lock().interaction_controls != 0
+    }
+
+    pub(crate) fn interaction_binding_pending(&self) -> bool {
+        self.lock().interaction_bindings != 0
+    }
+
+    /// Reserve foreground ownership before fallible turn admission touches
+    /// storage. The real `TurnStarted` event still opens steering afterward.
+    pub(crate) fn reserve_turn(&self) -> Option<InputState> {
+        let mut state = self.lock();
+        if state.queue.can_start() {
+            state.queue.start_turn();
+            state.revision += 1;
+        }
+        state.native.then(|| state.snapshot())
+    }
+
+    pub(crate) fn begin_interaction_control(
+        self: &Arc<Self>,
+        binding: bool,
+    ) -> Result<InteractionControlLease, String> {
+        let mut state = self.lock();
+        if matches!(
+            state.lifecycle_held,
+            Some(Lifecycle::Host {
+                allow_inputs: false,
+                ..
+            })
+        ) || (binding && (state.lifecycle_held.is_some() || state.queue.is_running()))
+        {
+            return Err("Session control is changing; retry the interaction request".into());
+        }
+        state.interaction_controls += 1;
+        state.interaction_bindings += usize::from(binding);
+        Ok(InteractionControlLease {
+            inputs: self.clone(),
+            binding,
+        })
+    }
+
+    /// Completion controls refer to this engine's immutable completion binding.
+    /// A current host lifecycle may configure its connection; later lifecycle
+    /// operations still wait for the admitted work to finish.
+    pub(crate) fn begin_completion_control(
+        self: &Arc<Self>,
+        binding: bool,
+    ) -> InteractionControlLease {
+        let mut state = self.lock();
+        state.interaction_controls += 1;
+        state.interaction_bindings += usize::from(binding);
+        InteractionControlLease {
+            inputs: self.clone(),
+            binding,
+        }
+    }
+
+    /// Share the lifecycle guard with host management. Input can still queue,
+    /// but no model turn or session replacement starts until this call ends.
+    pub(crate) fn begin_direct(&self) -> Result<(), String> {
+        let mut state = self.lock();
+        if state.lifecycle_held.is_some()
+            || state.interaction_bindings != 0
+            || !state.queue.can_start()
+        {
+            return Err("Session is busy; the direct call was not started".into());
+        }
+        state.lifecycle_held = Some(Lifecycle::Direct);
+        Ok(())
+    }
+
+    pub(crate) fn finish_direct(&self) {
+        let mut state = self.lock();
+        if matches!(state.lifecycle_held, Some(Lifecycle::Direct)) {
+            state.lifecycle_held = None;
+            self.1.notify_one();
+        }
     }
 
     /// The session's turn inbox. A completion that arrives while a turn is
@@ -350,6 +488,7 @@ impl SessionInputs {
                 | EngineEvent::PromptRejected { .. }
                 | EngineEvent::InputCommitted(_)
                 | EngineEvent::InputDeferred(_)
+                | EngineEvent::InteractionDeliveryReturned(_)
                 | EngineEvent::BackgroundTask(_)
                 | EngineEvent::SubagentCompletionReady(_)
         ) {
@@ -377,6 +516,13 @@ impl SessionInputs {
             EngineEvent::InputCommitted(input) => {
                 state.queue.committed(input.id);
             }
+            EngineEvent::InteractionDeliveryReturned(receipt) => {
+                for (_, receipt) in state.queue.return_interaction(*receipt) {
+                    if let Some(receipt) = receipt {
+                        state.accepted.remove(&receipt.client_id);
+                    }
+                }
+            }
             EngineEvent::InputDeferred(inputs) => {
                 for input in inputs {
                     state.queue.defer(input.id);
@@ -385,14 +531,14 @@ impl SessionInputs {
             EngineEvent::TurnComplete(complete) => {
                 state.active_turn_id = None;
                 if complete.cancelled {
-                    state.queue.cancel_turn();
+                    state.queue.finish_failed_turn();
+                } else {
+                    state.queue.finish_turn();
                 }
-                state.queue.finish_turn();
             }
             EngineEvent::TurnFailed { .. } | EngineEvent::PromptRejected { .. } => {
                 state.active_turn_id = None;
-                state.queue.cancel_turn();
-                state.queue.finish_turn();
+                state.queue.finish_failed_turn();
             }
             _ => unreachable!(),
         }
@@ -404,12 +550,13 @@ impl SessionInputs {
     pub(crate) fn next_prompt(&self) -> Option<(EngineCommand, InputState)> {
         let mut state = self.lock();
         if state.lifecycle_held.is_some()
+            || state.interaction_bindings != 0
             || !state.queue.can_start()
             || !state.queue.has_idle_queue()
         {
             return None;
         }
-        let inputs = state.queue.flush();
+        let inputs = state.queue.drain_next()?.inputs;
         state.active_turn_id = inputs.first().map(|input| input.id);
         let mut context = state
             .queue

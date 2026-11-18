@@ -6,6 +6,7 @@ pub(crate) mod export;
 pub(crate) mod format;
 pub(crate) mod git;
 pub(crate) mod help;
+pub(crate) mod interactions;
 pub(crate) mod lifecycle;
 pub(crate) mod memory_ui;
 pub(crate) mod pager;

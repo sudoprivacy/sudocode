@@ -54,17 +54,36 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         mut prompter: Option<&mut dyn PermissionPrompter>,
         mut observer: Option<&mut dyn RuntimeObserver>,
         turn_id: String,
+        input_reconciled: &mut bool,
     ) -> Result<TurnSummary, RuntimeError> {
         let started = self
-            .begin_turn_input(blocks, &mut observer, turn_id)
+            .begin_turn_input(blocks, &mut observer, &mut prompter, turn_id)
             .await?;
+        let Some(started) = started else {
+            // This context did not consume a new input. Do not call a model,
+            // compact, or advance the latest completed conversation projection.
+            *input_reconciled = true;
+            self.finish_current_turn_tracking();
+            return Ok(TurnSummary {
+                assistant_messages: Vec::new(),
+                tool_results: Vec::new(),
+                prompt_cache_events: Vec::new(),
+                iterations: 0,
+                turn_usage: crate::TokenUsage::default(),
+                session_usage: self.usage_tracker.cumulative_usage(),
+                auto_compaction: None,
+                cancelled: false,
+                response_model: None,
+            });
+        };
         let mut state = TurnProgress::default();
         loop {
             if self.hook_abort_signal.is_aborted() {
                 self.finalize_cancelled_turn(Vec::new());
                 return Ok(self.cancelled_turn_state(&mut state));
             }
-            self.commit_turn_inputs(&mut observer)?;
+            self.commit_turn_inputs(&mut observer, &mut prompter)
+                .await?;
             let final_answer = self.prepare_turn_iteration(&mut state)?;
             if !self
                 .enforce_turn_request_budget(&mut state, &mut observer)
@@ -137,8 +156,22 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         &mut self,
         blocks: Vec<ContentBlock>,
         observer: &mut Option<&mut dyn RuntimeObserver>,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
         turn_id: String,
-    ) -> Result<std::time::Instant, RuntimeError> {
+    ) -> Result<Option<std::time::Instant>, RuntimeError> {
+        let echoes = observer
+            .as_deref()
+            .map_or_else(Vec::new, RuntimeObserver::prompt_echoes);
+        if Self::prompt_already_committed(&echoes, observer)? {
+            if let Some(observer) = observer.as_deref_mut() {
+                observer.on_prompt_committed();
+            }
+            return Ok(None);
+        }
+        if let Some(reason) = Self::waiting_interaction(&echoes, observer)? {
+            Self::return_interaction_input(&echoes, &reason, observer)?;
+            return Ok(None);
+        }
         // The label is what the caller handed in. Taken after the injectors, a
         // turn that carried a reminder analysed the reminder for file intent
         // and traced it as the user's input.
@@ -195,17 +228,6 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .push_message(ConversationMessage::unanswered_turn_boundary())
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
         }
-        let echoes = observer
-            .as_deref()
-            .map_or_else(Vec::new, RuntimeObserver::prompt_echoes);
-        self.session
-            .push_prompt(prepared_blocks, echoes)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        if let Some(observer) = observer.as_deref_mut() {
-            observer.on_prompt_committed();
-        }
-        self.compaction_pending_input_tokens = 0;
-
         // Hook workers share the current observer's progress sink, so slow
         // hooks never hold the event loop while reporting lifecycle changes.
         if let Some(sink) = observer
@@ -221,12 +243,26 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         self.api_client
             .set_retry_sink(observer.as_deref().and_then(RuntimeObserver::retry_sink));
 
-        Ok(turn_started_at)
+        let committed = self
+            .commit_prompt_input(prepared_blocks, echoes, observer, prompter)
+            .await?;
+        if committed.is_consumed() {
+            if let Some(observer) = observer.as_deref_mut() {
+                observer.on_prompt_committed();
+            }
+        }
+        self.compaction_pending_input_tokens = 0;
+
+        Ok(
+            (committed == super::tool_context::PromptInputCommit::Committed)
+                .then_some(turn_started_at),
+        )
     }
 
-    fn commit_turn_inputs(
+    async fn commit_turn_inputs(
         &mut self,
         observer: &mut Option<&mut dyn RuntimeObserver>,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<(), RuntimeError> {
         for input in self.turn_inputs.batch() {
             if self.hook_abort_signal.is_aborted() {
@@ -235,26 +271,24 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             let view = input.view();
             // Resolve human references through the session filesystem;
             // peer and task notifications keep their literal text.
-            let prepared = if input.source == crate::turn_input::InputSource::Human {
-                crate::image_input::prompt_blocks(input.text, self.session.fs_handle().as_ref())
+            let prepared =
+                crate::image_input::turn_input_blocks(&input, self.session.fs_handle().as_ref())
                     .map_err(|error| RuntimeError::new(error.to_string()))
-                    .and_then(|mut blocks| {
-                        blocks.extend(input.attachments);
-                        self.prepare_input_blocks(blocks)
-                    })
-            } else {
-                Ok(vec![ContentBlock::Text { text: input.text }])
-            };
+                    .and_then(|blocks| self.prepare_input_blocks(blocks));
             // Preparation can perform I/O; cancellation still owns admission.
             if self.hook_abort_signal.is_aborted() {
                 break;
             }
-            self.session
-                .push_prompt(prepared?, vec![view.echo()])
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let committed = self
+                .commit_prompt_input(prepared?, vec![view.echo()], observer, prompter)
+                .await?;
+            // The durable journal owns a returned decision. Remove only the
+            // transient steering lease; never acknowledge it as a consumed input.
             self.turn_inputs.committed(input.id);
-            if let Some(observer) = observer.as_deref_mut() {
-                observer.on_input_committed(&view);
+            if committed.is_consumed() {
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_input_committed(&view);
+                }
             }
         }
         Ok(())

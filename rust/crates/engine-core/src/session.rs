@@ -38,7 +38,7 @@
 //! on completion or cancellation. Synchronous compatibility callers use the
 //! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -55,6 +55,7 @@ use runtime::{
     TokenUsage,
 };
 
+use crate::interaction_control::InteractionControls;
 use crate::requests::{PendingAnswer, RequestTable};
 use crate::subagent_completion::{CompletionState, EventSink};
 
@@ -69,6 +70,12 @@ use crate::subagent_completion::{CompletionState, EventSink};
 /// The driver never inspects engine internals — it only calls these methods and
 /// forwards the results as [`EngineEvent`]s.
 pub trait EngineDelegate: Send + Sync + 'static {
+    /// Called at session composition, never while a turn owns the runtime lock.
+    fn interaction_journal(
+        &self,
+    ) -> Result<Option<Arc<runtime::session_interactions::InteractionJournal>>, String> {
+        Ok(None)
+    }
     fn agent_directory(&self) -> Result<serde_json::Value, String> {
         Err("Agent directory is unavailable for this host".into())
     }
@@ -138,6 +145,17 @@ pub trait EngineDelegate: Send + Sync + 'static {
     ) -> Result<runtime::external_a2a::ExternalToolResult, DirectToolError> {
         Err(DirectToolError::Refused(
             "this engine does not run direct tool calls".into(),
+        ))
+    }
+
+    fn continue_direct_interaction(
+        &self,
+        _receipt: engine_events::InteractionReceipt,
+        _journal: Arc<runtime::session_interactions::InteractionJournal>,
+        _prompter: &mut dyn PermissionPrompter,
+    ) -> Result<(), DirectToolError> {
+        Err(DirectToolError::Refused(
+            "this engine does not resume direct interactions".into(),
         ))
     }
 
@@ -305,9 +323,31 @@ enum ShutdownReason {
     Disconnected,
 }
 
-fn forward_engine_commands(
-    cmd_rx: std_mpsc::Receiver<EngineCommand>,
-) -> tokio_mpsc::UnboundedReceiver<EngineCommand> {
+/// One command stream with a single lookahead slot across a turn boundary.
+/// A command received just after the terminal event still belongs to the
+/// next idle dispatch, even if the finalizer task has not returned yet.
+struct SessionCommands {
+    receiver: tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    pending: Option<EngineCommand>,
+}
+
+impl SessionCommands {
+    async fn recv(&mut self) -> Option<EngineCommand> {
+        match self.pending.take() {
+            Some(command) => Some(command),
+            None => self.receiver.recv().await,
+        }
+    }
+
+    fn try_recv(&mut self) -> Result<EngineCommand, tokio_mpsc::error::TryRecvError> {
+        match self.pending.take() {
+            Some(command) => Ok(command),
+            None => self.receiver.try_recv(),
+        }
+    }
+}
+
+fn forward_engine_commands(cmd_rx: std_mpsc::Receiver<EngineCommand>) -> SessionCommands {
     let (tcmd_tx, tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
     std::thread::Builder::new()
         .name("engine-cmd-forward".into())
@@ -320,25 +360,39 @@ fn forward_engine_commands(
         })
         .expect("spawn engine-cmd-forward thread");
 
-    tcmd_rx
+    SessionCommands {
+        receiver: tcmd_rx,
+        pending: None,
+    }
 }
 
 async fn next_session_command(
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    delegate: &Arc<dyn EngineDelegate>,
+    tcmd_rx: &mut SessionCommands,
     evt_tx: &EventSink,
+    controls: &mut InteractionControls,
 ) -> Option<EngineCommand> {
+    let tasks = delegate.background_tasks().unwrap_or_default();
     loop {
         // A control already in the channel precedes an automatically resumed batch.
         if let Ok(command) = tcmd_rx.try_recv() {
             return Some(command);
         }
+        controls.start_next(delegate, evt_tx);
         if let Some((command, state)) = evt_tx.inputs.next_prompt() {
             let _ = evt_tx.send(EngineEvent::InputState(state));
             return Some(command);
         }
+        if !delegate.tool_control().1 && evt_tx.inputs.can_start_direct() {
+            if let Some(receipt) = controls.take_direct() {
+                return Some(EngineCommand::ResumeDirectInteraction { receipt });
+            }
+        }
         tokio::select! {
             command = tcmd_rx.recv() => return command,
-            () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
+            () = tasks.control_changed() => controls.retry(),
+            () = controls.finished(evt_tx), if controls.is_active() => {}
+            () = evt_tx.completions.delivery_changed() => controls.deliver_completions(),
             () = evt_tx.inputs.changed() => {}
         }
     }
@@ -350,7 +404,7 @@ async fn drive(
     cmd_rx: std_mpsc::Receiver<EngineCommand>,
     evt_tx: EventSink,
 ) {
-    let subagents = SubagentRelay::new(evt_tx.clone());
+    let mut controls = InteractionControls::default();
     let _runtime_observation =
         delegate.observe_runtime_status(evt_tx.runtime_status_reader(Arc::downgrade(&delegate)));
 
@@ -364,9 +418,14 @@ async fn drive(
     let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
 
     let mut shutdown = ShutdownReason::Disconnected;
-    while let Some(cmd) = next_session_command(&mut tcmd_rx, &evt_tx).await {
+    while let Some(cmd) =
+        next_session_command(&delegate, &mut tcmd_rx, &evt_tx, &mut controls).await
+    {
         let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
+            EngineCommand::Interactions { id, action } => {
+                controls.command(id, action, false, &evt_tx);
+            }
             EngineCommand::RefreshAgents => refresh_agents(&delegate, &evt_tx),
             EngineCommand::Attention { request_id } => {
                 handle_attention(request_id, &evt_tx);
@@ -375,35 +434,25 @@ async fn drive(
                 handle_runtime_status(request_id, &tasks, &evt_tx);
             }
             EngineCommand::Input { id, action } => {
-                handle_input(delegate.as_ref(), id, action, &evt_tx);
+                handle_input(delegate.as_ref(), id, action, &evt_tx, &mut controls);
             }
             EngineCommand::Steer { inputs } => {
                 let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
             }
-            EngineCommand::Completion { id, action } => handle_completion(id, action, &evt_tx),
+            EngineCommand::Completion { id, action } => controls.completion(id, action, &evt_tx),
             EngineCommand::CancelSubagent {
                 request_id,
                 agent_id,
             } => handle_subagent_cancel(request_id, &agent_id, &evt_tx),
             command @ (EngineCommand::Prompt { .. } | EngineCommand::Management { .. }) => {
-                let (input, context) = TurnInput::from_command(command);
-                if let Err(message) = evt_tx.completions.begin(context.as_ref()) {
-                    // Admission failed before the turn began; do not mutate the
-                    // previous completion transaction.
-                    let _ = evt_tx.reject_prompt(message);
-                    continue;
-                }
-                if let Some(context) = &context {
-                    delegate.set_trace_id(&context.trace_id);
-                }
-                if let Some(reason) = run_one_turn(
+                if let Some(reason) = run_prompt_command(
                     &delegate,
-                    input,
+                    command,
                     &evt_tx,
                     &mut tcmd_rx,
-                    &subagents,
                     &requests,
                     &tasks,
+                    &mut controls,
                 )
                 .await
                 {
@@ -414,23 +463,24 @@ async fn drive(
             command @ (EngineCommand::SetModel { .. }
             | EngineCommand::SetPermissionMode { .. }
             | EngineCommand::SlashCommand { .. }) => {
-                change_setting(delegate.as_ref(), command, &evt_tx);
+                change_idle_setting(delegate.as_ref(), command, &evt_tx, &mut controls);
             }
             EngineCommand::BackgroundTask { action } => {
                 handle_background_task(action, &tasks, &evt_tx);
             }
-            EngineCommand::DirectTool {
-                request_id,
-                name,
-                input,
-            } => {
-                let call = DirectCall {
-                    request_id,
-                    name,
-                    input,
-                };
-                if let Some(reason) =
-                    run_direct_tool(&delegate, call, &evt_tx, &mut tcmd_rx, &requests, &tasks).await
+            command @ (EngineCommand::DirectTool { .. }
+            | EngineCommand::ResumeDirectInteraction { .. }) => {
+                let call = DirectCall::from_command(command);
+                if let Some(reason) = run_direct_tool(
+                    &delegate,
+                    call,
+                    &evt_tx,
+                    &mut tcmd_rx,
+                    &requests,
+                    &tasks,
+                    &mut controls,
+                )
+                .await
                 {
                     shutdown = reason;
                     break;
@@ -453,8 +503,36 @@ async fn drive(
             }
         }
     }
+    if let Some(tasks) = delegate.background_tasks() {
+        tasks.begin_shutdown();
+    }
+    delegate.abort_signal().abort();
+    controls.close(&evt_tx).await;
     requests.cancel_all(&evt_tx);
     finish_engine_session(delegate.as_ref(), shutdown);
+}
+
+async fn run_prompt_command(
+    delegate: &Arc<dyn EngineDelegate>,
+    command: EngineCommand,
+    evt_tx: &EventSink,
+    tcmd_rx: &mut SessionCommands,
+    requests: &RequestTable,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+    controls: &mut InteractionControls,
+) -> Option<ShutdownReason> {
+    if controls.binding_pending()
+        || evt_tx.inputs.interaction_binding_pending()
+        || (matches!(command, EngineCommand::Management { .. })
+            && evt_tx.inputs.has_interaction_controls())
+    {
+        let _ = evt_tx.reject_prompt(
+            "Interaction control is still changing the session; retry this operation".into(),
+        );
+        return None;
+    }
+    let input = TurnInput::from_command(command);
+    run_one_turn(delegate, input, evt_tx, tcmd_rx, requests, tasks, controls).await
 }
 
 fn finish_engine_session(delegate: &dyn EngineDelegate, shutdown: ShutdownReason) {
@@ -466,6 +544,22 @@ fn finish_engine_session(delegate: &dyn EngineDelegate, shutdown: ShutdownReason
     // not save a newly assembled prompt snapshot into its resumed transcript.
     if matches!(shutdown, ShutdownReason::ExplicitClose) {
         delegate.close();
+    }
+}
+
+fn change_idle_setting(
+    delegate: &dyn EngineDelegate,
+    command: EngineCommand,
+    evt_tx: &EventSink,
+    controls: &mut InteractionControls,
+) {
+    if evt_tx.inputs.has_interaction_controls() {
+        let _ = evt_tx.send(EngineEvent::Error {
+            message: "Interaction control is still changing the session; retry this setting".into(),
+        });
+    } else {
+        change_setting(delegate, command, evt_tx);
+        controls.refresh(evt_tx);
     }
 }
 
@@ -490,13 +584,6 @@ fn change_setting(delegate: &dyn EngineDelegate, command: EngineCommand, sink: &
         Err(message) => {
             let _ = sink.send(EngineEvent::Error { message });
         }
-    }
-}
-
-fn handle_completion(id: Option<u64>, action: engine_events::CompletionAction, sink: &EventSink) {
-    let result = sink.completions.command(action);
-    if let Some(id) = id {
-        let _ = sink.send(EngineEvent::CommandResult { id, result });
     }
 }
 
@@ -547,19 +634,10 @@ fn handle_input(
     id: u64,
     action: engine_events::InputAction,
     sink: &EventSink,
+    controls: &mut InteractionControls,
 ) -> bool {
-    let result = if matches!(
-        action,
-        engine_events::InputAction::Submit { .. }
-            | engine_events::InputAction::Flush
-            | engine_events::InputAction::FlushOrCancel
-    ) && delegate.tool_control().1
-    {
-        Err("Tool execution is paused by the user".to_owned())
-    } else {
-        sink.inputs
-            .action(action, delegate.turn_input_inbox().as_ref())
-    };
+    let releases_lifecycle = matches!(action, engine_events::InputAction::ReleaseLifecycle { .. });
+    let result = admit_input(delegate, action, sink);
     let (result, cancelled) = match result {
         Ok((receipt, state, cancelled)) => {
             if cancelled {
@@ -577,6 +655,10 @@ fn handle_input(
                     );
                 }
             }
+            if releases_lifecycle {
+                controls.refresh(sink);
+                controls.retry();
+            }
             (Ok(receipt), cancelled)
         }
         Err(error) => (Err(error), false),
@@ -585,16 +667,38 @@ fn handle_input(
     cancelled
 }
 
+/// Every engine-owned input, including an interaction reply, uses the same
+/// pause and lifecycle admission checks before it can schedule model work.
+pub(crate) fn admit_input(
+    delegate: &dyn EngineDelegate,
+    action: engine_events::InputAction,
+    sink: &EventSink,
+) -> Result<(serde_json::Value, Option<engine_events::InputState>, bool), String> {
+    if matches!(
+        action,
+        engine_events::InputAction::Submit { .. }
+            | engine_events::InputAction::Flush
+            | engine_events::InputAction::FlushOrCancel
+    ) && delegate.tool_control().1
+    {
+        Err("Tool execution is paused by the user".to_owned())
+    } else {
+        sink.inputs
+            .action(action, delegate.turn_input_inbox().as_ref())
+    }
+}
+
 struct TurnInput {
     blocks: Vec<ContentBlock>,
     management: Option<(String, engine_events::ManagementContext)>,
     image_policy: engine_events::ImageInputPolicy,
     input_views: Vec<engine_events::InputView>,
     shown: Vec<engine_events::InputEcho>,
+    context: Option<engine_events::PromptContext>,
 }
 
 impl TurnInput {
-    fn from_command(command: EngineCommand) -> (Self, Option<engine_events::PromptContext>) {
+    fn from_command(command: EngineCommand) -> Self {
         let (blocks, context, management, shown) = match command {
             EngineCommand::Prompt {
                 blocks,
@@ -613,34 +717,44 @@ impl TurnInput {
             .map_or(engine_events::ImageInputPolicy::Native, |context| {
                 context.image_policy
             });
-        (
-            Self {
-                blocks,
-                management,
-                image_policy,
-                input_views: context
-                    .as_ref()
-                    .map_or_else(Vec::new, |context| context.input_views.clone()),
-                shown,
-            },
+        Self {
+            blocks,
+            management,
+            image_policy,
+            input_views: context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.input_views.clone()),
+            shown,
             context,
-        )
+        }
     }
+}
+
+enum TurnOutcome {
+    Rejected(String),
+    Finished(Result<Box<TurnComplete>, RuntimeError>),
 }
 
 fn report_turn_worker_result(
     evt_tx: &EventSink,
-    result: Result<Result<TurnComplete, RuntimeError>, tokio::task::JoinError>,
+    result: Result<TurnOutcome, tokio::task::JoinError>,
+    admitted: bool,
 ) {
     match result {
-        Ok(Ok(complete)) => {
-            let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
+        Ok(TurnOutcome::Rejected(message)) => {
+            let _ = evt_tx.reject_prompt(message);
         }
-        Ok(Err(error)) => {
+        Ok(TurnOutcome::Finished(Ok(complete))) => {
+            let _ = evt_tx.send(EngineEvent::TurnComplete(*complete));
+        }
+        Ok(TurnOutcome::Finished(Err(error))) => {
             let _ = evt_tx.send(EngineEvent::TurnFailed {
                 message: error.to_string(),
                 context_window: error.is_context_window_blocked(),
             });
+        }
+        Err(join_error) if !admitted => {
+            let _ = evt_tx.reject_prompt(format!("engine admission panicked: {join_error}"));
         }
         Err(join_error) => {
             let _ = evt_tx.send(EngineEvent::TurnFailed {
@@ -656,39 +770,103 @@ fn spawn_turn_worker(
     input: TurnInput,
     evt_tx: &EventSink,
     table: &RequestTable,
-    subagents: &SubagentRelay,
     tasks: &runtime::background_tasks::BackgroundTasks,
-) -> tokio::task::JoinHandle<Result<TurnComplete, RuntimeError>> {
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<TurnOutcome> {
     let worker = delegate.clone();
     let turn_tx = evt_tx.clone();
     let turn_table = table.clone();
-    let subagents = subagents.clone();
+    let subagents = SubagentRelay::new(evt_tx.clone());
     let turn_tasks = tasks.clone();
     tokio::task::spawn_blocking(move || {
-        let mut input = input;
-        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
-            .with_subagent_relay(subagents)
-            .with_background_tasks(turn_tasks);
-        observer.initial_inputs = std::mem::take(&mut input.input_views);
-        observer.shown = std::mem::take(&mut input.shown);
-        let mut prompter = PrompterAdapter {
-            tx: turn_tx,
-            table: turn_table,
-        };
-        if input.management.is_none() && worker.requires_host_context() {
-            let (answer_tx, answer_rx) = oneshot::channel();
-            let _lease = prompter.table.begin_request(
-                &prompter.tx,
-                PendingAnswer::HostContext(answer_tx),
-                |id| EngineEvent::HostContextRequest { id },
-            );
-            let context = futures::executor::block_on(answer_rx)
-                .map_err(|_| RuntimeError::new("host context resolution was cancelled"))?
-                .map_err(RuntimeError::new)?;
-            worker.apply_host_context(context)?;
+        if let Err(message) = turn_tx.completions.begin(input.context.as_ref()) {
+            return TurnOutcome::Rejected(message);
         }
-        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
+        admitted.store(true, Ordering::Release);
+        let result = (|| {
+            if let Some(context) = &input.context {
+                if !context.trace_id.is_empty() {
+                    worker.set_trace_id(&context.trace_id);
+                }
+            }
+            let label = input.management.as_ref().map_or_else(
+                || turn_label(&input.blocks),
+                |(line, _)| line.chars().take(80).collect(),
+            );
+            let _ = turn_tx.send(EngineEvent::TurnStarted { label });
+            let mut input = input;
+            let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
+                .with_subagent_relay(subagents)
+                .with_background_tasks(turn_tasks);
+            observer.initial_inputs = std::mem::take(&mut input.input_views);
+            observer.shown = std::mem::take(&mut input.shown);
+            let mut prompter = PrompterAdapter {
+                tx: turn_tx,
+                table: turn_table,
+            };
+            if input.management.is_none() && worker.requires_host_context() {
+                let (answer_tx, answer_rx) = oneshot::channel();
+                let _lease = prompter.table.begin_request(
+                    &prompter.tx,
+                    PendingAnswer::HostContext(answer_tx),
+                    |id| EngineEvent::HostContextRequest { id },
+                );
+                let context = futures::executor::block_on(answer_rx)
+                    .map_err(|_| RuntimeError::new("host context resolution was cancelled"))?
+                    .map_err(RuntimeError::new)?;
+                worker.apply_host_context(context)?;
+            }
+            execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
+        })();
+        TurnOutcome::Finished(result.map(Box::new))
     })
+}
+
+fn finish_turn_worker(
+    turn: tokio::task::JoinHandle<TurnOutcome>,
+    evt_tx: &EventSink,
+    table: &RequestTable,
+    inbox: Option<&runtime::turn_input::TurnInputInbox>,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<Result<(), tokio::task::JoinError>> {
+    let finish_sink = evt_tx.clone();
+    let finish_table = table.clone();
+    let finish_inbox = inbox.cloned();
+    // The terminal event is a durable completion barrier. Await it without
+    // occupying the command pump, just as for the execution worker itself.
+    tokio::spawn(async move {
+        let result = turn.await;
+        tokio::task::spawn_blocking(move || {
+            finish_table.close_turn(&finish_sink);
+            if let Some(inbox) = &finish_inbox {
+                let unapplied = inbox.finish();
+                if !unapplied.is_empty() {
+                    let _ = finish_sink.send(EngineEvent::InputDeferred(unapplied));
+                }
+            }
+            report_turn_worker_result(&finish_sink, result, admitted.load(Ordering::Acquire));
+            let _ = finish_sink.send(EngineEvent::State(EngineState::Idle));
+        })
+        .await
+    })
+}
+
+fn report_finalizer_result(
+    result: Result<Result<(), tokio::task::JoinError>, tokio::task::JoinError>,
+    evt_tx: &EventSink,
+) {
+    let failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) | Err(error) => Some(error.to_string()),
+    };
+    if let Some(error) = failure {
+        // A panicked finalizer does not prove that its durable completion
+        // failed. Preserve that uncertainty for recovery.
+        let _ = evt_tx.reject_prompt(format!(
+            "engine completion failed: {error}; inspect the saved session before retrying"
+        ));
+        let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
+    }
 }
 
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
@@ -699,17 +877,12 @@ async fn run_one_turn(
     delegate: &Arc<dyn EngineDelegate>,
     input: TurnInput,
     evt_tx: &EventSink,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
-    subagents: &SubagentRelay,
+    tcmd_rx: &mut SessionCommands,
     requests: &RequestTable,
     tasks: &runtime::background_tasks::BackgroundTasks,
+    controls: &mut InteractionControls,
 ) -> Option<ShutdownReason> {
     let table = requests.turn();
-    let label = input.management.as_ref().map_or_else(
-        || turn_label(&input.blocks),
-        |(line, _)| line.chars().take(80).collect(),
-    );
-
     let abort = delegate.abort_signal();
     abort.reset();
     let inbox = delegate.turn_input_inbox();
@@ -717,18 +890,36 @@ async fn run_one_turn(
     if let Some(inbox) = &inbox {
         inbox.begin();
     }
-    let _ = evt_tx.send(EngineEvent::TurnStarted { label });
+    if let Some(state) = evt_tx.inputs.reserve_turn() {
+        let _ = evt_tx.send(EngineEvent::InputState(state));
+    }
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
-    let mut handle = spawn_turn_worker(delegate, input, evt_tx, &table, subagents, tasks);
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let turn = spawn_turn_worker(delegate, input, evt_tx, &table, tasks, admitted.clone());
+    let mut handle = finish_turn_worker(turn, evt_tx, &table, inbox.as_ref(), admitted);
 
     let mut shutdown = None;
+    let mut deferred = None;
     loop {
+        if shutdown.is_none() {
+            controls.start_next(delegate, evt_tx);
+        }
         tokio::select! {
             biased;
-            cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+            cmd = tcmd_rx.recv(), if shutdown.is_none() && deferred.is_none() => match cmd {
+                Some(command) if !evt_tx.inputs.is_running() => {
+                    // EventSink releases the shared input phase only after
+                    // durable terminal processing, before notifying the host.
+                    // Retain the first follow-up in FIFO order and let the
+                    // finalizer return before dispatching it as idle work.
+                    deferred = Some(command);
+                }
+                Some(EngineCommand::Interactions { id, action }) => {
+                    controls.command(id, action, true, evt_tx);
+                }
                 Some(EngineCommand::Input { id, action }) => {
-                    if handle_input(delegate.as_ref(), id, action, evt_tx) {
+                    if handle_input(delegate.as_ref(), id, action, evt_tx, controls) {
                         table.close_turn(evt_tx);
                     }
                 }
@@ -748,10 +939,11 @@ async fn run_one_turn(
                 Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::RefreshAgents) => refresh_agents(delegate, evt_tx),
                 Some(EngineCommand::Attention { request_id }) => handle_attention(request_id, evt_tx),
-                Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
+                Some(EngineCommand::Completion { id, action }) => controls.completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 // Both paths abort and reap; only explicit Close persists.
                 command @ (Some(EngineCommand::Close) | None) => {
+                    evt_tx.interactions.begin_close();
                     shutdown = Some(if command.is_some() {
                         ShutdownReason::ExplicitClose
                     } else {
@@ -775,18 +967,18 @@ async fn run_one_turn(
                 // turns). Ignore it rather than interleave.
                 Some(_) => {}
             },
-            () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
+            () = evt_tx.completions.delivery_changed() => controls.deliver_completions(),
+            () = tasks.control_changed(), if shutdown.is_none() => controls.retry(),
+            () = controls.finished(evt_tx), if controls.is_active() => {}
             result = &mut handle => {
-                table.close_turn(evt_tx);
-                if let Some(inbox) = &inbox {
-                    let unapplied = inbox.finish();
-                    if !unapplied.is_empty() { let _ = evt_tx.send(EngineEvent::InputDeferred(unapplied)); }
-                }
-                report_turn_worker_result(evt_tx, result);
-                let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
+                report_finalizer_result(result, evt_tx);
                 break;
             }
         }
+    }
+    if let Some(command) = deferred {
+        debug_assert!(tcmd_rx.pending.is_none());
+        tcmd_rx.pending = Some(command);
     }
     shutdown
 }
@@ -803,10 +995,33 @@ pub enum DirectToolError {
 }
 
 /// One [`EngineCommand::DirectTool`].
-struct DirectCall {
-    request_id: u64,
-    name: String,
-    input: String,
+enum DirectCall {
+    Immediate {
+        request_id: u64,
+        name: String,
+        input: String,
+    },
+    Resolved {
+        receipt: engine_events::InteractionReceipt,
+    },
+}
+
+impl DirectCall {
+    fn from_command(command: EngineCommand) -> Self {
+        match command {
+            EngineCommand::DirectTool {
+                request_id,
+                name,
+                input,
+            } => DirectCall::Immediate {
+                request_id,
+                name,
+                input,
+            },
+            EngineCommand::ResumeDirectInteraction { receipt } => DirectCall::Resolved { receipt },
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// A direct call that arrives while other work holds the engine is refused, not
@@ -818,6 +1033,88 @@ fn refuse_busy(request_id: u64, sink: &EventSink) {
     });
 }
 
+fn spawn_direct_worker(
+    delegate: &Arc<dyn EngineDelegate>,
+    call: DirectCall,
+    receipt: Option<engine_events::InteractionReceipt>,
+    table: &RequestTable,
+    evt_tx: &EventSink,
+) -> tokio::task::JoinHandle<
+    Result<Option<runtime::external_a2a::ExternalToolResult>, DirectToolError>,
+> {
+    let worker = Arc::clone(delegate);
+    let mut prompter = PrompterAdapter {
+        tx: evt_tx.clone(),
+        table: table.clone(),
+    };
+    let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
+    let direct_sink = evt_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = match call {
+            DirectCall::Immediate { name, input, .. } => worker
+                .run_direct_tool(&name, &input, &mut prompter)
+                .map(Some),
+            DirectCall::Resolved { receipt } => {
+                let journal = prompter
+                    .tx
+                    .interactions
+                    .journal()
+                    .map_err(DirectToolError::Refused)?
+                    .ok_or_else(|| {
+                        DirectToolError::Refused("interactions are no longer configured".into())
+                    })?;
+                worker
+                    .continue_direct_interaction(receipt, journal, &mut prompter)
+                    .map(|()| None)
+            }
+        };
+        if let Some(receipt) = receipt {
+            if matches!(result, Ok(None)) {
+                direct_sink.interactions.return_delivery(receipt);
+            }
+            if let Ok(Some(journal)) = direct_sink.interactions.journal() {
+                if let Ok(snapshot) = journal.snapshot() {
+                    let _ = direct_sink.send(EngineEvent::Interactions(snapshot));
+                }
+            }
+        }
+        result
+    })
+}
+
+fn direct_result(
+    result: Result<
+        Result<Option<runtime::external_a2a::ExternalToolResult>, DirectToolError>,
+        tokio::task::JoinError,
+    >,
+    has_request: bool,
+) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(Ok(Some(result))) => Ok(serde_json::json!({
+            "content": result.content,
+            "isError": result.is_error,
+            "pendingInteraction": result.pending,
+            "_meta": { "sudocode": { "directA2a": { "audit": result.audit } } },
+        })),
+        Ok(Ok(None)) => {
+            // Completion and a foreign live claimant both return
+            // the transient delivery lease. The journal determines
+            // whether another attempt can run; errors wait for an
+            // explicit retry instead of spinning the idle pump.
+            Ok(serde_json::Value::Null)
+        }
+        Ok(Err(DirectToolError::Refused(reason))) => {
+            if has_request {
+                Ok(serde_json::json!({ "refused": reason }))
+            } else {
+                Err(reason)
+            }
+        }
+        Ok(Err(DirectToolError::Unknown(detail))) => Err(detail),
+        Err(join_error) => Err(format!("direct tool call panicked: {join_error}")),
+    }
+}
+
 /// Run one [`EngineCommand::DirectTool`] on a blocking task while servicing its
 /// permission prompts through the same request table a turn uses. Returns the
 /// shutdown reason if a close or disconnection arrived meanwhile.
@@ -825,37 +1122,51 @@ async fn run_direct_tool(
     delegate: &Arc<dyn EngineDelegate>,
     call: DirectCall,
     evt_tx: &EventSink,
-    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    tcmd_rx: &mut SessionCommands,
     requests: &RequestTable,
     tasks: &runtime::background_tasks::BackgroundTasks,
+    controls: &mut InteractionControls,
 ) -> Option<ShutdownReason> {
+    let request_id = match &call {
+        DirectCall::Immediate { request_id, .. } => Some(*request_id),
+        DirectCall::Resolved { .. } => None,
+    };
+    let receipt = match &call {
+        DirectCall::Resolved { receipt } => Some(*receipt),
+        DirectCall::Immediate { .. } => None,
+    };
+    if let Err(message) = evt_tx.inputs.begin_direct() {
+        if let Some(id) = request_id {
+            let _ = evt_tx.send(EngineEvent::CommandResult {
+                id,
+                result: Ok(serde_json::json!({"refused": message})),
+            });
+        } else {
+            let _ = evt_tx.send(EngineEvent::InteractionError { message });
+        }
+        return None;
+    }
     let table = requests.turn();
     let abort = delegate.abort_signal();
     abort.reset();
-    let DirectCall {
-        request_id,
-        name,
-        input,
-    } = call;
-    let worker = Arc::clone(delegate);
-    let mut prompter = PrompterAdapter {
-        tx: evt_tx.clone(),
-        table: table.clone(),
-    };
-    let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
-    let mut handle =
-        tokio::task::spawn_blocking(move || worker.run_direct_tool(&name, &input, &mut prompter));
+    let mut handle = spawn_direct_worker(delegate, call, receipt, &table, evt_tx);
     let mut shutdown = None;
     loop {
+        if shutdown.is_none() {
+            controls.start_next(delegate, evt_tx);
+        }
         tokio::select! {
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
                 Some(EngineCommand::Input { id, action }) => {
-                    if handle_input(delegate.as_ref(), id, action, evt_tx) { table.close_turn(evt_tx); }
+                    if handle_input(delegate.as_ref(), id, action, evt_tx, controls) { table.close_turn(evt_tx); }
                 }
                 Some(command @ (EngineCommand::PermissionAnswer { .. }
                     | EngineCommand::QuestionAnswer { .. }
                     | EngineCommand::HostContextAnswer { .. })) => table.answer(command, evt_tx),
+                Some(EngineCommand::Interactions { id, action }) => {
+                    controls.command(id, action, true, evt_tx);
+                }
                 Some(EngineCommand::Steer { inputs }) => {
                     let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
                 }
@@ -864,9 +1175,10 @@ async fn run_direct_tool(
                 Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::RefreshAgents) => refresh_agents(delegate, evt_tx),
                 Some(EngineCommand::Attention { request_id }) => handle_attention(request_id, evt_tx),
-                Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
+                Some(EngineCommand::Completion { id, action }) => controls.completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 command @ (Some(EngineCommand::Close) | None) => {
+                    evt_tx.interactions.begin_close();
                     shutdown = Some(if command.is_some() {
                         ShutdownReason::ExplicitClose
                     } else {
@@ -887,26 +1199,23 @@ async fn run_direct_tool(
                 // does, rather than interleave.
                 Some(_) => {}
             },
+            () = tasks.control_changed(), if shutdown.is_none() => controls.retry(),
+            () = controls.finished(evt_tx), if controls.is_active() => {}
             result = &mut handle => {
                 table.close_turn(evt_tx);
-                let result = match result {
-                    Ok(Ok(result)) => Ok(serde_json::json!({
-                        "content": result.content,
-                        "isError": result.is_error,
-                        "_meta": { "sudocode": { "directA2a": { "audit": result.audit } } },
-                    })),
-                    Ok(Err(DirectToolError::Refused(reason))) => {
-                        Ok(serde_json::json!({ "refused": reason }))
-                    }
-                    Ok(Err(DirectToolError::Unknown(detail))) => Err(detail),
-                    Err(join_error) => Err(format!("direct tool call panicked: {join_error}")),
-                };
+                let result = direct_result(result, request_id.is_some());
                 // A permission prompt moves the reported state; the session is
                 // idle again either way. Say so before the reply, while the
                 // caller still holds the session's event listener, so the next
                 // turn cannot receive this call's state.
                 let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
-                let _ = evt_tx.send(EngineEvent::CommandResult { id: request_id, result });
+                evt_tx.inputs.finish_direct();
+                controls.scan();
+                if let Some(id) = request_id {
+                    let _ = evt_tx.send(EngineEvent::CommandResult { id, result });
+                } else if let Err(message) = result {
+                    let _ = evt_tx.send(EngineEvent::InteractionError { message });
+                }
                 break;
             }
         }
@@ -932,6 +1241,11 @@ fn execute_input(
         });
     }
     let blocks = delegate.prepare_prompt(input.blocks, input.image_policy)?;
+    prompter
+        .tx
+        .interactions
+        .refresh(delegate, &prompter.tx)
+        .map_err(RuntimeError::new)?;
     // Host context and image preparation can rebuild the runtime. Install the
     // question bridge only once preparation has selected the runtime to execute.
     delegate.set_question_prompter(Box::new(QuestionAdapter {
@@ -1010,6 +1324,30 @@ impl SubagentRelay {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn interaction_journal(
+        &self,
+    ) -> Result<Option<Arc<runtime::session_interactions::InteractionJournal>>, RuntimeError> {
+        self.tx.interactions.journal().map_err(RuntimeError::new)
+    }
+
+    fn input_context_action(
+        &self,
+        inputs: &[runtime::turn_input::InputEcho],
+    ) -> Result<Option<runtime::image_input::ToolContextAction>, RuntimeError> {
+        self.tx
+            .interactions
+            .input_context_action(inputs)
+            .map_err(RuntimeError::new)
+    }
+    fn validate_input_echoes(
+        &self,
+        inputs: &[runtime::turn_input::InputEcho],
+    ) -> Result<(), RuntimeError> {
+        self.tx
+            .interactions
+            .validate_inputs(inputs)
+            .map_err(RuntimeError::new)
+    }
     fn prompt_echoes(&self) -> Vec<runtime::turn_input::InputEcho> {
         self.shown
             .iter()
@@ -1022,12 +1360,28 @@ impl RuntimeObserver for ObserverAdapter {
             .collect()
     }
     fn on_prompt_committed(&mut self) {
+        // Host-owned input queues have already echoed these inputs. Their
+        // interaction receipts still retire only after this durable commit.
+        for echo in &self.shown {
+            if matches!(echo.source, engine_events::InputSource::Interaction(_)) {
+                let _ = self.tx.commit_interaction(echo.source);
+            }
+        }
         for input in std::mem::take(&mut self.initial_inputs) {
             let _ = self.tx.send(EngineEvent::InputCommitted(input));
         }
     }
     fn on_input_committed(&mut self, input: &runtime::turn_input::InputView) {
         let _ = self.tx.send(EngineEvent::InputCommitted(input.clone()));
+    }
+    fn on_interaction_delivery_returned(&mut self, receipt: engine_events::InteractionReceipt) {
+        self.initial_inputs
+            .retain(|input| input.source != engine_events::InputSource::Interaction(receipt));
+        self.shown
+            .retain(|input| input.source != engine_events::InputSource::Interaction(receipt));
+        let _ = self
+            .tx
+            .send(EngineEvent::InteractionDeliveryReturned(receipt));
     }
     fn on_compaction(&mut self, event: &runtime::CompactionProgress) {
         let _ = self.tx.send(EngineEvent::Compaction(event.clone()));
@@ -1178,15 +1532,54 @@ struct PrompterAdapter {
 }
 
 impl PermissionPrompter for PrompterAdapter {
+    fn submit_permission(
+        &mut self,
+        source: &str,
+        request: &PermissionRequest,
+        origin: runtime::session_interactions::InteractionOrigin,
+    ) -> Result<Option<runtime::session_interactions::Interaction>, String> {
+        self.tx.interactions.submit_from(
+            source,
+            engine_events::InteractionRequest::Permission(request.clone()),
+            origin,
+            &self.tx,
+        )
+    }
+
+    fn check_session_gate(&self, tool_name: &str, required: PermissionMode) -> Result<(), String> {
+        self.tx.interactions.check_plan_gate(tool_name, required)
+    }
     fn delegation_sink(&self) -> Option<runtime::PermissionPromptSink> {
         let bridge = self.clone();
         let attention = self.tx.clone();
         let changed = self.clone();
-        Some(runtime::PermissionPromptSink::new(
+        let legacy = runtime::PermissionPromptSink::new(
             move |request, agent| bridge.permission(request, agent),
             move || attention.attention(),
             move || changed.table.refresh(&changed.tx),
-        ))
+        );
+        match self
+            .tx
+            .interactions
+            .worker_sink(self.tx.clone(), legacy.clone())
+        {
+            Ok(Some(sink)) => return Some(sink),
+            Ok(None) => {}
+            Err(reason) => {
+                let attention = self.tx.clone();
+                let changed = self.clone();
+                return Some(runtime::PermissionPromptSink::new(
+                    move |_, _| {
+                        Box::pin(std::future::ready(PermissionPromptDecision::Deny {
+                            reason: reason.clone(),
+                        }))
+                    },
+                    move || attention.attention(),
+                    move || changed.table.refresh(&changed.tx),
+                ));
+            }
+        }
+        Some(legacy)
     }
 
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -1234,6 +1627,16 @@ struct QuestionAdapter {
 }
 
 impl QuestionPrompter for QuestionAdapter {
+    fn submit_question(
+        &mut self,
+        source: &str,
+        request: &QuestionPromptRequest,
+    ) -> Result<Option<runtime::session_interactions::Interaction>, String> {
+        self.tx
+            .interactions
+            .submit_question(source, request, &self.tx)
+    }
+
     fn ask(
         &mut self,
         request: &QuestionPromptRequest,
@@ -1264,7 +1667,6 @@ impl QuestionPrompter for QuestionAdapter {
 
 /// One bounded discovery at a time, never on the command pump or render thread.
 fn refresh_agents(delegate: &Arc<dyn EngineDelegate>, sink: &EventSink) {
-    use std::sync::atomic::Ordering;
     if sink.directory_inflight.swap(true, Ordering::AcqRel) {
         return;
     }

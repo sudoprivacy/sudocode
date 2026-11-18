@@ -191,6 +191,23 @@ pub fn prepare_image(data: &str, mime: &str, model: &str) -> Result<ContentBlock
     Ok(ContentBlock::Image { data, mime_type })
 }
 
+/// Prepare one queued or steering input without promoting machine text into
+/// attachment instructions. Only human input owns native image attachments.
+pub fn turn_input_blocks(
+    input: &crate::turn_input::TurnInput,
+    fs: &dyn FsBackend,
+) -> io::Result<Vec<ContentBlock>> {
+    if input.source == crate::turn_input::InputSource::Human {
+        let mut blocks = prompt_blocks(input.text.clone(), fs)?;
+        blocks.extend(input.attachments.iter().cloned());
+        Ok(blocks)
+    } else {
+        Ok(vec![ContentBlock::Text {
+            text: input.text.clone(),
+        }])
+    }
+}
+
 /// Resolve explicit CLI image references, including quoted paths containing
 /// spaces. Ordinary @mentions remain text. Called only for user input.
 pub fn prompt_blocks(text: impl Into<String>, fs: &dyn FsBackend) -> io::Result<Vec<ContentBlock>> {

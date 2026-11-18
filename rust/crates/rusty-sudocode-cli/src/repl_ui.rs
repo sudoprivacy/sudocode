@@ -340,6 +340,8 @@ pub enum UiCommand {
     ShowQuestion(QuestionPromptView, QuestionOwner),
     /// Clear the question on screen; with an owner, only that owner's.
     ClearQuestion(Option<QuestionOwner>),
+    ShowInteraction(InteractionFocus, QuestionPromptView),
+    CloseInteraction,
     SetTurnResult {
         text: Arc<StyledText>,
         turn: u32,
@@ -391,6 +393,7 @@ pub struct UiCommandSender {
 pub enum QuestionOwner {
     Turn,
     Repl,
+    Interaction,
 }
 
 impl UiCommandSender {
@@ -440,6 +443,14 @@ impl UiCommandSender {
         let _ = self
             .tx
             .send(UiCommand::ClearQuestion(Some(QuestionOwner::Turn)));
+    }
+
+    pub(crate) fn show_interaction(&self, focus: InteractionFocus, question: QuestionPromptView) {
+        let _ = self.tx.send(UiCommand::ShowInteraction(focus, question));
+    }
+
+    pub(crate) fn close_interaction(&self) {
+        let _ = self.tx.send(UiCommand::CloseInteraction);
     }
 
     pub(crate) fn set_turn_result(&self, text: &crate::render::StyledLine, turn: u32) {
@@ -518,10 +529,23 @@ fn submit_dialpad_selection(
     question: &QuestionPromptView,
     selected_index: usize,
     input_tx: &SyncSender<InputEvent>,
+    focus: Option<InteractionFocus>,
 ) {
     if let Some(option) = question.options.get(selected_index) {
-        let _ = input_tx.send(InputEvent::QuestionAnswer(option.value.clone()));
+        send_question_answer(input_tx, option.value.clone(), focus);
     }
+}
+
+fn send_question_answer(
+    input_tx: &SyncSender<InputEvent>,
+    answer: String,
+    focus: Option<InteractionFocus>,
+) {
+    let event = match focus {
+        Some(focus) => InputEvent::InteractionAnswer { focus, answer },
+        None => InputEvent::QuestionAnswer(answer),
+    };
+    let _ = input_tx.send(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -941,6 +965,14 @@ pub(crate) struct CacheTip {
 }
 
 /// Events from the iocraft UI to the coordinator thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InteractionFocus {
+    pub id: String,
+    pub revision: u64,
+    pub index: usize,
+}
+
+/// Events from the iocraft UI to the coordinator thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
     RefreshAgents,
@@ -962,6 +994,12 @@ pub enum InputEvent {
     /// An option value, literal custom text, or QUESTION_BACK. The input view
     /// already resolves digit shortcuts; consumers must preserve this value.
     QuestionAnswer(String),
+    OpenInteractions,
+    DismissInteraction,
+    InteractionAnswer {
+        focus: InteractionFocus,
+        answer: String,
+    },
     /// A question the turn asks took the slot from a REPL picker, or arrived
     /// first and turned one away: the picker is no longer on screen. Sent in
     /// screen order with answers, so an answer before it was for the picker.
@@ -1257,6 +1295,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut turn_result = hooks.use_state(move || initial_turn_result);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
+    let mut focused_interaction = hooks.use_state(|| None::<InteractionFocus>);
     let mut question_owner = hooks.use_state(|| QuestionOwner::Repl);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
@@ -1299,6 +1338,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ..
             }) if kind != KeyEventKind::Release => {
                 let current_slot = input_slot.read().clone();
+                let interaction = focused_interaction.read().clone();
+                if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::ALT)
+                    && matches!(current_slot, InputSlot::TextInput) {
+                    let _ = input_tx_for_events.send(InputEvent::OpenInteractions);
+                    return;
+                }
+                if code == KeyCode::Esc && interaction.is_some() {
+                    focused_interaction.set(None);
+                    input_slot.set(InputSlot::TextInput);
+                    let _ = input_tx_for_events.send(InputEvent::DismissInteraction);
+                    return;
+                }
                 if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
                     let question = match &current_slot {
                         InputSlot::DialPad(question) => Some(question),
@@ -1428,19 +1479,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         if !*has_submitted.read() {
                                             has_submitted.set(true);
                                         }
-                                        let _ = input_tx_for_events
-                                            .send(InputEvent::QuestionAnswer(answer));
+                                        send_question_answer(&input_tx_for_events, answer, interaction.clone());
                                         dialpad_input.set(String::new());
-                                        paste_store.write().clear();
-                                        next_paste_id.set(1);
+                                        if interaction.is_none() {
+                                            paste_store.write().clear();
+                                            next_paste_id.set(1);
+                                            input_value.set(String::new());
+                                            input_slot.set(InputSlot::TextInput);
+                                        }
+                                    }
+                                } else {
+                                    submit_dialpad_selection(question, selected, &input_tx_for_events, interaction.clone());
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    if interaction.is_none() {
                                         input_value.set(String::new());
                                         input_slot.set(InputSlot::TextInput);
                                     }
-                                } else {
-                                    submit_dialpad_selection(question, selected, &input_tx_for_events);
-                                    if !*has_submitted.read() { has_submitted.set(true); }
-                                    input_value.set(String::new());
-                                    input_slot.set(InputSlot::TextInput);
                                 }
                             }
                             InputSlot::FuzzySelect(_) => {
@@ -1466,9 +1520,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 };
                                 if let Some(answer) = answer {
                                     if !*has_submitted.read() { has_submitted.set(true); }
-                                    let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(answer));
-                                    input_value.set(String::new());
-                                    input_slot.set(InputSlot::TextInput);
+                                    send_question_answer(&input_tx_for_events, answer, interaction.clone());
+                                    if interaction.is_none() {
+                                        input_value.set(String::new());
+                                        input_slot.set(InputSlot::TextInput);
+                                    }
                                 }
                             }
                             // TextInput owns submission and clearing at event
@@ -1514,9 +1570,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             InputSlot::TextInput => None,
                         };
                         if let Some(val) = back {
-                            let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(val));
-                            input_slot.set(InputSlot::TextInput);
-                            input_value.set(String::new());
+                            send_question_answer(&input_tx_for_events, val, interaction.clone());
+                            if interaction.is_none() {
+                                input_slot.set(InputSlot::TextInput);
+                                input_value.set(String::new());
+                            }
                         }
                     }
                     // ── Right — drill into navigable option ───────────
@@ -1524,9 +1582,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         if let InputSlot::DialPad(ref q) = current_slot {
                             let selected = dialpad_cursor.get();
                             if q.options.get(selected).is_some_and(|o| o.is_navigable) {
-                                submit_dialpad_selection(q, selected, &input_tx_for_events);
-                                input_slot.set(InputSlot::TextInput);
-                                input_value.set(String::new());
+                                submit_dialpad_selection(q, selected, &input_tx_for_events, interaction.clone());
+                                if interaction.is_none() {
+                                    input_slot.set(InputSlot::TextInput);
+                                    input_value.set(String::new());
+                                }
                             }
                         }
                     }
@@ -1543,13 +1603,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let slot = input_slot.read();
                             if let InputSlot::FuzzySelect(ref fs) = *slot {
                                 if let Some(option) = fs.selected_option() {
-                                    let _ = input_tx_for_events
-                                        .send(InputEvent::QuestionAnswer(option.value.clone()));
+                                    send_question_answer(&input_tx_for_events, option.value.clone(), interaction.clone());
                                 }
                             }
                             drop(slot);
-                            input_slot.set(InputSlot::TextInput);
-                            input_value.set(String::new());
+                            if interaction.is_none() {
+                                input_slot.set(InputSlot::TextInput);
+                                input_value.set(String::new());
+                            }
                         }
                     }
                     // ── Digit shortcut — DialPad only ─────────────────
@@ -1573,10 +1634,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         if digit >= 1 && digit <= option_count {
                             dialpad_cursor.set(digit - 1);
                             if let InputSlot::DialPad(ref question) = current_slot {
-                                submit_dialpad_selection(question, digit - 1, &input_tx_for_events);
+                                submit_dialpad_selection(question, digit - 1, &input_tx_for_events, interaction.clone());
                                 if !*has_submitted.read() { has_submitted.set(true); }
-                                input_value.set(String::new());
-                                input_slot.set(InputSlot::TextInput);
+                                if interaction.is_none() {
+                                    input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
+                                }
                             }
                         }
                     }
@@ -1843,18 +1906,35 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             footer_hint
                                 .set(Some((message, Instant::now() + Duration::from_secs(3))));
                         }
-                        Ok(UiCommand::ShowQuestion(question, owner)) => {
-                            // A turn's question always wins the slot over a REPL
-                            // picker; the REPL is told its picker is gone.
+                        Ok(command @ (UiCommand::ShowQuestion(..) | UiCommand::ShowInteraction(..))) => {
+                            let (question, owner, focus) = match command {
+                                UiCommand::ShowQuestion(question, owner) => (question, owner, None),
+                                UiCommand::ShowInteraction(focus, question) =>
+                                    (question, QuestionOwner::Interaction, Some(focus)),
+                                _ => unreachable!(),
+                            };
                             let is_question_shown =
                                 !matches!(*input_slot.read(), InputSlot::TextInput);
                             if is_question_shown && owner != question_owner.get() {
-                                let _ = input_tx_for_future.send(InputEvent::QuestionSuperseded);
-                                if owner == QuestionOwner::Repl {
+                                // Turn-owned prompts retain priority. Otherwise,
+                                // explicit user navigation selects the owner.
+                                let displaced = if question_owner.get() == QuestionOwner::Turn {
+                                    owner
+                                } else {
+                                    question_owner.get()
+                                };
+                                let event = match displaced {
+                                    QuestionOwner::Repl => InputEvent::QuestionSuperseded,
+                                    QuestionOwner::Interaction => InputEvent::DismissInteraction,
+                                    QuestionOwner::Turn => unreachable!(),
+                                };
+                                let _ = input_tx_for_future.send(event);
+                                if question_owner.get() == QuestionOwner::Turn {
                                     continue;
                                 }
                             }
                             question_owner.set(owner);
+                            focused_interaction.set(focus);
                             // A request's immutable description belongs to
                             // history. Only its first field presents it; the
                             // live slot owns the current field's controls.
@@ -1889,11 +1969,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
-                            input_value.set(String::new());
+                            if focused_interaction.read().is_none() {
+                                input_value.set(String::new());
+                            }
+                        }
+                        Ok(UiCommand::CloseInteraction) => {
+                            if focused_interaction.read().is_some() {
+                                focused_interaction.set(None);
+                                input_slot.set(InputSlot::TextInput);
+                            }
                         }
                         Ok(UiCommand::ClearQuestion(only)) => {
                             let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
-                            if !is_plain_input && only.is_none_or(|owner| owner == question_owner.get()) {
+                            if !is_plain_input && focused_interaction.read().is_none()
+                                && only.is_none_or(|owner| owner == question_owner.get()) {
                                 input_slot.set(InputSlot::TextInput);
                                 input_value.set(String::new());
                             }
@@ -2502,29 +2591,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(row_text("controls", controls, visible.controls))
             // The editor stays mounted even with zero allocated rows so a
             // shrink/grow cannot discard its cursor, draft or edit ownership.
-            View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: input_background) {
-            #(if task_panel.is_some() {
-                element! { View(flex_direction: FlexDirection::Row) {} }
-            } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
-                // DialPad: no input row — all interaction is via
-                // arrow keys and digit shortcuts shown in the panel.
-                element! {
-                    View(flex_direction: FlexDirection::Row) {}
-                }
-            } else if matches!(current_input_slot, InputSlot::FuzzySelect(_)) {
-                // FuzzySelect owns keyboard input — render filter as
-                // static text so TextInput's on_change doesn't compete.
-                let filter_display = match &current_input_slot {
-                    InputSlot::FuzzySelect(fs) if !fs.filter.is_empty() => fs.filter.clone(),
-                    _ => String::new(),
-                };
-                element! {
-                    View(flex_direction: FlexDirection::Row) {
-                        Text(content: prompt_label, color: input_foreground)
-                        Text(content: filter_display, color: input_foreground)
-                    }
-                }
-            } else {
+            View(height: row_height(visible.editor), flex_direction: FlexDirection::Column, flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: input_background) {
+            // A question changes focus, never the editor's component identity.
+            // Keep its cursor and pasted draft while the question owns the keys.
+            View(height: row_height(if task_panel.is_none() && matches!(current_input_slot, InputSlot::TextInput) { visible.editor } else { 0 }), overflow: Overflow::Hidden) {
+            #({
                 let tasks_for_edit = Arc::clone(&tasks);
                 let mut input_history = input_history::InputHistory {
                     history,
@@ -2654,7 +2725,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         TextInput(
                             color: input_foreground,
                             value: val,
-                            has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer | TaskFocus::Tip),
+                            has_focus: reviewable && matches!(current_input_slot, InputSlot::TextInput) && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer | TaskFocus::Tip),
                             multiline: true,
                             auto_grow: false,
                             on_edit: Some(on_edit),
@@ -2665,6 +2736,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 }
             })
+            }
+            #(if task_panel.is_none() {
+                if let InputSlot::FuzzySelect(fs) = &current_input_slot {
+                    Some(element! {
+                        View(flex_direction: FlexDirection::Row, height: row_height(visible.editor)) {
+                            Text(content: prompt_label, color: input_foreground)
+                            Text(content: fs.filter.clone(), color: input_foreground)
+                        }
+                    })
+                } else { None }
+            } else { None })
             }
             // Separator
             #((layout.separators > 0).then(|| element! {

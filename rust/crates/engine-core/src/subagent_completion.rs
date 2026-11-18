@@ -48,6 +48,9 @@ pub struct CompletionState {
     wake: Arc<tokio::sync::Notify>,
     delivery: Mutex<control::DeliveryState>,
     inner: Mutex<CompletionTurn>,
+    // Cancellation checks only the local ownership projection. Never make it
+    // wait for the completion mutex while another worker persists an event.
+    agents: Mutex<HashSet<String>>,
     // Error-only state must not reserve the reporter's map/strings in every
     // healthy session. Keep allocation lazy as well as initialization.
     persistence_diagnostics: std::sync::OnceLock<Box<telemetry::RetryDiagnostics>>,
@@ -59,7 +62,6 @@ pub struct CompletionState {
 #[derive(Default)]
 struct CompletionTurn {
     volatile: Completions,
-    agents: HashSet<String>,
     trace: Option<String>,
     failure: Option<String>,
     terminal_retries: BTreeMap<String, SubagentLifecycle>,
@@ -89,10 +91,9 @@ impl CompletionState {
 
     pub(crate) fn cancel_subagent(&self, agent_id: &str) -> Result<serde_json::Value, String> {
         if !self
-            .inner
+            .agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .agents
             .contains(agent_id)
         {
             return Err(format!("agent {agent_id} was not spawned in this session"));
@@ -142,17 +143,20 @@ impl CompletionState {
     }
 
     pub(crate) fn observe(&self, mut event: EngineEvent) -> Vec<EngineEvent> {
+        if let EngineEvent::Subagent(event) = &event {
+            if let SubagentUpdate::Lifecycle(lifecycle) = &event.update {
+                if lifecycle.phase == engine_events::SubagentPhase::Started {
+                    self.agents
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(lifecycle.agent.agent_id.clone());
+                }
+            }
+        }
         let mut turn = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let EngineEvent::Subagent(event) = &event {
-            if let SubagentUpdate::Lifecycle(lifecycle) = &event.update {
-                if lifecycle.phase == engine_events::SubagentPhase::Started {
-                    turn.agents.insert(lifecycle.agent.agent_id.clone());
-                }
-            }
-        }
         let mut output = Vec::new();
         if let Some(journal) = self.journal() {
             let observed = match &event {
@@ -238,6 +242,7 @@ pub(crate) struct EventSink {
     attention: Arc<Mutex<Arc<engine_events::AttentionState>>>,
     pub(crate) completions: Arc<CompletionState>,
     pub(crate) inputs: Arc<crate::session_inputs::SessionInputs>,
+    pub(crate) interactions: Arc<crate::interactions::SessionInteractions>,
 }
 
 fn snapshot_runtime_status(
@@ -266,6 +271,7 @@ impl EventSink {
             state: Arc::new(Mutex::new(engine_events::EngineState::Idle)),
             attention: Arc::default(),
             inputs: Arc::default(),
+            interactions: Arc::default(),
         }
     }
 
@@ -340,6 +346,7 @@ impl EventSink {
                 | EngineEvent::PromptRejected { .. }
                 | EngineEvent::InputCommitted(_)
                 | EngineEvent::InputDeferred(_)
+                | EngineEvent::InteractionDeliveryReturned(_)
                 | EngineEvent::BackgroundTask(_)
                 | EngineEvent::ToolResult { .. }
         ) || matches!(&event, EngineEvent::Subagent(event) if matches!(event.update, SubagentUpdate::Lifecycle(_)))
@@ -354,6 +361,12 @@ impl EventSink {
                 self.completions.observe(event)
             };
             for event in events {
+                if let EngineEvent::InputCommitted(input) = &event {
+                    self.commit_interaction(input.source)?;
+                }
+                if let EngineEvent::InteractionDeliveryReturned(receipt) = &event {
+                    self.interactions.return_delivery(*receipt);
+                }
                 let input_state = if matches!(event, EngineEvent::BackgroundTask(_))
                     && self.completions.journal().is_some()
                 {
@@ -370,6 +383,17 @@ impl EventSink {
             Ok(())
         } else {
             tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))
+        }
+    }
+
+    pub(crate) fn commit_interaction(
+        &self,
+        source: engine_events::InputSource,
+    ) -> Result<(), std::sync::mpsc::SendError<()>> {
+        match self.interactions.committed(source) {
+            Ok(Some(snapshot)) => self.send(EngineEvent::Interactions(snapshot)),
+            Ok(None) => Ok(()),
+            Err(message) => self.send(EngineEvent::InteractionError { message }),
         }
     }
 

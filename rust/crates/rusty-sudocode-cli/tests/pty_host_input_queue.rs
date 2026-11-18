@@ -2,219 +2,64 @@
 mod common;
 
 use common::TestEnv;
-use pty_expect::PtySession;
 use serde_json::{json, Value};
-use std::{fs, time::Duration};
+use std::fs;
+use std::time::Duration;
 
-const METHOD: &str = "_sudocode/session/input";
+#[path = "support/acp_pty.rs"]
+mod acp_pty;
+use acp_pty::Host;
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
 
-struct Host {
-    terminal: PtySession,
-    session: String,
-    id: u64,
-    /// Raw reply and preceding events, retained for notification assertions.
-    /// The PTY consumes this prefix; server requests are also queued below.
-    last_read: String,
-    /// Server requests can precede a correlated reply in the same PTY read.
-    /// Retain them until their consumer takes them, across status queries.
-    incoming: Vec<Value>,
-}
-
-impl Host {
-    fn new(env: &TestEnv) -> Self {
-        Self::with_permissions(env, true)
-    }
-
-    fn with_permissions(env: &TestEnv, allow_tools: bool) -> Self {
-        Self::with_options(env, allow_tools, &[])
-    }
-
-    fn with_options(env: &TestEnv, allow_tools: bool, extra: &[(&str, &str)]) -> Self {
-        let mut terminal = if allow_tools {
-            env.spawn_with_env(&["--dangerously-skip-permissions", "acp"], extra)
-        } else {
-            env.spawn_with_env(&["--permission-mode", "workspace-write", "acp"], extra)
-        };
-        terminal.resize(40, 4096).unwrap();
-        terminal.set_default_timeout(common::LIVE_TURN_BUDGET);
-        let mut host = Self {
-            terminal,
-            session: String::new(),
-            id: 0,
-            last_read: String::new(),
-            incoming: Vec::new(),
-        };
-        let init = host.request("initialize", &json!({"protocolVersion":1}));
-        assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
-        assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
-        assert_eq!(init["_meta"]["sudocode"]["attention"]["version"], 1);
-        let created = host.request(
-            "session/new",
-            &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
-        );
-        created["sessionId"]
-            .as_str()
-            .unwrap()
-            .clone_into(&mut host.session);
-        assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
-        host
-    }
-
-    fn request(&mut self, method: &str, params: &Value) -> Value {
-        let response = self.response(method, params);
-        assert!(response.get("error").is_none(), "{response}");
-        response["result"].clone()
-    }
-
-    fn response(&mut self, method: &str, params: &Value) -> Value {
-        self.id += 1;
-        let newline = if cfg!(windows) { "\r" } else { "\n" };
-        self.terminal
-            .send(&format!(
-                "{}{newline}",
-                json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params})
-            ))
-            .unwrap();
-        let response = self
-            .terminal
-            .expect(&format!(
-                r#"\{{"jsonrpc":"2.0","(?:result|error)":[^\r\n]*,"id":{}\}}"#,
-                self.id
-            ))
-            .unwrap_or_else(|error| {
-                panic!(
-                    "ACP reply: {error}; {}",
-                    self.terminal.render(common::screen_contents)
-                )
-            });
-        self.last_read.clone_from(&response);
-        self.retain_requests(&response);
-        let response: Value = response
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| {
-                value["id"] == self.id
-                    && (value.get("result").is_some() || value.get("error").is_some())
-            })
-            .unwrap_or_else(|| panic!("response line missing: {response}"));
-        response
-    }
-
-    fn input(&mut self, mut action: Value) -> Value {
-        action["sessionId"] = json!(self.session);
-        self.request(METHOD, &action)
-    }
-
-    fn cancel(&mut self) {
-        let newline = if cfg!(windows) { "\r" } else { "\n" };
-        self.terminal.send(&format!(
-            "{}{newline}",
-            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}})
-        )).unwrap();
-    }
-
-    fn retain_requests(&mut self, text: &str) {
-        self.incoming.extend(
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-                .filter(|value| value.get("method").is_some() && value.get("id").is_some()),
-        );
-    }
-
-    #[track_caller]
-    fn incoming_request(&mut self, method: &str) -> Value {
-        if let Some(index) = self
-            .incoming
-            .iter()
-            .position(|value| value["method"] == method)
-        {
-            return self.incoming.remove(index);
-        }
-        let message = match self.terminal.expect(&format!(
-            r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
-        )) {
-            Ok(message) => message,
-            Err(error) => panic!(
-                "missing {method} request: {error}; queued: {:?}; last reply: {}; screen: {}",
-                self.incoming,
-                self.last_read,
-                self.terminal.render(common::screen_contents)
-            ),
-        };
-        self.retain_requests(&message);
-        let index = self
-            .incoming
-            .iter()
-            .position(|value| value["method"] == method)
-            .unwrap_or_else(|| panic!("missing {method} request: {message}"));
-        self.incoming.remove(index)
-    }
-
-    fn respond(&mut self, request: &Value, result: &Value) {
-        let newline = if cfg!(windows) { "\r" } else { "\n" };
-        self.terminal
-            .send(&format!(
-                "{}{newline}",
-                json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-            ))
-            .unwrap();
-    }
-
-    fn submit(&mut self, client: &str, text: &str, delivery: &str) -> Value {
-        self.input(json!({"action":"submit","clientId":client,"delivery":delivery,"content":[{"type":"text","text":text}]}))
-    }
-
-    fn snapshot(&mut self) -> Value {
-        self.input(json!({"action":"snapshot"}))["state"].clone()
-    }
-
-    fn attention(&mut self) -> Value {
-        self.request(
-            "_sudocode/session/attention",
-            &json!({"sessionId":self.session}),
-        )
-    }
-
-    fn wait_for_attention(&mut self, context: &str, ready: impl Fn(&Value) -> bool) -> Value {
-        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-        loop {
-            let state = self.attention();
-            if ready(&state) {
-                return state;
-            }
-            assert!(std::time::Instant::now() < deadline, "{context}: {state}");
-            std::thread::sleep(Duration::from_millis(30));
-        }
-    }
-
-    fn runtime_status(&mut self) -> Value {
-        self.request(
-            "_sudocode/session/status",
-            &json!({"sessionId":self.session}),
-        )
-    }
-
-    fn idle(&mut self) -> Value {
-        let deadline = std::time::Instant::now() + common::LIVE_TURN_BUDGET;
-        loop {
-            let state = self.snapshot();
-            if state["running"] == false {
-                return state;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "session did not stop: {state}"
+#[test]
+fn completion_connection_setup_precedes_prompts_management_and_resume() {
+    let env = TestEnv::new_mock("completion-connection-order");
+    let mut host = Host::with_client_capabilities(
+        &env,
+        true,
+        &[],
+        &json!({"_meta":{"sudocode":{
+            "subagentEvents":{"version":1},"subagentCompletions":{"version":1}
+        }}}),
+    );
+    for turn in 1..=3 {
+        if turn == 3 {
+            host.close();
+            host.request(
+                "session/load",
+                &json!({
+                    "sessionId":host.session,"cwd":env.workspace_root(),"mcpServers":[]
+                }),
             );
-            std::thread::sleep(Duration::from_millis(30));
         }
+        // Every legacy prompt rebinds its completion connection. The host must
+        // await that configuration, including after loading the original SID.
+        let response = host.request(
+            "session/prompt",
+            &json!({
+                "sessionId":host.session,
+                "prompt":[{"type":"text","text":"PARITY_SCENARIO:streaming_text"}],
+                "_meta":{"traceId":format!("connection-turn:{turn}")}
+            }),
+        );
+        assert_eq!(response["stopReason"], "end_turn", "{response}");
+        assert!(response["_meta"]["sudocode"]["contextRef"]["revision"]
+            .as_u64()
+            .is_some());
+        let model_calls = env.captured_message_count();
+        let help = host.request(
+            "session/prompt",
+            &json!({
+                "sessionId":host.session,"prompt":[{"type":"text","text":"/help"}],
+                "_meta":{"traceId":format!("connection-help:{turn}")}
+            }),
+        );
+        assert_eq!(help["stopReason"], "end_turn", "{help}");
+        assert_eq!(env.captured_message_count(), model_calls);
     }
-
-    fn close(&mut self) {
-        self.request("session/close", &json!({"sessionId":self.session}));
-    }
+    assert!(env.captured_message_count() >= 3);
+    host.close();
 }
 
 struct Release(std::path::PathBuf);

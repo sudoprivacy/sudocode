@@ -7,7 +7,7 @@
 
 pub use engine_events::InputSource as QueuedKind;
 use engine_events::{EngineCommand, InputView, TurnInput};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Whether the REPL queues inputs that land while a turn is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,17 +138,27 @@ pub enum SubmitOutcome {
 /// The next batch to run after a turn ends. `None` = queue is empty, sit at
 /// the prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextTurn<R = ()> {
-    /// The prompt text to hand to `run_turn`. When multiple items were batched,
-    /// this is their `text` fields joined with `\n\n` in submission order.
-    pub prompt: String,
+pub struct NextTurn {
+    /// Preserve origins through initial prompt preparation. A machine reply
+    /// must never be reinterpreted as a human image reference.
+    pub inputs: Vec<TurnInput>,
     /// How each input of this run is drawn, in submission order: the coordinator
     /// echoes queued items from these on flush (an idle submit it echoes
     /// directly), and the turn saves them with its prompt for replay.
     pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.
     pub consumed: usize,
-    pub receipts: Vec<R>,
+}
+
+impl NextTurn {
+    #[must_use]
+    pub fn prompt(&self) -> String {
+        self.inputs
+            .iter()
+            .map(|input| input.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 }
 
 /// The active [`QueueMode`], shared with whatever reads it mid-session.
@@ -188,6 +198,9 @@ enum Phase {
 pub struct TurnInputCoordinator<R = ()> {
     queue: VecDeque<QueuedInput<R>>,
     steering: BTreeMap<u64, QueuedInput<R>>,
+    /// Inputs already in the initial prompt must not also be sent as steering
+    /// when the engine acknowledges turn admission.
+    initial: BTreeSet<u64>,
     next_id: u64,
     phase: Phase,
 }
@@ -198,6 +211,7 @@ impl<R> TurnInputCoordinator<R> {
         Self {
             queue: VecDeque::new(),
             steering: BTreeMap::new(),
+            initial: BTreeSet::new(),
             next_id: 0,
             phase: Phase::Idle,
         }
@@ -247,6 +261,7 @@ impl<R> TurnInputCoordinator<R> {
                 let inputs = self
                     .steering
                     .values()
+                    .filter(|input| !self.initial.contains(&input.input.id))
                     .map(|input| input.input.clone())
                     .collect::<Vec<_>>();
                 (!inputs.is_empty()).then_some(EngineCommand::Steer { inputs })
@@ -268,6 +283,14 @@ impl<R> TurnInputCoordinator<R> {
         } else {
             Phase::Idle
         };
+    }
+    /// Retain uncommitted input after failure without overwriting a user's
+    /// explicit resume that arrived while cancellation was still settling.
+    pub fn finish_failed_turn(&mut self) {
+        if !matches!(self.phase, Phase::Cancelling { .. } | Phase::Paused) {
+            self.cancel_turn();
+        }
+        self.finish_turn();
     }
     pub fn resume(&mut self) {
         match &mut self.phase {
@@ -315,11 +338,52 @@ impl<R> TurnInputCoordinator<R> {
         !self.queue.is_empty() || !self.steering.is_empty()
     }
 
+    /// The initial prompt already belongs to the active turn, even while its
+    /// durable admission is waiting. Only later input can take priority over
+    /// cancellation when the user requests a flush-or-cancel.
+    #[must_use]
+    pub fn has_pending_followup(&self) -> bool {
+        !self.queue.is_empty() || self.steering.keys().any(|id| !self.initial.contains(id))
+    }
+
     pub fn committed(&mut self, id: u64) -> Option<R> {
+        self.initial.remove(&id);
         self.steering.remove(&id).and_then(|input| input.receipt)
     }
 
+    /// Return only a machine decision's transient delivery lease. Its durable
+    /// request remains in the session journal; ordinary chat stays queued.
+    pub fn return_interaction(
+        &mut self,
+        receipt: engine_events::InteractionReceipt,
+    ) -> Vec<(InputView, Option<R>)> {
+        let source = QueuedKind::Interaction(receipt);
+        let mut returned = Vec::new();
+        for item in std::mem::take(&mut self.queue) {
+            if item.input.source == source {
+                returned.push((item.input.view(), item.receipt));
+            } else {
+                self.queue.push_back(item);
+            }
+        }
+        let ids: Vec<_> = self
+            .steering
+            .iter()
+            .filter(|(_, item)| item.input.source == source)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.initial.remove(&id);
+            if let Some(item) = self.steering.remove(&id) {
+                returned.push((item.input.view(), item.receipt));
+            }
+        }
+        returned.sort_unstable_by_key(|(view, _)| view.id);
+        returned
+    }
+
     pub fn defer(&mut self, id: u64) -> bool {
+        self.initial.remove(&id);
         if let Some(input) = self.steering.remove(&id) {
             self.queue.push_back(input);
             true
@@ -331,6 +395,7 @@ impl<R> TurnInputCoordinator<R> {
     /// Recover unacknowledged steering after turn failure/cancellation. A late
     /// refusal can arrive after `TurnComplete`; ids make that reply idempotent.
     pub fn recover_uncommitted(&mut self) {
+        self.initial.clear();
         let pending = std::mem::take(&mut self.steering);
         for (_, input) in pending.into_iter().rev() {
             self.queue.push_front(input);
@@ -384,16 +449,11 @@ impl<R> TurnInputCoordinator<R> {
     /// Called on the FIRST submit when the REPL is idle. No decision — just run
     /// the input as a normal turn immediately. Kept as a distinct method so
     /// callers don't accidentally route idle submits through the during-turn
-    /// path. `echoes` is empty: an idle submit's echo is printed by the caller
-    /// right away, not deferred to a turn boundary.
+    /// path. Ownership stays here until the engine confirms durable input.
     #[must_use]
-    pub fn submit_when_idle(&mut self, input: QueuedInput<R>) -> NextTurn<R> {
-        NextTurn {
-            echoes: vec![input.input.view()],
-            prompt: input.input.text,
-            consumed: 1,
-            receipts: input.receipt.into_iter().collect(),
-        }
+    pub fn submit_when_idle(&mut self, input: QueuedInput<R>) -> NextTurn {
+        self.enqueue(input);
+        self.drain_next().expect("the submitted input is queued")
     }
 
     /// Called when a submit lands WHILE a turn is running. Returns what the
@@ -408,39 +468,34 @@ impl<R> TurnInputCoordinator<R> {
         SubmitOutcome::Rejected
     }
 
-    /// Called on turn end. Consumes the queued items up to the first queued
-    /// command and joins their text with `\n\n` for a single batched turn.
-    /// `echoes` collects an [`EchoLine`] per item (human and peer alike) so
-    /// the caller can write them to scrollback now, at the moment they
-    /// actually run, with the right marker.
+    /// Lease the next FIFO batch, isolating each durable human decision from
+    /// ordinary chat and stopping before a queued slash command. Receipts stay
+    /// in the coordinator until durable commitment. `echoes` collects each
+    /// input's scrollback presentation at the moment it actually runs.
     ///
     /// Returns `None` when the queue is empty or a command is first; the
     /// caller runs that command through [`Self::take_command`].
-    pub fn drain_next(&mut self) -> Option<NextTurn<R>> {
-        // A queued command is a boundary: only the messages before it run.
-        let batch = self
-            .queue
-            .iter()
-            .position(|item| item.is_command)
-            .unwrap_or(self.queue.len());
-        if batch == 0 {
+    pub fn drain_next(&mut self) -> Option<NextTurn> {
+        if self.queue.front().is_none_or(|item| item.is_command) {
             return None;
         }
-        let mut parts = Vec::new();
-        let mut echoes = Vec::new();
-        let mut consumed = 0_usize;
-        let mut receipts = Vec::new();
-        for item in self.queue.drain(..batch) {
-            echoes.push(item.input.view());
-            parts.push(item.input.text);
-            receipts.extend(item.receipt);
-            consumed += 1;
-        }
+        // Keep each durable decision in its own initial admission. If another
+        // context has consumed it, retiring that receipt cannot discard human
+        // text or attachments from the same batch. Ordinary chat still batches.
+        let count = match self.queue.iter().position(|item| {
+            item.is_command || matches!(item.input.source, QueuedKind::Interaction(_))
+        }) {
+            Some(0) => 1,
+            Some(index) => index,
+            None => self.queue.len(),
+        };
+        let queued: Vec<_> = self.queue.drain(..count).collect();
+        let inputs: Vec<_> = queued.into_iter().map(|item| self.steer(item)).collect();
+        self.initial.extend(inputs.iter().map(|input| input.id));
         Some(NextTurn {
-            prompt: parts.join("\n\n"),
-            echoes,
-            consumed,
-            receipts,
+            echoes: inputs.iter().map(TurnInput::view).collect(),
+            consumed: inputs.len(),
+            inputs,
         })
     }
 
@@ -499,6 +554,7 @@ impl<R> TurnInputCoordinator<R> {
 
     /// Drop everything without running any of it. Used by shutdown / /clear.
     pub fn clear(&mut self) {
+        self.initial.clear();
         self.steering.clear();
         self.queue.clear();
     }
@@ -526,7 +582,7 @@ mod queue_docs {
     fn idle_submit_runs_alone_and_carries_its_echo() {
         let mut c = TurnInputCoordinator::<()>::new();
         let next = c.submit_when_idle(human("hello"));
-        assert_eq!(next.prompt, "hello");
+        assert_eq!(next.prompt(), "hello");
         assert_eq!(next.echoes.len(), 1, "saved with the prompt for replay");
         assert_eq!(next.echoes[0].display, "hello");
         assert_eq!(next.consumed, 1);
@@ -554,7 +610,7 @@ mod queue_docs {
         assert_eq!(c.pending(), 3);
         assert_eq!(c.peek_display(), vec!["B", "C", "D"]);
         let next = c.drain_next().expect("batched turn present");
-        assert_eq!(next.prompt, "B\n\nC\n\nD");
+        assert_eq!(next.prompt(), "B\n\nC\n\nD");
         let echo_texts: Vec<&str> = next.echoes.iter().map(|e| e.display.as_str()).collect();
         assert_eq!(echo_texts, vec!["B", "C", "D"]);
         assert!(next.echoes.iter().all(|e| e.source == QueuedKind::Human));
@@ -571,7 +627,7 @@ mod queue_docs {
         c.submit_during_turn(human("human"), mode);
         c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
         let next = c.drain_next().expect("batched turn present");
-        assert_eq!(next.prompt, "human\n\npeer-text");
+        assert_eq!(next.prompt(), "human\n\npeer-text");
         assert_eq!(next.echoes.len(), 2, "both echo on flush");
         assert_eq!(next.echoes[0].display, "human");
         assert_eq!(next.echoes[0].source, QueuedKind::Human);
@@ -649,7 +705,8 @@ mod queue_docs {
         );
         let first = c.drain_next().expect("A runs first");
         assert_eq!(
-            first.prompt, "A",
+            first.prompt(),
+            "A",
             "the command is not merged into the batch"
         );
         assert_eq!(first.consumed, 1);
@@ -660,7 +717,7 @@ mod queue_docs {
         let command = c.take_command().expect("the command is next");
         assert_eq!(command.input.text, "/clear");
         assert!(c.take_command().is_none());
-        assert_eq!(c.drain_next().expect("B runs after").prompt, "B");
+        assert_eq!(c.drain_next().expect("B runs after").prompt(), "B");
     }
 
     #[test]

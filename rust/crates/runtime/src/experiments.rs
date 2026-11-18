@@ -45,6 +45,8 @@ pub enum Experiment {
     SharedSessionHistory,
     /// Shaded prompt surfaces using the existing native inline history.
     PromptViewport,
+    /// Session-owned question/review/approval lifecycle under acceptance.
+    NonblockingInteractions,
 }
 
 /// Settings keys of experiments that graduated. A settings file that still
@@ -58,6 +60,7 @@ impl Experiment {
         Experiment::McpConfigServers,
         Experiment::SharedSessionHistory,
         Experiment::PromptViewport,
+        Experiment::NonblockingInteractions,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -69,6 +72,7 @@ impl Experiment {
             Experiment::McpConfigServers => "mcpConfigServers",
             Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::PromptViewport => "promptViewport",
+            Experiment::NonblockingInteractions => "nonblockingInteractions",
         }
     }
 
@@ -80,6 +84,7 @@ impl Experiment {
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::PromptViewport => "PROMPT_VIEWPORT",
+            Experiment::NonblockingInteractions => "NONBLOCKING_INTERACTIONS",
         }
     }
 
@@ -91,7 +96,9 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
-            Experiment::SharedSessionHistory | Experiment::PromptViewport => None,
+            Experiment::SharedSessionHistory
+            | Experiment::PromptViewport
+            | Experiment::NonblockingInteractions => None,
         }
     }
 }

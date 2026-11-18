@@ -531,7 +531,7 @@ impl EngineEventRenderer {
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
-            EngineEvent::InputDeferred(_) => RenderOutcome::Continue,
+            EngineEvent::InputDeferred(_) | EngineEvent::InteractionDeliveryReturned(_) => RenderOutcome::Continue,
             EngineEvent::Notice { text } => {
                 if !text.is_empty() {
                     self.write_block(&text, OutputBlock::Notice);
@@ -603,6 +603,9 @@ impl EngineEventRenderer {
             | EngineEvent::Attention(_)
             | EngineEvent::AgentDirectory(_)
             | EngineEvent::InputState(_)
+            | EngineEvent::Interactions(_)
+            | EngineEvent::InteractionInput(_)
+            | EngineEvent::InteractionError { .. }
             | EngineEvent::ModelResolved { .. }
             | EngineEvent::Usage(_)
             | EngineEvent::PromptCache(_)

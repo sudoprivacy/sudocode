@@ -8,6 +8,7 @@ use futures::stream::Stream;
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
+mod interaction_continuation;
 mod response;
 mod tool_context;
 mod tool_execution;
@@ -502,13 +503,52 @@ pub trait ApiClient: Send {
 /// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
 /// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
+    /// Engine-owned durable interaction authority, shared with the scheduler.
+    /// Renderers never supply executable operations through message text.
+    fn interaction_journal(
+        &self,
+    ) -> Result<Option<Arc<crate::session_interactions::InteractionJournal>>, RuntimeError> {
+        Ok(None)
+    }
+
     /// How the turn's initial prompt was drawn, saved with it for replay.
     fn prompt_echoes(&self) -> Vec<crate::turn_input::InputEcho> {
         Vec::new()
     }
+    /// Only the engine's durable decision can request a context transition.
+    /// Ordinary message text and tool-looking JSON have no effect here.
+    fn input_context_action(
+        &self,
+        _inputs: &[crate::turn_input::InputEcho],
+    ) -> Result<Option<crate::image_input::ToolContextAction>, RuntimeError> {
+        Ok(None)
+    }
+    /// Validate engine-owned reply receipts immediately before transcript
+    /// admission, for initial input and later steering alike.
+    fn validate_input_echoes(
+        &self,
+        inputs: &[crate::turn_input::InputEcho],
+    ) -> Result<(), RuntimeError> {
+        if inputs
+            .iter()
+            .any(|input| matches!(input.source, crate::turn_input::InputSource::Interaction(_)))
+        {
+            return Err(RuntimeError::new(
+                "interaction inputs require an engine-owned delivery controller",
+            ));
+        }
+        Ok(())
+    }
     /// The initial user blocks, including attachments, reached durable history.
     fn on_prompt_committed(&mut self) {}
     fn on_input_committed(&mut self, _input: &crate::turn_input::InputView) {}
+    /// The existing journal retains a decision that cannot execute in this
+    /// context yet. Its input lease must not block unrelated user messages.
+    fn on_interaction_delivery_returned(
+        &mut self,
+        _receipt: crate::turn_input::InteractionReceipt,
+    ) {
+    }
     /// Non-fatal runtime maintenance notices, forwarded through the engine seam.
     fn on_notice(&mut self, _text: &str) {}
 
@@ -2137,7 +2177,14 @@ where
         let catalog = self.api_client.model_catalog();
         let (blocks, pending_notifications) = Self::prepend_pending_task_notifications(blocks)?;
         let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
-        let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer, turn_id.clone());
+        let mut input_reconciled = false;
+        let turn = self.run_turn_with_blocks_inner(
+            blocks,
+            prompter,
+            observer,
+            turn_id.clone(),
+            &mut input_reconciled,
+        );
         let summary = if let Some(catalog) = catalog {
             catalog.refresh_in_background();
             catalog.scope(turn).await
@@ -2161,7 +2208,7 @@ where
         // on success, which is the behaviour the CLI's call site had: a failed
         // turn leaves the session as the close-time save finds it, rather than
         // committing a half-turn as though it completed.
-        if summary.is_ok() {
+        if summary.is_ok() && !input_reconciled {
             self.ensure_session_persistence_allowed().map_err(|error| {
                 RuntimeError::new(format!(
                     "refusing to persist a stale session; durable history preserved: {error}"

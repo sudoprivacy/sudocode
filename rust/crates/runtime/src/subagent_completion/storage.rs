@@ -345,7 +345,12 @@ fn owned_storage_remains(
         .map(PathBuf::as_path)
         .chain(std::iter::once(transcript))
     {
-        for owned in std::iter::once(path.to_path_buf()).chain(payload_dirs(path, session_id)) {
+        for owned in std::iter::once(path.to_path_buf())
+            .chain(std::iter::once(crate::session_interactions::storage_path(
+                path,
+            )))
+            .chain(payload_dirs(path, session_id))
+        {
             if fs
                 .exists(&owned.to_string_lossy())
                 .map_err(|error| error.to_string())?
@@ -358,6 +363,11 @@ fn owned_storage_remains(
 }
 
 fn remove_payloads(fs: &dyn FsBackend, transcript: &Path, session_id: &str) -> Result<(), String> {
+    match fs.delete(&crate::session_interactions::storage_path(transcript).to_string_lossy()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
     for path in payload_dirs(transcript, session_id) {
         match fs.remove_dir_all(&path.to_string_lossy()) {
             Ok(()) => {}

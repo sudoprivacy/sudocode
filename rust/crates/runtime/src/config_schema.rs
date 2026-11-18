@@ -395,6 +395,11 @@ const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 /// here but missing there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
+        "nonblockingInteractions",
+        FieldType::Bool,
+        "Session-owned pending interactions (experimental)",
+    ),
+    FieldSchema::leaf(
         "promptViewport",
         FieldType::Bool,
         "Experimental shaded prompts using native inline history",

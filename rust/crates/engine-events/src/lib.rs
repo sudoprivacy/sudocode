@@ -38,7 +38,12 @@ pub use runtime::attention::{AttentionRequest, AttentionState, RequestPhase};
 pub use runtime::background_tasks::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
-pub use runtime::turn_input::{InputDelivery, InputEcho, InputSource, InputView, TurnInput};
+pub use runtime::session_interactions::{
+    Interaction, InteractionReply, InteractionRequest, InteractionSnapshot, InteractionStatus,
+};
+pub use runtime::turn_input::{
+    InputDelivery, InputEcho, InputSource, InputView, InteractionReceipt, TurnInput,
+};
 pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
@@ -64,6 +69,7 @@ pub use runtime::{
     QuestionField,
     QuestionKind,
     QuestionOption,
+    QuestionPresentation,
     QuestionPromptAnswer,
     QuestionPromptRequest,
     // What the HTTP transport is doing while it retries a failed request.
@@ -267,6 +273,14 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    /// Durable pending requests are independent of the active turn's state.
+    Interactions(InteractionSnapshot),
+    /// A resolved interaction for a host that owns the session's input queue.
+    /// Preserve its source receipt until the runtime commits the input.
+    InteractionInput(TurnInput),
+    InteractionError {
+        message: String,
+    },
     /// Resolve caller-owned context at execution time, including queued turns.
     HostContextRequest {
         id: RequestId,
@@ -280,6 +294,9 @@ pub enum EngineEvent {
     InputCommitted(InputView),
     /// Not consumed: return ownership to the submitting surface.
     InputDeferred(Vec<runtime::turn_input::TurnInput>),
+    /// Return a decision's transient input lease to its durable journal. This
+    /// is neither transcript commitment nor acknowledgement of the decision.
+    InteractionDeliveryReturned(InteractionReceipt),
     CommandResult {
         id: u64,
         result: Result<serde_json::Value, String>,
@@ -431,6 +448,35 @@ pub enum EngineEvent {
     },
 }
 
+/// Control of durable requests; approval never changes the session's policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum InteractionAction {
+    Configure {
+        enabled: bool,
+        #[serde(default)]
+        delivery: InteractionDeliveryOwner,
+    },
+    Snapshot,
+    Result {
+        interaction_id: String,
+    },
+    Reply {
+        interaction_id: String,
+        revision: u64,
+        reply: InteractionReply,
+    },
+}
+
+/// Exactly one existing input coordinator owns reply admission per attachment.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionDeliveryOwner {
+    #[default]
+    Engine,
+    Host,
+}
+
 /// Renderer → engine. The sole inward type crossing the seam.
 ///
 /// Input was historically the worst source of "weird access points" — moss's
@@ -438,6 +484,14 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Internal continuation for an approved host operation; never model input.
+    ResumeDirectInteraction {
+        receipt: InteractionReceipt,
+    },
+    Interactions {
+        id: u64,
+        action: InteractionAction,
+    },
     /// Refresh navigation without running a model or blocking cancellation.
     RefreshAgents,
     /// Answer the matching host-context request. Failure forbids a stale turn.

@@ -129,8 +129,10 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, &str)], no_color: bool) -
                         })
                     })
                     .collect::<Vec<_>>();
+                // The same projection `expect_screen` hands this closure, so
+                // the two describe one frame.
                 StyledSnapshot {
-                    contents: raw.contents(),
+                    contents: common::screen_contents(screen),
                     samples,
                 }
             });

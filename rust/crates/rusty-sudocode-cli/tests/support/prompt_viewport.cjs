@@ -12,7 +12,7 @@ const policy = require(path.join(shared, 'performance-policy.json'));
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const host = createHost(config);
 const { child, state, viewport, settle, sleep, close } = host;
-const report = { version: 1, status: 'running', enabled: config.enabled,
+const report = { version: 1, status: 'running', 
   measurement: 'OS PTY dispatch to parsed xterm cells; headless terminal, no browser raster/GPU measurement.',
   metric_scope: 'cpu_ms and wire_kib sum the identical wait/stream/history typing phases. Both modes use native terminal scrolling; scrolling costs are retained separately.',
   environment: host.metadata, samples: {}, metrics: { cpu_ms: 0, wire_kib: 0 }, resources: [] };

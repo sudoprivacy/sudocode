@@ -31,7 +31,7 @@ const server = http.createServer((request, response) => {
   response.writeHead(200, { 'Content-Type': route[0] }); response.end(fs.readFileSync(route[1]));
 });
 const websocket = new WebSocketServer({ server });
-const report = { status: 'running', enabled: config.enabled, samples: [], frame_samples: [], checks: [], metrics: {}, resources: [],
+const report = { status: 'running', samples: [], frame_samples: [], checks: [], metrics: {}, resources: [],
   measurement: 'Real Chromium mouse/keyboard. Parsed keys use one browser clock; painted keys include dispatch, two animation frames and PNG readback. No physical display scanout measurement.',
   resource_scope: 'Dedicated browser process tree, including renderer/GPU; summed RSS can count shared pages more than once. Peak sums per-process high-water RSS where available, otherwise phase samples. Observer Node process excluded. Memory accounting requires Linux/macOS.' };
 let child, browser, page, exited = false;

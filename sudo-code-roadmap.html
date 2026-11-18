@@ -4228,18 +4228,22 @@ namespace for the new TUI work.</p>
 
 <section id="prompt-viewport-experiment">
 <h5>Native inline prompt surfaces — 2026-10-31</h5>
-<p><strong>Experimental; off by default.</strong> The existing
-<code>promptViewport</code> setting now applies matching shading to the live
-editor and committed prompts. The fixed conversation viewport was removed after
-Windows VS Code testing exposed independent wheel and native scrollbar positions.
-All output uses the existing inline history writer, and the terminal owns
-scrolling and selection.</p>
+<p><strong>Graduated 2026-11-15; always on.</strong> The live editor and
+committed prompts share one shade drawn from the terminal background; it
+replaces the editor's separator lines, which remain wherever no shade can be
+drawn (<code>NO_COLOR</code>, small palettes). The <code>promptViewport</code>
+experiment was removed; a leftover setting is accepted and ignored. Measured on the real terminal host
+(release, three runs each): CPU, input latency and memory unchanged; terminal
+output about 20% larger from the colour codes. The fixed conversation viewport
+was removed earlier after Windows VS Code testing exposed independent wheel and
+native scrollbar positions. All output uses the existing inline history writer,
+and the terminal owns scrolling and selection.</p>
 <ul>
   <li>Keep one output path, one replay formatter and one prompt style. Styling
   must not introduce another transcript store or input/navigation owner.</li>
   <li>Verify native history growth, actual scrollbar dragging and wheel scrolling,
   selection, Unicode drafts, resize and resume through real PTYs and browser
-  terminal interaction. Retain enabled/disabled performance budgets.</li>
+  terminal interaction. Retain the viewport performance budget.</li>
   <li>A composer and prompt header that remain visible during native scrollback
   require terminal-host integration. They are deferred until the host can share
   its scroll position.</li>

@@ -1,12 +1,26 @@
 //! Resizing or restarting inline chrome must not retain old live frames.
 mod common;
 
+#[path = "support/chrome_input.rs"]
+mod chrome_input;
+
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
 #[cfg(windows)]
 #[path = "support/windows_palette.rs"]
 mod windows_palette;
+
+#[test]
+#[ignore = "the native resize profile runs these real CLI input journeys on every host"]
+fn unreviewable_resize_rejects_delivered_typing_paste_and_confirmation() {
+    chrome_input::assert_resize_edit_burst_rejected("MustNotAppear", "native-resize-typing-burst");
+    chrome_input::assert_resize_edit_burst_rejected(
+        "\x1b[200~MustNotAppear\x1b[201~",
+        "native-resize-paste-burst",
+    );
+    chrome_input::assert_resize_confirmation_rejected();
+}
 
 #[test]
 #[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]

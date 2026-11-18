@@ -445,7 +445,7 @@ split across reads.
 
 For local input/resize diagnosis, set `SCODE_TRACE_INPUT` to a writable file
 path before starting the REPL. It appends JSON lines when the UI observes
-keys and bracketed paste: a monotonic sequence, event category, callback frame
+keys and bracketed paste: the PID, a per-process sequence, event category, callback frame
 dimensions, reviewability and the existing frame guard's result. Function-key
 numbers are recorded; typed characters, paste contents, modifiers and model
 traffic are not. This is opt-in local output and does not change admission or

@@ -46,6 +46,7 @@ impl InputTrace {
         };
         self.sequence += 1;
         let record = serde_json::json!({
+            "pid": std::process::id(),
             "sequence": self.sequence,
             "event": event,
             "function": function,

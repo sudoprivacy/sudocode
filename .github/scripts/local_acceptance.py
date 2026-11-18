@@ -522,7 +522,7 @@ except subprocess.TimeoutExpired:
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
-        "f4f1fff803886aa485c4e490031e4c280e578974fcd2cc5b9c3268b64641430f",
+        "ce07860b969b3cd4c4bb8fe6ccc89ccbdc379d1366f3921a0446d3a3448e8764",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -2730,10 +2730,11 @@ def deferred_pull(remote, head, preview):
 
 
 def deferred_state(branch):
-    """This clone's per-branch state for deferred checks, outside every checkout."""
+    """This clone's per-branch state for deferred checks, outside every checkout.
+    The name is short: Windows linkers refuse paths over 260 characters, and the
+    branch worktree under it builds the whole workspace."""
     common = Path(value("rev-parse", "--git-common-dir")).resolve()
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", branch)
-    return Path.home() / ".nexus/local-acceptance/deferred" / f"{sha(str(common).encode())[:12]}-{name}"
+    return Path.home() / ".nexus/local-acceptance/deferred" / sha(f"{common}\0{branch}".encode())[:12]
 
 
 def stop_superseded(state, head):
@@ -2755,7 +2756,8 @@ def stop_superseded(state, head):
             child.kill()
     psutil.wait_procs([process], timeout=10)
     with contextlib.suppress(OSError):
-        (Path(record["output"]) / "superseded.json").write_bytes(canonical({"superseded_by": head, "at": time.time()}))
+        Path(record["log"]).with_suffix(".superseded.json").write_bytes(
+            canonical({"superseded_by": head, "at": time.time()}))
     print(f"LOCAL_ACCEPTANCE_DEFERRED: stopped the check for superseded head {record['head'][:12]}", flush=True)
     return False
 
@@ -2766,16 +2768,19 @@ def defer_check(head, remote, pull, trusted):
     checkout waits. Local acceptance stays pending, and merge stays gated,
     until the signed receipt is published."""
     branch = value("symbolic-ref", "--short", "HEAD")
-    output = (Path.home() / ".nexus/local-acceptance/results" / head / f"deferred-{time.time_ns()}").resolve()
-    output.mkdir(parents=True)
-    publish_plan(head, trusted, remote, output)
+    # The check's own output takes the normal results layout; its plan and log
+    # sit beside it.
+    output = (Path.home() / ".nexus/local-acceptance/results" / head / str(time.time_ns())).resolve()
+    plan_output = output.with_name(output.name + "-plan")
+    plan_output.mkdir(parents=True)
+    publish_plan(head, trusted, remote, plan_output)
     state = deferred_state(branch)
     state.mkdir(parents=True, exist_ok=True)
     if stop_superseded(state, head):
         print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
               f"see {state / 'deferred.json'}", flush=True)
         return
-    worktree = state / "source"
+    worktree = state / "w"
     if (worktree / ".git").exists():
         git("checkout", "--detach", "--force", head, root=worktree)
         git("clean", "-ffd", root=worktree)
@@ -2783,8 +2788,8 @@ def defer_check(head, remote, pull, trusted):
         git("worktree", "add", "--detach", str(worktree), head)
     command = [sys.executable, str(Path(__file__).resolve()), "check", "--head", head, "--base", "origin/main",
                "--policy-ref", "origin/main", "--publish", "--remote", remote,
-               "--output", str(output / "author"), "--dispatch-publish", str(pull["number"])]
-    log = output / "deferred.log"
+               "--output", str(output), "--dispatch-publish", str(pull["number"])]
+    log = output.with_name(output.name + ".log")
     detached = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
                 if os.name == "nt" else {"start_new_session": True})
     with log.open("wb") as stream:

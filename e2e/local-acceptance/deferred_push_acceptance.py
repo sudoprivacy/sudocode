@@ -30,6 +30,17 @@ def load(name, path):
     return module
 
 
+def finished(pid):
+    """Exited, or exited and awaiting this fixture's reap: the fixture process
+    started it, so on Unix it stays a zombie until this process exits."""
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 def wait_for(predicate, what, timeout=120):
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -190,7 +201,7 @@ def exercise(output, spawned):
     assert time.monotonic() - started < 60, "the push must not wait for the check"
     assert remote_note(helper.PLAN_NOTE_REF, first)["attestations"], "the signed plan precedes the push"
     first_record = record()
-    worktree = helper.deferred_state("source") / "source"
+    worktree = helper.deferred_state("source") / "w"
     assert git("rev-parse", "HEAD", cwd=worktree) == first
     wait_for(lambda: (control / "started-first").exists(), "the first check to start")
     assert git("status", "--porcelain") == "", "the author's checkout is untouched"
@@ -200,9 +211,9 @@ def exercise(output, spawned):
     helper.defer_check(second, "origin", ready, trusted)
     import psutil
 
-    wait_for(lambda: not psutil.pid_exists(first_record["pid"]) or psutil.Process(first_record["pid"]).status()
-             == psutil.STATUS_ZOMBIE, "the superseded check to stop")
-    assert json.loads((Path(first_record["output"]) / "superseded.json").read_text())["superseded_by"] == second
+    wait_for(lambda: finished(first_record["pid"]), "the superseded check to stop")
+    superseded = Path(first_record["log"]).with_suffix(".superseded.json")
+    assert json.loads(superseded.read_text())["superseded_by"] == second
     second_record = record()
     assert second_record["head"] == second and second_record["pid"] != first_record["pid"]
     wait_for(lambda: (control / "started-second").exists(), "the second check to start")
@@ -214,7 +225,7 @@ def exercise(output, spawned):
     (control / "release-second").write_text("go")
     (control / "release-first").write_text("go")
     log = Path(second_record["log"])
-    wait_for(lambda: not psutil.pid_exists(second_record["pid"]), "the second check to finish", timeout=300)
+    wait_for(lambda: finished(second_record["pid"]), "the second check to finish", timeout=300)
     text = log.read_text(encoding="utf-8", errors="replace")
     receipt = remote_note(helper.NOTE_REF, second)
     assert receipt and receipt["attestations"], text

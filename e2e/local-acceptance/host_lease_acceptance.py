@@ -700,8 +700,8 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(s
         return run("git", "rev-parse", "HEAD", cwd=repository)
 
     mutations = [
-        ("OldInventoryCount", inventory_source.replace("len(native) != 14", "len(native) != 13", 1),
-         "found 1 protocol and 14 native"),
+        ("OldInventoryCount", inventory_source.replace("len(native) != 15", "len(native) != 14", 1),
+         "found 1 protocol and 15 native"),
         ("DuplicateInventory", inventory_source.replace('SOURCE / "e2e/local-acceptance/native.py"',
          'SOURCE / "e2e/local-acceptance/power_acceptance.py"', 1), "duplicate fixture scripts"),
         ("MissingInventory", inventory_source.replace('SOURCE / "e2e/local-acceptance/native.py"',

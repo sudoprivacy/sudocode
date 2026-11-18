@@ -489,7 +489,7 @@ except subprocess.TimeoutExpired:
         used = referenced_globals(symbols.lookup(name).get_namespace())
         pending.extend(used & definitions.keys() - consumers.keys())
     layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
-    reviewed = "32b51f2756d1ca52cec2f39f62ae50189878b2d31c44a7b8a4c3706c56251de6"
+    reviewed = "70b0ba75cdebf76162e16f9a8bfab48f479c597265f6161c1c2aa837e072a644"
     if layout != reviewed:
         print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
             "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
@@ -522,6 +522,7 @@ except subprocess.TimeoutExpired:
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
+        "51b69bebd2b48ed2b2fc90552c624a525d61f9db280ae1599e16b53bcf62bd83",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -1312,6 +1313,12 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
+    linker = Path(environment.get("VCTOOLSINSTALLDIR", "")) / "bin/Hostx64/x64"
+    if (os.name == "nt" and environment.get("VCTOOLSINSTALLDIR") and (linker / "link.exe").is_file()
+            and Path(command[0]).stem.lower() in {"cargo", "cargo-nextest", "rustc"}):
+        # With VCINSTALLDIR set, rustc takes link.exe from PATH, and Git for
+        # Windows runs hooks with its own /usr/bin (and its link) first.
+        environment["PATH"] = str(linker) + os.pathsep + environment.get("PATH", "")
     # SDK discovery also captures hook-exported repository selectors. Fixtures
     # run Git in their own repositories, so clear inherited selectors after
     # setup and before applying explicit per-command settings.
@@ -2699,6 +2706,319 @@ def refresh_managed_runner(trusted, operation):
     return current
 
 
+def deferred_pull(remote, head, preview):
+    """The one open, ready PR this branch heads, when its push can be verified
+    after it lands. None keeps the original blocking push."""
+    if os.environ.get("SCODE_ACCEPTANCE_PUSH") == "blocking" or not preview["ci"]:
+        return None
+    repository = load_policy("origin/main")["repository"]
+    try:
+        contract_remote(remote, repository)
+    except RuntimeError:
+        # Local fixtures and other remotes have no pull request to hold pending.
+        return None
+    branch = value("symbolic-ref", "--short", "HEAD")
+    try:
+        pulls = github_api(f"repos/{repository}/pulls?state=open&base=main&head="
+                           + urllib.parse.quote(repository.split("/")[0] + ":" + branch, safe=""))
+    except RuntimeError as error:
+        print(f"LOCAL_ACCEPTANCE_DEFERRED_UNAVAILABLE: {error}", flush=True)
+        return None
+    if len(pulls) != 1 or pulls[0]["draft"] or pulls[0]["head"]["repo"]["full_name"] != repository:
+        return None
+    return pulls[0]
+
+
+def deferred_state(branch):
+    """This clone's per-branch state for deferred checks, outside every checkout.
+    The name is short: Windows linkers refuse paths over 260 characters, and the
+    branch worktree under it builds the whole workspace."""
+    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    return Path.home() / ".nexus/local-acceptance/deferred" / sha(f"{common}\0{branch}".encode())[:12]
+
+
+def stop_superseded(state, head):
+    """Stop this branch's earlier deferred check. Returns True when one for the
+    same head is still running, so it is kept instead of started twice."""
+    import psutil
+
+    try:
+        record = json.loads((state / "deferred.json").read_text(encoding="utf-8"))
+        process = psutil.Process(record["pid"])
+        if process.create_time() != record["started"]:
+            return False
+    except (OSError, ValueError, KeyError, psutil.NoSuchProcess):
+        return False
+    if record["head"] == head:
+        return True
+    if os.name != "nt":
+        # start_new_session made the check its own process group leader.
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, 9)
+    for child in process.children(recursive=True)[::-1] + [process]:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.kill()
+    psutil.wait_procs([process], timeout=10)
+    with contextlib.suppress(OSError):
+        Path(record["log"]).with_suffix(".superseded.json").write_bytes(
+            canonical({"superseded_by": head, "at": time.time()}))
+    print(f"LOCAL_ACCEPTANCE_DEFERRED: stopped the check for superseded head {record['head'][:12]}", flush=True)
+    return False
+
+
+def defer_check(head, remote, pull, trusted):
+    """Publish this head's signed plan, then verify it in the background in the
+    branch's own acceptance worktree, so neither the push nor the author's
+    checkout waits. Local acceptance stays pending, and merge stays gated,
+    until the signed receipt is published."""
+    branch = value("symbolic-ref", "--short", "HEAD")
+    # The check's own output takes the normal results layout; its plan and log
+    # sit beside it.
+    output = (Path.home() / ".nexus/local-acceptance/results" / head / str(time.time_ns())).resolve()
+    plan_output = output.with_name(output.name + "-plan")
+    plan_output.mkdir(parents=True)
+    publish_plan(head, trusted, remote, plan_output)
+    state = deferred_state(branch)
+    state.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError, ValueError):
+        previous = json.loads((state / "deferred.json").read_text(encoding="utf-8"))
+        ended, healthy = deferred_status(previous)
+        if not healthy:
+            print(f"LOCAL_ACCEPTANCE_DEFERRED: the earlier check for {previous['head'][:12]} {ended}", flush=True)
+    if stop_superseded(state, head):
+        print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
+              f"see {state / 'deferred.json'}", flush=True)
+        return
+    worktree = state / "w"
+    if (worktree / ".git").exists():
+        git("checkout", "--detach", "--force", head, root=worktree)
+        git("clean", "-ffd", root=worktree)
+    else:
+        git("worktree", "add", "--detach", str(worktree), head)
+    command = [sys.executable, str(Path(__file__).resolve()), "check", "--head", head, "--base", "origin/main",
+               "--policy-ref", "origin/main", "--publish", "--remote", remote,
+               "--output", str(output), "--dispatch-publish", str(pull["number"])]
+    log = output.with_name(output.name + ".log")
+    detached = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+                if os.name == "nt" else {"start_new_session": True})
+    with log.open("wb") as stream:
+        try:
+            # Outlive a terminal or agent job that kills its tree on exit.
+            breakaway = {"creationflags": detached["creationflags"] | 0x01000000} if os.name == "nt" else detached
+            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+                                       stderr=subprocess.STDOUT, **breakaway)
+        except OSError:
+            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+                                       stderr=subprocess.STDOUT, **detached)
+    import psutil
+
+    (state / "deferred.json").write_bytes(canonical({
+        "pid": process.pid, "started": psutil.Process(process.pid).create_time(), "head": head,
+        "branch": branch, "pr": pull["number"], "output": str(output), "log": str(log)}))
+    print("LOCAL_ACCEPTANCE_DEFERRED=" + canonical({
+        "head": head, "pr": pull["number"], "worktree": str(worktree), "log": str(log),
+        "status": "Pushed with a signed plan. Local acceptance is running in the background; the required "
+                  "Local acceptance status stays pending, and merge stays blocked, until its signed receipt "
+                  "is published. Set SCODE_ACCEPTANCE_PUSH=blocking to verify before pushing instead.",
+    }).decode(), flush=True)
+
+
+def deferred_result_path(log):
+    return Path(log).with_name(Path(log).name.removesuffix(".log") + ".result.json")
+
+
+def record_deferred_result(args, outcome, finalization, error=None):
+    """Leave the background check's outcome beside its log for doctor and the next push."""
+    log = Path(args.output).with_name(Path(args.output).name + ".log")
+    deferred_result_path(log).write_bytes(canonical({
+        "head": value("rev-parse", args.head or "HEAD"), "pr": args.dispatch_publish, "outcome": outcome,
+        "finalization": finalization, "error": None if error is None else str(error)[-2000:],
+        "finished_at": time.time()}))
+
+
+def deferred_status(record):
+    """(state, healthy) of the check a deferred.json record started."""
+    import psutil
+
+    log = Path(record["log"])
+    with contextlib.suppress(psutil.NoSuchProcess, KeyError):
+        process = psutil.Process(record["pid"])
+        # A finished check stays a zombie only while its starter still runs.
+        if process.create_time() == record["started"] and process.status() != psutil.STATUS_ZOMBIE:
+            return f"is still running; log {log}", True
+    with contextlib.suppress(OSError, ValueError):
+        superseded = json.loads(log.with_suffix(".superseded.json").read_text(encoding="utf-8"))
+        return f"was stopped for {superseded['superseded_by'][:12]}", True
+    try:
+        result = json.loads(deferred_result_path(log).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"ended without recording a result; Local acceptance stays pending. See {log}", False
+    if result["outcome"] != "verified":
+        reason = next(reversed((result.get("error") or "unknown error").splitlines()), "unknown error")
+        return f"FAILED ({reason}); Local acceptance stays pending until a new head passes. See {log}", False
+    if result["finalization"] != "requested":
+        return (f"passed and published its receipt, but finalization was not requested ({result['finalization']}). "
+                f"Run `gh workflow run local-acceptance-publish.yml -f pr={record['pr']} -f head={record['head']}`"), False
+    return "passed; trusted finalization was requested", True
+
+
+def deferred_findings():
+    """One line per branch with a deferred check from this host."""
+    findings = []
+    for path in sorted((Path.home() / ".nexus/local-acceptance/deferred").glob("*/deferred.json")):
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            state, healthy = deferred_status(record)
+            findings.append((f"deferred {record['branch']} {record['head'][:12]} (PR #{record['pr']})", healthy, state))
+    return findings
+
+
+def dispatch_publish(pr, head, policy_ref):
+    """Ask the trusted publisher to read the receipt just published for `head`."""
+    repository = load_policy(policy_ref)["repository"]
+    print(f"LOCAL_ACCEPTANCE: receipt published; requesting trusted finalization for PR #{pr} at {head[:12]}",
+          flush=True)
+    github_api(f"repos/{repository}/actions/workflows/local-acceptance-publish.yml/dispatches",
+               {"ref": "main", "inputs": {"pr": str(pr), "head": head}})
+    print(f"LOCAL_ACCEPTANCE: trusted finalization requested for PR #{pr}.", flush=True)
+
+
+def compiler_store_findings(root, capacity=2147483648, stale=86400):
+    """Each shared compiler store's size against its cap and its newest write.
+    A store at its cap that has stopped taking writes wedged cold compiles on
+    2026-11-17; a probe through a scratch store cannot see that."""
+    findings = []
+    for store in sorted(path for path in root.glob("*") if path.is_dir() and not path.name.endswith(".control")):
+        size, newest = 0, 0.0
+        for directory, _, files in os.walk(store):
+            for name in files:
+                with contextlib.suppress(OSError):
+                    info = os.stat(os.path.join(directory, name))
+                    size, newest = size + info.st_size, max(newest, info.st_mtime)
+        age = time.time() - newest if newest else None
+        wedged = size >= 0.95 * capacity and (age is None or age > stale)
+        written = "never written" if age is None else f"last write {age / 3600:.1f} h ago"
+        findings.append((f"compiler store {store.name}", not wedged,
+                         f"{size / 1024**3:.2f} of {capacity / 1024**3:.0f} GiB, {written}" + (
+                             "; it is full and no longer taking writes, which can hang cold compiles. With no "
+                             f"acceptance running, move {store} aside (reversible); the next check starts a fresh store"
+                             if wedged else "")))
+    return findings
+
+
+def host_findings(names=None):
+    """This host's acceptance prerequisites as (name, ok, detail) with the fix
+    in each failing detail. `names` limits it to what those checks use; None
+    reports everything. A finding grants no acceptance; the policy's checks
+    revalidate what they need before the host queue and at execution."""
+    findings = []
+
+    def probe(command, timeout=30, **kwargs):
+        try:
+            return subprocess.run(command, capture_output=True, timeout=timeout, **kwargs)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return error
+
+    native = names is None or any(name.startswith("native-") or name == "guard-contract" for name in names)
+    docker = names is None or bool(set(names) & {"rendering", "browser", "guard-contract"})
+    if names is None:
+        for module in ["psutil", "jsonschema"]:
+            try:
+                __import__(module)
+                findings.append((f"python {module}", True, "importable"))
+            except ImportError:
+                findings.append((f"python {module}", False, f"run `{sys.executable} -m pip install {module}`"))
+        signer = git("config", "localAcceptance.signer", check=False).stdout.decode().strip()
+        key = git("config", "localAcceptance.key", check=False).stdout.decode().strip()
+        if not signer or not key or not Path(key).expanduser().is_file():
+            findings.append(("signing key", False, "run `local_acceptance.py install --signer DEVICE --key KEY` "
+                                                   "with a key enrolled in spec/local_acceptance_signers.json"))
+        else:
+            with tempfile.TemporaryDirectory(prefix="scode-doctor-") as scratch:
+                message = Path(scratch) / "probe"
+                message.write_bytes(b"doctor")
+                public = probe(["ssh-keygen", "-y", "-f", str(Path(key).expanduser())])
+                signed = probe(["ssh-keygen", "-Y", "sign", "-f", str(Path(key).expanduser()), "-n", NAMESPACE,
+                                str(message)])
+                verified = None
+                if not isinstance(public, Exception) and not isinstance(signed, Exception) and not signed.returncode:
+                    allowed = Path(scratch) / "allowed"
+                    allowed.write_bytes(signer.encode() + b" " + public.stdout.strip() + b"\n")
+                    verified = probe(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", signer, "-n", NAMESPACE,
+                                      "-s", str(message) + ".sig"], input=b"doctor")
+                ok = verified is not None and not isinstance(verified, Exception) and not verified.returncode
+                findings.append(("signing key", ok, f"{signer} signs and verifies" if ok else
+                                 "ssh-keygen could not sign and verify with the configured key; run this outside "
+                                 "a sandbox that hides the key or ssh-keygen, and check the key's permissions"))
+        gh = shutil.which("gh")
+        status = probe([gh, "auth", "status"]) if gh else None
+        findings.append(("GitHub CLI", status is not None and not isinstance(status, Exception)
+                         and not status.returncode and Path(gh).suffix.lower() not in {".cmd", ".bat"},
+                         "authenticated" if status is not None and not isinstance(status, Exception)
+                         and not status.returncode else "install the native gh and run `gh auth login`"))
+    if os.name == "nt" and native:
+        pwsh = shutil.which("pwsh.exe")
+        findings.append(("PowerShell 7", bool(pwsh), pwsh or "add an existing PowerShell 7 directory to PATH, or "
+                         "`winget install --id Microsoft.PowerShell --exact --source winget`"))
+        tools = os.environ.get("VCToolsInstallDir")
+        configured = git("config", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
+        locator = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+        if tools:
+            linker = Path(tools) / "bin/Hostx64/x64/link.exe"
+            findings.append(("MSVC linker", linker.is_file(), f"{linker} goes first for compiler commands" if linker.is_file()
+                             else f"{linker} is missing; repair the Visual Studio C++ build tools"))
+        else:
+            ok = bool(configured and Path(configured).is_file()) or locator.is_file()
+            findings.append(("MSVC linker", ok, "found through " + (configured or str(locator)) if ok else
+                             "install the Visual Studio C++ build tools, or set "
+                             "`git config localAcceptance.vsdevcmd <path to VsDevCmd.bat>`"))
+    if names is None:
+        findings.extend(compiler_store_findings(Path.home() / ".cache/sudocode-local-acceptance/compiler-objects"))
+        prepared = sorted((Path.home() / ".cache/sudocode-local-acceptance/tools/sccache").glob("*/*/sccache*"))
+        tool = next((path for path in prepared if path.name in {"sccache", "sccache.exe"}), None)
+        if tool is None:
+            findings.append(("compiler cache", True, "not prepared yet; the first check fetches the pinned sccache"))
+        else:
+            with tempfile.TemporaryDirectory(prefix="scode-doctor-cache-") as scratch:
+                import socket
+
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                cache = {**os.environ, "SCCACHE_DIR": str(Path(scratch) / "cache"), "SCCACHE_SERVER_PORT": str(port),
+                         "SCCACHE_IDLE_TIMEOUT": "60"}
+                (Path(scratch) / "probe.rs").write_text("", encoding="utf-8")
+                probe([str(tool), "--start-server"], timeout=20, env=cache)
+                compiled = probe([str(tool), "rustc", "--crate-name", "doctor_probe", "--crate-type", "lib", "--emit",
+                                  "metadata", "--out-dir", scratch, str(Path(scratch) / "probe.rs")],
+                                 timeout=120, env=cache, cwd=scratch)
+                probe([str(tool), "--stop-server"], timeout=20, env=cache)
+            ok = not isinstance(compiled, Exception) and not compiled.returncode
+            findings.append(("compiler cache", ok, f"{tool} compiles through its own server" if ok else
+                             f"{tool} did not compile a probe within 120s; acceptance falls back to original Cargo, "
+                             "or set any SCCACHE_* variable to skip the cache"))
+    if docker:
+        server = probe(["docker", "version", "--format", "{{.Server.Version}}"])
+        ok = not isinstance(server, Exception) and not server.returncode
+        findings.append(("Docker", ok, f"server {server.stdout.decode().strip()}" if ok else
+                         "start Docker Desktop (or the Docker daemon) and rerun"))
+    return findings
+
+
+def doctor(args):
+    """Report every prerequisite with its fix; runs no acceptance check."""
+    findings = host_findings()
+    for name, ok, detail in findings:
+        print(f"{'ok ' if ok else 'fix'} {name}: {detail}", flush=True)
+    # Background checks are reported, not counted as host readiness.
+    for name, ok, detail in deferred_findings():
+        print(f"{'ok ' if ok else 'see'} {name}: {detail}", flush=True)
+    failed = [name for name, ok, _ in findings if not ok]
+    if failed:
+        raise RuntimeError("fix " + ", ".join(failed) + " before running local acceptance")
+    print("This host is ready for local acceptance. A doctor run grants no acceptance.", flush=True)
+
+
 def pre_push(args):
     global ROOT
     ROOT = Path(value("rev-parse", "--show-toplevel", root=Path.cwd()))
@@ -2740,6 +3060,10 @@ def pre_push(args):
                 comparison = value("merge-base", "origin/main", head)
                 preview = acceptance_plan(policy,
                     selected(policy, changed_paths(comparison, head), base=comparison, head=head), host())
+                pull = deferred_pull(args.remote, head, preview)
+                if pull is not None:
+                    defer_check(head, args.remote, pull, value("rev-parse", "origin/main"))
+                    continue
                 if preview["ci"]:
                     print("LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE=" + canonical({
                         "current_push_mode": "serial",
@@ -2800,6 +3124,44 @@ def plan_pre_push(args):
           "complete author checks and native CI still gate merge.", flush=True)
 
 
+def publish_plan(head, trusted, remote, output):
+    """Sign and publish this head's execution plan, or reuse the one already
+    published from this host. The plan schedules native CI; it proves no test."""
+    repository = load_policy(trusted)["repository"]
+    contract_remote(remote, repository)
+    base = value("merge-base", trusted, head)
+    policy = load_policy(trusted)
+    names = selected(policy, changed_paths(base, head), base=base, head=head)
+    plan = acceptance_plan(policy, names, host())
+    for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
+        fetched = git("fetch", "--no-tags", remote, f"+{note_ref}:{note_ref}", check=False)
+        if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
+            raise RuntimeError(fetched.stderr.decode(errors="replace"))
+    prior = None
+    if read_note(head, PLAN_NOTE_REF)["attestations"]:
+        prior = read_execution_plan(head, trusted, trusted)
+        if prior["host"] != host():
+            raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
+        plan = prior["plan"]
+    if not plan["ci"]:
+        raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
+    identity = value("config", "localAcceptance.signer")
+    key = Path(value("config", "localAcceptance.key")).expanduser()
+    receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+               "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+               "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
+    if prior is None:
+        envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
+    else:
+        envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
+                        if json.loads(base64.b64decode(item["payload"])) == prior)
+    verify_execution_plan(envelope, head, trusted, trusted)
+    if prior is None:
+        publish(head, envelope, remote, note_ref=PLAN_NOTE_REF)
+    git("fetch", "--no-tags", remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
+    return plan, envelope
+
+
 def start_pr(args, api=None, context=None):
     """Start native CI and mandatory author checks together for frozen source."""
     api = api or github_api
@@ -2840,37 +3202,7 @@ def start_pr(args, api=None, context=None):
             delegated = True
             return namespace["start_pr"](args, api=api, context={**context, "refreshes": context["refreshes"] + 1})
         repository = load_policy(trusted)["repository"]
-        contract_remote(args.remote, repository)
-        base = value("merge-base", trusted, head)
-        policy = load_policy(trusted)
-        names = selected(policy, changed_paths(base, head), base=base, head=head)
-        plan = acceptance_plan(policy, names, host())
-        for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
-            fetched = git("fetch", "--no-tags", args.remote, f"+{note_ref}:{note_ref}", check=False)
-            if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
-                raise RuntimeError(fetched.stderr.decode(errors="replace"))
-        prior = None
-        if read_note(head, PLAN_NOTE_REF)["attestations"]:
-            prior = read_execution_plan(head, trusted, trusted)
-            if prior["host"] != host():
-                raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
-            plan = prior["plan"]
-        if not plan["ci"]:
-            raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
-        identity = value("config", "localAcceptance.signer")
-        key = Path(value("config", "localAcceptance.key")).expanduser()
-        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
-                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
-                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-        if prior is None:
-            envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
-        else:
-            envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                            if json.loads(base64.b64decode(item["payload"])) == prior)
-        verify_execution_plan(envelope, head, trusted, trusted)
-        if prior is None:
-            publish(head, envelope, args.remote, note_ref=PLAN_NOTE_REF)
-        git("fetch", "--no-tags", args.remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
+        plan, envelope = publish_plan(head, trusted, args.remote, output)
         with tempfile.TemporaryDirectory(prefix="scode-plan-push-") as temporary:
             hook = Path(temporary) / "pre-push"
             interpreter = shlex.quote(sys.executable.replace("\\", "/"))
@@ -3014,6 +3346,9 @@ def main():
                                  help="Reuse unchanged checks from a signed exact-source output directory")
             command.add_argument("--publish", action="store_true")
             command.add_argument("--remote", default="origin")
+            command.add_argument("--dispatch-publish", type=int, metavar="PR",
+                                 help="After publishing, ask the trusted publisher to finalize this PR")
+    sub.add_parser("doctor", help="Report this host's acceptance prerequisites and how to fix each; runs no check")
     command = sub.add_parser("install")
     command.add_argument("--signer")
     command.add_argument("--key")
@@ -3069,7 +3404,22 @@ def main():
         elif args.operation == "check":
             if args.policy_ref == "origin/main":
                 args.policy_ref = authorized_policy(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
-            check(args)
+            if not args.dispatch_publish:
+                check(args)
+            else:
+                try:
+                    check(args)
+                except BaseException as error:
+                    record_deferred_result(args, "failed", "not requested", error)
+                    raise
+                try:
+                    dispatch_publish(args.dispatch_publish, value("rev-parse", args.head or "HEAD"), args.policy_ref)
+                except BaseException as error:
+                    record_deferred_result(args, "verified", f"failed: {error}")
+                    raise
+                record_deferred_result(args, "verified", "requested")
+        elif args.operation == "doctor":
+            doctor(args)
         elif args.operation == "index-output":
             index_existing_output(args.directory, value("rev-parse", args.policy_ref))
         elif args.operation == "install":

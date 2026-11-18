@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import socket
 import stat
+import subprocess
 import tarfile
 import time
 import uuid
@@ -332,6 +333,12 @@ def compiler_frontend(command):
         "build", "check", "clippy", "test", "bench", "run", "rustc", "doc", "rustdoc")]
 
 
+# Bounds the probe compile that shows the session's server answers. A new
+# server first hashes the Rust toolchain, which takes tens of seconds on a cold
+# host; a server that never answers holds a compile for its 600 s idle timeout.
+PROBE_SECONDS = 120
+
+
 class Session:
     """A finite, lazy compiler server; application/test children retain priority."""
 
@@ -512,7 +519,52 @@ class Session:
         stats = json.loads(self.tool_command("initial-stats", "--show-stats", "--stats-format", "json"))
         if stats["max_cache_size"] != 2 * 1024**3:
             raise RuntimeError("Compiler-cache disk limit differs from the declared 2 GiB")
+        if not self.answers_probe() or not self.forget_probe():
+            # A server that takes requests but never answers would hold the
+            # first cached compile until its idle timeout, then fail it.
+            self.fall_back(f"the cache server did not answer a probe compile within {PROBE_SECONDS}s")
+            return False
         return True
+
+    def fall_back(self, reason):
+        """Retire this invocation's own server and run original Cargo from here on."""
+        import psutil
+
+        for process in self.owned_servers():
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                process.kill()
+        self.disabled = True
+        print(f"COMPILER_CACHE: {reason}; preserving original Cargo for this invocation.", flush=True)
+
+    def answers_probe(self):
+        """Compile one fresh library through this session's own server. A wedged
+        server can still answer cache hits, so the source is new every time and
+        the compile is always a miss that must reach storage."""
+        probe = self.directory / "probe"
+        probe.mkdir(exist_ok=True)
+        (probe / "probe.rs").write_text(f'pub const SCODE_CACHE_PROBE: &str = "{uuid.uuid4().hex}";' + "\n",
+                                        encoding="utf-8")
+        try:
+            result = subprocess.run([self.tool["executable"], "rustc", "--crate-name", "compiler_cache_probe",
+                                     "--crate-type", "lib", "--emit", "metadata", "--out-dir", str(probe),
+                                     str(probe / "probe.rs")], cwd=probe, env={**os.environ, **self.environment},
+                                    capture_output=True, timeout=PROBE_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
+
+    def forget_probe(self):
+        """Reset the new server's statistics, so they count only the session's own compilations."""
+        try:
+            result = subprocess.run([self.tool["executable"], "--zero-stats"], cwd=self.directory,
+                                    env={**os.environ, **self.environment}, capture_output=True,
+                                    timeout=PROBE_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
 
     def build_wrapper(self):
         """Compile Cargo's rustc wrapper around this session's verified sccache."""

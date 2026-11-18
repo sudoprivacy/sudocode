@@ -52,8 +52,12 @@ fn agent_list_discovers_a_peer_provisioned_through_the_mailbox() {
     // The host filesystem, because `SUDOCODE_AGENT_STORE` above names a host
     // directory: the sub-agent half of the list is read through the session's
     // backend, which for this test's session is the host.
-    let rows = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend)
-        .expect("collect_agent_list should succeed when the namespace is readable");
+    let rows = tools::collect_agent_list(
+        false,
+        &std::collections::BTreeSet::default(),
+        &runtime::fs_backend::StdFsBackend,
+    )
+    .expect("collect_agent_list should succeed when the namespace is readable");
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
 
     assert!(
@@ -91,7 +95,11 @@ fn collect_agent_list_surfaces_a_read_failure_instead_of_empty() {
     std::fs::write(root.join("agents"), b"not a directory").unwrap();
     let _scope = MailboxScope::enter(me);
 
-    let result = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend);
+    let result = tools::collect_agent_list(
+        false,
+        &std::collections::BTreeSet::default(),
+        &runtime::fs_backend::StdFsBackend,
+    );
     assert!(
         result.is_err(),
         "a namespace read failure must surface as Err, not an empty list; got {result:?}"
@@ -155,7 +163,7 @@ fn assert_discovered_address_routes(row: &Value) {
     assert!(row.get("pid").is_none(), "a task ID is not an OS PID");
     let address = row["send_to"].as_str().unwrap();
     if row["kind"] == "peer" {
-        assert!(row.get("active").is_none());
+        assert_eq!(row["active"], false, "no runtime host saw the peer online");
         tools::execute_tool(
             "send",
             &json!({

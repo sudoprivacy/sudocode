@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUTC": "2026-11-17T22:41:57.683334+00:00",
+  "policyPR": {
+    "number": 1473,
+    "url": "https://github.com/sudoprivacy/sudocode/pull/1473",
+    "qualifiedHead": "616e7b6b41709b0a9b9670eb63cc66a4435fd11f",
+    "qualifiedTree": "80e3c95526013d0829e6f61cdff61cb79edd0365",
+    "normalMerge": "a78aefb199d7558b3b92eb6c326f7078f63b6542",
+    "mergedAt": "2026-11-17T22:35:07Z",
+    "acceptedTree": "48cf4048f82fa9d5872ce23f3e12f845a51d58e7"
+  },
+  "authorQualification": {
+    "host": {
+      "architecture": "amd64",
+      "system": "windows"
+    },
+    "profiles": [
+      "guard-contract",
+      "native-cohost",
+      "native-context",
+      "native-examples",
+      "native-resize",
+      "native-services",
+      "native-workspace",
+      "preflight"
+    ],
+    "originalReceiptSHA256": "5b6bca9d5040ef988a67f5d45593f549926a9e148120fd01c7f539a397f3d119",
+    "scope": "Eight original signed source-head profiles; no rewritten earlier receipt."
+  },
+  "sourceFullWorkspaceJobs": [
+    {
+      "name": "Full workspace (ubuntu-latest)",
+      "source": "616e7b6b41709b0a9b9670eb63cc66a4435fd11f",
+      "run": 44184683961,
+      "job": 134397921450,
+      "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44184683961/job/134397921450",
+      "conclusion": "success"
+    },
+    {
+      "name": "Full workspace (macos-latest)",
+      "source": "616e7b6b41709b0a9b9670eb63cc66a4435fd11f",
+      "run": 44184683961,
+      "job": 134397920956,
+      "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44184683961/job/134397920956",
+      "conclusion": "success"
+    },
+    {
+      "name": "Full workspace (windows-latest)",
+      "source": "616e7b6b41709b0a9b9670eb63cc66a4435fd11f",
+      "run": 44184683961,
+      "job": 134397921490,
+      "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44184683961/job/134397921490",
+      "conclusion": "success"
+    }
+  ],
+  "sourcePreflight": {
+    "source": "616e7b6b41709b0a9b9670eb63cc66a4435fd11f",
+    "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44184684086/job/134397922173",
+    "conclusion": "success",
+    "repair": "Prepare only the three immutable protected-base tool sources before the standalone native artifact fixture; scope the read-only API credential to trusted preparation."
+  },
+  "normalCombinedQueue": [
+    {
+      "run": 44190041098,
+      "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44190041098",
+      "source": "a78aefb199d7558b3b92eb6c326f7078f63b6542",
+      "conclusion": "success",
+      "applicableSuccessfulJobs": [
+        "CI preflight",
+        "cargo clippy --workspace (macos-latest)",
+        "nexus-A2A journeys (real daemon)",
+        "cargo clippy --workspace (ubuntu-latest)",
+        "nexus co-host journeys (real daemon)",
+        "cargo clippy --workspace (windows-latest)",
+        "nexus-A2A live (real daemon)"
+      ],
+      "expectedSkippedJobs": [
+        "dependency-cache",
+        "Release rendering stress matrix",
+        "Release optimized build (${{ matrix.os }})",
+        "Live model PTY (${{ matrix.os }})",
+        "Live API smoke test",
+        "stop-after-clippy-failure",
+        "stop-after-cohost-failure",
+        "stop-after-daemon-failure"
+      ]
+    },
+    {
+      "run": 44190041051,
+      "url": "https://github.com/sudoprivacy/sudocode/actions/runs/44190041051",
+      "source": "a78aefb199d7558b3b92eb6c326f7078f63b6542",
+      "conclusion": "success",
+      "applicableSuccessfulJobs": [
+        "Verify local acceptance"
+      ],
+      "expectedSkippedJobs": [
+        "matrix.name"
+      ]
+    }
+  ],
+  "normalComposition": {
+    "verifiedExactGitMergeTree": true,
+    "acceptedBase": "29373b1b52d33733fa172d73fb6bcb0ab295c78b",
+    "qualifiedWholeTreeEqualsMerge": false,
+    "acceptedBaseCompositionPaths": [
+      "M\tCONTRIBUTING.md",
+      "M\tdocs/acp.md",
+      "M\tdocs/usage.md",
+      "M\te2e/nexus-a2a/run-cross-node.sh",
+      "M\te2e/terminal-resize/gui.cjs",
+      "M\trust/Cargo.lock",
+      "M\trust/Cargo.toml",
+      "M\trust/crates/commands/src/lib.rs",
+      "M\trust/crates/engine-acp/src/acp_sdk_server.rs",
+      "A\trust/crates/engine-acp/src/attention_control.rs",
+      "M\trust/crates/engine-acp/src/lib.rs",
+      "M\trust/crates/engine-acp/src/session_driver.rs",
+      "M\trust/crates/engine-core/src/attachment.rs",
+      "M\trust/crates/engine-core/src/input_queue.rs",
+      "M\trust/crates/engine-core/src/lib.rs",
+      "A\trust/crates/engine-core/src/requests.rs",
+      "M\trust/crates/engine-core/src/session.rs",
+      "M\trust/crates/engine-core/src/session_inputs.rs",
+      "M\trust/crates/engine-core/src/subagent_completion.rs",
+      "M\trust/crates/engine-events/src/lib.rs",
+      "M\trust/crates/engine-host/src/local_runtime.rs",
+      "M\trust/crates/engine-host/src/peer/runtime_observation.rs",
+      "M\trust/crates/engine-host/src/runtime_build.rs",
+      "M\trust/crates/engine-host/src/session_engine.rs",
+      "M\trust/crates/runtime/src/agent_color.rs",
+      "M\trust/crates/runtime/src/agent_mailbox.rs",
+      "A\trust/crates/runtime/src/attention.rs",
+      "M\trust/crates/runtime/src/config.rs",
+      "M\trust/crates/runtime/src/config_schema.rs",
+      "M\trust/crates/runtime/src/conversation.rs",
+      "M\trust/crates/runtime/src/experiments.rs",
+      "M\trust/crates/runtime/src/external_a2a.rs",
+      "M\trust/crates/runtime/src/lib.rs",
+      "M\trust/crates/runtime/src/permissions.rs",
+      "M\trust/crates/runtime/src/runtime_status.rs",
+      "M\trust/crates/runtime/tests/agent_mailbox_roundtrip.rs",
+      "M\trust/crates/runtime/tests/experiments_flags.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/cli/format.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/cli/format/a2a.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/cli/help.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/cli/received.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/main.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/render.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/render/color_theme.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/render/text_layout.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/render_engine.rs",
+      "A\trust/crates/rusty-sudocode-cli/src/repl_prompts.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/repl_ui.rs",
+      "A\trust/crates/rusty-sudocode-cli/src/repl_ui/agents.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/repl_ui/footer.rs",
+      "M\trust/crates/rusty-sudocode-cli/src/repl_ui/tasks.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/acp_a2a_receive.rs",
+      "A\trust/crates/rusty-sudocode-cli/tests/acp_a2a_receive/presence.rs",
+      "D\trust/crates/rusty-sudocode-cli/tests/acp_a2a_receive/runtime_observation.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/acp_integration.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/fixtures/acp_subagent_events_off/subagent_delegation_parent.jsonl",
+      "M\trust/crates/rusty-sudocode-cli/tests/fixtures/acp_subagent_events_off/subagent_events_background.jsonl",
+      "M\trust/crates/rusty-sudocode-cli/tests/fixtures/acp_subagent_events_off/subagent_events_nested.jsonl",
+      "M\trust/crates/rusty-sudocode-cli/tests/fixtures/acp_subagent_events_off/subagent_events_sync.jsonl",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_a2a_cards.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_a2a_overlay.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_agent_directory.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_agent_permission_bubble.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_background_tasks.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_cache_prefix.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_commands_during_turn.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_compaction_safety.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_cron_tab.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_host_input_queue.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_peer_descriptions_live.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_prose_preview.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_restart_parity.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_text_layout.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/pty_todo_write.rs",
+      "M\trust/crates/rusty-sudocode-cli/tests/support/acp_direct_fences.rs",
+      "M\trust/crates/service-host/runtime-artifacts.json",
+      "M\trust/crates/tools/src/lib.rs",
+      "M\trust/crates/tools/tests/agent_list_discovery.rs",
+      "M\tsdk/typescript/src/mcpTools.ts",
+      "M\tsdk/typescript/src/scodeA2a.ts",
+      "M\tsdk/typescript/test/fixtures/scode-direct-a2a-agent.mjs",
+      "M\tsdk/typescript/test/mcpIntegration.ts",
+      "M\tsudo-code-roadmap.html"
+    ],
+    "ownedPathsWithCleanIntegration": [
+      {
+        "path": "CONTRIBUTING.md",
+        "acceptedSHA256": "99edd2141b551fa95c516e4ab044faf4f52cdc82becf1fae0ebebcad70f5e527",
+        "qualifiedSHA256": "bb7f9fd59c8153357667f0743a8fc0998214078f565882b6398574de9c606652"
+      },
+      {
+        "path": "rust/Cargo.lock",
+        "acceptedSHA256": "821777840df9df88851290a53346477352fbd66aa2d5d03dee9a40df40285929",
+        "qualifiedSHA256": "49fe1397ae5480f5ef44adf585086dc95363ac23abad83a0154218731b440db9"
+      },
+      {
+        "path": "rust/Cargo.toml",
+        "acceptedSHA256": "13608d71bd29eec5d5c8240b7c043b452a0e6af94b8595479074974e7caac087",
+        "qualifiedSHA256": "3a81c2835867285e4f6cfa581b9d9a25b1c3940630c21359ebe504955655dd5a"
+      },
+      {
+        "path": "sudo-code-roadmap.html",
+        "acceptedSHA256": "cb61c335ee95792679878e4cf8d4f23271db149e112c33bf92bc29be4ce1a710",
+        "qualifiedSHA256": "287beb802726240c093a2fbb28451eaf7859555b1af6f72f78c66e101d0dbbe2"
+      }
+    ],
+    "scope": "Three-platform full profiles qualify616. The later accepted base includes Nexus rc.10 and other source changes; normal combined-tree queue checks qualify their recorded scope. The old full receipts are not retconned into a full combined-tree run."
+  },
+  "activeCoverage": {
+    "authorWorkspace": "Original selected native-workspace remains mandatory on the author host.",
+    "otherOSFullWorkspace": "Original full three-platform workspace weekly Sunday03:19UTC and manual main dispatch; ready changes to the periodic workflow run the full matrix.",
+    "selectedComplements": [
+      "native-examples",
+      "native-resize",
+      "native-services",
+      "native-context",
+      "native-cohost"
+    ],
+    "queue": "Three-platform all-feature Clippy and selected real daemon journeys remain.",
+    "explicitReduction": "Other-OS workspace cases may first fail after merge in periodic regression; equivalent per-PR detection is not claimed.",
+    "assertionsDeadlinesRetriesPoolsChangedByMeasurement": false
+  },
+  "cacheAtQualifiedAuthor": {
+    "pinnedSccache": "0.19.0",
+    "activeObjectDataCapBytes": 2147483648,
+    "compileRequests": 0,
+    "cacheHits": 0,
+    "cargoArgumentFileDirectUnits": 34,
+    "cacheSizeNullMeansUnknown": true,
+    "warmCacheOrSpeedupProven": false
+  },
+  "preservedHistory": [
+    {
+      "source": "30247257e8b9164dc8e30bb5703cc2431a236e5b",
+      "scope": "Eight signed author groups passed; hosted standalone artifact preflight failedHTTP403. No live quota or generic API recovery conclusion.",
+      "job": "https://github.com/sudoprivacy/sudocode/actions/runs/44171842755/job/134352720195"
+    },
+    {
+      "source": "f44ed787f773ffaef802ef7687e5679069ea40ca",
+      "scope": "The new negative fixture incorrectly expected outer97; actual nested child97/outer1 failure was retained and corrected at616. Original31 artifact assertions were retained."
+    }
+  ],
+  "measurement": {
+    "fixedDataset": "ci-lifecycle-measurement-20261117.json",
+    "fixedDatasetSHA256": "3b74c3ec0d9376628d818dd8cca2b8c190d5afc718395cebe2eec44efb2298b0",
+    "originalFixedCohortsChanged": false,
+    "knownHistoricalCurrentRatioPercent": 9.09374548,
+    "historicalSourceMixWeightedRatioPercent": 10.40005664,
+    "wholeLifecycleTenthProven": false,
+    "postPolicySelectionTrigger": "2026-11-17T22:35:07Z",
+    "postPolicyRule": "First20 merged Rust-source PRs in mergedAt/PR-number order, source classified before cost; no replacement by runtime/size/author/failure. Incomplete file data blocks selection.",
+    "firstReadAtUTC": "2026-11-17T22:36:37.724609+00:00",
+    "eligiblePRsAtFirstRead": 0,
+    "selectionFrozenAtFirstRead": false,
+    "postPolicyCostObserved": false,
+    "scope": "Runner occupancy is separate from local author, queue, periodic and engineering costs; incomplete intervals are unknown, never zero. No new benefit is inferred from policy activation."
+  },
+  "originalShareBinding": {
+    "url": "https://s.shareone.vip/s/sudo-code-roadmap",
+    "source": "https://raw.githubusercontent.com/sudoprivacy/sudocode/main/sudo-code-roadmap.html",
+    "policyMergePageAnonymouslyVerified": true
+  },
+  "sourceAcceptanceIsNotInstalledOrProductionAcceptance": true
+}

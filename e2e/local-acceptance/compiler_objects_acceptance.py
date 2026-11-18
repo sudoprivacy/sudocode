@@ -43,6 +43,8 @@ def run(output):
         tool = cache.prepare(checks.github_asset_download)
         if tool is None:
             raise RuntimeError("The compiler-object fixture requires a pinned supported platform")
+        official_tool = cache.prepare(checks.github_asset_download, variant="official") if tool["response_files"] else tool
+        assert official_tool is not None and not official_tool["response_files"]
         nextest = checks.nextest_binary(output)
         workspaces = [output / name for name in ("source-a", "source-b")]
         manifest = Path(__file__).with_name("compiler-objects.Cargo.toml").read_text(encoding="utf-8")
@@ -124,6 +126,44 @@ fn nested_cargo_and_explicit_target() {
             (workspace / "nested/src/main.rs").write_text(
                 'fn main() {println!("NESTED:{}", env!("CACHE_COMPILE_INPUT"));}\n', encoding="utf-8")
             shutil.copyfile(Path(__file__).with_name("compiler-objects.Cargo.lock"), workspace / "Cargo.lock")
+        # Build scripts use the same wrapper for information and feature probes.
+        # These are real compiler commands, with output/status compared to the
+        # direct compiler before cacheable Cargo units are built below.
+        probe_build = r'''use std::process::Command;
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let compiler=std::env::var_os("RUSTC").unwrap();
+    let wrapper=std::env::var_os("RUSTC_WRAPPER").unwrap();
+    for arguments in [vec!["--version"], vec!["-vV"], vec!["--print", "cfg"],
+                      vec!["--help"], vec!["--print", "deliberately-invalid-query"]] {
+        let direct=Command::new(&compiler).args(&arguments).output().unwrap();
+        let wrapped=Command::new(&wrapper).arg(&compiler).args(&arguments).output().unwrap();
+        assert_eq!(direct.status.code(), wrapped.status.code(), "probe exit: {arguments:?}");
+        assert_eq!(direct.stdout, wrapped.stdout, "probe stdout: {arguments:?}");
+        assert_eq!(direct.stderr, wrapped.stderr, "probe stderr: {arguments:?}");
+    }
+    let root=std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let source=root.join("probe.rs");
+    std::fs::write(&source, "pub fn probe() -> u8 {42}\n").unwrap();
+    // Metadata-only compilation is also a real, non-cacheable compiler probe.
+    let args=[std::ffi::OsString::from("--crate-name"), "feature_probe".into(),
+        "--crate-type=rlib".into(), "--emit=metadata".into(), "--out-dir".into(),
+        root.as_os_str().to_owned(), source.as_os_str().to_owned()];
+    let direct=Command::new(&compiler).args(&args).output().unwrap();
+    assert!(direct.status.success(), "{}", String::from_utf8_lossy(&direct.stderr));
+    let metadata=root.join("libfeature_probe.rmeta");
+    let bytes=std::fs::read(&metadata).unwrap();
+    std::fs::remove_file(&metadata).unwrap();
+    let wrapped=Command::new(&wrapper).arg(&compiler).args(&args).output().unwrap();
+    assert_eq!(direct.status.code(), wrapped.status.code());
+    assert_eq!(direct.stdout, wrapped.stdout);
+    assert_eq!(direct.stderr, wrapped.stderr);
+    assert_eq!(std::fs::read(&metadata).unwrap(), bytes);
+    eprintln!("WRAPPED_QUERY_AND_METADATA_PROBES_PASSED");
+}
+'''
+        for workspace in workspaces:
+            (workspace / "build.rs").write_text(probe_build, encoding="utf-8")
         rows, sessions = [], []
 
         def command(label, argv, cwd, env=None, execute=None, expected=0):
@@ -138,6 +178,64 @@ fn nested_cargo_and_explicit_target() {
             rows.append({"label": label, "log": str(log), "exit_code": receipt["exit_code"]})
             return log.read_text(encoding="utf-8")
 
+        for label, changes in [
+            ("unknown-variant", {"variant": "unregistered"}),
+            ("forged-capability", {"response_files": not tool["response_files"]}),
+            ("forged-namespace", {"cache_namespace": "unregistered"}),
+            ("forged-release", {"release_tag": "unregistered"}),
+        ]:
+            private = output / label
+            rejected = cache.Session({**tool, **changes}, private / "server", helper.run_command, private / "objects")
+            try:
+                rejected.start()
+            except RuntimeError as error:
+                assert "Unknown compiler-cache tool variant" in str(error) or "does not match this pinned platform" in str(error)
+            else:
+                raise AssertionError("Unregistered compiler tool metadata was accepted: " + label)
+            finally:
+                rejected.close()
+            assert rejected.server is None and not rejected.tool_commands and rejected.storage_lock is None
+            assert not private.exists(), "Tool metadata must refuse before writing or executing"
+
+        storage = load("compiler_object_storage_controls", Path(__file__).with_name("compiler_storage_acceptance.py"))
+        storage.run(output / "storage-pressure", cache, tool)
+        # An unavailable cache must never break a compiler information query.
+        # Compile both the candidate and the restored old routing against the
+        # same deliberately missing cache path; no real cache/tool is replaced.
+        probe = output / "query-routing"
+        probe.mkdir()
+        (probe / "cache-tool").write_text(str(probe / "unavailable-cache"), encoding="utf-8")
+        (probe / "cache-response-files").write_bytes(b"1")
+        (probe / "argument-files").mkdir()
+        gate = "    if !cacheable_compilation(&arguments) {\n        finish(&compiler, Command::new(&compiler).args(&arguments).status());\n    }\n"
+        assert cache.WRAPPER_SOURCE.count(gate) == 1
+        direct = command("direct-compiler-query", ["rustc", "--version"], SOURCE)
+        for kind, text, expected in [("candidate", cache.WRAPPER_SOURCE, 0),
+                                     ("old-routing", cache.WRAPPER_SOURCE.replace(gate, "", 1), 101)]:
+            source = probe / (kind + ".rs")
+            source.write_text(text, encoding="utf-8")
+            wrapper = probe / (kind + (".exe" if os.name == "nt" else ""))
+            command(kind + "-query-wrapper", ["rustc", "--edition=2021", str(source), "-o", str(wrapper)], SOURCE)
+            result = command(kind + "-unavailable-cache-query", [str(wrapper), shutil.which("rustc"), "--version"],
+                             SOURCE, expected=expected)
+            if expected == 0:
+                assert result == direct, result
+            else:
+                assert "cannot start" in result and "unavailable-cache" in result, result
+        query_file = probe / "query.args"
+        query_file.write_bytes(b"--version\n")
+        wrapped_query = command("argument-file-query", [str(probe / ("candidate" + (".exe" if os.name == "nt" else ""))),
+                                shutil.which("rustc"), "@" + str(query_file)], SOURCE)
+        assert wrapped_query == direct
+        selector = 'CACHE_RESPONSE_FILES == "1" && cacheable_response_compilation(&arguments)'
+        assert cache.WRAPPER_SOURCE.count(selector) == 1
+        mutant = probe / "unsafe-argument-file-query.rs"
+        mutant.write_text(cache.WRAPPER_SOURCE.replace(selector, 'CACHE_RESPONSE_FILES == "1"', 1), encoding="utf-8")
+        mutant_binary = probe / ("unsafe-argument-file-query" + (".exe" if os.name == "nt" else ""))
+        command("unsafe-argument-file-query-wrapper", ["rustc", "--edition=2021", str(mutant), "-o", str(mutant_binary)], SOURCE)
+        refused = command("unsafe-argument-file-query-control",
+                          [str(mutant_binary), shutil.which("rustc"), "@" + str(query_file)], SOURCE, expected=101)
+        assert "cannot start" in refused and "unavailable-cache" in refused
         if os.name == "nt":
             # Finish cold public downloads before a lazy cache server is active.
             # Use a separate driver target so real Cargo still creates each
@@ -146,6 +244,76 @@ fn nested_cargo_and_explicit_target() {
             command("terminal-prerequisite", [sys.executable, "e2e/terminal-resize/setup_windows.py",
                     str(Path.home() / ".cache/sudocode-terminal-host"), "--native-target", str(terminal_target)], SOURCE)
             checks.verify_native_terminal(output / "terminal-prerequisite.log", terminal_target)
+
+        def legacy_argument_files(active, workspace, target, binary, build, env):
+            # Keep the original official-tool assertions and direct compiler path.
+            def cached(label):
+                stats = json.loads(active.tool_command(label, "--show-stats", "--stats-format", "json"))["stats"]
+                return sum(sum(stats[key]["counts"].values()) for key in ("cache_hits", "cache_misses"))
+            before = cached("argument-file-before")
+            forced = {**env, "__CARGO_TEST_FORCE_ARGFILE": "1"}
+            command("argument-file-retirement",
+                    ["cargo", "clean", "--package", "memchr", "--target-dir", str(target)], workspace)
+            command("argument-file-build", build, workspace, forced, active.execute)
+            assert command("argument-file-binary", [str(binary)], workspace).strip() == "SOURCE1:alpha:false"
+            built = active.argument_file_units()
+            command("argument-file-lint", ["cargo", "clippy", "--offline", "--locked", "--all-targets"],
+                    workspace, forced, active.execute)
+            units = active.argument_file_units()
+            assert built["cargo"] > 0 and units["cargo"] > built["cargo"] and units["wrapper"] == 0, units
+            assert cached("argument-file-after") == before, "argument-file units reached the cache"
+
+        def fixed_argument_files(active, workspace, target, binary, build, env):
+            def stats(label):
+                value = json.loads(active.tool_command(label, "--show-stats", "--stats-format", "json"))["stats"]
+                return {key: sum(value[key]["counts"].values()) for key in ("cache_hits", "cache_misses")}
+            # Append to the actual caller flags instead of replacing their contract.
+            extra = " ".join("--cfg=scode_cache_long_argument_" + str(i) for i in range(1200))
+            assert len(extra.encode("utf-16-le")) // 2 > 32767
+            forced = {**env, "__CARGO_TEST_FORCE_ARGFILE": "1"}
+            if "CARGO_ENCODED_RUSTFLAGS" in os.environ:
+                forced["CARGO_ENCODED_RUSTFLAGS"] = os.environ["CARGO_ENCODED_RUSTFLAGS"] + "\x1f" + "\x1f".join(extra.split())
+            else:
+                forced["RUSTFLAGS"] = os.environ.get("RUSTFLAGS", "") + " " + extra
+            before = stats("fixed-file-before")
+            command("fixed-file-build", build, workspace, forced, active.execute)
+            assert command("fixed-file-binary", [str(binary)], workspace).strip() == "SOURCE1:alpha:false"
+            cold = stats("fixed-file-cold")
+            assert cold["cache_misses"] > before["cache_misses"], (before, cold)
+            command("fixed-file-private-retirement",
+                    ["cargo", "clean", "--package", "memchr", "--target-dir", str(target)], workspace)
+            command("fixed-file-warm-build", build, workspace, forced, active.execute)
+            warm = stats("fixed-file-warm")
+            assert warm["cache_hits"] > cold["cache_hits"], (cold, warm)
+            assert active.argument_file_units()["cargo_cached"] > 0
+            command("fixed-file-lint", ["cargo", "clippy", "--offline", "--locked", "--all-targets"],
+                    workspace, forced, active.execute)
+
+            old = output / "restored-argument-file-bypass"
+            old.mkdir()
+            (old / "argument-files").mkdir()
+            (old / "cache-tool").write_text(tool["executable"], encoding="utf-8")
+            (old / "cache-response-files").write_bytes(b"0")
+            source = old / "old.rs"
+            source.write_text(cache.WRAPPER_SOURCE, encoding="utf-8")
+            executable = old / ("old-wrapper" + (".exe" if os.name == "nt" else ""))
+            command("restored-bypass-wrapper", ["rustc", "--edition=2021", str(source), "-o", str(executable)], SOURCE)
+            command("restored-bypass-private-retirement",
+                    ["cargo", "clean", "--package", "memchr", "--target-dir", str(target)], workspace)
+            old_before = stats("restored-bypass-before")
+            command("restored-bypass-build", build, workspace,
+                    {**forced, **active.environment, "RUSTC_WRAPPER": str(executable)})
+            assert command("restored-bypass-binary", [str(binary)], workspace).strip() == "SOURCE1:alpha:false"
+            old_after = stats("restored-bypass-after")
+            assert old_after == old_before, (old_before, old_after)
+            assert any((old / "argument-files").glob("*.cargo"))
+            assert not any((old / "argument-files").glob("*.cargo_cached"))
+            try:
+                assert old_after["cache_hits"] > old_before["cache_hits"], "original bypass cannot qualify the fixed cache"
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("Restored old bypass unexpectedly qualified")
 
         for index, workspace in enumerate(workspaces):
             target = output / f"target-{index}"
@@ -171,24 +339,13 @@ fn nested_cargo_and_explicit_target() {
                 command(f"nextest-{index}", [nextest, "nextest", "run", "--offline", "--locked", "--no-tests=fail"],
                         workspace, env, active.execute)
                 if index == 1:
-                    # Cargo passes arguments that do not fit inline as one
-                    # argument file; force that for every unit. The wrapper gives
-                    # rustc and clippy-driver the file unexpanded, outside the cache.
-                    def cached(label):
-                        stats = json.loads(active.tool_command(label, "--show-stats", "--stats-format", "json"))["stats"]
-                        return sum(sum(stats[key]["counts"].values()) for key in ("cache_hits", "cache_misses"))
-                    before = cached("argument-file-before")
-                    forced = {**env, "__CARGO_TEST_FORCE_ARGFILE": "1"}
-                    command("argument-file-retirement",
-                            ["cargo", "clean", "--package", "memchr", "--target-dir", str(target)], workspace)
-                    command("argument-file-build", build, workspace, forced, active.execute)
-                    assert command("argument-file-binary", [str(binary)], workspace).strip() == "SOURCE1:alpha:false"
-                    built = active.argument_file_units()
-                    command("argument-file-lint", ["cargo", "clippy", "--offline", "--locked", "--all-targets"],
-                            workspace, forced, active.execute)
-                    units = active.argument_file_units()
-                    assert built["cargo"] > 0 and units["cargo"] > built["cargo"] and units["wrapper"] == 0, units
-                    assert cached("argument-file-after") == before, "argument-file units reached the cache"
+                    if tool["response_files"]:
+                        with cache.session(official_tool, output / "official-file-server", helper.run_command,
+                                           output / "official-file-objects") as legacy:
+                            legacy_argument_files(legacy, workspace, target, binary, build, env)
+                        fixed_argument_files(active, workspace, target, binary, build, env)
+                    else:
+                        legacy_argument_files(active, workspace, target, binary, build, env)
                     with cache.session(tool, output / "busy-cache", helper.run_command, output / "objects") as busy:
                         command("busy-cache-original", build, workspace, env, busy.execute)
                     assert busy.disabled and busy.server is None and not busy.tool_commands
@@ -226,7 +383,7 @@ fn nested_cargo_and_explicit_target() {
             for relative in ("AppData/Local", "AppData/Roaming"):
                 (home / relative).mkdir(parents=True, exist_ok=True)
         definition = cache.archive_definition()
-        archive = home / ".cache/sudocode-local-acceptance/tools/sccache" / cache.VERSION / definition["target"] / definition["filename"]
+        archive = home / ".cache/sudocode-local-acceptance/tools/sccache" / definition["cache_namespace"] / definition["target"] / definition["filename"]
         archive.parent.mkdir(parents=True)
         shutil.copyfile(tool["archive"], archive)
         os.environ.update(HOME=str(home), USERPROFILE=str(home))

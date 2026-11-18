@@ -210,6 +210,10 @@ impl DeferredDelegate {
 }
 
 impl EngineDelegate for DeferredDelegate {
+    fn agent_directory(&self) -> Result<serde_json::Value, String> {
+        self.get()?.agent_directory()
+    }
+
     fn runtime_status_background(&self) -> Option<runtime::runtime_status::BackgroundTaskSummary> {
         // Model replacement may close its predecessor while holding `inner`.
         // Observation must neither wait for that close nor retain its storage.

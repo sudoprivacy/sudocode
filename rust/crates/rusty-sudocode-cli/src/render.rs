@@ -192,6 +192,16 @@ pub(crate) fn force_test_colors() {
 /// the live prompt used `❯`).
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
 
+/// Width of the left gutter. Columns 0–1 hold only markers: the prompt glyph
+/// ([`PROMPT_PREFIX`]), prose leads (`•`, `✻`), `↳` for queued input, choice
+/// markers and frame borders. Every row's text starts at this column — prose,
+/// the status line, todo panel, question heading and footer alike — so the
+/// left edge of text is one straight line. The brand spinner's four-cell mark
+/// is the one marker wider than the gutter.
+pub const GUTTER_COLS: usize = 2;
+/// [`GUTTER_COLS`] spaces: the gutter of a row without a marker.
+pub const GUTTER: &str = "  ";
+
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
@@ -525,22 +535,30 @@ struct LinkState {
 }
 
 impl RenderState {
-    /// Close the current list line while its semantic content column is known.
-    /// This handles terminal soft wraps as well as authored Markdown breaks.
-    fn wrap_list_line(&self, output: &mut StyledText) {
-        if self.list_stack.is_empty() || output.text.ends_with('\n') {
+    /// Close the current prose line while its structure is known: wrap it
+    /// between words, hanging continuation rows under the text — a list
+    /// item's content column, a quote's text, or the paragraph's edge (the
+    /// response gutter is added later). Code never reaches here, and anything
+    /// still too wide is hard-wrapped by the response layout.
+    fn wrap_prose_line(&self, output: &mut StyledText) {
+        if output.text.ends_with('\n') {
             return;
         }
         let start = output.text.rfind('\n').map_or(0, |pos| pos + 1);
         if text_layout::display_width(&output.text[start..]) <= self.max_width {
             return;
         }
-        let rows = text_layout::wrap_line_with_indent(
+        let indent = if self.list_stack.is_empty() {
+            2 * self.quote
+        } else {
+            self.item_content_col
+        };
+        let rows = text_layout::wrap_words_with_indent(
             output,
             start..output.text.len(),
             self.max_width,
             0,
-            self.item_content_col,
+            indent,
         );
         output.truncate(start);
         for (index, (row, _)) in rows.iter().enumerate() {
@@ -802,6 +820,7 @@ impl TerminalRenderer {
             }
             Event::End(TagEnd::Paragraph) => {
                 if state.list_stack.is_empty() {
+                    state.wrap_prose_line(output);
                     output.plain("\n\n");
                 }
                 // Inside a list, End(Item) handles the newline.
@@ -813,6 +832,7 @@ impl TerminalRenderer {
                 output.plain("\n");
             }
             Event::End(TagEnd::Heading(..)) => {
+                state.wrap_prose_line(output);
                 state.inline_styles.pop();
                 output.plain("\n\n");
             }
@@ -821,13 +841,13 @@ impl TerminalRenderer {
                 // ends with its own newline; pushing another here opened a
                 // blank hole between the nested items and the next sibling.
                 if !output.text.ends_with('\n') {
-                    state.wrap_list_line(output);
+                    state.wrap_prose_line(output);
                     state.append_text(output, "\n");
                 }
                 state.item_content_col = state.parent_item_cols.pop().unwrap_or(0);
             }
             Event::SoftBreak | Event::HardBreak => {
-                state.wrap_list_line(output);
+                state.wrap_prose_line(output);
                 state.append_text(output, "\n");
                 // Inside a list item, align the continuation line under the
                 // item's text — without this it landed at column 0, hanging
@@ -854,7 +874,7 @@ impl TerminalRenderer {
                     // break — so without this the child items rendered inline
                     // after their parent ("• outer  • inner" on one row).
                     if !output.text.ends_with('\n') {
-                        state.wrap_list_line(output);
+                        state.wrap_prose_line(output);
                         output.plain("\n");
                     }
                     // Nested markers start at the parent item's content
@@ -1666,8 +1686,8 @@ impl ResponseGlyphState {
                 let rows = text_layout::wrap_line(
                     text,
                     offset..offset + body.len(),
-                    self.max_col - 2,
-                    self.visible_col.saturating_sub(2),
+                    self.max_col - GUTTER_COLS,
+                    self.visible_col.saturating_sub(GUTTER_COLS),
                 );
                 for (index, (row, col)) in rows.into_iter().enumerate() {
                     if index > 0 {
@@ -1692,11 +1712,11 @@ impl ResponseGlyphState {
                             out.push(theme().style(role), glyph);
                             out.plain(" ");
                         } else {
-                            out.plain("  ");
+                            out.plain(GUTTER);
                         }
                     }
                     out.append(&row);
-                    self.visible_col = col + 2;
+                    self.visible_col = col + GUTTER_COLS;
                 }
             }
             if body.len() < line.len() {

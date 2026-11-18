@@ -83,14 +83,9 @@ workspace folder name plus a short hash of its path. For a long-lived role, set
 a readable `agentName` when the agent is first created. Renaming an existing
 agent gives it a new identity and leaves its conversations under the old name.
 
-Runtime discovery is separate from these stored descriptions. `agent_list`
-adds one `runtime` row per observed instance, including foreground
-state, a permission/question waiting reason and independent background task
-counts. Several instances can share an Agent name or session ID. Unsupported,
-stale or unreachable observations remain unknown; an empty list is conclusive
-only within its reported discovery coverage. `active_only` retains positively
-online instances and running subagent tasks. See the shared
-[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+Liveness is separate from these stored descriptions. Each `agent_list` row
+carries one `active` bit: a peer seen online in the zone, or a running subagent
+task. `active_only` keeps those rows. `active: false` means not seen online.
 
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest
@@ -359,6 +354,29 @@ Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described
 under [Background tasks](#background-tasks-in-the-repl).
+
+### Agent navigation and attention
+
+Press **Left** with an empty input to open **Subagents**. **Left/Right** cycles
+between background terminals, subagents, peers and scheduled jobs in the existing
+inline task browser. With text in the editor, Left still moves the cursor.
+Questions and approvals keep keyboard ownership; navigation never submits input
+or cancels the current turn.
+
+Subagent rows and the footer show **Waiting on you** from outstanding engine
+requests. Details identify the requesting child and include a bounded preview;
+the actual approval/question panel retains the complete request. Queued requests
+wait behind the currently presented request. A background child can still ask
+after its parent's turn ends, and answering or cancelling removes the request
+from every view.
+
+**Peers** is an on-demand directory snapshot. Open the tab or press **r** to
+refresh it; Enter opens details. Discovery uses the same directory and zone
+presence as `agent_list`, with one row per addressable peer. **Online** means
+the zone has seen that peer online; it does not establish whether its model is
+running or waiting for input. Discovery grants no authority to answer or
+interrupt that peer.
+The browser does not introduce a periodic discovery poll or a new rendering engine.
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
@@ -869,9 +887,9 @@ firing late. `scode cron tick` fires due jobs once, unless another process is
 already scheduling.
 
 The task browser has a **Scheduled** tab: open it from the footer as above,
-then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
+then use **←/→** to select Scheduled. **↑/↓** selects a job, **Enter** shows its details, **e**
 enables or disables it, **r** runs it now, and **d** deletes it after you
-confirm with **y**. **←** returns to background tasks. The footer shows how
+confirm with **y**. **←/→** switches browser tabs. The footer shows how
 many jobs are enabled. Desktop hosts manage the same jobs through the ACP
 `_sudocode/cron/*` methods.
 

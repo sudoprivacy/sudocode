@@ -85,7 +85,7 @@ pub enum PermissionPromptDecision {
 /// An owned reply future lets a prompt wait without borrowing the dispatcher.
 pub type PromptReply<T> = futures::future::BoxFuture<'static, T>;
 
-/// One input owner per turn, shared by permissions and questions across hosts.
+/// One input owner per session, shared by permissions and questions across hosts.
 /// Queueing a prompt never holds a tool or provider polling thread.
 #[derive(Clone, Default)]
 pub struct PromptQueue(std::sync::Arc<tokio::sync::Mutex<()>>);
@@ -128,11 +128,47 @@ pub trait PermissionPrompter {
 /// A child can await its parent's approval without borrowing the parent turn
 /// or granting itself a broader permission mode.
 #[derive(Clone)]
-pub struct PermissionPromptSink(
-    std::sync::Arc<
-        dyn Fn(PermissionRequest) -> PromptReply<PermissionPromptDecision> + Send + Sync,
+pub struct PermissionPromptOrigin {
+    agent: crate::SubagentIdentity,
+    background: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    parent: Option<std::sync::Arc<Self>>,
+}
+
+impl PermissionPromptOrigin {
+    /// Follow actual handoffs, including a synchronous descendant whose
+    /// parent subsequently moved to the background.
+    #[must_use]
+    pub fn is_detached(&self) -> bool {
+        self.background.load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_detached())
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> crate::SubagentIdentity {
+        let mut agent = self.agent.clone();
+        agent.background = self.background.load(std::sync::atomic::Ordering::Acquire);
+        agent
+    }
+}
+
+#[derive(Clone)]
+pub struct PermissionPromptSink {
+    request: std::sync::Arc<
+        dyn Fn(
+                PermissionRequest,
+                Option<PermissionPromptOrigin>,
+            ) -> PromptReply<PermissionPromptDecision>
+            + Send
+            + Sync,
     >,
-);
+    origin: Option<PermissionPromptOrigin>,
+    attention:
+        std::sync::Arc<dyn Fn() -> std::sync::Arc<crate::attention::AttentionState> + Send + Sync>,
+    changed: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
 
 impl std::fmt::Debug for PermissionPromptSink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,12 +179,57 @@ impl std::fmt::Debug for PermissionPromptSink {
 impl PermissionPromptSink {
     #[must_use]
     pub fn new(
-        request: impl Fn(PermissionRequest) -> PromptReply<PermissionPromptDecision>
+        request: impl Fn(
+                PermissionRequest,
+                Option<PermissionPromptOrigin>,
+            ) -> PromptReply<PermissionPromptDecision>
             + Send
             + Sync
             + 'static,
+        attention: impl Fn() -> std::sync::Arc<crate::attention::AttentionState> + Send + Sync + 'static,
+        changed: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        Self(std::sync::Arc::new(request))
+        Self {
+            request: std::sync::Arc::new(request),
+            origin: None,
+            attention: std::sync::Arc::new(attention),
+            changed: std::sync::Arc::new(changed),
+        }
+    }
+
+    /// Identity comes from the spawning runtime, never from a message body.
+    #[must_use]
+    pub fn for_agent(&self, agent: crate::SubagentIdentity) -> Self {
+        let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(agent.background));
+        Self {
+            request: self.request.clone(),
+            origin: Some(PermissionPromptOrigin {
+                agent,
+                background,
+                parent: self.origin.clone().map(std::sync::Arc::new),
+            }),
+            attention: self.attention.clone(),
+            changed: self.changed.clone(),
+        }
+    }
+
+    /// The spawning runtime calls this at its actual automatic handoff.
+    /// Existing replies and future descendant replies share that ownership.
+    pub fn detach(&self) {
+        if let Some(origin) = &self.origin {
+            if !origin
+                .background
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                (self.changed)();
+            }
+        }
+    }
+
+    /// Read the same request owner used for approvals, without taking input.
+    #[must_use]
+    pub fn attention(&self) -> std::sync::Arc<crate::attention::AttentionState> {
+        (self.attention)()
     }
 }
 
@@ -161,7 +242,7 @@ impl PermissionPrompter for PermissionPromptSink {
         &mut self,
         request: &PermissionRequest,
     ) -> PromptReply<PermissionPromptDecision> {
-        (self.0)(request.clone())
+        (self.request)(request.clone(), self.origin.clone())
     }
 
     fn delegation_sink(&self) -> Option<PermissionPromptSink> {

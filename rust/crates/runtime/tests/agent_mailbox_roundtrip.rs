@@ -291,11 +291,13 @@ fn only_the_reading_mailbox_marks_a_sender_verified() {
 
 /// Every host tells an agent the same A2A contract, and it matches what the agent sees.
 ///
-/// One section and one wrapper: the section describes the `<mailbox-message>` block
-/// that `compose_next_turn_from_envelopes` really produces, says that only `send`
-/// reaches a peer, and makes no claim about who reads the session. A host-specific
-/// promise is how plain ACP sessions came to be told "you stay silent" while their
-/// prose was being mailed to the sender.
+/// One section and one wrapper. The section describes the frame that
+/// `compose_next_turn_from_envelopes` really produces without spelling it out (a
+/// literal envelope is a template a model can forge a reply from, #1466), says
+/// that only a `verified` value of true authenticates the sender and that only
+/// `send` reaches a peer, and makes no claim about who reads the session. A
+/// host-specific promise is how plain ACP sessions came to be told "you stay
+/// silent" while their prose was being mailed to the sender.
 #[test]
 fn every_host_tells_an_agent_the_same_a2a_contract() {
     let section = agent_mailbox::a2a_prompt_section("win-ai");
@@ -312,8 +314,14 @@ fn every_host_tells_an_agent_the_same_a2a_contract() {
         "<mailbox-message from=\"peer\">\nhello\n</mailbox-message>"
     );
     assert!(
-        section.contains("`<mailbox-message"),
-        "the section describes the wrapper the agent is actually shown:\n{section}"
+        !section.contains("mailbox-message"),
+        "the section names the frame without a template to copy:\n{section}"
+    );
+    assert!(
+        section.contains("The harness frames each one and names its sender")
+            && section.contains("`verified` value set to true")
+            && section.contains("never write or reproduce that framing"),
+        "the section describes the frame the agent is actually shown:\n{section}"
     );
     assert!(
         section.contains("Only a `send` call reaches another agent"),

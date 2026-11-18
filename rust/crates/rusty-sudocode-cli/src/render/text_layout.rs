@@ -44,12 +44,54 @@ fn terminal_width(text: &str) -> usize {
     text.width() + text.matches(['\u{FF9E}', '\u{FF9F}']).count()
 }
 
+/// Columns a grapheme may take when deciding where a row breaks. Terminals
+/// disagree on multi-code-point clusters: `👩🏽‍💻` is one 2-cell cluster to
+/// iTerm2 and `unicode-width`, but 6 cells to xterm.js with Unicode 11 (VS Code)
+/// and to vt100, which lay out each code point. A row measured short
+/// overflows, and the terminal wraps its tail into column 0; a row measured
+/// long only ends a few cells early. Breaks therefore take the larger count.
+fn row_fitting_width(grapheme: &str, col: usize) -> usize {
+    let clustered = grapheme_width(grapheme, col);
+    if grapheme.chars().nth(1).is_none() {
+        return clustered;
+    }
+    let per_code_point: usize = grapheme
+        .chars()
+        .map(|c| terminal_width(c.encode_utf8(&mut [0; 4])))
+        .sum();
+    clustered.max(per_code_point)
+}
+
 fn grapheme_width(grapheme: &str, col: usize) -> usize {
     if grapheme == "\t" {
         8 - col % 8
     } else {
         terminal_width(grapheme)
     }
+}
+
+/// `text` word-wrapped right of the gutter, each row starting at
+/// [`GUTTER_COLS`](crate::render::GUTTER_COLS). A row that already fits keeps
+/// its own indentation, so pre-laid-out panels only move into the gutter.
+pub(crate) fn wrap_in_gutter(text: &StyledText, width: usize) -> StyledText {
+    let mut out = StyledText::default();
+    if text.text.is_empty() {
+        return out;
+    }
+    let rows = wrap_words(
+        text,
+        width.saturating_sub(crate::render::GUTTER_COLS).max(1),
+    );
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            out.plain("\n");
+        }
+        if !row.text.is_empty() {
+            out.plain(crate::render::GUTTER);
+            out.append(row);
+        }
+    }
+    out
 }
 
 /// Wrap a single logical line. Rows retain complete styles so a frame or
@@ -143,6 +185,93 @@ pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) ->
             output
         })
         .collect()
+}
+
+/// [`wrap_line_with_indent`] for prose: rows end between words. A row ends
+/// at its last space that fits, the spaces are dropped, and the next row
+/// starts at `continuation_indent` with the following word. A word wider than
+/// a whole row is still split between graphemes. Leading indentation is never
+/// a break, and a row continuing at `initial_col` cannot move its first word.
+pub(crate) fn wrap_words_with_indent(
+    source: &StyledText,
+    range: Range<usize>,
+    width: usize,
+    initial_col: usize,
+    continuation_indent: usize,
+) -> Vec<(StyledText, usize)> {
+    let width = width.max(1);
+    let indent = continuation_indent.min(width.saturating_sub(2));
+    let padding = " ".repeat(indent);
+    let graphemes: Vec<(usize, &str)> = source.text[range.clone()]
+        .grapheme_indices(true)
+        .map(|(offset, grapheme)| (range.start + offset, grapheme))
+        .collect();
+    let skip_spaces = |mut index: usize| {
+        while graphemes
+            .get(index)
+            .is_some_and(|(_, grapheme)| *grapheme == " ")
+        {
+            index += 1;
+        }
+        index
+    };
+    let mut rows = Vec::new();
+    let mut row = StyledText::default();
+    let mut col = initial_col;
+    // Where this row may end: its length and column before the latest run of
+    // spaces that follows a word on it, and the index of that run.
+    let mut space: Option<(usize, usize, usize)> = None;
+    let mut has_word = false;
+    // A continuation row holding only its indentation.
+    let mut fresh = false;
+    let mut index = 0;
+    while index < graphemes.len() {
+        let (start, grapheme) = graphemes[index];
+        let cells = row_fitting_width(grapheme, col);
+        if col > 0 && col + cells > width && !fresh {
+            let next = if let Some((len, end_col, run)) = space.take() {
+                row.truncate(len);
+                rows.push((std::mem::take(&mut row), end_col));
+                Some(skip_spaces(run))
+            } else {
+                rows.push((std::mem::take(&mut row), col));
+                (grapheme == " ").then(|| skip_spaces(index))
+            };
+            row.push(crossterm::style::ContentStyle::default(), &padding);
+            col = indent;
+            has_word = false;
+            fresh = true;
+            if let Some(next) = next {
+                index = next;
+                continue;
+            }
+        }
+        if grapheme == " " {
+            let follows_word = has_word && index > 0 && graphemes[index - 1].1 != " ";
+            if follows_word {
+                space = Some((row.text.len(), col, index));
+            }
+        } else {
+            has_word = true;
+        }
+        let (style, _, link) = source
+            .rich_spans(start..start + grapheme.len())
+            .next()
+            .unwrap();
+        if grapheme == "\t" {
+            // Tabs become the spaces they occupy, as in `wrap_line_with_indent`.
+            row.push_link(style, &" ".repeat(cells), link);
+        } else {
+            for (style, part, link) in source.rich_spans(start..start + grapheme.len()) {
+                row.push_link(style, part, link);
+            }
+        }
+        col += cells;
+        fresh = false;
+        index += 1;
+    }
+    rows.push((row, col));
+    rows
 }
 
 /// Terminal strings use grapheme widths. The pinned iocraft canvas clips by

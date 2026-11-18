@@ -22,9 +22,9 @@
 ///
 /// Order MATTERS — changing it re-shuffles every existing agent's
 /// color, which would be surprising to a coordinator UI that
-/// remembers the previous mapping. Adding a NEW color at the end is
-/// safe (existing IDs' colors don't move unless they happened to
-/// modulo-hash into the new slot).
+/// remembers the previous mapping. Changing the palette length also changes
+/// the modulo mapping. Terminal themes own their own resolved palettes;
+/// this legacy wire palette remains unchanged for existing consumers.
 pub const AGENT_COLOR_PALETTE: &[&str] = &[
     "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
 ];
@@ -42,8 +42,14 @@ pub fn assign_agent_color(agent_id: &str) -> Option<&'static str> {
     if agent_id.is_empty() {
         return None;
     }
-    let idx = portable_hash(agent_id.as_bytes()) as usize % AGENT_COLOR_PALETTE.len();
+    let idx = identity_index(agent_id, AGENT_COLOR_PALETTE.len());
     Some(AGENT_COLOR_PALETTE[idx])
+}
+
+/// Stable identity assignment independent of any renderer's palette.
+#[must_use]
+pub fn identity_index(agent_id: &str, palette_len: usize) -> usize {
+    portable_hash(agent_id.as_bytes()) as usize % palette_len.max(1)
 }
 
 /// Portable byte-level hash — matches the Java-style `hashCode`

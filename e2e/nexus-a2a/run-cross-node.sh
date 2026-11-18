@@ -182,10 +182,11 @@ NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RUNTIME_BU
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime \
   --test mailbox_nexus_live live_runtime_call_deadline_covers_transport_admission -- --exact --ignored --nocapture
 
-echo "== [cross-node] runtime observations retain independent CLI instances =="
+echo "== [cross-node] a peer on the other node reads online until it exits =="
 NEXUS_A2A_TEST_ENDPOINT="$FOUNDER_ENDPOINT" NEXUS_A2A_TEST_PEER_ENDPOINT="$JOINER_ENDPOINT" \
-  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$RUNTIME_BUNDLE" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$RECEIVER_BUNDLE" \
+  NEXUS_A2A_TEST_SENDER_CREDENTIAL="$SENDER_BUNDLE" \
   cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test acp_a2a_receive live_runtime_directory_tracks_same_agent_instances_across_nodes -- --ignored --nocapture
+  --test acp_a2a_receive live_presence_names_a_peer_online_across_nodes_until_it_exits -- --ignored --nocapture
 
 echo "CROSS-NODE E2E OK"

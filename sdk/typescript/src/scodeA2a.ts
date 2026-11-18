@@ -10,6 +10,7 @@ export interface ScodeMessage {
   to: string;
   message: string;
   summary: string;
+  delivery?: 'steer' | 'queue';
 }
 
 /** The real tool output, not a queued-command acknowledgement or delivery claim. */
@@ -158,13 +159,20 @@ async function directRequest(
 export async function sendScodeMessage(
   connection: ScodeConnection, message: ScodeMessage, timeoutMs = 60000,
 ): Promise<ScodeA2aResult> {
-  const input = validateKeys(message, ['to', 'message', 'summary']);
+  const input = validateKeys(message, ['to', 'message', 'summary', 'delivery']);
   if (typeof input.to !== 'string' || !input.to.trim() || typeof input.message !== 'string'
       || typeof input.summary !== 'string' || !input.summary.trim()) {
     throw new ScodeA2aError('send requires a target, plain text message and nonempty summary', 'not_submitted');
   }
+  if (input.delivery !== undefined && input.delivery !== 'steer' && input.delivery !== 'queue') {
+    throw new ScodeA2aError('delivery must be steer or queue', 'not_submitted');
+  }
+  if (input.delivery !== undefined && directCapability(connection)?.delivery !== 1) {
+    throw new ScodeA2aError('The owned scode does not advertise delivery selection', 'not_submitted');
+  }
   return directRequest(connection, SCODE_A2A_METHODS.send, {
     to: input.to, message: input.message, summary: input.summary,
+    ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
   }, timeoutMs);
 }
 

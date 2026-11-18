@@ -14,10 +14,12 @@ struct Host {
     terminal: PtySession,
     session: String,
     id: u64,
-    /// Everything the last reply's read consumed, the reply and what preceded it.
-    /// An event written concurrently with that reply can be in here and nowhere
-    /// else: the terminal does not show it again.
+    /// Raw reply and preceding events, retained for notification assertions.
+    /// The PTY consumes this prefix; server requests are also queued below.
     last_read: String,
+    /// Server requests can precede a correlated reply in the same PTY read.
+    /// Retain them until their consumer takes them, across status queries.
+    incoming: Vec<Value>,
 }
 
 impl Host {
@@ -26,10 +28,14 @@ impl Host {
     }
 
     fn with_permissions(env: &TestEnv, allow_tools: bool) -> Self {
+        Self::with_options(env, allow_tools, &[])
+    }
+
+    fn with_options(env: &TestEnv, allow_tools: bool, extra: &[(&str, &str)]) -> Self {
         let mut terminal = if allow_tools {
-            env.spawn(&["--dangerously-skip-permissions", "acp"])
+            env.spawn_with_env(&["--dangerously-skip-permissions", "acp"], extra)
         } else {
-            env.spawn(&["--permission-mode", "workspace-write", "acp"])
+            env.spawn_with_env(&["--permission-mode", "workspace-write", "acp"], extra)
         };
         terminal.resize(40, 4096).unwrap();
         terminal.set_default_timeout(common::LIVE_TURN_BUDGET);
@@ -38,10 +44,12 @@ impl Host {
             session: String::new(),
             id: 0,
             last_read: String::new(),
+            incoming: Vec::new(),
         };
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
         assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
+        assert_eq!(init["_meta"]["sudocode"]["attention"]["version"], 1);
         let created = host.request(
             "session/new",
             &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
@@ -82,6 +90,7 @@ impl Host {
                 )
             });
         self.last_read.clone_from(&response);
+        self.retain_requests(&response);
         let response: Value = response
             .lines()
             .rev()
@@ -99,19 +108,49 @@ impl Host {
         self.request(METHOD, &action)
     }
 
+    fn cancel(&mut self) {
+        let newline = if cfg!(windows) { "\r" } else { "\n" };
+        self.terminal.send(&format!(
+            "{}{newline}",
+            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}})
+        )).unwrap();
+    }
+
+    fn retain_requests(&mut self, text: &str) {
+        self.incoming.extend(
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                .filter(|value| value.get("method").is_some() && value.get("id").is_some()),
+        );
+    }
+
+    #[track_caller]
     fn incoming_request(&mut self, method: &str) -> Value {
-        let message = self
-            .terminal
-            .expect(&format!(
-                r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
-            ))
-            .unwrap();
-        message
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| value["method"] == method)
-            .unwrap_or_else(|| panic!("missing {method} request: {message}"))
+        if let Some(index) = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+        {
+            return self.incoming.remove(index);
+        }
+        let message = match self.terminal.expect(&format!(
+            r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
+        )) {
+            Ok(message) => message,
+            Err(error) => panic!(
+                "missing {method} request: {error}; queued: {:?}; last reply: {}; screen: {}",
+                self.incoming,
+                self.last_read,
+                self.terminal.render(common::screen_contents)
+            ),
+        };
+        self.retain_requests(&message);
+        let index = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+            .unwrap_or_else(|| panic!("missing {method} request: {message}"));
+        self.incoming.remove(index)
     }
 
     fn respond(&mut self, request: &Value, result: &Value) {
@@ -130,6 +169,25 @@ impl Host {
 
     fn snapshot(&mut self) -> Value {
         self.input(json!({"action":"snapshot"}))["state"].clone()
+    }
+
+    fn attention(&mut self) -> Value {
+        self.request(
+            "_sudocode/session/attention",
+            &json!({"sessionId":self.session}),
+        )
+    }
+
+    fn wait_for_attention(&mut self, context: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        loop {
+            let state = self.attention();
+            if ready(&state) {
+                return state;
+            }
+            assert!(std::time::Instant::now() < deadline, "{context}: {state}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
     }
 
     fn runtime_status(&mut self) -> Value {
@@ -173,7 +231,9 @@ fn working(env: &TestEnv) -> (Host, Release) {
 fn working_with_mode(env: &TestEnv, background: bool) -> (Host, Release) {
     // Publish readiness only after the progress file can be read. ACP replies
     // may otherwise finish before the shell gets to its first loop iteration.
-    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished\n").unwrap();
+    // Likewise, publish completion only after the full output is written; a
+    // shell redirection creates an empty file before printf fills it.
+    fs::write(env.workspace_root().join("input-work.sh"), ": > input-tool-ticks\nprintf started > input-tool-started\ni=0\nwhile [ ! -f release-input-tool ] && [ $i -lt 1200 ]; do\n printf x >> input-tool-ticks\n sleep 0.1\n i=$((i+1))\ndone\nprintf ORIGINAL_INPUT_TOOL_RESULT > input-tool-finished.tmp\nmv input-tool-finished.tmp input-tool-finished\n").unwrap();
     let mut host = Host::new(env);
     let input =
         json!({"command":"sh input-work.sh","timeout":180_000,"run_in_background":background});
@@ -282,22 +342,11 @@ fn host_cancel_keeps_queued_input_until_an_explicit_flush() {
         "HOST_AFTER_CANCEL: reply briefly; do not run any tools.",
         "queue",
     );
-    let newline = if cfg!(windows) { "\r" } else { "\n" };
-    host.terminal
-        .send(&format!(
-            "{}{newline}",
-            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":host.session}})
-        ))
-        .unwrap();
+    host.cancel();
     let paused = host.idle();
     assert_eq!(paused["paused"], true, "{paused}");
     assert_eq!(paused["pending"].as_array().unwrap().len(), 1);
     assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
-    assert_eq!(
-        discovered_instance(&mut observer, &host.session)["runtime"]["update"]["status"]
-            ["foreground"],
-        json!({"state":"idle"})
-    );
     assert!(!env.workspace_root().join("input-tool-finished").exists());
     if env.is_mock() {
         assert_eq!(
@@ -387,13 +436,18 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
     host.submit("permission-input", &prompt, "steer");
     let request = host.incoming_request("session/request_permission");
     assert_eq!(request["params"]["sessionId"], host.session);
+    let attention = host.attention();
+    let requests = attention["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1, "{attention}");
+    assert_eq!(requests[0]["phase"], "presented");
+    assert_eq!(requests[0]["reason"], "permission");
+    assert_eq!(requests[0]["agent"], Value::Null);
+    assert!(requests[0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("HOST_PERMISSION_GRANTED"));
     assert_eq!(
         host.runtime_status()["foreground"],
-        json!({"state":"awaiting_input","waiting_for":"permission"})
-    );
-    assert_eq!(
-        discovered_instance(&mut observer, &host.session)["runtime"]["update"]["status"]
-            ["foreground"],
         json!({"state":"awaiting_input","waiting_for":"permission"})
     );
     assert!(!env
@@ -405,16 +459,14 @@ fn native_turn_delivers_permission_requests_without_a_prompt_rpc_listener() {
         &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
     host.idle();
+    let cleared = host.attention();
+    assert_eq!(cleared["requests"], json!([]));
+    assert!(cleared["revision"].as_u64().unwrap() > attention["revision"].as_u64().unwrap());
     assert_eq!(
         fs::read_to_string(env.workspace_root().join("host-permission-proof.txt")).unwrap(),
         "HOST_PERMISSION_GRANTED"
     );
     assert_eq!(host.runtime_status()["foreground"], json!({"state":"idle"}));
-    assert_eq!(
-        discovered_instance(&mut observer, &host.session)["runtime"]["update"]["status"]
-            ["foreground"],
-        json!({"state":"idle"})
-    );
     host.close();
     observer.close();
 }
@@ -573,80 +625,8 @@ impl Host {
     }
 }
 
-fn discovered_instance(observer: &mut Host, target_sid: &str) -> Value {
-    let listing = observer.discovered();
-    assert!(
-        listing["runtime_discovery"]["unavailable"]
-            .as_array()
-            .expect("coverage")
-            .is_empty(),
-        "{listing}"
-    );
-    runtime_instance_row(&listing, target_sid)
-}
-
-fn runtime_instance_row(listing: &Value, target_sid: &str) -> Value {
-    listing["agents"]
-        .as_array()
-        .expect("instances")
-        .iter()
-        .find(|row| row["runtime"]["update"]["identity"]["session_id"] == target_sid)
-        .cloned()
-        .unwrap_or_else(|| panic!("missing live SID {target_sid}: {listing}"))
-}
-
 #[test]
-fn local_directory_preserves_cli_instances_and_releases_normal_exit_ownership() {
-    let env = TestEnv::new_mock("runtime-directory-instances");
-    let mut first = Host::new(&env);
-    let mut second = Host::new(&env);
-    let mut observer = Host::new(&env);
-    let listing = observer.discovered();
-    let rows = listing["agents"].as_array().expect("rows");
-    let live: Vec<_> = rows
-        .iter()
-        .filter(|row| row.get("runtime").is_some())
-        .collect();
-    assert_eq!(
-        live.len(),
-        2,
-        "two peer instances of the same Agent are retained; only the exact observer instance is excluded: {listing}"
-    );
-    let one = discovered_instance(&mut observer, &first.session);
-    let two = discovered_instance(&mut observer, &second.session);
-    assert_eq!(one["name"], two["name"]);
-    assert_ne!(one["runtime"]["instance"], two["runtime"]["instance"]);
-    assert_eq!(
-        one["runtime"]["update"]["status"]["foreground"],
-        json!({"state":"idle"})
-    );
-    assert_eq!(two["runtime"]["presence"], "online");
-    assert_eq!(
-        env.captured_message_count(),
-        0,
-        "discovery starts no model request"
-    );
-    let retired = one["runtime"]["instance"].clone();
-    first.close();
-    let after_close = observer.discovered();
-    assert!(
-        after_close["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["runtime"]["instance"] != retired),
-        "retired instance persisted: {after_close}"
-    );
-    assert_eq!(
-        discovered_instance(&mut observer, &second.session)["runtime"]["instance"],
-        two["runtime"]["instance"]
-    );
-    second.close();
-    observer.close();
-}
-
-#[test]
-fn local_directory_reads_real_quiet_work_and_independent_background_counts() {
+fn runtime_status_reads_real_quiet_work_and_independent_background_counts() {
     for background in [false, true] {
         let env = TestEnv::new(if background {
             "directory-background"
@@ -658,15 +638,21 @@ fn local_directory_reads_real_quiet_work_and_independent_background_counts() {
         if background {
             first.idle();
         }
-        let runtime_row = discovered_instance(&mut observer, &first.session);
         let direct = first.runtime_status();
         assert_eq!(
-            runtime_row["runtime"]["update"]["status"], direct,
-            "directory and ACP consume one engine snapshot"
-        );
-        assert_eq!(
-            runtime_row["runtime"]["update"]["status"]["foreground"]["state"],
+            direct["foreground"]["state"],
             if background { "idle" } else { "running" }
+        );
+        // agent_list reports one active bit per Agent and no runtime rows.
+        let listing = observer.discovered();
+        assert!(listing.get("runtime_discovery").is_none(), "{listing}");
+        assert!(
+            listing["agents"]
+                .as_array()
+                .expect("agents")
+                .iter()
+                .all(|row| row["active"].is_boolean() && row.get("runtime").is_none()),
+            "{listing}"
         );
         if background {
             assert_eq!(direct["background"]["terminals"], 1);
@@ -707,7 +693,7 @@ fn local_directory_reads_real_quiet_work_and_independent_background_counts() {
 }
 
 #[test]
-fn local_directory_question_wait_keeps_independent_tools_and_background_work_visible() {
+fn question_wait_keeps_independent_tools_and_background_work_visible() {
     let env = TestEnv::new_mock("directory-question-independent-work");
     let (mut first, _release) = working_with_mode(&env, true);
     first.idle();
@@ -733,9 +719,7 @@ fn local_directory_question_wait_keeps_independent_tools_and_background_work_vis
         common::LIVE_TURN_BUDGET,
         "independent read finishes before the question is answered",
     );
-    let runtime_row = discovered_instance(&mut observer, &first.session);
     let direct = first.runtime_status();
-    assert_eq!(runtime_row["runtime"]["update"]["status"], direct);
     assert_eq!(
         direct["foreground"],
         json!({"state":"awaiting_input","waiting_for":"question"})
@@ -770,190 +754,148 @@ fn local_directory_question_wait_keeps_independent_tools_and_background_work_vis
 }
 
 #[test]
-fn local_directory_retires_crashed_process_ownership_and_preserves_its_peer() {
-    let env = TestEnv::new_mock("directory-crashed-owner");
-    let mut first = Host::new(&env);
-    let mut observer = Host::new(&env);
-    let row = discovered_instance(&mut observer, &first.session);
-    let instance = row["runtime"]["instance"].clone();
-    let pid = u32::try_from(
-        row["runtime"]["update"]["identity"]["os_pid"]
-            .as_u64()
-            .unwrap(),
-    )
-    .expect("runtime reports a native PID");
-    let other = discovered_instance(&mut first, &observer.session);
-    let other_pid = u32::try_from(
-        other["runtime"]["update"]["identity"]["os_pid"]
-            .as_u64()
-            .unwrap(),
-    )
-    .expect("observer reports a native PID");
-    assert!(
-        common::verify_owned_runtime_process(
-            &first.terminal,
-            other_pid,
-            &common::scode_bin(),
-            env.workspace_root(),
-        )
-        .is_err(),
-        "another owned fixture is not this PTY's runtime"
+fn attention_tracks_queued_questions_and_clears_cancelled_requests() {
+    let env = TestEnv::new_mock("attention-queued-questions");
+    let mut host = Host::new(&env);
+    let batch = json!([
+        {"id":"one","name":"AskUserQuestion","input":{"questions":[{"id":"q1","prompt":"FIRST_ATTENTION_REQUEST"}]}},
+        {"id":"two","name":"AskUserQuestion","input":{"questions":[{"id":"q2","prompt":"SECOND_ATTENTION_REQUEST"}]}}
+    ]);
+    host.submit(
+        "two-questions",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
     );
-    common::verify_owned_runtime_process(
-        &first.terminal,
-        pid,
-        &common::scode_bin(),
-        env.workspace_root(),
-    )
-    .expect("reported engine belongs to this PTY, independently of its launch wrapper");
-    #[cfg(windows)]
-    let status = std::process::Command::new("taskkill.exe")
-        .args(["/F", "/PID", &pid.to_string()])
-        .status()
-        .unwrap();
-    #[cfg(unix)]
-    let status = std::process::Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success(), "could not terminate the owned fixture");
-    assert_ne!(first.terminal.expect_eof().unwrap(), 0);
-    let listing = observer.discovered();
-    assert!(
-        listing["runtime_discovery"]["unavailable"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "OS-released ownership is a retired route: {listing}"
-    );
-    assert!(listing["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| { row["runtime"]["instance"] != instance }));
-    let mut replacement = Host::new(&env);
-    let fresh = discovered_instance(&mut observer, &replacement.session);
-    assert_ne!(fresh["runtime"]["instance"], instance);
-    assert_eq!(fresh["runtime"]["presence"], "online");
-    assert_eq!(env.captured_message_count(), 0);
-    replacement.close();
-    observer.close();
+    let first = host.incoming_request("_scode/ask_user_question");
+    let waiting = host.wait_for_attention("second request never queued", |state| {
+        state["requests"].as_array().unwrap().len() == 2
+    });
+    assert_eq!(waiting["requests"][0]["phase"], "presented");
+    assert_eq!(waiting["requests"][1]["phase"], "queued");
+    host.respond(&first, &json!({"answers":[{"id":"q1","value":"continue"}]}));
+    let _second = host.incoming_request("_scode/ask_user_question");
+    let next = host.attention();
+    assert_eq!(next["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(next["requests"][0]["id"], waiting["requests"][1]["id"]);
+    assert_eq!(next["requests"][0]["phase"], "presented");
+    host.cancel();
+    host.idle();
+    assert_eq!(host.attention()["requests"], json!([]));
+    host.close();
 }
 
 #[test]
-fn local_directory_malformed_routing_preserves_healthy_instances_and_unknown_coverage() {
-    let env = TestEnv::new_mock("directory-malformed-route");
-    let mut first = Host::new(&env);
-    let mut observer = Host::new(&env);
-    let healthy = discovered_instance(&mut observer, &first.session);
-    let root = runtime::mailbox::local_pair_root_in(env.config_home()).join("runtime-instances");
-    let path = root.join("malformed.json");
-    let ownership = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path.with_extension("owner.lock"))
-        .unwrap();
-    ownership.try_lock().unwrap();
-    fs::write(&path, "malformed routing metadata").unwrap();
-    let partial = observer.discovered();
-    assert!(
-        !partial["runtime_discovery"]["unavailable"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "{partial}"
-    );
-    assert_eq!(
-        runtime_instance_row(&partial, &first.session)["runtime"]["instance"],
-        healthy["runtime"]["instance"]
-    );
-    first.close();
-    let partial = observer.discovered();
-    assert!(
-        partial["agents"].as_array().unwrap().is_empty(),
-        "{partial}"
-    );
-    assert!(
-        !partial["runtime_discovery"]["unavailable"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "partial discovery must never prove global absence: {partial}"
-    );
-    observer.close();
-    drop(ownership);
+fn attention_background_child_can_request_approval_after_parent_turn_finishes() {
+    assert_background_child_approval(false, false);
 }
 
 #[test]
-fn local_directory_missing_live_routing_is_unknown_and_recovers() {
-    let env = TestEnv::new_mock("directory-missing-live-route");
-    let mut first = Host::new(&env);
-    let root = runtime::mailbox::local_pair_root_in(env.config_home()).join("runtime-instances");
-    let routes: Vec<_> = fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect();
-    assert_eq!(
-        routes.len(),
-        1,
-        "one actual CLI owns the isolated directory"
-    );
-    let route = &routes[0];
-    let original = fs::read(route).unwrap();
-    let mut observer = Host::new(&env);
-    let before = discovered_instance(&mut observer, &first.session);
+fn attention_automatically_backgrounded_child_retains_approval_owner() {
+    assert_background_child_approval(true, false);
+}
 
-    // Ownership stays held by the running native CLI. Losing routing bytes
-    // must not turn that unknown coverage into a complete empty enumeration.
-    fs::remove_file(route).unwrap();
-    let missing_route = observer.discovered();
-    fs::write(route, &original).unwrap();
-    assert!(
-        !missing_route["runtime_discovery"]["unavailable"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "missing live routing was reported as complete: {missing_route}"
-    );
-    assert_eq!(
-        discovered_instance(&mut observer, &first.session)["runtime"]["instance"],
-        before["runtime"]["instance"]
-    );
+#[test]
+fn attention_foreground_cancel_does_not_revoke_a_detached_childs_reply_route() {
+    assert_background_child_approval(false, true);
+}
 
-    let observer_instance = discovered_instance(&mut first, &observer.session);
-    let observer_pid = u32::try_from(
-        observer_instance["runtime"]["update"]["identity"]["os_pid"]
-            .as_u64()
-            .unwrap(),
+fn assert_background_child_approval(automatic: bool, cancel_parent: bool) {
+    let env = TestEnv::new_mock("attention-background-child");
+    fs::write(
+        env.workspace_root()
+            .join(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH),
+        "CHILD_APPROVAL_CONTENT",
     )
-    .expect("observer reports a native PID");
-    let fault = common::DirectoryReadFault::new(
-        &root,
-        env.workspace_root(),
-        &observer.terminal,
-        observer_pid,
-        &common::scode_bin(),
+    .unwrap();
+    let mut host = Host::with_options(&env, false, &[("SUDOCODE_AGENT_AUTO_BG_SECS", "1")]);
+    host.request(
+        "session/setPermissionMode",
+        &json!({"sessionId":host.session,"permissionMode":"prompt"}),
     );
-    let inaccessible_root = observer.discovered();
-    fault.assert_unreadable();
-    drop(fault);
-    assert!(
-        !inaccessible_root["runtime_discovery"]["unavailable"]
+    let mut batch = json!([{"id":"detached-child","name":"agent_spawn","input":{
+        "description":"child approval owner", "subagent_type":"general-purpose", "model":"inherit", "run_in_background":!automatic,
+        "prompt":"PARITY_SCENARIO:subagent_slow_child Read the notes"
+    }}]);
+    if cancel_parent {
+        batch
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"parent-hold","name":"Bash","input":{
+                "command":"echo ATTENTION_PARENT_HOLD"
+            }}));
+    }
+    host.submit(
+        "parent",
+        &format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{batch}"),
+        "steer",
+    );
+    let spawn = host.incoming_request("session/request_permission");
+    assert!(spawn["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains("run_in_background"));
+    host.respond(
+        &spawn,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+    );
+    let queued_child = if cancel_parent {
+        let pending_parent = host.incoming_request("session/request_permission");
+        assert!(pending_parent["params"]["toolCall"]["rawInput"]
+            .as_str()
+            .unwrap()
+            .contains("ATTENTION_PARENT_HOLD"));
+        // Approving agent_spawn does not mean its child has started yet.
+        // Wait for the child's real queued request before cancelling the
+        // parent; otherwise cancellation may correctly prevent the spawn.
+        let state = host.wait_for_attention("child did not reach its approval request", |state| {
+            state["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["agent"]["background"] == true)
+        });
+        let child = state["requests"]
             .as_array()
             .unwrap()
-            .is_empty(),
-        "unreadable runtime index was reported as complete: {inaccessible_root}"
+            .iter()
+            .find(|request| request["agent"]["background"] == true)
+            .unwrap();
+        assert_eq!(child["phase"], "queued", "{state}");
+        host.cancel();
+        Some(child["id"].clone())
+    } else {
+        None
+    };
+    host.idle();
+    if !cancel_parent {
+        assert_eq!(
+            host.attention()["requests"],
+            json!([]),
+            "child request must happen after the parent ended"
+        );
+    }
+    let child = host.incoming_request("session/request_permission");
+    assert!(child["params"]["toolCall"]["rawInput"]
+        .as_str()
+        .unwrap()
+        .contains(mock_anthropic_service::SUBAGENT_CHILD_READ_PATH));
+    let state = host.attention();
+    assert_eq!(state["requests"].as_array().unwrap().len(), 1, "{state}");
+    if let Some(id) = queued_child {
+        assert_eq!(state["requests"][0]["id"], id, "{state}");
+    }
+    assert_eq!(state["requests"][0]["agent"]["background"], true);
+    assert!(state["requests"][0]["agent"]["agent_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert_eq!(state["requests"][0]["phase"], "presented");
+    assert_eq!(host.runtime_status()["foreground"]["state"], "idle");
+    host.respond(
+        &child,
+        &json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
     );
-    assert_eq!(
-        discovered_instance(&mut observer, &first.session)["runtime"]["instance"],
-        before["runtime"]["instance"]
-    );
-    assert_eq!(env.captured_message_count(), 0);
-    first.close();
-    observer.close();
+    host.wait_for_attention("answered child request did not clear", |state| {
+        state["requests"] == json!([])
+    });
+    host.close();
 }

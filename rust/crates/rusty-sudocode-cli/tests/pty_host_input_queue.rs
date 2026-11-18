@@ -19,7 +19,7 @@ fn completion_connection_setup_precedes_prompts_management_and_resume() {
         &env,
         true,
         &[],
-        json!({"_meta":{"sudocode":{
+        &json!({"_meta":{"sudocode":{
             "subagentEvents":{"version":1},"subagentCompletions":{"version":1}
         }}}),
     );

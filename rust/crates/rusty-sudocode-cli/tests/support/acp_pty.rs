@@ -32,14 +32,14 @@ impl Host {
         allow_tools: bool,
         extra_env: &[(&str, &str)],
     ) -> Self {
-        Self::with_client_capabilities(env, allow_tools, extra_env, json!({}))
+        Self::with_client_capabilities(env, allow_tools, extra_env, &json!({}))
     }
 
     pub(crate) fn with_client_capabilities(
         env: &TestEnv,
         allow_tools: bool,
         extra_env: &[(&str, &str)],
-        capabilities: Value,
+        capabilities: &Value,
     ) -> Self {
         let args: &[&str] = if allow_tools {
             &["--dangerously-skip-permissions", "acp"]

@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "preparedAtUTC": "2026-11-18T08:43:42.023515+00:00",
+  "repository": "sudoprivacy/sudocode",
+  "wholeLifecycleTenthProven": false,
+  "scope": "Delivered fixed-driver functional compiler configuration and private Clippy priority observation; original real source/queue/cache evidence, not recurring Rust-source population or a controlled speedup.",
+  "delivery": {
+    "pr": 1493,
+    "head": "ec3020a7227b3c8165743ded2f44a2e581bc87e8",
+    "qualifiedTree": "3875999d262242babff934fcb9e69e699fff7540",
+    "merge": "02c1dc8b732a9be755a86091af2012cbd4a2317a",
+    "mergedAt": "2026-11-18T08:25:07Z",
+    "acceptedTree": "a1b6edf7b4167627c05af37702cd674fb249954f",
+    "all11OwnedGitBlobsEqual": true,
+    "wholeMergedTreeIsNotAuthorTree": "The accepted merge also contains previously accepted main Rust changes; its actual combined queue passed. Do not transfer author-full-workspace acceptance to that whole tree."
+  },
+  "retainedContract": {
+    "fixedDriverDevAndTest": {
+      "workspaceAndDependenciesOptLevel": 0,
+      "debug": 0,
+      "incremental": false,
+      "debugAssertions": true,
+      "overflowChecks": true
+    },
+    "sharedSelectedCryptoOptLevel": 2,
+    "candidateCohostAndReleasePerformanceProfilesUnchanged": true,
+    "originalCargoCommandArgumentsCaseAssertionsAnd90sBoundsUnchanged": true,
+    "workerAndRetrySettingsUnchanged": true,
+    "compilerProfileSourcesAndConfigurationBytesBoundIntoCacheKey": true,
+    "optimizedLegacyAndUnboundNonemptyTargetsRefused": true,
+    "realRuntimeAlwaysExecutesAgainstCurrentCohostOutsideCache": true,
+    "noProductPtyCoverageCreditForInfrastructureFixtures": true
+  },
+  "sourceControls": {
+    "originalVfsAssertionASTsRetained": 38,
+    "separateActualVfsFocusCommands": 62,
+    "originalClippyAssertionASTsRetained": 42,
+    "sameSourceFullClippyFixturesPassed": [
+      "linux",
+      "windows"
+    ],
+    "originalCleanClippyCompilersPerHost": 6,
+    "actualPriorityWitness": "Unmodified compiler is spawned through a private Cargo outer wrapper; actual child OS priority is read before reaping, retaining the original compiler arguments, streams and normal exit code.",
+    "linuxWrongPriorityControl": true,
+    "windowsDoesNotRaiseCompilerToManufactureNegative": true,
+    "countsAcrossRunsAreNotAdditive": true
+  },
+  "normalAcceptance": {
+    "localProfiles": [
+      "preflight",
+      "guard-contract"
+    ],
+    "fullNativeAndDockerGuardPassed": true,
+    "sourceHostedPreflightRun": 44265223371,
+    "sourceHostedPreflightJob": 134667969069,
+    "actualQueueRun": 44265557006,
+    "queueHead": "02c1dc8b732a9be755a86091af2012cbd4a2317a",
+    "realCohostJob": 134669373964,
+    "realA2AJob": 134669374201,
+    "queueLocalProofRun": 44265557037,
+    "bothRealDaemonJobsPassed": true,
+    "mixedFixtureInputRetainsConservativeA2AFallback": true
+  },
+  "realCommandObservation": {
+    "case": "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes",
+    "sourcePin": "b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "sameCommandArguments": true,
+    "originalRun": 44243293424,
+    "originalJob": 134596343153,
+    "originalSeconds": 598.987,
+    "currentRun": 44265557006,
+    "currentJob": 134669373964,
+    "currentArtifact": 14410357302,
+    "currentSeconds": 152.962,
+    "descriptiveFractionOfOriginal": 0.25536781265703595,
+    "currentOriginalLogSHA256": "80edd0ace5cf1da8b060aaf618b3fb48c9c1f084e1e920e7762c6e31ee82f48e",
+    "currentOriginalBuildResultLines": [
+      "Finished `test` profile [unoptimized] target(s) in 1m 56s",
+      "Finished `dev` profile [unoptimized] target(s) in 33.13s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 36.09s"
+    ],
+    "currentCompilerProfileSources": {
+      "source_files": {
+        ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
+        ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415"
+      },
+      "configuration_sha256": "c8d97ea772b2cbd0d5bd0525d19164115bdd9f8255b6f40fac111918a69d1cc1"
+    },
+    "actualPublisherPackageProfilePairs": {
+      "sha2": [
+        [
+          "0",
+          true
+        ],
+        [
+          "2",
+          true
+        ]
+      ],
+      "nexus_search_plugin": [
+        [
+          "0",
+          true
+        ]
+      ],
+      "ed25519_dalek": [
+        [
+          "2",
+          true
+        ]
+      ],
+      "curve25519_dalek": [
+        [
+          "2",
+          true
+        ]
+      ],
+      "user_runtime": [
+        [
+          "0",
+          true
+        ]
+      ]
+    },
+    "limits": [
+      "Different physical runners and current cohost hashes; not a controlled causal comparison, cold-OS benchmark or full-job/lifecycle speedup.",
+      "One unchanged original real search/restart case passed; its21filtered cases are not claimed as executed.",
+      "The elapsed command includes its original driver build, nested plugin build and execution; nested timings must not be summed again."
+    ]
+  },
+  "cachePublication": {
+    "actualMainPublisherRun": 44266799432,
+    "actualMainPublisherJob": 134673230388,
+    "originalBuildCommandSeconds": [
+      76.256,
+      49.841
+    ],
+    "consumerKey": "vfs-search-v2-47f30bee9dc9441f45ab418fa9a4b042194983adb4fa8eba91138e0f58e4d4f4-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "mainPublisherKey": "vfs-search-v2-eb99fe5988eaba7173133cdf01093d54e50ee0412476ce6e69aa7a5cbe158051-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "actualInputDifferences": {
+      "ImageVersion": {
+        "consumer": "20261111.196.1",
+        "publisher": "20261111.82.6"
+      }
+    },
+    "currentCacheEntry": {
+      "id": 10712374103,
+      "key": "vfs-search-v2-eb99fe5988eaba7173133cdf01093d54e50ee0412476ce6e69aa7a5cbe158051-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+      "version": "0e924dac4074ca5f59016c8ca23840d71ef66e411f0b33b7edaa44932d294550",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 721722007,
+      "created_at": "2026-11-18T08:27:58.380234Z"
+    },
+    "sameImageWarmConsumerHitQualified": false,
+    "quotaAndCachePathsUnchanged": true,
+    "limits": [
+      "Publisher and consumer have different ImageVersion contexts. A successful main cache save does not prove that this consumer can restore it.",
+      "The recorded cache size is not extracted disk size, RAM or evidence of a footprint reduction. Different old keys are not a controlled size baseline.",
+      "No cache alias, relaxed compiler identity, extra workflow or image-equivalence waiver was introduced."
+    ]
+  },
+  "localInterruptionAndClocks": {
+    "originalEeSourceFullContractPassedBeforeHostedFailure": true,
+    "currentSourceEarlierGuardOutcome": "owned_bulk_foreground_interruption",
+    "currentSourceEarlierGuardExitCode": 15,
+    "foregroundCpuStopSamples": 3,
+    "exactOwnOrphanContainerStoppedAfterLabelImageCidVerification": true,
+    "normalContinuationReusedOriginalSignedPreflight": true,
+    "currentSignedTiming": {
+      "checks_finished_at": 1794989615.19355,
+      "first_recorded_started_at": 1794988071.373377,
+      "prior_timing_available": true,
+      "started_at": 1794988467.2911272
+    },
+    "firstStartToChecksFinishedSeconds": 1543.8201730251312,
+    "allOriginalIncompleteOutputsAndFirstClockRetained": true,
+    "overlappingTimersAreNotAddedAsSeparateWork": true
+  },
+  "preservedFailures": [
+    "First new VFS synthetic build-script fixture invalidated on tar timestamp truncation; only that redundant new script was removed, original warm assertion retained.",
+    "Original ee334 hosted Clippy clean build produced six nonfresh artifacts in0.08s but the observer recorded no compiler, so its priority assertion failed before the VFS fixture.",
+    "First new Windows Normal-negative was lowered by the existing supervisor; final controls preserve original assertions and never raise a compiler.",
+    "Own current-source full guard was stopped for renewed foreground CPU pressure; it is incomplete, not an assertion verdict.",
+    "Read-only observer first requested absent logs for a skipped job; original API refusal and corrected reader are retained."
+  ],
+  "hostedEngineering": {
+    "sourceQueueAndAcceptedMainPhysicalJobRecords": 49,
+    "sourceQueueAndAcceptedMainKnownRunnerMinutes": 23.366666666666667,
+    "additionalCommitStatusLinkedPublisherJobs": [
+      {
+        "id": 134646676350,
+        "name": "Publish verified local and cross-platform acceptance",
+        "run": 44258752072,
+        "attempt": 1,
+        "head": "610bb400b3d019132bf4fd4c53f44b00494a0068",
+        "event": "workflow_run",
+        "status": "completed",
+        "conclusion": "success",
+        "knownRunnerMinutes": 0.45
+      },
+      {
+        "id": 134668217149,
+        "name": "Publish verified local and cross-platform acceptance",
+        "run": 44265300121,
+        "attempt": 1,
+        "head": "610bb400b3d019132bf4fd4c53f44b00494a0068",
+        "event": "workflow_run",
+        "status": "completed",
+        "conclusion": "success",
+        "knownRunnerMinutes": 0.35
+      },
+      {
+        "id": 134669285883,
+        "name": "Publish verified local and cross-platform acceptance",
+        "run": 44265620550,
+        "attempt": 1,
+        "head": "610bb400b3d019132bf4fd4c53f44b00494a0068",
+        "event": "workflow_run",
+        "status": "completed",
+        "conclusion": "success",
+        "knownRunnerMinutes": 0.55
+      }
+    ],
+    "identifiedUnionPhysicalJobRecords": 52,
+    "identifiedUnionKnownRunnerMinutes": 24.71666666666667,
+    "unknownOrOpenIntervalsAmongIdentifiedJobs": 0,
+    "sourceQueueAndMainKnownMinutesByEvent": {
+      "merge_group": 16.266666666666666,
+      "pull_request": 4.1000000000000005,
+      "push": 3.0
+    },
+    "unlinkedFailedPublisherDiscoveryProven": false,
+    "limits": [
+      "Includes original failed source, corrected source, queue, main cache/maintenance and explicitly status-linked publishers; deduplicated by physical job ID.",
+      "Scope is identified associated engineering jobs, not every possible unlinked failed publisher. Unknown real intervals are not zero.",
+      "Runner occupancy is not CPU use, billing, local author clock, recurring Rust-source population cost or a causal saving.",
+      "The immutable20+20data and historical ratios are unchanged; this supplemental publisher association is not silently retrofitted into that corpus."
+    ]
+  },
+  "populationStatus": {
+    "postPolicyRealRustSourcesObserved": 1,
+    "predefinedRequired": 20,
+    "frozen": false,
+    "selectionUsedNoWorkflowTiming": true,
+    "ciDocsToolChangesDoNotFillTheRustSourceCohort": true
+  },
+  "sameOriginalShare": {
+    "url": "https://s.shareone.vip/s/sudo-code-roadmap",
+    "binding": "https://raw.githubusercontent.com/sudoprivacy/sudocode/main/sudo-code-roadmap.html",
+    "sourceMergeReadbackSHA256": "05995ab52fdf1ee3831cbfcb62942bb66719720480d75fc5b688a80ab9cb938c"
+  },
+  "evidenceDigestBindings": {
+    "normalSourcePublication": "556f2f23bb726749a50badd5c94a581646693901cd22fab91d5e6af0728daee8",
+    "actualCurrentCommandAndCacheIntake": "af7a9bb3f5a1ed990b72d1e6e026fbb11b6b7cb73dde95aff69b0c976b68779d",
+    "additionalStatusPublisherIntake": "f276333df4739db9f1ee1f0fd6a0e33048cfb2696aaef5e2002a9a5ab1183543"
+  }
+}

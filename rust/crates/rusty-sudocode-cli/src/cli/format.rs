@@ -430,13 +430,13 @@ pub(crate) fn format_input_echo(
     };
     let mut rendered = String::new();
     let mut offset = lead;
-    let surface =
-        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport)
-            .then(|| theme().prompt_style());
+    // The live editor's shade, where the terminal can draw one; otherwise the
+    // echo is plain text in the terminal's own colors.
+    let surface = Some(theme().prompt_style()).filter(|style| style.background_color.is_some());
     // A shaded surface sets the prompt's foreground explicitly, and faint text
     // over it barely differs from what was typed. There a paste takes the
     // muted foreground instead, as other low-emphasis text does.
-    let (paste_on, paste_off) = match surface.filter(|style| style.background_color.is_some()) {
+    let (paste_on, paste_off) = match surface {
         Some(style) => (
             theme().fg_seq(TextRole::Secondary),
             style
@@ -447,9 +447,9 @@ pub(crate) fn format_input_echo(
     };
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
-        // box uses. Live commits and replay share this presentation; the
-        // experiment adds the same background to both. Continuation lines indent
-        // by two spaces to align under the text.
+        // box uses. Live commits and replay share this presentation, shade
+        // included. Continuation lines indent by two spaces to align under
+        // the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!(
             "{prefix}{}",

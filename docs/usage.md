@@ -711,31 +711,21 @@ For the canonical, live command list:
 scode --help
 ```
 
-### Experimental shaded prompts
+### Shaded prompts
 
-Enable `experimental.promptViewport` to try matching shaded surfaces for the
-live editor and submitted prompts:
+The live editor and every submitted prompt sit on a faint shade drawn from the
+terminal's own background, so your turns stand apart from the conversation.
+The shade replaces the separator lines above and below the editor. It uses the
+same inline editor, output writer and native terminal history as everything
+else: new output advances the editor with the conversation, and the mouse
+wheel, scrollbar and selection work on that one history.
 
-```json
-{"experimental":{"promptViewport":true}}
-```
+Where the terminal can't draw a shade (`NO_COLOR`, or a palette too small for
+one), the editor keeps its separator lines and the terminal's own colors.
+Resumed sessions show their prompts with the same shade.
 
-This temporary experiment is off by default. It uses the same inline editor,
-output writer and native terminal history as the ordinary REPL. New output
-advances the editor with the conversation; the mouse wheel and scrollbar browse
-the same terminal history. Selection uses the terminal's ordinary drag gesture.
-The draft survives returning to the latest output and resizing.
-
-The earlier fixed conversation view has been removed because its mouse scrolling
-and the terminal scrollbar controlled separate histories. The editor and prompt
-header are no longer pinned while browsing older native history. A sticky view
-would require support from the terminal host to share its scroll position.
-
-Saved sessions remain the durable record; `--resume` uses the existing replay
-formatter. Colors respect the terminal palette and `NO_COLOR`. The existing
-`promptViewport` setting name remains compatible. This changes presentation only
-and adds no model requests or prompt context. Validation requirements live in the
-[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+This is always on; a leftover `experimental.promptViewport` setting, which
+enabled it while it was experimental, is accepted and ignored.
 
 ## Bash tool results
 

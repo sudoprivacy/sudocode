@@ -2456,12 +2456,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .map_or(0, |text| text.text.lines().count());
     let slot_width = Size::Length(u32::from(term_width));
     // Styling changes the existing editor, never the owner of terminal history.
-    let shaded_prompts =
-        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
-    let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
     // The shade replaces the separator lines only where it is drawn. Without
-    // color (NO_COLOR, or a palette too small for a shade) the experiment
-    // has no surface, and the lines are the editor's only boundary.
+    // color (NO_COLOR, or a palette too small for a shade) there is no
+    // surface: the lines are the editor's boundary and its text keeps the
+    // terminal's own colors.
+    let prompt_style = Some(crate::render::theme().prompt_style())
+        .filter(|style| style.background_color.is_some());
     let input_background = prompt_style
         .and_then(|style| style.background_color)
         .and_then(ansi_text::ui_color);

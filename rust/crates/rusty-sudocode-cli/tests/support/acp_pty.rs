@@ -14,7 +14,8 @@ pub(crate) struct Host {
     /// Raw bytes consumed with the latest reply, including preceding events.
     pub(crate) last_read: String,
     trace: PathBuf,
-    responses: std::collections::HashMap<u64, Value>,
+    responses: std::collections::VecDeque<Value>,
+    incoming: Vec<Value>,
 }
 
 impl Host {
@@ -55,11 +56,13 @@ impl Host {
             id: 0,
             last_read: String::new(),
             trace,
-            responses: std::collections::HashMap::new(),
+            responses: std::collections::VecDeque::new(),
+            incoming: Vec::new(),
         };
         let init = host.request("initialize", &json!({"protocolVersion":1}));
         assert_eq!(init["_meta"]["sudocode"]["inputDelivery"]["version"], 1);
         assert_eq!(init["_meta"]["sudocode"]["runtimeStatus"]["version"], 1);
+        assert_eq!(init["_meta"]["sudocode"]["attention"]["version"], 1);
         let created = host.request(
             "session/new",
             &json!({"cwd":env.workspace_root(),"mcpServers":[]}),
@@ -97,19 +100,21 @@ impl Host {
 
     pub(crate) fn receive(&mut self, id: u64) -> Value {
         loop {
-            if let Some(response) = self.responses.remove(&id) {
-                return response;
+            if let Some(index) = self.responses.iter().position(|value| value["id"] == id) {
+                return self.responses.remove(index).unwrap();
             }
-            let response = self.receive_next();
-            if response["id"] == id {
-                return response;
-            }
-            self.responses
-                .insert(response["id"].as_u64().unwrap(), response);
+            self.read_response();
         }
     }
 
     pub(crate) fn receive_next(&mut self) -> Value {
+        if self.responses.is_empty() {
+            self.read_response();
+        }
+        self.responses.pop_front().unwrap()
+    }
+
+    fn read_response(&mut self) {
         let response = self
             .terminal
             .expect(r#"\{"jsonrpc":"2.0","(?:result|error)":[^\r\n]*,"id":[0-9]+\}"#)
@@ -120,16 +125,11 @@ impl Host {
                 )
             });
         self.last_read.clone_from(&response);
-        let response: Value = response
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| {
-                value["id"].is_u64()
-                    && (value.get("result").is_some() || value.get("error").is_some())
-            })
-            .unwrap_or_else(|| panic!("response line missing: {response}"));
-        response
+        self.retain_messages(&response);
+        assert!(
+            !self.responses.is_empty(),
+            "response line missing: {response}"
+        );
     }
 
     pub(crate) fn input(&mut self, mut action: Value) -> Value {
@@ -137,19 +137,43 @@ impl Host {
         self.request(METHOD, &action)
     }
 
+    fn retain_messages(&mut self, text: &str) {
+        for value in text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        {
+            if value.get("method").is_some() && value.get("id").is_some() {
+                self.incoming.push(value);
+            } else if value["id"].is_u64()
+                && (value.get("result").is_some() || value.get("error").is_some())
+            {
+                self.responses.push_back(value);
+            }
+        }
+    }
+
+    #[track_caller]
     pub(crate) fn incoming_request(&mut self, method: &str) -> Value {
+        if let Some(index) = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+        {
+            return self.incoming.remove(index);
+        }
         let message = self
             .terminal
             .expect(&format!(
                 r#"\{{"jsonrpc":"2.0","method":"{method}",[^\r\n]*\}}"#
             ))
             .unwrap();
-        message
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-            .find(|value| value["method"] == method)
-            .unwrap_or_else(|| panic!("missing {method} request: {message}"))
+        self.retain_messages(&message);
+        let index = self
+            .incoming
+            .iter()
+            .position(|value| value["method"] == method)
+            .unwrap_or_else(|| panic!("missing {method} request: {message}"));
+        self.incoming.remove(index)
     }
 
     pub(crate) fn respond(&mut self, request: &Value, result: &Value) {
@@ -175,6 +199,37 @@ impl Host {
             "_sudocode/session/status",
             &json!({"sessionId":self.session}),
         )
+    }
+
+    pub(crate) fn attention(&mut self) -> Value {
+        self.request(
+            "_sudocode/session/attention",
+            &json!({"sessionId":self.session}),
+        )
+    }
+
+    pub(crate) fn wait_for_attention(
+        &mut self,
+        context: &str,
+        ready: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        loop {
+            let state = self.attention();
+            if ready(&state) {
+                return state;
+            }
+            assert!(std::time::Instant::now() < deadline, "{context}: {state}");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        let newline = if cfg!(windows) { "\r" } else { "\n" };
+        self.terminal.send(&format!(
+            "{}{newline}",
+            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}})
+        )).unwrap();
     }
 
     pub(crate) fn idle(&mut self) -> Value {

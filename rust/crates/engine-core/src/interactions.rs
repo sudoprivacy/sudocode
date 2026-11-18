@@ -557,6 +557,7 @@ impl SessionInteractions {
     pub(crate) fn worker_sink(
         self: &Arc<Self>,
         sink: EventSink,
+        legacy: runtime::PermissionPromptSink,
     ) -> Result<Option<runtime::PermissionPromptSink>, String> {
         let Some(journal) = self.journal()? else {
             return Ok(None);
@@ -564,7 +565,7 @@ impl SessionInteractions {
         let controller = Arc::downgrade(self);
         let gate_controller = controller.clone();
         let gate_journal = journal.clone();
-        Ok(Some(runtime::PermissionPromptSink::session_owned(
+        Ok(Some(legacy.session_owned(
             move |agent_id, request| {
                 let controller = controller.clone();
                 let journal = journal.clone();

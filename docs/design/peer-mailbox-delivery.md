@@ -392,9 +392,11 @@ model whole unless the operator lowers the limit for this tool.
 Retirement does not depend on admission. A frame retires only on its exact
 token, a result cut at its tail carries none, and each key has at most three
 submissions. Under a lowered limit an interior cut can keep the token, and
-retirement then rests on the model reading the message alone, as the
-instruction asks. On Codex 0.170.0 with a 64-token tool limit, a 505-byte
-result was cut in its middle and its trailing token line stayed visible.
+retirement then rests on the model withholding the ACK, as the instruction
+asks. A limit below one window cuts the read-alone window as well; windows
+keep their size, so that frame stays unread until the limit is raised. On
+Codex 0.170.0 with a 64-token tool limit, a 505-byte read-alone result was cut
+in its middle and its trailing token line stayed visible.
 
 The native mailbox fixture runs these cases in an isolated Codex home with a
 loopback model endpoint:
@@ -410,7 +412,7 @@ loopback model endpoint:
 | delivery request lost | The submission stays unresolved; after 60 s idle the next number follows; submissions stay within three |
 | owner stops after logging | The logged submission counts; the restarted owner continues with the next number |
 | native stops between start and delete | Whether the native server starts the item again is measured and recorded with the qualification |
-| interior truncation | An offer forced over the budget so its middle is cut: the model request shows the truncation notice; reading that message alone returns it within the budget |
+| interior truncation | A tool limit above one window and below the offer cuts the offer's middle: the model request shows the truncation notice; reading that message alone returns it whole |
 | tail truncation or omission | The token is absent; the frame stays unread and is offered again |
 | compaction before acknowledgement | A context-pressure rewrite before the acknowledgement, and no valid token presented afterwards: the frame stays unread and is offered again |
 | acknowledgement omitted | The frame is re-offered with `redelivery: true` within the budget |

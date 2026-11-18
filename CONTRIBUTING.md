@@ -238,7 +238,7 @@ lists this host's prerequisites (Python modules, the signing key's sign/verify
 round trip, gh, PowerShell 7, the MSVC toolchain, the compiler cache and
 Docker) with the fix for each; it grants no acceptance. The checks themselves
 also verify the MSVC toolchain and Docker before joining the host queue, and a
-compiler-cache server that does not answer a probe compile within 20 seconds is
+compiler-cache server that does not answer a probe compile within 2 minutes is
 replaced by plain Cargo for that run.
 
 The queue separates CLI daemon journeys from co-host/search acceptance. CLI

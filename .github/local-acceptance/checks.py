@@ -464,7 +464,7 @@ def compiler_cache_profiles():
 def prepare_compiler_cache(output):
     """Bind the separate cache implementation before loading or executing it."""
     contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
-    if hashlib.sha256(contents).hexdigest() != "0f30e494f369ee25f715ef533dc1ff7249ecfe0b5b4e9a93080427ec46577731":
+    if hashlib.sha256(contents).hexdigest() != "afad13b1c6b76b34aea48d4e9e9183afb5275b846ebb032c4dd52a4b238b975c":
         raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
                            f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
                            "prepare_compiler_cache, then rerun the original supported contract-update command. "
@@ -1171,12 +1171,12 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
-        "e2e/local-acceptance/compiler_storage_acceptance.py": "cd2e11371bcb7f2fd741a5678b54709c78036cea289a9e750bc844fd004d65a7",
+        "e2e/local-acceptance/compiler_storage_acceptance.py": "98e5f5b223ae900da913ed6d1a3f6306ed509def067f26d226dab6d9e7038a1f",
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
-        ".github/local-acceptance/compiler_cache.py": "0f30e494f369ee25f715ef533dc1ff7249ecfe0b5b4e9a93080427ec46577731",
+        ".github/local-acceptance/compiler_cache.py": "afad13b1c6b76b34aea48d4e9e9183afb5275b846ebb032c4dd52a4b238b975c",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
@@ -1186,7 +1186,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "e87771666589b8ca2b7a1d52c49c8a5a002336b8d8338a5cc51e9a5e54f3c918",
+        ".github/scripts/ci_input_scope.py": "4a1cdc5930690fc213187e87d44e9e92db4edddfd2d7083c900f3520199040e2",
         ".github/workflows/rust-ci.yml": "2d89ef53d1728b32b7f9dd0a141896b421f85849fb8aabc28671cae4895bfa84",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/action.yml": "b1ea2bc54f370d257aac898ce38a139d9e4f84b68c12455f0398e6f665184e39",
@@ -1198,7 +1198,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "388db07e96e2cdada543749ddd49699d26c82ae3cfb7e7e828fe4fc87d899bc3",
+        ".github/scripts/local_acceptance.py": "282e0f3ca36b5224e61bed1bf92b9dcad4a69d968180467113f9882c36eb3c9d",
         ".github/scripts/vfs_search_cache.py": "410727c5e215727b688e536dc932e86f65ecb661924c88a2cb23705ccd2fcd0a",
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1282,7 +1282,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '3c315bd98203ea6489d3e3228eb618fed5618235d2af67225132ca4537629710', 'native-context': 'ccd94c4c141e25db29dbc0048ecb03144b8dfd5db4c9c3c9cdbda950e0fae2fe', 'native-services': 'b33281ba33467b74f65edc1323885e0b57dfe1bdf94ccb78ceedffbe2eec6f66'}
+    expected = {'native-release': '1814e3a28c429e359559de828f24cf6b7b626b9c36102c4330da4c3dcae80aa6', 'native-context': '8c0b7b69b4d0d2eee3169f461c5ca2312cb0479b65af94e6476ad7fdcfc69300', 'native-services': '29cf227090038951698281062ed891b19b7a37922ac0f85973595065ebe65916'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

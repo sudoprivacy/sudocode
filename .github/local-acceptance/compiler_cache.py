@@ -333,8 +333,10 @@ def compiler_frontend(command):
         "build", "check", "clippy", "test", "bench", "run", "rustc", "doc", "rustdoc")]
 
 
-# Bounds the probe compile that shows the session's server answers.
-PROBE_SECONDS = 20
+# Bounds the probe compile that shows the session's server answers. A new
+# server first hashes the Rust toolchain, which takes tens of seconds on a cold
+# host; a server that never answers holds a compile for its 600 s idle timeout.
+PROBE_SECONDS = 120
 
 
 class Session:

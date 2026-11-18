@@ -522,7 +522,7 @@ except subprocess.TimeoutExpired:
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
-        "ce07860b969b3cd4c4bb8fe6ccc89ccbdc379d1366f3921a0446d3a3448e8764",
+        "3f2916aeaa1b8017e2f1ccea330913865e4583f7ba7c23933a542ff68f6390b6",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -2908,11 +2908,11 @@ def host_findings(names=None):
                 probe([str(tool), "--start-server"], timeout=20, env=cache)
                 compiled = probe([str(tool), "rustc", "--crate-name", "doctor_probe", "--crate-type", "lib", "--emit",
                                   "metadata", "--out-dir", scratch, str(Path(scratch) / "probe.rs")],
-                                 timeout=20, env=cache, cwd=scratch)
+                                 timeout=120, env=cache, cwd=scratch)
                 probe([str(tool), "--stop-server"], timeout=20, env=cache)
             ok = not isinstance(compiled, Exception) and not compiled.returncode
             findings.append(("compiler cache", ok, f"{tool} compiles through its own server" if ok else
-                             f"{tool} did not compile a probe within 20s; acceptance falls back to original Cargo, "
+                             f"{tool} did not compile a probe within 120s; acceptance falls back to original Cargo, "
                              "or set any SCCACHE_* variable to skip the cache"))
     if docker:
         server = probe(["docker", "version", "--format", "{{.Server.Version}}"])

@@ -61,6 +61,10 @@ def configuration():
         assert re.fullmatch('[0-9a-f]{64}', value[name])
     for name in ['source_commit', 'upstream_fix_commit', 'baseline_helper_ref']:
         assert re.fullmatch('[0-9a-f]{40}', value[name])
+    assert set(value['compatibility_files']) == {'tests/system.rs'}
+    for pins in value['compatibility_files'].values():
+        assert set(pins) == {'original_sha256', 'patched_sha256'}
+        assert all(re.fullmatch('[0-9a-f]{64}', digest) for digest in pins.values())
     assert sha(blob(value['patch_path'])) == value['patch_sha256']
     return value
 
@@ -100,6 +104,8 @@ def prepare(output):
     project = source / prefix
     before = source_manifest(project)
     assert before['src/compiler/rust.rs'] == config['original_rust_sha256']
+    for name, pins in config['compatibility_files'].items():
+        assert before[name] == pins['original_sha256']
     patch = output / 'response-files.patch'
     patch.write_bytes(blob(config['patch_path']))
     for label, arguments in [('check', ['--check']), ('apply', [])]:
@@ -110,8 +116,10 @@ def prepare(output):
         assert result.returncode == 0, 'Pinned source patch ' + label + ' failed'
     after = source_manifest(project)
     assert before.keys() == after.keys()
-    assert [name for name in before if before[name] != after[name]] == ['src/compiler/rust.rs']
+    assert [name for name in before if before[name] != after[name]] == sorted(['src/compiler/rust.rs', *config['compatibility_files']])
     assert after['src/compiler/rust.rs'] == config['patched_rust_sha256']
+    for name, pins in config['compatibility_files'].items():
+        assert after[name] == pins['patched_sha256']
     result = {'project': str(project.resolve()), 'source_manifest': after,
               'source_tree_sha256': sha(json.dumps(after, sort_keys=True, separators=(',', ':')).encode()),
               'source_inputs': input_hashes(), 'producer_head': git('rev-parse', 'HEAD').decode().strip()}

@@ -8,7 +8,10 @@ maintained artifact for the Windows response-file defect fixed by upstream
 The source is the immutable upstream 0.19.0 commit. Its archive, minimal backport
 and original/patched Rust modules are SHA-256 pinned in
 `.github/compiler-cache/response-files.json`. The production hunks come from the
-merged upstream fix; the older module import and test-helper interfaces are adapted. No Cargo
+merged upstream fix; the older module import and test-helper interfaces are adapted.
+The existing system-test vector macro uses conventional square brackets to pass
+Rust 1.100 Clippy; its expansion and every test/assertion remain unchanged. Both
+changed files have complete original/patched SHA-256 pins. No Cargo
 dependency or release-profile setting is changed. The upstream tool's tests are
 dependency qualification, not a new SudoCode unit-test layer or product coverage.
 The patch uses zero context to avoid whitespace-only patch context lines; both

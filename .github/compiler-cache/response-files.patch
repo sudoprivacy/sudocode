@@ -330,3 +330,9 @@ diff --git a/src/compiler/rust.rs b/src/compiler/rust.rs
 +    }
 +
 +    #[test]
+diff --git a/tests/system.rs b/tests/system.rs
+--- a/tests/system.rs
++++ b/tests/system.rs
+@@ -90 +90 @@
+-        vec!($( Into::<$t>::into(&$x), )*)
++        vec![$( Into::<$t>::into(&$x), )*]

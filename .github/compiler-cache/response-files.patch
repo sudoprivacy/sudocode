@@ -1,3 +1,4 @@
+diff --git a/src/compiler/rust.rs b/src/compiler/rust.rs
 --- a/src/compiler/rust.rs
 +++ b/src/compiler/rust.rs
 @@ -18,2 +18,2 @@
@@ -5,6 +6,9 @@
 -    CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
 +    CCompileCommand, Cacheable, ColorMode, Compilation, CompileCommand, CompileCommandImpl,
 +    Compiler, CompilerArguments, CompilerHasher, CompilerKind, CompilerProxy, HashResult, Language,
+@@ -47 +47 @@
+-use std::ffi::OsString;
++use std::ffi::{OsStr, OsString};
 @@ -455,0 +456,10 @@
 +    let mut dep_info_arguments = arguments.to_vec();
 +    dep_info_arguments.extend([

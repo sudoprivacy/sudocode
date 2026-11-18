@@ -12,8 +12,8 @@
   "source_archive_sha256": "af4a19932ab6f10b749265b449de5ad0f7aecbe281f652108fc8212b70267ea8",
   "upstream_fix_commit": "91d34f10947e68a850f4c124ddaba0d040a921f6",
   "patch_path": ".github/compiler-cache/response-files.patch",
-  "patch_sha256": "d1eb20f9c230d9c32c518d89f984b34ac61c09bea75694c4763e42a596d20fed",
-  "patched_rust_sha256": "897aebfc65c40c18632d2709ef5f4ff98f0d216d4e0c7857053195635b255fe1",
+  "patch_sha256": "f0102d9ed88b157a3cf8195fa0fbd396cb15b9b2a87a0a678202839ca703d400",
+  "patched_rust_sha256": "d8400acd2df2e1e9ef16b51ad5b34815052c04357d69d4ececb9659237e2b395",
   "baseline_helper_ref": "f591e11aea780a1947de56df0724b2e551518cc4",
   "required_upstream_regressions": [
     "test_command_line_len",

@@ -894,6 +894,32 @@ pub(crate) fn render_tool_card_with_width(
     )
 }
 
+/// Whether a persistent todo panel owns the complete list in this presentation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolResultView {
+    Standalone,
+    WithTodoPanel,
+}
+
+pub(crate) fn format_tool_result_for_view(
+    name: &str,
+    input: &str,
+    output: &str,
+    is_error: bool,
+    view: ToolResultView,
+) -> String {
+    if view == ToolResultView::WithTodoPanel {
+        if let Some(result) = todo::from_tool_result(name, output, is_error) {
+            return result.receipt();
+        }
+    }
+    format_tool_result(name, input, output, is_error)
+}
+
+fn format_hook_feedback(feedback: &str) -> String {
+    format!("{}{feedback}{RESET}", theme().fg_seq(TextRole::Notice))
+}
+
 pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {
     let (payload, hook_feedback) = split_hook_feedback(output);
     let status = if is_error {
@@ -931,8 +957,7 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
         };
     }
     if let (Some(feedback), false) = (hook_feedback, is_error) {
-        let hf = theme().fg_seq(TextRole::Notice);
-        let feedback_body = format!("{hf}{feedback}{RESET}");
+        let feedback_body = format_hook_feedback(feedback);
         content.body = Some(match content.body {
             Some(body) => format!("{body}\n{feedback_body}"),
             None => feedback_body,

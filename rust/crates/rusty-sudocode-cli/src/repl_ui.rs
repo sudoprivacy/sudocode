@@ -47,6 +47,7 @@ mod ansi_text;
 mod choice_text;
 mod footer;
 mod input_history;
+mod input_trace;
 mod layout;
 mod prompt_text;
 mod queued_message;
@@ -1245,6 +1246,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // to maintain consistent hook ordering.
     let (term_width, term_height) = hooks.use_terminal_size();
     let input_frame = hooks.use_input_frame();
+    let input_trace = hooks.use_memo(
+        || input_trace::InputTrace::open().map(|trace| Arc::new(Mutex::new(trace))),
+        (),
+    );
 
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -1291,6 +1296,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_terminal_events({
         let _pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
+        let record_input = move |input, frame_current| {
+            if let Some(trace) = &input_trace {
+                trace.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(
+                    input,
+                    (term_width, term_height),
+                    input_reviewable.get(),
+                    frame_current,
+                );
+            }
+        };
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
                 code,
@@ -1298,6 +1313,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 modifiers,
                 ..
             }) if kind != KeyEventKind::Release => {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Key(code), frame_current);
                 let current_slot = input_slot.read().clone();
                 if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
                     let question = match &current_slot {
@@ -1318,7 +1335,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
                 if !(code == KeyCode::Esc
-                    || input_reviewable.get() && input_frame.is_current()
+                    || input_reviewable.get() && frame_current
                     || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
@@ -1703,7 +1720,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // not mounted, so route the paste into the active buffer here using
             // the SAME normalize/placeholder logic (DRY).
             TerminalEvent::Paste(pasted) => {
-                if !input_reviewable.get() || !input_frame.is_current() {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Paste, frame_current);
+                if !input_reviewable.get() || !frame_current {
                     return;
                 }
                 let current_slot = input_slot.read().clone();

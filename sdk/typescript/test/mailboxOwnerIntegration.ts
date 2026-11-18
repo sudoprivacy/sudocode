@@ -15,7 +15,7 @@ import { CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 const sdk = path.resolve(__dirname, '../..');
 const threadId = '33333333-3333-3333-3333-333333333333';
 const otherThread = '77777777-7777-4777-8777-777777777777';
-const { connectCodexAutojoin, runCodexMcp, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
+const { CodexMailboxPresentation, connectCodex, connectCodexAutojoin, runCodexMcp, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
 const rows = (file: string): any[] => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(row => JSON.parse(row)) : [];
 const hash = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -56,6 +56,8 @@ async function main() {
   const native = { codexArgv: [process.execPath, path.join(sdk, 'test/fixtures/codex-stdio-proxy.mjs'), String(address.port), 'normal'],
     socket: 'fixture-native.sock', env: env as Record<string, string>, closeTimeoutMs: 900 };
   let loaded = true, otherLoaded = false, failure: unknown;
+  const presentation = new CodexMailboxPresentation();
+  let selectedClient: Client | undefined;
   const calls: any[] = [], queue: any[] = [];
   endpoint.on('connection', socket => socket.on('message', bytes => {
     try {
@@ -63,6 +65,14 @@ async function main() {
       if (call.id === undefined) return;
       let result: unknown;
       if (call.method === 'initialize') result = { userAgent: 'unqualified-fixture-without-addOnce' };
+      else if (call.method === 'mcpServerStatus/list') {
+        assert.equal(call.params.serverName, 'nexus_scode');
+        assert.equal(call.params.detail, 'full');
+        assert.ok(selectedClient);
+        result = { nextCursor: null, data: [{ name: 'nexus_scode', runtimeStatus: 'connected',
+          serverInfo: selectedClient.getServerVersion(), serverCapabilities: selectedClient.getServerCapabilities(),
+          tools: { scode_inbox: {} } }] };
+      }
       else if (call.method === 'thread/loaded/list') result = { data: [...(loaded ? [threadId] : []), ...(otherLoaded ? [otherThread] : [])], nextCursor: null };
       else if (call.method === 'thread/read') result = { thread: { id: call.params.threadId, cwd: directory,
         status: { type: 'idle' }, parentThreadId: null, threadSource: 'user', ephemeral: false, canAcceptDirectInput: true, turns: [] } };
@@ -105,7 +115,7 @@ async function main() {
     const offset = rows(audit).length;
     // Only this private fixture supplies an artificial qualification verdict.
     owner = runCodexMcpOwner(runtime, { encodedResultBytes: 8192, encodedSubmissionBytes: 4096, existingBinding,
-      qualified: async (_, id) => id === threadId && fs.readFileSync(path.join(directory, 'qualified'), 'utf8') === 'yes' });
+      qualified: async (_, id) => id === threadId && fs.readFileSync(path.join(directory, 'qualified'), 'utf8') === 'yes' }, presentation);
     const deadline = performance.now() + 5000;
     while (!rows(audit).slice(offset).some(row => row.phase === 'native_inventory')) {
       if (performance.now() >= deadline) throw new Error('Elected owner did not finish its initial inventory');
@@ -219,6 +229,27 @@ async function main() {
       assert.notEqual(otherClient.getServerVersion()?.description, client!.getServerVersion()?.description);
       assert.equal(client!.getServerVersion()?.description, 'SCode registration ' + registrationId);
     } finally { await otherClient.close(); }
+    const replacement = await attach(registrationId);
+    const reader = await connectCodex({ ...native, requireDurableQueue: false });
+    try {
+      selectedClient = client;
+      await assert.rejects(presentation.prepare(reader, otherThread, registrationId, 4096), /no matching live/);
+      const first = await presentation.prepare(reader, threadId, registrationId, 4096);
+      selectedClient = replacement;
+      assert.equal((await call('scode_inbox', {read: first.read})).isError, true);
+      presentation.cancel(first.read);
+      const second = await presentation.prepare(reader, threadId, registrationId, 4096);
+      assert.notEqual(second.connectionId, first.connectionId);
+      assert.equal((await call('scode_inbox', {read: second.read})).isError, true);
+      const readOnce = () => replacement.callTool({name: 'scode_inbox', arguments: {read: second.read}, _meta: {threadId}});
+      const replies = await Promise.all([readOnce(), readOnce()]);
+      assert.equal(replies.filter(reply => reply.isError).length, 1);
+      assert.deepEqual(replies.find(reply => !reply.isError)?.content, [{type: 'text', text: second.expectedText}]);
+    } finally {
+      await reader.close();
+      await replacement.close();
+      selectedClient = undefined;
+    }
     assert.equal((await call('scode_inbox')).isError, undefined);
     assert.equal(rows(path.join(directory, 'enrollment.jsonl')).length, 1, 'ready binding retains actor, operation and ACP session');
     assert.equal(offers().at(-1).params.legacy, undefined, 'restart retains completed migration outcomes');

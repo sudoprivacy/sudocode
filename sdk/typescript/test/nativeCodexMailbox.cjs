@@ -67,7 +67,7 @@ const library = path.resolve(__dirname, '../dist/index.cjs');
 const internals = path.resolve(__dirname, '../dist/testing/nativeMailboxInternals.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../manifest.json')));
 assert.equal(manifest.files['dist/index.cjs'].sha256, sha(library));
-const { connectCodex, CodexRequestError, runCodexMcpOwner, shutdownCommand } = require(library);
+const { connectCodex, CodexRequestError, CodexMailboxPresentation, runCodexMcpOwner, shutdownCommand } = require(library);
 const { openCodexMailboxWake, readCodexMailboxSnapshot, mailboxSubmissionTextBudget,
   CODEX_MAILBOX_DELIVERY_PROVENANCE } = require(internals);
 const env = {};
@@ -107,8 +107,11 @@ let phase = 'seed', expectedDelivery, expectedWindow, callIssued = false, server
 let sdkOwner, sdkStartupError;
 const sdkRuntime = path.join(root, 'sdk-runtime.json');
 const sdkEntry = path.join(path.dirname(library), 'server.cjs');
-const sdkRegistration = id => ({ command: process.execPath, required: true,
-  args: [sdkEntry, '--codex', '--config', sdkRuntime, '--registration-id', id] });
+const sdkRegistration = (id, limit) => ({ command: process.execPath, required: true,
+  args: [sdkEntry, '--codex', '--config', sdkRuntime, '--registration-id', id],
+  tools: { scode_inbox: { approval_mode: 'approve', output_token_limit: limit } } });
+const sdkMeasurement = settingsResume ? new CodexMailboxPresentation() : undefined;
+let sdkSample, sdkCallIssued = false;
 let realToolSequence = 0, realModelCompleted = false;
 let nativeStderr = '', tuiStderr = '', tuiBuffer = '';
 const tuiEvents = [];
@@ -161,6 +164,14 @@ const endpoint = http.createServer((req, res) => {
           text.includes('SETTINGS-WINDOW-BEGIN') && text.includes('SETTINGS-WINDOW-END')
           && /truncated/i.test(text) && !text.includes('SETTINGS-WINDOW-MIDDLE'));
       }
+      const sampleOutput = value.input.find(item => item.type === 'function_call_output' && item.call_id === 'call_sdk_presentation');
+      if (sdkSample && sampleOutput && value.client_metadata?.thread_id === sdkSample.threadId) {
+        const parts = strings(sampleOutput.output);
+        observation.sdkSampleExact = parts.some(part => part.includes(sdkSample.expectedText));
+        observation.sdkSampleTruncated = parts.some(part => part.includes(sdkSample.expectedText.slice(0, 16))
+          && part.includes(sdkSample.expectedText.slice(-16)) && /truncated/i.test(part)
+          && !part.includes(sdkSample.expectedText.slice(1950, 1982)));
+      }
       const id = 'resp_fixture_'+receipt.modelRequests.indexOf(observation);
       const events = [{ type: 'response.created', response: { id } }];
       if (phase === 'truncation' && observation.truncationUserTurn
@@ -182,6 +193,17 @@ const endpoint = http.createServer((req, res) => {
           events.push({ type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: 'msg_'+id,
             content: [{ type: 'output_text', text: 'Real scode mailbox handled and acknowledged.' }] } });
         }
+      } else if (sdkSample && !sdkCallIssued && observation.exactDeliverySeen && phase === 'delivery'
+          && value.client_metadata?.thread_id === sdkSample.threadId
+          && value.input.some(item => item.type === 'function_call_output' && item.call_id === 'call_fixture_window')) {
+        const namespace = value.tools.find(entry => entry.type === 'namespace' && entry.name === 'mcp__nexus_scode');
+        const tool = namespace?.tools.find(entry => entry.name === 'scode_inbox')
+          ?? value.tools.find(entry => entry.name === 'mcp__nexus_scode__scode_inbox');
+        assert(tool && expectedDelivery.includes(sdkSample.read), 'The native model must receive the prepared SDK read');
+        sdkCallIssued = true;
+        events.push({ type: 'response.output_item.done', item: { type: 'function_call', id: 'fc_sdk_presentation',
+          call_id: 'call_sdk_presentation', ...(namespace ? { namespace: namespace.name } : {}),
+          name: tool.name, arguments: JSON.stringify({ read: sdkSample.read }) } });
       } else {
         events.push({ type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: 'msg_'+id,
           content: [{ type: 'output_text', text: 'Isolated native mailbox presentation completed.' }] } });
@@ -281,10 +303,10 @@ const endpoint = http.createServer((req, res) => {
           native: { codexArgv: [options.codex], socket, env }, auditLog, stateDirectory: path.join(root, 'sdk-state'),
           peers: [], peerPolicy: 'node-namespace', endpoint: { port, token: crypto.randomBytes(32).toString('hex') },
           enrollmentArgv: [process.execPath, '-e', 'process.exit(1)'] }), {flag:'wx',mode:0o600});
-        // Inspect registration only. The measured tool payload still comes
-        // from mailbox_probe. This owner cannot enroll or open an ACP receiver.
+        // The actual inbox can present one operator-prepared sample even while
+        // the private owner refuses to attach an ACP receiver.
         sdkOwner = runCodexMcpOwner(sdkRuntime, { encodedResultBytes: 4096, encodedSubmissionBytes: 4096,
-          qualified: async () => false });
+          qualified: async () => false }, sdkMeasurement);
         sdkOwner.catch(error => { sdkStartupError = error; });
         await wait(() => {
           if (sdkStartupError) throw sdkStartupError;
@@ -292,7 +314,7 @@ const endpoint = http.createServer((req, res) => {
         }, 5000, 'Packaged SDK owner observes its private native server');
         expectedGeneration = crypto.randomUUID();
         params.config['mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION'] = expectedGeneration;
-        params.config['mcp_servers.nexus_scode'] = sdkRegistration(expectedGeneration);
+        params.config['mcp_servers.nexus_scode'] = sdkRegistration(expectedGeneration, 64);
         if (coldSettingsResume) params.config.thread_unload_delay_secs = 0;
       }
       const started = await client.request('thread/start', params);
@@ -338,7 +360,7 @@ const endpoint = http.createServer((req, res) => {
         const resumed = await request('thread/resume', { threadId: settingsThread,
           config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 4096,
             'mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION': requestedGeneration,
-            'mcp_servers.nexus_scode': sdkRegistration(requestedGeneration) } });
+            'mcp_servers.nexus_scode': sdkRegistration(requestedGeneration, 4096) } });
         assert.equal(resumed.thread.id, settingsThread);
         const resumedRollout = fs.statSync(resumed.thread.path, { bigint: true });
         assert.deepEqual([resumedRollout.dev, resumedRollout.ino], [originalRollout.dev, originalRollout.ino],
@@ -406,6 +428,13 @@ const endpoint = http.createServer((req, res) => {
         const sdk = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'nexus_scode', detail: 'full' });
         assert.equal(sdk.data[0].serverInfo.description, 'SCode registration ' + expectedGeneration);
         receipt.resumeRegistration.actualSdkDescription = sdk.data[0].serverInfo.description;
+        await assert.rejects(sdkMeasurement.prepare(client, thread.id, crypto.randomUUID(), 4096), /no matching live/);
+        sdkSample = await sdkMeasurement.prepare(client, thread.id, expectedGeneration, 4096);
+        assert.equal(Buffer.byteLength(JSON.stringify({ content: [{ type: 'text', text: sdkSample.expectedText }] })), 4096);
+        const refused = await request('mcpServer/tool/call', { threadId: thread.id, server: 'nexus_scode', tool: 'scode_inbox',
+          arguments: { read: sdkSample.read, ack: ['private-fixture'] } });
+        assert.equal(refused.isError, true);
+        assert.equal(JSON.parse(refused.content[0].text).outcome, 'not_submitted');
       }
       receipt.settingsProbe = { diagnostics, executable, executableSha256: sha(executable),
         diskToolOutputTokens: 4096, threadStartOverrideToolOutputTokens: 64, configuration, inventory,
@@ -488,7 +517,7 @@ const endpoint = http.createServer((req, res) => {
       }
     }
     const budget = mailboxSubmissionTextBudget('fixture-actor', thread.id, encodedBound);
-    let text = 'OFFER-BEGIN-'+crypto.randomUUID()+'\n';
+    let text = 'OFFER-BEGIN-'+crypto.randomUUID()+'\n'+(sdkSample ? sdkSample.read+'\n' : '');
     while (Buffer.byteLength(text+'正文🙂"\\\n'+'OFFER-END') <= budget) text += '正文🙂"\\\n';
     text += 'OFFER-END'; expectedDelivery = CODEX_MAILBOX_DELIVERY_PROVENANCE+'\n'+text;
     if (wholeBudget) {
@@ -636,6 +665,7 @@ const endpoint = http.createServer((req, res) => {
     await wait(() => {
       if (endpointFailure) throw new Error(endpointFailure);
       return receipt.modelRequests.some(row => row.exactDeliverySeen)
+        && (!sdkSample || receipt.modelRequests.some(row => coldSettingsResume ? row.sdkSampleExact : row.sdkSampleTruncated))
         && (realMailboxCase ? realModelCompleted : settingsProbe && !coldSettingsResume
           ? receipt.modelRequests.some(row => row.truncatedWindowSeen) : receipt.modelRequests.some(row => row.exactWindowSeen));
     }, 20000, 'Native model receives exact offer and read-alone window');
@@ -701,6 +731,16 @@ const endpoint = http.createServer((req, res) => {
     assert(receipt.presentation.encodedSubmissionBytes <= encodedBound && receipt.presentation.encodedToolResultBytes <= encodedBound);
     if (wholeBudget) stage('actual-max-text-budget-preserved-with-json-escaping');
     if (settingsProbe) {
+      if (sdkSample) {
+        assert.equal(receipt.modelRequests.some(row => row.sdkSampleExact), coldSettingsResume);
+        assert.equal(receipt.modelRequests.some(row => row.sdkSampleTruncated), !coldSettingsResume);
+        const again = await request('mcpServer/tool/call', { threadId: thread.id, server: 'nexus_scode', tool: 'scode_inbox',
+          arguments: { read: sdkSample.read } });
+        assert(again.isError && JSON.parse(again.content[0].text).outcome === 'not_submitted');
+        receipt.sdkPresentation = { encodedResultBytes: sdkSample.encodedResultBytes,
+          registrationId: sdkSample.registrationId, connectionId: sdkSample.connectionId, actualThread: sdkSample.threadId,
+          completeAtModel: coldSettingsResume, truncatedAtModel: !coldSettingsResume, duplicateRefused: true };
+      }
       if (coldSettingsResume) {
         assert(receipt.modelRequests.some(row => row.exactWindowSeen), 'Cold-resumed original thread must present the complete tool output');
         assert(!receipt.modelRequests.some(row => row.truncatedWindowSeen));

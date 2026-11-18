@@ -464,7 +464,7 @@ def compiler_cache_profiles():
 def prepare_compiler_cache(output):
     """Bind the separate cache implementation before loading or executing it."""
     contents = Path(__file__).with_name("compiler_cache.py").read_bytes().replace(b"\r\n", b"\n")
-    if hashlib.sha256(contents).hexdigest() != "afad13b1c6b76b34aea48d4e9e9183afb5275b846ebb032c4dd52a4b238b975c":
+    if hashlib.sha256(contents).hexdigest() != "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1":
         raise RuntimeError(f"Compiler-cache input {Path(__file__).with_name('compiler_cache.py')} changed: "
                            f"SHA256 {hashlib.sha256(contents).hexdigest()}. Update the reviewed source pin in "
                            "prepare_compiler_cache, then rerun the original supported contract-update command. "
@@ -1176,7 +1176,7 @@ def native_guard_files():
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
-        ".github/local-acceptance/compiler_cache.py": "afad13b1c6b76b34aea48d4e9e9183afb5275b846ebb032c4dd52a4b238b975c",
+        ".github/local-acceptance/compiler_cache.py": "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1",
         "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
@@ -1186,7 +1186,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "6a8da138579a69c42d677d6255b086c1e1013ed06c4dd4ad8ae51c7a41a54522",
+        ".github/scripts/ci_input_scope.py": "596c94e1ca945e0492c108f5ecf92b642e2be9ddfa87ff8ab9f6db0bfa8ce8b5",
         ".github/workflows/rust-ci.yml": "2d89ef53d1728b32b7f9dd0a141896b421f85849fb8aabc28671cae4895bfa84",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1201,7 +1201,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "282e0f3ca36b5224e61bed1bf92b9dcad4a69d968180467113f9882c36eb3c9d",
+        ".github/scripts/local_acceptance.py": "dd1ca3c0bc689bc1ecf89d2a7f39f40c0292a35c1b0471487afa3adcdd2f7b70",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
@@ -1210,7 +1210,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/deferred_push_acceptance.py": "20de3c037f380831a5ae2b47cefb94bda3f8a519d425cfe0e1272c4a64284da4",
+        "e2e/local-acceptance/deferred_push_acceptance.py": "35486dbd718f9f4236811d23d32d82a9771b02a54d34bc9477bd5b0c7b39616d",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "4fe0969d5ad3b2e37e03de615ad69ba1b484f61e48a24b02e03473a050286d8b",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
@@ -1285,7 +1285,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '1814e3a28c429e359559de828f24cf6b7b626b9c36102c4330da4c3dcae80aa6', 'native-context': '8c0b7b69b4d0d2eee3169f461c5ca2312cb0479b65af94e6476ad7fdcfc69300', 'native-services': '29cf227090038951698281062ed891b19b7a37922ac0f85973595065ebe65916'}
+    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': 'cb0c5ee358360bfc092c9e6e1c8b56f14f36e367d2a0c0c4e60125239c769e75'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

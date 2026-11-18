@@ -9,7 +9,9 @@ and the background finalization request is made without credentials, so no
 call reaches GitHub. This grants no product journey coverage.
 """
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -132,6 +134,7 @@ def exercise(output, spawned):
         'import os,time\nfrom pathlib import Path\n'
         'control=Path(os.environ["SCODE_DEFERRED_FIXTURE_CONTROL"])\n'
         'source=Path("input.txt").read_text()\n'
+        'if source=="fail": raise SystemExit(3)\n'
         '(control/("started-"+source)).write_text(str(os.getpid()))\n'
         'deadline=time.monotonic()+90\n'
         'while not (control/("release-"+source)).exists():\n'
@@ -231,6 +234,27 @@ def exercise(output, spawned):
     assert receipt and receipt["attestations"], text
     assert f"requesting trusted finalization for PR #7 at {second[:12]}" in text, text
     assert remote_note(helper.NOTE_REF, first) is None, "a superseded head publishes no receipt"
+    # The outcome is recorded beside the log: verified, but this fixture has no
+    # credentials, so the finalization request failed and doctor says so.
+    result = json.loads(helper.deferred_result_path(log).read_text(encoding="utf-8"))
+    assert result["outcome"] == "verified" and result["finalization"].startswith("failed"), result
+    state, healthy = helper.deferred_status(second_record)
+    assert not healthy and "finalization was not requested" in state, state
+
+    # A failing check is not silent: the next push and doctor both report it.
+    third = commit("fail")
+    announced = io.StringIO()
+    with contextlib.redirect_stdout(announced):
+        helper.defer_check(third, "origin", ready, trusted)
+    assert f"the earlier check for {second[:12]} passed and published" in announced.getvalue(), announced.getvalue()
+    third_record = record()
+    wait_for(lambda: finished(third_record["pid"]), "the failing check to finish", timeout=300)
+    failed = json.loads(helper.deferred_result_path(third_record["log"]).read_text(encoding="utf-8"))
+    assert failed["outcome"] == "failed" and failed["finalization"] == "not requested", failed
+    assert remote_note(helper.NOTE_REF, third) is None, "a failed check publishes no receipt"
+    listed = helper.deferred_findings()
+    assert any(name.startswith(f"deferred source {third[:12]}") and not ok and "FAILED" in detail
+               for name, ok, detail in listed), listed
 
     # Compiler cache: a server that never answers the probe means original Cargo.
     cache = load("deferred_compiler_cache", SOURCE / ".github/local-acceptance/compiler_cache.py")
@@ -246,12 +270,43 @@ def exercise(output, spawned):
         assert time.monotonic() - began < 15, "the probe is bounded"
         (Path(scratch) / "probe/rustc").write_text("")
         assert session.answers_probe() is True
-        session.owned_servers = lambda marker=None: []
+        # Every probe is a new source, so it is a cache miss that reaches storage.
+        sources = [(Path(scratch) / "probe/probe.rs").read_text(encoding="utf-8")]
+        assert session.answers_probe() is True
+        sources.append((Path(scratch) / "probe/probe.rs").read_text(encoding="utf-8"))
+        assert sources[0] != sources[1] and all("SCODE_CACHE_PROBE" in text for text in sources), sources
+
+        class Wedged:
+            """A server that ignores terminate: fall_back kills it instead of raising."""
+            killed = False
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                raise psutil.TimeoutExpired(timeout)
+
+            def kill(self):
+                Wedged.killed = True
+
+        session.owned_servers = lambda marker=None: [Wedged()]
         session.fall_back("fixture server did not answer")
-        assert session.disabled
+        assert session.disabled and Wedged.killed
+
+        # doctor: a store at its cap with no recent write is reported with the fix.
+        store = Path(scratch) / "stores" / "0.19.0"
+        store.mkdir(parents=True)
+        (store / "object").write_bytes(b"x" * 100)
+        os.utime(store / "object", (time.time() - 3 * 86400, time.time() - 3 * 86400))
+        (name, ok, detail), = helper.compiler_store_findings(store.parent, capacity=100)
+        assert name == "compiler store 0.19.0" and not ok and "move" in detail, detail
+        os.utime(store / "object")
+        assert helper.compiler_store_findings(store.parent, capacity=100)[0][1], "a store still taking writes is fine"
+        assert helper.compiler_store_findings(store.parent)[0][1], "a store below its cap is fine"
     print("DEFERRED_PUSH_ACCEPTANCE=" + json.dumps({"plan_before_push": True, "superseded": True,
                                                      "same_head_kept": True, "receipt_published": True,
-                                                     "blocking_kept": True, "cache_probe": True}))
+                                                     "blocking_kept": True, "cache_probe": True,
+                                                     "failure_reported": True}))
 
 
 if __name__ == "__main__":

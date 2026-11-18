@@ -528,17 +528,25 @@ class Session:
 
     def fall_back(self, reason):
         """Retire this invocation's own server and run original Cargo from here on."""
+        import psutil
+
         for process in self.owned_servers():
             process.terminate()
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                process.kill()
         self.disabled = True
         print(f"COMPILER_CACHE: {reason}; preserving original Cargo for this invocation.", flush=True)
 
     def answers_probe(self):
-        """Compile one empty library through this session's own server."""
+        """Compile one fresh library through this session's own server. A wedged
+        server can still answer cache hits, so the source is new every time and
+        the compile is always a miss that must reach storage."""
         probe = self.directory / "probe"
         probe.mkdir(exist_ok=True)
-        (probe / "probe.rs").write_text("", encoding="utf-8")
+        (probe / "probe.rs").write_text(f'pub const SCODE_CACHE_PROBE: &str = "{uuid.uuid4().hex}";' + "\n",
+                                        encoding="utf-8")
         try:
             result = subprocess.run([self.tool["executable"], "rustc", "--crate-name", "compiler_cache_probe",
                                      "--crate-type", "lib", "--emit", "metadata", "--out-dir", str(probe),

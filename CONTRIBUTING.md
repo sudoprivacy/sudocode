@@ -233,10 +233,14 @@ head stops the check for the older one. The required `Local acceptance` status
 stays pending, and merge stays blocked, until that check publishes its signed
 receipt and requests trusted finalization. A first push, a draft PR, a branch
 without complementary native hosts and `SCODE_ACCEPTANCE_PUSH=blocking` keep
-verifying before the push. `python .github/scripts/local_acceptance.py doctor`
-lists this host's prerequisites (Python modules, the signing key's sign/verify
-round trip, gh, PowerShell 7, the MSVC toolchain, the compiler cache and
-Docker) with the fix for each; it grants no acceptance. The checks themselves
+verifying before the push. A background check records its outcome beside its
+log; the next push to that branch and `doctor` report one that failed, ended
+without a result or could not request finalization.
+`python .github/scripts/local_acceptance.py doctor` lists this host's
+prerequisites (Python modules, the signing key's sign/verify round trip, gh,
+PowerShell 7, the MSVC toolchain, the compiler cache and each shared compiler
+store's size and last write, and Docker) with the fix for each; it grants no
+acceptance. The checks themselves
 also verify the MSVC toolchain and Docker before joining the host queue, and a
 compiler-cache server that does not answer a probe compile within 2 minutes is
 replaced by plain Cargo for that run.

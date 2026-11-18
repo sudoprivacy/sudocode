@@ -2751,6 +2751,10 @@ def stop_superseded(state, head):
         return False
     if record["head"] == head:
         return True
+    if os.name != "nt":
+        # start_new_session made the check its own process group leader.
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, 9)
     for child in process.children(recursive=True)[::-1] + [process]:
         with contextlib.suppress(psutil.NoSuchProcess):
             child.kill()
@@ -2776,6 +2780,11 @@ def defer_check(head, remote, pull, trusted):
     publish_plan(head, trusted, remote, plan_output)
     state = deferred_state(branch)
     state.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError, ValueError):
+        previous = json.loads((state / "deferred.json").read_text(encoding="utf-8"))
+        ended, healthy = deferred_status(previous)
+        if not healthy:
+            print(f"LOCAL_ACCEPTANCE_DEFERRED: the earlier check for {previous['head'][:12]} {ended}", flush=True)
     if stop_superseded(state, head):
         print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
               f"see {state / 'deferred.json'}", flush=True)
@@ -2814,6 +2823,56 @@ def defer_check(head, remote, pull, trusted):
     }).decode(), flush=True)
 
 
+def deferred_result_path(log):
+    return Path(log).with_name(Path(log).name.removesuffix(".log") + ".result.json")
+
+
+def record_deferred_result(args, outcome, finalization, error=None):
+    """Leave the background check's outcome beside its log for doctor and the next push."""
+    log = Path(args.output).with_name(Path(args.output).name + ".log")
+    deferred_result_path(log).write_bytes(canonical({
+        "head": value("rev-parse", args.head or "HEAD"), "pr": args.dispatch_publish, "outcome": outcome,
+        "finalization": finalization, "error": None if error is None else str(error)[-2000:],
+        "finished_at": time.time()}))
+
+
+def deferred_status(record):
+    """(state, healthy) of the check a deferred.json record started."""
+    import psutil
+
+    log = Path(record["log"])
+    with contextlib.suppress(psutil.NoSuchProcess, KeyError):
+        process = psutil.Process(record["pid"])
+        # A finished check stays a zombie only while its starter still runs.
+        if process.create_time() == record["started"] and process.status() != psutil.STATUS_ZOMBIE:
+            return f"is still running; log {log}", True
+    with contextlib.suppress(OSError, ValueError):
+        superseded = json.loads(log.with_suffix(".superseded.json").read_text(encoding="utf-8"))
+        return f"was stopped for {superseded['superseded_by'][:12]}", True
+    try:
+        result = json.loads(deferred_result_path(log).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"ended without recording a result; Local acceptance stays pending. See {log}", False
+    if result["outcome"] != "verified":
+        reason = next(reversed((result.get("error") or "unknown error").splitlines()), "unknown error")
+        return f"FAILED ({reason}); Local acceptance stays pending until a new head passes. See {log}", False
+    if result["finalization"] != "requested":
+        return (f"passed and published its receipt, but finalization was not requested ({result['finalization']}). "
+                f"Run `gh workflow run local-acceptance-publish.yml -f pr={record['pr']} -f head={record['head']}`"), False
+    return "passed; trusted finalization was requested", True
+
+
+def deferred_findings():
+    """One line per branch with a deferred check from this host."""
+    findings = []
+    for path in sorted((Path.home() / ".nexus/local-acceptance/deferred").glob("*/deferred.json")):
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            state, healthy = deferred_status(record)
+            findings.append((f"deferred {record['branch']} {record['head'][:12]} (PR #{record['pr']})", healthy, state))
+    return findings
+
+
 def dispatch_publish(pr, head, policy_ref):
     """Ask the trusted publisher to read the receipt just published for `head`."""
     repository = load_policy(policy_ref)["repository"]
@@ -2822,6 +2881,29 @@ def dispatch_publish(pr, head, policy_ref):
     github_api(f"repos/{repository}/actions/workflows/local-acceptance-publish.yml/dispatches",
                {"ref": "main", "inputs": {"pr": str(pr), "head": head}})
     print(f"LOCAL_ACCEPTANCE: trusted finalization requested for PR #{pr}.", flush=True)
+
+
+def compiler_store_findings(root, capacity=2147483648, stale=86400):
+    """Each shared compiler store's size against its cap and its newest write.
+    A store at its cap that has stopped taking writes wedged cold compiles on
+    2026-11-17; a probe through a scratch store cannot see that."""
+    findings = []
+    for store in sorted(path for path in root.glob("*") if path.is_dir() and not path.name.endswith(".control")):
+        size, newest = 0, 0.0
+        for directory, _, files in os.walk(store):
+            for name in files:
+                with contextlib.suppress(OSError):
+                    info = os.stat(os.path.join(directory, name))
+                    size, newest = size + info.st_size, max(newest, info.st_mtime)
+        age = time.time() - newest if newest else None
+        wedged = size >= 0.95 * capacity and (age is None or age > stale)
+        written = "never written" if age is None else f"last write {age / 3600:.1f} h ago"
+        findings.append((f"compiler store {store.name}", not wedged,
+                         f"{size / 1024**3:.2f} of {capacity / 1024**3:.0f} GiB, {written}" + (
+                             "; it is full and no longer taking writes, which can hang cold compiles. With no "
+                             f"acceptance running, move {store} aside (reversible); the next check starts a fresh store"
+                             if wedged else "")))
+    return findings
 
 
 def host_findings(names=None):
@@ -2891,6 +2973,7 @@ def host_findings(names=None):
                              "install the Visual Studio C++ build tools, or set "
                              "`git config localAcceptance.vsdevcmd <path to VsDevCmd.bat>`"))
     if names is None:
+        findings.extend(compiler_store_findings(Path.home() / ".cache/sudocode-local-acceptance/compiler-objects"))
         prepared = sorted((Path.home() / ".cache/sudocode-local-acceptance/tools/sccache").glob("*/*/sccache*"))
         tool = next((path for path in prepared if path.name in {"sccache", "sccache.exe"}), None)
         if tool is None:
@@ -2927,6 +3010,9 @@ def doctor(args):
     findings = host_findings()
     for name, ok, detail in findings:
         print(f"{'ok ' if ok else 'fix'} {name}: {detail}", flush=True)
+    # Background checks are reported, not counted as host readiness.
+    for name, ok, detail in deferred_findings():
+        print(f"{'ok ' if ok else 'see'} {name}: {detail}", flush=True)
     failed = [name for name, ok, _ in findings if not ok]
     if failed:
         raise RuntimeError("fix " + ", ".join(failed) + " before running local acceptance")
@@ -3318,9 +3404,20 @@ def main():
         elif args.operation == "check":
             if args.policy_ref == "origin/main":
                 args.policy_ref = authorized_policy(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
-            check(args)
-            if args.dispatch_publish:
-                dispatch_publish(args.dispatch_publish, value("rev-parse", args.head or "HEAD"), args.policy_ref)
+            if not args.dispatch_publish:
+                check(args)
+            else:
+                try:
+                    check(args)
+                except BaseException as error:
+                    record_deferred_result(args, "failed", "not requested", error)
+                    raise
+                try:
+                    dispatch_publish(args.dispatch_publish, value("rev-parse", args.head or "HEAD"), args.policy_ref)
+                except BaseException as error:
+                    record_deferred_result(args, "verified", f"failed: {error}")
+                    raise
+                record_deferred_result(args, "verified", "requested")
         elif args.operation == "doctor":
             doctor(args)
         elif args.operation == "index-output":

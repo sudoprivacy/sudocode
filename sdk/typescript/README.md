@@ -797,6 +797,15 @@ loaded thread's 64-token override truncated the middle of the model-facing
 tool result. Its thread-specific MCP inventory did not report the effective
 limit. These observations cannot supply production mailbox admission.
 
+`native-settings-warm-resume` and `native-settings-cold-resume` request a new
+MCP registration generation and a 4096-token tool limit on the same existing
+private thread. Both check the original seed turn, the physical rollout file,
+the active registration reported by native Codex, and the tool text in the
+model request. On Windows 0.169.0 the subscribed thread retained its old
+registration and 64-token limit. After the private thread unloaded, the
+same-thread resume applied the requested generation and presented the full
+4162-byte tool text. The fixture changes only its private home.
+
 `real-mailbox-truncation` sets a deliberately small 256-token native tool limit
 in its private home. An explicit fixture user turn reads five real scode frames;
 their combined offer must lose its middle in the actual model request. Each

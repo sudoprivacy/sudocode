@@ -15,7 +15,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (request.method === 'initialize') {
     record({ method: request.method, params: request.params });
     result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} },
-      serverInfo: { name: 'mailbox-presentation-fixture', version: '1' } };
+      serverInfo: { name: 'mailbox-presentation-fixture', version: process.env.NATIVE_MAILBOX_FIXTURE_GENERATION || '1' } };
   } else if (request.method === 'tools/list') {
     result = { tools: [{ name: 'scode_inbox', description: 'Read the next isolated mailbox fixture window.',
       inputSchema: { type: 'object', properties: { read: { type: 'string' } }, required: ['read'], additionalProperties: false } }] };

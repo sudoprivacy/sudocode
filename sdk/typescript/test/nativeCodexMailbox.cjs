@@ -17,11 +17,13 @@ const options = parseArgs({ options: { codex: { type: 'string' }, scode: { type:
   driver: { type: 'string' }, 'process-probe': { type: 'string' }, 'temp-root': { type: 'string' },
   'previous-scode': { type: 'string' },
   case: { type: 'string', default: 'idle' } } }).values;
-assert(['idle', 'active-reply-loss', 'interrupted', 'request-loss-budget', 'owner-crash-budget', 'whole-budget', 'real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation', 'native-settings-probe'].includes(options.case));
+assert(['idle', 'active-reply-loss', 'interrupted', 'request-loss-budget', 'owner-crash-budget', 'whole-budget', 'real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation', 'native-settings-probe', 'native-settings-warm-resume', 'native-settings-cold-resume'].includes(options.case));
 const realMailboxCase = ['real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation'].includes(options.case);
 const realMailboxBurst = options.case === 'real-mailbox-burst';
 const realMailboxTruncation = options.case === 'real-mailbox-truncation';
-const settingsProbe = options.case === 'native-settings-probe';
+const coldSettingsResume = options.case === 'native-settings-cold-resume';
+const settingsResume = coldSettingsResume || options.case === 'native-settings-warm-resume';
+const settingsProbe = settingsResume || options.case === 'native-settings-probe';
 if (realMailboxCase) assert(options.scode && path.isAbsolute(options.scode) && fs.statSync(options.scode).isFile());
 const previousScode = options['previous-scode'];
 if (previousScode !== undefined) {
@@ -258,9 +260,15 @@ const endpoint = http.createServer((req, res) => {
       catch (error) { row.error = String(error); throw error; }
     };
     let settingsThread;
+    let expectedGeneration;
     if (settingsProbe) {
       const params = { cwd: work, threadSource: 'user',
         config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 64 } };
+      if (settingsResume) {
+        expectedGeneration = crypto.randomUUID();
+        params.config['mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION'] = expectedGeneration;
+        if (coldSettingsResume) params.config.thread_unload_delay_secs = 0;
+      }
       const started = await client.request('thread/start', params);
       settingsThread = started.thread.id;
       receipt.fixtureActions.push({ method: 'thread/start', params, result: started });
@@ -269,9 +277,46 @@ const endpoint = http.createServer((req, res) => {
       receipt.fixtureActions.push({ method: 'turn/start', params: seedParams, result: seed });
       await wait(async () => {
         if (endpointFailure) throw new Error(endpointFailure);
+        if (!receipt.notifications.some(event => event.method === 'turn/completed'
+            && event.params?.threadId === settingsThread && event.params.turn?.id === seed.turn.id)) return false;
         return (await request('thread/read', { threadId: settingsThread, includeTurns: true })).thread.turns
           .some(turn => turn.id === seed.turn.id && turn.status === 'completed');
       }, 10000, 'Private API-created root completes seed before CLI resume');
+      if (settingsResume) {
+        const status = async () => {
+          const list = await request('mcpServerStatus/list', { threadId: settingsThread, serverName: 'mailbox_probe', detail: 'full' });
+          assert.equal(list.data.length, 1);
+          assert.equal(list.data[0].runtimeStatus, 'connected');
+          return list.data[0].serverInfo.version;
+        };
+        assert.equal(await status(), expectedGeneration, 'Original native registration reports its launch generation');
+        const originalGeneration = expectedGeneration;
+        const originalRollout = fs.statSync(started.thread.path, { bigint: true });
+        assert(originalRollout.isFile() && originalRollout.ino !== 0n);
+        if (coldSettingsResume) {
+          await request('thread/unsubscribe', { threadId: settingsThread });
+          await wait(async () => {
+            const loaded = await request('thread/loaded/list', {});
+            assert.equal(loaded.nextCursor, null);
+            return !loaded.data.includes(settingsThread);
+          }, 10000, 'The original private thread unloads after its last subscriber leaves');
+        }
+        const requestedGeneration = crypto.randomUUID();
+        const resumed = await request('thread/resume', { threadId: settingsThread,
+          config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 4096,
+            'mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION': requestedGeneration } });
+        assert.equal(resumed.thread.id, settingsThread);
+        const resumedRollout = fs.statSync(resumed.thread.path, { bigint: true });
+        assert.deepEqual([resumedRollout.dev, resumedRollout.ino], [originalRollout.dev, originalRollout.ino],
+          'Resume must select the same physical rollout file');
+        assert(resumed.thread.turns.some(turn => turn.id === seed.turn.id), 'Existing seed turn survived resume');
+        if (coldSettingsResume) expectedGeneration = requestedGeneration;
+        const observedGeneration = await status();
+        assert.equal(observedGeneration, expectedGeneration, 'Native reports the registration in use on the original thread');
+        receipt.resumeRegistration = { originalGeneration, requestedGeneration, observedGeneration, seedTurnId: seed.turn.id,
+          originalThread: settingsThread, resumedThread: resumed.thread.id, unloadedBeforeResume: coldSettingsResume };
+        stage('existing-thread-registration-after-resume');
+      }
     }
     const tuiAction = settingsProbe ? ['resume', settingsThread] : ['Reply with the isolated fixture seed.'];
     tui = spawn(driverArgv[0], [...driverArgv.slice(1), options.codex, '--no-alt-screen', '--cd', work, ...tuiAction],
@@ -322,6 +367,7 @@ const endpoint = http.createServer((req, res) => {
       assert(executableRows.some(file => fs.realpathSync(file) === executable), 'Diagnostics PID must map to the measured native executable');
       const configuration = await request('config/read', { cwd: work, includeLayers: true });
       const inventory = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'mailbox_probe', detail: 'full' });
+      if (settingsResume) assert.equal(inventory.data[0].serverInfo.version, expectedGeneration);
       receipt.settingsProbe = { diagnostics, executable, executableSha256: sha(executable),
         diskToolOutputTokens: 4096, threadStartOverrideToolOutputTokens: 64, configuration, inventory,
         boundary: 'Read-only loaded-thread settings diagnosis; no production admission or real mailbox ACK claim.' };
@@ -551,7 +597,7 @@ const endpoint = http.createServer((req, res) => {
     await wait(() => {
       if (endpointFailure) throw new Error(endpointFailure);
       return receipt.modelRequests.some(row => row.exactDeliverySeen)
-        && (realMailboxCase ? realModelCompleted : settingsProbe
+        && (realMailboxCase ? realModelCompleted : settingsProbe && !coldSettingsResume
           ? receipt.modelRequests.some(row => row.truncatedWindowSeen) : receipt.modelRequests.some(row => row.exactWindowSeen));
     }, 20000, 'Native model receives exact offer and read-alone window');
     let after;
@@ -616,12 +662,15 @@ const endpoint = http.createServer((req, res) => {
     assert(receipt.presentation.encodedSubmissionBytes <= encodedBound && receipt.presentation.encodedToolResultBytes <= encodedBound);
     if (wholeBudget) stage('actual-max-text-budget-preserved-with-json-escaping');
     if (settingsProbe) {
-      assert(!receipt.modelRequests.some(row => row.exactWindowSeen), 'Loaded thread must use its small override');
-      receipt.presentation.byteExactWindowRequired = false;
-      receipt.settingsProbe.actualWindowTruncated = true;
+      if (coldSettingsResume) {
+        assert(receipt.modelRequests.some(row => row.exactWindowSeen), 'Cold-resumed original thread must present the complete tool output');
+        assert(!receipt.modelRequests.some(row => row.truncatedWindowSeen));
+      } else assert(!receipt.modelRequests.some(row => row.exactWindowSeen), 'Loaded thread must use its small override');
+      receipt.presentation.byteExactWindowRequired = coldSettingsResume;
+      receipt.settingsProbe.actualWindowTruncated = !coldSettingsResume;
       receipt.settingsProbe.observedConfigToolOutputTokens = receipt.settingsProbe.configuration.config
         ?.mcp_servers?.mailbox_probe?.tools?.scode_inbox?.output_token_limit ?? null;
-      stage('actual-thread-override-truncates-tool-output');
+      stage(coldSettingsResume ? 'actual-cold-resume-preserves-complete-tool-output' : 'actual-thread-override-truncates-tool-output');
     } else stage('actual-native-byte-exact-presentation-and-history');
     receipt.status = settingsProbe ? 'PASS_NATIVE_SETTINGS_DIAGNOSIS_ONLY'
       : realMailboxBurst ? 'PASS_NATIVE_REAL_SCODE_FIVE_FRAME_BURST_ONLY'

@@ -8,6 +8,7 @@ on:
       - rust-toolchain.toml
       - .github/actions/rust-toolchain/**
       - .github/scripts/vfs_search_cache.py
+      - .github/scripts/vfs_search_publication.py
       - .github/ci/cohost-plugin-crypto.toml
       - .github/actions/vfs-search-cache/**
       - .github/workflows/ci-vfs-search-cache.yml
@@ -18,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   fixed-drivers:
@@ -31,6 +33,49 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
+      - name: Resolve the accepted queue compiler producer
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/vfs_search_publication.py select --output "$RUNNER_TEMP/vfs-compiler-publication"
+      - name: Look up the producer's original exact image key
+        if: steps.producer.outputs.available == 'true'
+        id: original
+        uses: actions/cache/restore@v4
+        with:
+          path: .native-vfs
+          key: ${{ steps.producer.outputs.key }}
+          lookup-only: true
+      - name: Download the accepted queue compiler archive
+        if: steps.producer.outputs.archive == 'true' && steps.original.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.producer.outputs.artifact_id }}
+          run-id: ${{ steps.producer.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/vfs-compiler-data
+          merge-multiple: true
+      - name: Verify data and the still-current producer without executing imported code
+        if: steps.producer.outputs.archive == 'true' && steps.original.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 .github/scripts/vfs_search_publication.py import
+          --output "$RUNNER_TEMP/vfs-compiler-publication" --data "$RUNNER_TEMP/vfs-compiler-data"
+      - name: Publish only the producer's original exact compiler inputs
+        if: steps.producer.outputs.archive == 'true' && steps.original.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .native-vfs
+          key: ${{ steps.producer.outputs.key }}
       - uses: ./.github/actions/vfs-search-cache
+        if: steps.producer.outputs.available != 'true' || (steps.original.outputs.cache-hit != 'true' && steps.producer.outputs.archive != 'true')
         with:
           publish: 'true'
+      - name: Retain the original producer and publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfs-compiler-publication
+          path: ${{ runner.temp }}/vfs-compiler-publication
+          if-no-files-found: error

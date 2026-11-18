@@ -151,11 +151,13 @@ def scope_acceptance(directory):
              ("rust/crates/runtime/src/response_archive/gzip.rs", True, True, True),
              ("e2e/response-gzip/main.rs", False, False, False),
              (".github/scripts/vfs_search_cache.py", False, True, False),
+             (".github/scripts/vfs_search_publication.py", False, True, False),
              (".github/actions/vfs-search-cache/action.yml", False, True, False),
              (".github/actions/vfs-search-cache/functional.toml", False, True, False),
              (".github/ci/cohost-plugin-crypto.toml", False, True, False),
              (".github/workflows/ci-vfs-search-cache.yml", False, True, False),
-             ("e2e/local-acceptance/vfs_search_cache_acceptance.py", False, False, False)]
+             ("e2e/local-acceptance/vfs_search_cache_acceptance.py", False, False, False),
+             ("e2e/local-acceptance/vfs_search_publication_acceptance.py", False, False, False)]
     for index, (path, live, daemon, clippy) in enumerate(cases):
         base = command("git", "rev-parse", "HEAD", cwd=repository)
         file = repository / path
@@ -197,12 +199,14 @@ def scope_acceptance(directory):
                 ".github/scripts/local_acceptance.py", "rust/crates/runtime/src/response_archive.rs",
                 "rust/crates/runtime/src/response_archive/gzip.rs", "e2e/response-gzip/main.rs"}, vfs_cache=path in {
                 ".github/workflows/rust-ci.yml", ".github/scripts/ci_input_scope.py", ".github/scripts/vfs_search_cache.py",
+                ".github/scripts/vfs_search_publication.py",
                 ".github/actions/vfs-search-cache/action.yml", ".github/actions/vfs-search-cache/functional.toml",
                 ".github/ci/cohost-plugin-crypto.toml", ".github/workflows/ci-vfs-search-cache.yml",
-                "e2e/local-acceptance/vfs_search_cache_acceptance.py"},
+                "e2e/local-acceptance/vfs_search_cache_acceptance.py", "e2e/local-acceptance/vfs_search_publication_acceptance.py"},
                 cohost=False if path == ".github/local-acceptance/checks.py" else None,
                 a2a=daemon and path not in {
-                ".github/scripts/vfs_search_cache.py", ".github/actions/vfs-search-cache/action.yml",
+                ".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
+                ".github/actions/vfs-search-cache/action.yml",
                 ".github/actions/vfs-search-cache/functional.toml",
                 ".github/workflows/ci-vfs-search-cache.yml"})
             if path == ".github/scripts/ci_input_scope.py":

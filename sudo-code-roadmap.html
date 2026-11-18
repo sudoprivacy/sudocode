@@ -2340,9 +2340,12 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       <code>cargo test</code> to compile and execute the original case; the required
       command refuses an extra pre-test build that switches plugin variants.
       Real Git/Cargo/tar/native fixtures refuse altered source and wrong runtimes.</td>
-      <td>Coverage unchanged; cached compiler outputs never replace the real
+      <td>Functional cases, assertions and deadlines unchanged; cached compiler outputs never replace the real
       journey or authorize reuse of a passing result. Infrastructure fixtures add
-      no product journey credit. Cache footprint and cold/warm product measurements
+      no product journey credit. Ordinary optimized fixed-driver/plugin artifact
+      coverage is reduced: this functional run supplies no replacement proof for
+      optimization-specific behavior. The candidate co-host and existing
+      release/performance gates remain unchanged. Cache footprint and cold/warm product measurements
       are required before a lifecycle speedup claim. The original PR1493 hosted
       lint fixture missed every compiler during a real 0.08s clean build and failed
       its priority assertion before VFS acceptance. Its private launch witness now

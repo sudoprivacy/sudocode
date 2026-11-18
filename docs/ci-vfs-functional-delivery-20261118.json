@@ -25,6 +25,8 @@
     "sharedSelectedCryptoOptLevel": 2,
     "candidateCohostAndReleasePerformanceProfilesUnchanged": true,
     "originalCargoCommandArgumentsCaseAssertionsAnd90sBoundsUnchanged": true,
+    "ordinaryOptimizedFixedDriverPluginCoverageReduced": true,
+    "noReplacementProofForOptimizationSpecificDriverPluginBehavior": true,
     "workerAndRetrySettingsUnchanged": true,
     "compilerProfileSourcesAndConfigurationBytesBoundIntoCacheKey": true,
     "optimizedLegacyAndUnboundNonemptyTargetsRefused": true,

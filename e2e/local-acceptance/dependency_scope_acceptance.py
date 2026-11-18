@@ -533,6 +533,212 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     return result
 
 
+def policy_fixture_scope(output, environment):
+    """Exercise the actual selector against real committed policy inputs."""
+    output.mkdir(parents=True)
+    repository = output / "r"
+    repository.mkdir()
+    environment = {key: value for key, value in environment.items()
+                   if not key.upper().startswith(("GIT_", "GITHUB_"))
+                   and key.upper() not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                       PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+    if os.name == "nt":
+        bash = git_for_windows_bash(environment.get("PATH"))
+        if not bash:
+            raise RuntimeError("The real scanner control requires Git for Windows Bash")
+        environment["PATH"] = str(Path(bash).parent) + os.pathsep + environment["PATH"]
+    commands, cases = [], []
+
+    def command(label, argv, *, expected=0, env=None):
+        result = subprocess.run(list(map(str, argv)), cwd=repository,
+                                env=env or environment, capture_output=True)
+        prefix = output / f"{len(commands):03}-{label}"
+        prefix.with_suffix(".stdout").write_bytes(result.stdout)
+        prefix.with_suffix(".stderr").write_bytes(result.stderr)
+        commands.append({"label": label, "argv": list(map(str, argv)),
+                         "exit_code": result.returncode,
+                         "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+                         "stderr_sha256": hashlib.sha256(result.stderr).hexdigest()})
+        assert (result.returncode == 0) == (expected == 0), (label, result.stdout, result.stderr)
+        return result
+
+    def git(*args):
+        return command("git", ["git", *args]).stdout.decode().strip()
+
+    selector = ".github/scripts/ci_input_scope.py"
+    text = (SOURCE / selector).read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    registry_node = next(node for node in tree.body if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "POLICY_FIXTURE_INPUTS"
+                                 for target in node.targets))
+    registry = ast.literal_eval(registry_node.value)
+    sources = {name: (SOURCE / name).read_text(encoding="utf-8")
+               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock"}}
+
+    def write(name, contents):
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8", newline="\n")
+
+    git("init", "--initial-branch=main")
+    git("config", "user.name", "Preflight policy scope acceptance")
+    git("config", "user.email", "policy-scope@example.invalid")
+    git("config", "core.autocrlf", "false")
+    git("config", "core.filemode", "false")
+    git("config", "core.symlinks", "false")
+    for name, contents in sources.items():
+        write(name, contents)
+    write("rust/crates/runtime/src/policy_scope.rs", "pub fn value() -> u8 { 1 }\n")
+    write("docs/policy-scope.md", "Original documentation.\n")
+    git("add", ".")
+    for name, (mode, _kind, _identity) in registry.items():
+        git("update-index", "--chmod=" + ("+x" if mode == "100755" else "-x"), name)
+    git("commit", "-m", "Reviewed policy programs and ordinary source")
+    base = git("rev-parse", "HEAD")
+
+    def commit(name, contents):
+        git("switch", "--detach", base)
+        write(name, contents)
+        git("add", "--", name)
+        git("commit", "-m", "Private policy scope input")
+        return git("rev-parse", "HEAD")
+
+    def observe(label, first, head, expected, *, checkout=None, events=None, declared=None):
+        git("switch", "--detach", checkout or head)
+        actual_checkout = git("rev-parse", "HEAD")
+        observations = []
+        for event in events or ["pull_request", "push", "merge_group"]:
+            body = ({"pull_request": {"base": {"sha": first}, "head": {"sha": head}}}
+                    if event == "pull_request" else {"before": first, "after": head}
+                    if event == "push" else {"merge_group": {"base_sha": first, "head_sha": head}}
+                    if event == "merge_group" else {})
+            event_file = output / f"{label}-{event}.event.json"
+            result_file = output / f"{label}-{event}.github-output"
+            event_file.write_text(json.dumps(body), encoding="utf-8")
+            result_file.write_text("", encoding="utf-8")
+            result = command(label, [sys.executable, repository / selector], env={
+                **environment, "GITHUB_EVENT_NAME": event, "GITHUB_EVENT_PATH": str(event_file),
+                "GITHUB_OUTPUT": str(result_file), "GITHUB_SHA": declared or actual_checkout})
+            data = json.loads(result.stdout)
+            assert data["policy_fixtures_required"] == str(expected).lower(), (label, data)
+            emitted = dict(line.split("=", 1) for line in result_file.read_text().splitlines())
+            assert emitted["policy_fixtures_required"] == data["policy_fixtures_required"]
+            if label in {"ordinary-rust-source", "manual"}:
+                assert all(data[key] == "true" for key in ["live_required", "daemon_required",
+                           "a2a_required", "cohost_required", "clippy_required"]), data
+            if label == "documentation":
+                assert all(data[key] == "false" for key in ["live_required", "daemon_required",
+                           "a2a_required", "cohost_required", "clippy_required"]), data
+            if not expected:
+                assert data["policy_fixture_scope"]["checkout"] == actual_checkout
+                assert data["policy_fixture_scope"]["reviewed_input_count"] == len(registry)
+            observations.append(data)
+            cases.append({"case": label, "event": event, "required": expected,
+                          "actual_checkout": actual_checkout, "observation": data})
+        return observations
+
+    ordinary = commit("rust/crates/runtime/src/policy_scope.rs", "pub fn value() -> u8 { 2 }\n")
+    observe("ordinary-rust-source", base, ordinary, False)
+    docs = commit("docs/policy-scope.md", "Changed documentation.\n")
+    observe("documentation", base, docs, False)
+    for label, name, contents in [
+            ("test-source", "rust/crates/runtime/tests/policy_scope.rs", "// Required test input.\n"),
+            ("configuration", "rust/Cargo.toml", sources["rust/Cargo.toml"] + "\n# Changed configuration input.\n"),
+            ("unknown-input", "tools/unknown-policy.py", "pass\n"),
+            ("direct-policy-input", "scripts/publish_release_mirror.py",
+             sources["scripts/publish_release_mirror.py"] + "\n# Changed policy input.\n")]:
+        changed = commit(name, contents)
+        observe(label, base, changed, True)
+    observe("manual", base, ordinary, True, events=["workflow_dispatch"])
+    observe("empty-change", base, base, True)
+    observe("declared-source-mismatch", base, ordinary, True, declared=base, events=["pull_request"])
+    git("switch", "--detach", base)
+    git("rm", "--", "docs/policy-scope.md")
+    git("commit", "-m", "Private deleted documentation input")
+    observe("deleted-source", base, git("rev-parse", "HEAD"), True)
+    git("switch", "--detach", base)
+    source_path = "rust/crates/runtime/src/policy_scope.rs"
+    write(source_path, "synthetic-policy-link-target")
+    git("add", "--", source_path)
+    blob = git("rev-parse", ":" + source_path)
+    git("update-index", "--cacheinfo", "120000," + blob + "," + source_path)
+    git("commit", "-m", "Private symbolic source input without a filesystem link")
+    observe("symbolic-source", base, git("rev-parse", "HEAD"), True)
+    git("switch", "--detach", base)
+    git("update-index", "--chmod=-x", ".github/scripts/check_engine_boundary.sh")
+    git("commit", "-m", "Private policy input mode change")
+    changed_mode = git("rev-parse", "HEAD")
+    write("docs/policy-scope.md", "Documentation after mode-only policy change.\n")
+    git("add", "docs/policy-scope.md")
+    git("commit", "-m", "Ordinary input under unreviewed policy mode")
+    observe("inherited-policy-mode", changed_mode, git("rev-parse", "HEAD"), True)
+
+    # A new comparison base must not silently register an unreviewed checker.
+    scanner = ".github/scripts/check_engine_boundary.sh"
+    changed_checker = commit(scanner, "#!/usr/bin/env bash\nexit 0\n")
+    write("docs/policy-scope.md", "Documentation after a changed checker.\n")
+    git("add", "docs/policy-scope.md")
+    git("commit", "-m", "Ordinary source after unreviewed policy change")
+    newer = git("rev-parse", "HEAD")
+    observe("unreviewed-inherited-program", changed_checker, newer, True)
+    failed = command("actual-broken-scanner-self-test",
+                     [sys.executable, repository / "e2e/engine-boundary/run.py"], expected=1)
+    assert failed.returncode != 0
+    assert b"PASS: engine internals are allowed below the seam" in failed.stdout
+    assert b"renderer rejects runtime::RuntimeObserver" in failed.stderr
+    # Removing the reviewed-input comparison is an actual unsafe selector mutant.
+    unsafe = text.replace("if observed.get(path) != expected:", "if False:", 1)
+    assert unsafe != text
+    write(selector, unsafe)
+    git("add", selector)
+    git("commit", "-m", "Private missing-registry-check counterexample")
+    unsafe_base = git("rev-parse", "HEAD")
+    write("docs/policy-scope.md", "Documentation after unsafe selector.\n")
+    git("add", "docs/policy-scope.md")
+    git("commit", "-m", "Ordinary source under unsafe selector")
+    unsafe_head = git("rev-parse", "HEAD")
+    observe("missing-registry-control", unsafe_base, unsafe_head, False)
+
+    # The running PR workflow may be a combined checkout newer than its PR head.
+    git("switch", "--detach", changed_checker)
+    git("merge", "--no-ff", docs, "-m", "Private combined workflow checkout")
+    combined = git("rev-parse", "HEAD")
+    observe("combined-checkout", base, docs, True, checkout=combined, events=["pull_request"])
+    git("switch", "--detach", ordinary)
+    write(scanner, sources[scanner] + "\n# Uncommitted checker input.\n")
+    observe("dirty-checkout", base, ordinary, True, events=["pull_request"])
+    git("restore", "--", scanner)
+    assert not git("status", "--porcelain")
+
+    workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+    guarded = ["Exercise real Git histories", "Exercise queue cancellation completion races",
+               "Exercise real Git boundary violations and scanner failures",
+               "Exercise interrupted publication and real installer", "Exercise provider probe contracts",
+               "Exercise explicit model selection and shared native runner without a key",
+               "Exercise exact published pin tags and refusal paths"]
+    for name in guarded:
+        start = lines.index("      - name: " + name)
+        assert lines[start + 1] == "        if: steps.scope.outputs.policy_fixtures_required == 'true'", name
+    for name in ["Reject silent merge rewrites and conflict markers",
+                 "Renderer crates must not name engine-internal streaming types",
+                 "Canonical Nexus contract and daemon resolve one published pin"]:
+        start = lines.index("      - name: " + name)
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("      - ")), len(lines))
+        assert "policy_fixtures_required" not in "\n".join(lines[start:end]), name
+    assert lines.index("      - name: Canonical Nexus contract and daemon resolve one published pin") < lines.index(
+        "      - name: Exercise real Git histories")
+    result = {"status": "PASS", "cases": cases, "commands": commands,
+              "actual_broken_scanner_fixture_refused": True,
+              "unsafe_selector_omits_that_required_fixture": True,
+              "original_actual_current_source_checks_ungated": True,
+              "scope": "Real Git/PR/push/queue selector and actual scanner refusal; no product or population latency acceptance."}
+    (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"PASS: {len(cases)} real preflight policy-fixture input/event boundaries", flush=True)
+    return result
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     repository = output / "repository"
@@ -548,6 +754,7 @@ def run(output):
             environment["CARGO_ENCODED_RUSTFLAGS"] += "\x1f-C\x1flink-arg=/Brepro"
         else:
             environment["RUSTFLAGS"] = environment.get("RUSTFLAGS", "") + " -C link-arg=/Brepro"
+    policy_fixtures = policy_fixture_scope(output / "policy-fixture-scope", environment)
     commands, cases = [], []
 
     def command(*args, success=True):
@@ -1081,6 +1288,7 @@ def run(output):
               "broken_independent_cli_does_not_build_into_cohost": True,
               "shared_runtime_source_rebuilds_actual_cohost": True,
               "workflow_scope": workflow,
+              "policy_fixture_scope": policy_fixtures,
               "scheduling_scope": scheduling,
               "compiler_priority": expected_priority,
               "scope": "Actual Git/public planner and Cargo/native canaries. No product runtime, provider or performance coverage claimed."}
@@ -1091,4 +1299,17 @@ def run(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    run(parser.parse_args().output.resolve())
+    parser.add_argument("--policy-fixtures-only", action="store_true",
+                        help="Run only the real Git policy-fixture controls under the existing host lease")
+    args = parser.parse_args()
+    if args.policy_fixtures_only:
+        spec = importlib.util.spec_from_file_location("policy_fixture_host_lease", SOURCE / ".github/scripts/local_acceptance.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        helper.ROOT = SOURCE
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
+        attempt = {"active_profile": "private-preflight-policy-fixture-controls"}
+        with helper.host_acceptance_lease(attempt, head):
+            policy_fixture_scope(args.output.resolve(), os.environ)
+    else:
+        run(args.output.resolve())

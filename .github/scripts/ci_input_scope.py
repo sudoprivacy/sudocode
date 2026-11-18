@@ -389,6 +389,178 @@ def independent_cli_sources(*refs):
         return False
 
 
+# Reviewed program/tool inputs to the independent preflight policy self-tests.
+# A changed input stays on the full path until this registry is reviewed again.
+# This does not cache a test result or exempt any actual current-source check.
+POLICY_FIXTURE_INPUTS = {
+    "e2e/pr-history/run.py": [
+        "100644",
+        "blob",
+        "c4bdcb53ba830e44beadb15b1fdd380760c44a62"
+    ],
+    ".github/scripts/check_pr_history.py": [
+        "100644",
+        "blob",
+        "1f7a89d250ec6553df85ea669d63e90322af9a4d"
+    ],
+    "e2e/local-acceptance/queue_maintenance_acceptance.py": [
+        "100644",
+        "blob",
+        "7dc7439032d43da7d8317959abb94dc30f3a30c7"
+    ],
+    ".github/scripts/cancel_obsolete_queue_runs.py": [
+        "100644",
+        "blob",
+        "f7d8ab003f369629ca8fcae4b2da89b27aec49a3"
+    ],
+    "e2e/engine-boundary/run.py": [
+        "100644",
+        "blob",
+        "c51ee0a73a7c3030ce7335830439c593227e7d9f"
+    ],
+    ".github/scripts/check_engine_boundary.sh": [
+        "100755",
+        "blob",
+        "904ec8964b5c680d25eed7a30555eabf1f8bda19"
+    ],
+    "e2e/release-mirror/run.py": [
+        "100644",
+        "blob",
+        "90041be55afaa9c6a87aa74908b481816e5ba967"
+    ],
+    "scripts/publish_release_mirror.py": [
+        "100644",
+        "blob",
+        "3bd4097608f03a9ff589eeac48feebc5d4e29b23"
+    ],
+    "install.sh": [
+        "100755",
+        "blob",
+        "5aeaae3a447d1e3857b069f7e56dffbcc8cb5d36"
+    ],
+    ".github/scripts/probe_live_usage.test.cjs": [
+        "100644",
+        "blob",
+        "0518aea397e02ec1d28533e32064de9db9ead055"
+    ],
+    ".github/scripts/probe_live_usage.cjs": [
+        "100644",
+        "blob",
+        "82e24dc5ea890bbf81eabbb1a9b9fbfd5d796f0d"
+    ],
+    ".github/scripts/live_model_evidence.cjs": [
+        "100644",
+        "blob",
+        "5a7d91c679253b271333e854d5256c2beef82956"
+    ],
+    ".github/scripts/live_model_acceptance_e2e.py": [
+        "100644",
+        "blob",
+        "8c5410221eedbf19fe44a6997f6b6536216c3c87"
+    ],
+    ".github/scripts/live_model_acceptance.py": [
+        "100644",
+        "blob",
+        "7b1d81b4961d911b9f8188094ed9d797832873e7"
+    ],
+    ".github/scripts/local_acceptance.py": [
+        "100644",
+        "blob",
+        "5071f83781baf49dd12664cddfcdcb7a8d547ce8"
+    ],
+    ".github/scripts/nexus_pin_workflow_e2e.py": [
+        "100644",
+        "blob",
+        "6dd5af2cfa77009d707502947605306244219680"
+    ],
+    ".github/workflows/rust-ci.yml": [
+        "100644",
+        "blob",
+        "8b1f091c2c552c9b54ccffcbc40510b5fcf2ed39"
+    ],
+    ".github/workflows/model-compat.yml": [
+        "100644",
+        "blob",
+        "9d72d3121cdab2b76e52a9d371809ceb0b73b01c"
+    ],
+    ".github/workflows/subagent-parity-live.yml": [
+        "100644",
+        "blob",
+        "284b69c2fe9fd46a017f873d73a54088ea1d661d"
+    ],
+    "rust-toolchain.toml": [
+        "100644",
+        "blob",
+        "f5cb5dc008e39d124eb48fdf0ebc728cca4d5889"
+    ],
+    ".github/actions/rust-toolchain/action.yml": [
+        "100644",
+        "blob",
+        "b02330ea66170c3c96003e8732bfbd55987d2e0f"
+    ],
+    ".gitignore": [
+        "100644",
+        "blob",
+        "b1657a8e126e95e5d3f7aa4cf2055a73195256a2"
+    ],
+    ".gitattributes": [
+        "100644",
+        "blob",
+        "ec1ffa81eddd7e5b06813a1e017cdb89eb2c9fab"
+    ]
+}
+
+
+def policy_fixture_scope(paths, event_name, details):
+    """Omit only unchanged policy self-tests for bounded ordinary source edits."""
+    if event_name == "workflow_dispatch" or not paths:
+        details.update(decision="full", reason="manual_or_unknown_history")
+        return True
+
+    def ordinary(path):
+        return (path in {"README.md", "CONTRIBUTING.md", "sudo-code-roadmap.html"}
+                or (path.startswith("docs/") and path.endswith((".md", ".html", ".json")))
+                or re.fullmatch(r"rust/(?:crates|vendor)/[^/]+/src/(?:[^/]+/)*[^/]+\.rs", path))
+
+    if not all(ordinary(path) for path in paths):
+        details.update(decision="full", reason="changed_or_unknown_policy_inputs")
+        return True
+    try:
+        if not POLICY_FIXTURE_INPUTS:
+            raise ValueError("No reviewed policy-fixture input registry")
+        checkout = git("rev-parse", "HEAD")
+        declared = os.environ.get("GITHUB_SHA")
+        if declared is not None and declared != checkout:
+            raise ValueError("The workflow checkout differs from its declared source")
+        if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"]).strip():
+            raise ValueError("The workflow source has uncommitted inputs")
+        rows = subprocess.check_output(["git", "ls-tree", "-r", "-z", checkout, "--",
+                                        *POLICY_FIXTURE_INPUTS, *paths])
+        observed = {}
+        for row in rows.split(b"\0"):
+            if not row:
+                continue
+            entry, path = row.split(b"\t", 1)
+            fields = entry.decode("ascii").split()
+            if len(fields) != 3:
+                raise ValueError("Unknown committed policy-fixture input")
+            observed[path.decode("utf-8")] = fields
+        for path, expected in POLICY_FIXTURE_INPUTS.items():
+            if observed.get(path) != expected:
+                raise ValueError("Unreviewed policy-fixture input: " + path)
+        for path in paths:
+            entry = observed.get(path)
+            if entry is None or entry[0] not in {"100644", "100755"} or entry[1] != "blob":
+                raise ValueError("Changed source is missing or is not a regular file: " + path)
+        details.update(decision="unchanged_reviewed_policy_inputs", checkout=checkout,
+                       reviewed_input_count=len(POLICY_FIXTURE_INPUTS),
+                       omitted="independent policy self-tests only; actual current-source checks remain")
+        return False
+    except (ValueError, KeyError, TypeError, UnicodeError, OSError, subprocess.CalledProcessError) as error:
+        details.update(decision="full", reason=str(error))
+        return True
+
+
 def main():
     nextest_scope = {}
     scheduling_scope = {}
@@ -515,6 +687,8 @@ def main():
                              ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
                              "e2e/local-acceptance/vfs_search_cache_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
+    policy_fixtures = {}
+    policy_fixtures_required = policy_fixture_scope(paths, name, policy_fixtures)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
               "a2a_required": str(a2a).lower(),
               "cohost_required": str(cohost).lower(),
@@ -523,6 +697,7 @@ def main():
               "gzip_codec_required": str(gzip_codec).lower(),
               "release_artifact_required": str(release_artifact).lower()}
     result["vfs_cache_required"] = str(vfs_cache).lower()
+    result["policy_fixtures_required"] = str(policy_fixtures_required).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():
             stream.write(f"{key}={value}\n")
@@ -531,6 +706,7 @@ def main():
                       "cohost_cli_source_ignored": ignored_cohost_cli_sources, "nextest_dependency_scope": nextest_scope,
                       "acceptance_scheduling_scope": scheduling_scope,
                       "acceptance_metadata_scope": metadata_scope,
+                      "policy_fixture_scope": policy_fixtures,
                       "selector_only_product_checks_skipped": ".github/scripts/ci_input_scope.py" in paths
                           and not daemon and not clippy}))
 

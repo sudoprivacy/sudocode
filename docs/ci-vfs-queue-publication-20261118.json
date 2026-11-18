@@ -1226,5 +1226,85 @@
       "The frozen current20 already includes138source-linked status-publisher jobs and57.45known runner-minutes; do not add them twice.",
       "The source-defined population is incomplete and source-mix-weighted original ratio exceeds10percent; total comparable lifecycle tenth is unproved."
     ]
+  },
+  "warmConsumerObservedAfterInitialPublication": {
+    "observedAtUTC": "2026-11-18T12:48:22.989711+00:00",
+    "releasePR": 1496,
+    "acceptedMerge": "3240715b7e36f9b83022089fc5e9a5cfcd058cce",
+    "queueRun": 44300701626,
+    "queueJob": {
+      "id": 134789845637,
+      "startedAt": "2026-11-18T12:07:00Z",
+      "completedAt": "2026-11-18T12:12:25Z",
+      "elapsedSeconds": 325.0,
+      "conclusion": "success"
+    },
+    "runnerImageVersion": "20261111.196.1",
+    "restoredExactOriginalCacheId": 10720544088,
+    "restoredOriginalKey": "vfs-search-v2-47f30bee9dc9441f45ab418fa9a4b042194983adb4fa8eba91138e0f58e4d4f4-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "sourceContext": {
+      "source_revision": "b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+      "recipe_sha256": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
+      "current_runtime_sha256": "e4c5c0ded328d8058b9636f299d660065fc27073617851360582d690febb1833",
+      "test_required_now": true,
+      "functional_profile": {
+        "source_files": {
+          ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
+          ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415"
+        },
+        "configuration_sha256": "c8d97ea772b2cbd0d5bd0525d19164115bdd9f8255b6f40fac111918a69d1cc1"
+      }
+    },
+    "originalCargoCommand": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/home/runner/work/sudocode/sudocode/.native-vfs/Cargo.toml",
+        "-p",
+        "nexus-cluster",
+        "--all-features",
+        "--test",
+        "user_runtime",
+        "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "seconds": 17.598,
+      "log_sha256": "57f480e2fec57b53abccee720e444de75bdb6ee51ad8a82c74e622a31cb710aa",
+      "compiler_artifacts": []
+    },
+    "actualTestSummary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 8.70s"
+    ],
+    "coldCommandSeconds": 193.735,
+    "warmCommandSeconds": 17.598,
+    "warmFractionOfObservedColdCommand": 0.09083541951634964,
+    "warmQueueIdentityOnly": true,
+    "searchArtifact": 14426166621,
+    "identityArtifact": 14426141381,
+    "followingMainLookupRun": 44302230923,
+    "followingMainLookupJob": {
+      "id": 134794604299,
+      "startedAt": "2026-11-18T12:15:46Z",
+      "completedAt": "2026-11-18T12:16:23Z",
+      "elapsedSeconds": 37.0,
+      "conclusion": "success"
+    },
+    "followingMainExactHitAndArchiveTransferImportSaveSkipped": true,
+    "originalEvidenceSHA256": {
+      "queue-log": "bfafd3a07564d9f884764a3fdcd14a43e80b6f2242729ce013d36bce184c9368",
+      "search": "1180488f8c98bbdcb08a25c20c78fa8bc45a49022ec34a5db8f6912ef22b6022",
+      "identity": "4f16ef32c25aa79bdff74d2c7bc5283428f58c3e9e24d935788c904f591bb3a2",
+      "publisher": "ec538f2aa3cc026fca5b6d403f06707a8e3d6e87307c6d88145a8a36f919a8f7",
+      "publisher-log": "62ce04b9d80c1863cfcce916cacd1b33e281ea16c98260aca83575885800f4cb"
+    },
+    "limits": [
+      "The command and Nexus VFS source/profile stayed the same. Physical runner instances and current co-host binary hashes differ.",
+      "Job and PR elapsed times include other work. Cross-image behavior and a whole-lifecycle speedup require separate proof.",
+      "This real release-only merge stays outside the fixed Rust-source cohort, since the accepted change contains no .rs file."
+    ]
   }
 }

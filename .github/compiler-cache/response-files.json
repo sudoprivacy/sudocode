@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "sccache",
+  "version": "0.19.0",
+  "variant": "scode-responsefiles.1",
+  "target": "x86_64-pc-windows-msvc",
+  "rust_toolchain": "1.100.0",
+  "release_tag": "ci-sccache-v0.19.0-responsefiles.1",
+  "archive_name": "sccache-v0.19.0-scode-responsefiles.1-x86_64-pc-windows-msvc.zip",
+  "member_root": "sccache-v0.19.0-scode-responsefiles.1-x86_64-pc-windows-msvc",
+  "source_commit": "965c01943a40c9df96264474bbe28ba98f2e1487",
+  "source_archive_sha256": "af4a19932ab6f10b749265b449de5ad0f7aecbe281f652108fc8212b70267ea8",
+  "upstream_fix_commit": "91d34f10947e68a850f4c124ddaba0d040a921f6",
+  "patch_path": ".github/compiler-cache/response-files.patch",
+  "patch_sha256": "7f58e6e3901f4900b7b02e375ebb2c97b2cc7c87345129558e5c093a7f5fb7d5",
+  "patched_rust_sha256": "d8400acd2df2e1e9ef16b51ad5b34815052c04357d69d4ececb9659237e2b395",
+  "baseline_helper_ref": "f591e11aea780a1947de56df0724b2e551518cc4",
+  "required_upstream_regressions": [
+    "test_command_line_len",
+    "test_arguments_for_spawn",
+    "test_arguments_for_spawn_keeps_arguments_a_response_file_would_change",
+    "test_generate_compile_commands_response_file"
+  ],
+  "baseline_archive_sha256": "28be8c61f6b2c89b9eb2869f6af7f78e6f992e78a8abae0ce855fcc129cbeac1",
+  "original_rust_sha256": "128ef5eb2e89dc3ab69ec810e68ab271169b3a74e711fa80023e0578f90aa4eb",
+  "compatibility_files": {
+    "tests/system.rs": {
+      "original_sha256": "d9ac065cfcc0c9275f06d2e8340f6c791e6db246c58d26b91961798c7d2fb9ef",
+      "patched_sha256": "72f277e6815563e6cb874fba59bc75ec3bd0d90772fa4377ba9e5705ff987ccc"
+    },
+    "src/test/utils.rs": {
+      "original_sha256": "6c92e0304e71ab9b6ae9bd9b404390b58e8a08e65cf2a7ea9be28bc6e4dcfa4c",
+      "patched_sha256": "c9b56d24f4d26b67395f14eb7645021a3a75343ece0566e982ebe3fd9b3ad8e8"
+    }
+  }
+}

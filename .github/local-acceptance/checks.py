@@ -1199,7 +1199,7 @@ def native_guard_files():
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
         "e2e/local-acceptance/run.py": "761454a71f645f71567af35b8982e0e6df1a11708ba69ab3d15e4ab597080fc3",
-        "e2e/local-acceptance/vfs_search_publication_acceptance.py": "f3b13da5b7bfcb9195a952de204c4d2c492ea772fad904cce6b77f321367b479",
+        "e2e/local-acceptance/vfs_search_publication_acceptance.py": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",

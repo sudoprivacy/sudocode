@@ -52,9 +52,16 @@ def run(source_root, root, output, journey, command, environment):
         log.write_bytes(result.stdout + result.stderr)
         assert (result.returncode == 0) == success, log.read_text(errors="replace")
         assert b"PUBLICATION_DUMMY_TOKEN" not in log.read_bytes()
+        matched = None
         if expected:
-            assert expected in log.read_text(errors="replace"), log.read_text(errors="replace")
-        records.append({"case": label, "exit_code": result.returncode, "log_sha256": publication.sha(log)})
+            messages = (expected,) if isinstance(expected, str) else expected
+            matched = next((message for message in messages if message in log.read_text(errors="replace")), None)
+            assert matched is not None, log.read_text(errors="replace")
+        row = {"case": label, "exit_code": result.returncode, "log_sha256": publication.sha(log)}
+        if matched is not None:
+            row["refusal"] = matched
+        records.append(row)
+        print("VFS_PUBLICATION_CONTROL=" + json.dumps(row, sort_keys=True), flush=True)
 
     exported = output / "exported"
     execute("export", ["export", "--output", exported, "--journey", journey])
@@ -260,14 +267,22 @@ def run(source_root, root, output, journey, command, environment):
                 info = tarfile.TarInfo(name)
                 info.type, info.mode = kind, mode
                 if label == "negative-size":
-                    info.size = -1
+                    # The normal writer rejects a negative regular-file size
+                    # before emitting it. PAX can carry that malformed size to
+                    # the real reader without asking the writer to copy data.
+                    info.pax_headers["size"] = "-1"
                 info.linkname = "../../escape" if kind in {tarfile.SYMTYPE, tarfile.LNKTYPE} else ""
                 stream.addfile(info)
             document = copy.deepcopy(original)
             document["archive"].update(sha256=publication.sha(archive), size=archive.stat().st_size, members=1, bytes=1)
             publication.write(selected / "manifest.json", document)
+            # Some supported tarfile versions discard an invalid negative-size
+            # member before yielding it. The exact inventory guard must still
+            # refuse that shortened archive; other versions reach the size guard.
+            refusal = (("Unsafe compiler archive", "Compiler archive inventory differs from its producer")
+                       if label == "negative-size" else "Unsafe compiler archive")
             execute(label, ["import", "--output", selected, "--data", bad], overrides=main_env,
-                    success=False, expected="Unsafe compiler archive")
+                    success=False, expected=refusal)
             assert not source.exists() and not (root / "escape").exists()
         publication.write(selected / "manifest.json", original)
         altered = output / "altered"

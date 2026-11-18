@@ -942,6 +942,8 @@ def enforcement_acceptance(*, profile_compat_only=False, publication_only=False)
         print("PASS: actual hook/push, failed process, signed notes, fresh head, tamper, preserved notes and dirty inputs")
         # Reject Git/signature/authorization errors before any Cargo fixture.
         # Passing runs retain every native build, cache and policy guard below.
+        print(command(sys.executable, str(SOURCE / "e2e/shared-services/grpcurl_process_acceptance.py"),
+                      "--output", directory / "grpcurl-process", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("contract_reads_acceptance.py")),
                       "--output", directory / "contract-reads", cwd=SOURCE))
         print(command(sys.executable, str(Path(__file__).with_name("parallel_acceptance.py")),

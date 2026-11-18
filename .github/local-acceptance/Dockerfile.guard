@@ -13,6 +13,14 @@ RUN nice -n 10 rustup component add rustfmt clippy \
  && cargo fmt --version \
  && cargo clippy --version
 
+
+# Cache the VFS fixture's independent Rust compiler in this image layer.
+COPY vfs-rust-version /opt/vfs-rust-version
+RUN nice -n 10 rustup toolchain install "$(cat /opt/vfs-rust-version)" --profile minimal --no-self-update
+RUN --network=none version="$(cat /opt/vfs-rust-version)" \
+ && rustup run "$version" rustc -vV \
+ && rustup run "$version" cargo --version
+
 ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 COPY nextest_seed.py /opt/nextest_seed.py
 RUN python3 /opt/nextest_seed.py --verify-cache

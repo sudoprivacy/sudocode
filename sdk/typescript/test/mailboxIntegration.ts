@@ -286,6 +286,7 @@ async function main(): Promise<void> {
       const selected = await readCodexMailboxSnapshot(reader, 'root-thread', () => new Set([legacyCustody]));
       assert.equal(selected.epoch, 'mixed');
       assert.deepEqual([...selected.running], ['scode-wake:running']);
+      assert.equal(selected.recoveryIdle, false, 'an older unfinished wake still blocks recovery');
       assert.deepEqual([...selected.finished], [legacyCustody]);
       assert.ok(!calls.slice(start).some(row => row.params?.turnId === 'older'));
       const absent = await readCodexMailboxSnapshot(reader, 'root-thread', () => new Set(['absent']));
@@ -293,6 +294,22 @@ async function main(): Promise<void> {
       assert.ok(calls.slice(start).some(row => row.params?.turnId === 'older' && row.params.cursor === 'item-two'));
       invalidItemPage = true;
       await assert.rejects(readCodexMailboxSnapshot(reader, 'root-thread', () => new Set()), /requested turn/);
+      invalidItemPage = false;
+      const ordinary = makeTurn('ordinary', legacyCustody, 'inProgress');
+      const completed = makeTurn('human', null);
+      const snapshot = () => readCodexMailboxSnapshot(reader, 'root-thread', () => new Set());
+      status = 'idle'; queue = []; turns = [ordinary];
+      assert.equal((await snapshot()).recoveryIdle, false, 'no completed human epoch');
+      turns = [ordinary, completed];
+      assert.equal((await snapshot()).recoveryIdle, false, 'newer unfinished input');
+      turns = [completed, ordinary];
+      const historical = await snapshot();
+      assert.ok(historical.running.has(legacyCustody) && !historical.finished.has(legacyCustody));
+      assert.equal(historical.recoveryIdle, true, 'older ordinary input is retained while the thread is idle');
+      queue = [{ id: 'item', clientUserMessageId: legacyClean }];
+      assert.equal((await snapshot()).recoveryIdle, false, 'nonempty queue');
+      queue = []; status = 'active';
+      assert.equal((await snapshot()).recoveryIdle, false, 'active native thread');
     } finally { await reader.close(); invalidItemPage = false; paginated = false; }
     queue = []; turns = []; const head = { conversation: 'c1', start: 10, deliveryId: 'head-one' };
     let owner = await startWake();
@@ -338,6 +355,10 @@ async function main(): Promise<void> {
     const fourthId = nativeCalls()[3].params.clientUserMessageId;
     assert.notEqual(fourthId, firstId); assert.ok(fourthId.endsWith(':1'), 'a new native non-wake epoch opens one new key');
     queue = []; turns.unshift(makeTurn('wake-four', fourthId));
+    // Official paginated history can retain an ordinary inProgress input even
+    // after a newer human turn completed and the thread returned to idle.
+    paginated = true;
+    turns.push(makeTurn('historical-input', legacyCustody, 'inProgress'));
     await owner.request('set', { qualified: true, heads: [{ ...head, start: 100, deliveryId: 'head-two' }] });
     loseRequest = true;
     assert.equal((await owner.request('evaluate')).state, 'submitted'); assert.equal(nativeCalls().length, 5);

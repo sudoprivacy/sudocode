@@ -109,6 +109,9 @@ impl HostContext {
         // afterwards would leave the kernel's view of who is writing and the
         // prompt's claim about who this is free to disagree.
         let agent_name = agent_name_under(&cwd);
+        if joins_automatically(&agent_name, &cwd) {
+            crate::peer::allow_join(&agent_name);
+        }
         let (fs, kernel) = crate::local_kernel::boot_session_host(&cwd, &extra_roots, &agent_name)?;
         let runtime_observation = match crate::peer::attach(&agent_name) {
             crate::peer::Peer::Disk(_) => Some(Arc::new(
@@ -250,18 +253,11 @@ fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
 /// The agent name a session under `root` answers to: what the configuration
 /// there says, else what [`runtime::mailbox::local_agent_name`] derives from
 /// the directory itself.
+#[must_use]
 pub fn agent_name_under(root: &Path) -> String {
     let loader = ConfigLoader::default_for(root);
-    let configured = loader.load().ok().and_then(|rc| {
-        rc.get("agentName")
-            .and_then(|v| v.as_str().map(str::to_string))
-    });
-    if let Some(name) = configured
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return name.to_string();
+    if let Some(name) = configured_agent_name(&loader) {
+        return name;
     }
     // No configured name: mint one from the workspace and persist it, so this
     // identity is stable across restarts instead of being re-derived every boot
@@ -270,8 +266,96 @@ pub fn agent_name_under(root: &Path) -> String {
     // native analog of nexus minting the name at auth. Best-effort: if the
     // write fails we still return the derived name for this boot.
     let minted = runtime::mailbox::local_agent_name(None, root);
-    let _ = loader.set_agent_name(&minted);
+    // Where the project settings are the user's own (the home directory, by
+    // default), saving the name would hand it to every unconfigured workspace.
+    if !settings_are_shared(root) {
+        let _ = loader.set_agent_name(&minted);
+    }
     minted
+}
+
+/// Whether the workspace under `root` keeps its settings in the user's own
+/// settings files, which every workspace without its own inherits: the home
+/// directory by default, or wherever the configuration directories point.
+#[must_use]
+pub fn settings_are_shared(root: &Path) -> bool {
+    // Spell both sides from their nearest existing ancestor: the settings
+    // directory may not exist yet, and a canonical root (`\\?\C:\...` on
+    // Windows) must still match a plain home path.
+    let located = |path: &Path| {
+        let mut ancestor = path;
+        let mut rest = Vec::new();
+        loop {
+            if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+                return rest
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path, part| path.join(part));
+            }
+            match (ancestor.parent(), ancestor.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_os_string());
+                    ancestor = parent;
+                }
+                _ => return path.to_path_buf(),
+            }
+        }
+    };
+    let entries = ConfigLoader::default_for(root).discover();
+    let user: Vec<PathBuf> = entries
+        .iter()
+        .filter(|entry| entry.source == runtime::ConfigSource::User)
+        .map(|entry| located(&entry.path))
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| entry.source != runtime::ConfigSource::User)
+        .any(|entry| user.contains(&located(&entry.path)))
+}
+
+/// Only the identity derived from this workspace's own path joins a node
+/// without being asked. A configured `agentName` may come from the repository,
+/// and a workspace whose settings are the user's own sets every unconfigured
+/// workspace's defaults, so neither is claimed automatically.
+fn joins_automatically(agent_name: &str, cwd: &Path) -> bool {
+    agent_name == runtime::mailbox::local_agent_name(None, cwd) && !settings_are_shared(cwd)
+}
+
+/// Every settings file that sets an `agentName` for the workspace under
+/// `root`, lowest precedence first.
+#[must_use]
+pub fn agent_name_sources(root: &Path) -> Vec<PathBuf> {
+    ConfigLoader::default_for(root)
+        .discover()
+        .into_iter()
+        .filter(|entry| {
+            std::fs::read(&entry.path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|settings| {
+                    settings["agentName"]
+                        .as_str()
+                        .is_some_and(|name| !name.trim().is_empty())
+                })
+        })
+        .map(|entry| entry.path)
+        .collect()
+}
+
+/// The name [`agent_name_under`] would answer to, without persisting it.
+#[must_use]
+pub fn peek_agent_name_under(root: &Path) -> String {
+    configured_agent_name(&ConfigLoader::default_for(root))
+        .unwrap_or_else(|| runtime::mailbox::local_agent_name(None, root))
+}
+
+fn configured_agent_name(loader: &ConfigLoader) -> Option<String> {
+    let configured = loader.load().ok().and_then(|rc| {
+        rc.get("agentName")
+            .and_then(|v| v.as_str().map(str::to_string))
+    })?;
+    let name = configured.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
@@ -902,4 +986,37 @@ fn agent_directory_reader(
         let _mailbox = mailbox.clone().map(runtime::mailbox::MailboxScope::enter);
         tools::collect_agent_directory(false, fs.as_ref(), observation.as_deref(), None)
     })
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::joins_automatically;
+
+    #[test]
+    fn only_the_workspace_derived_name_joins_without_being_asked() {
+        let workspace = tempfile::tempdir().unwrap();
+        let derived = runtime::mailbox::local_agent_name(None, workspace.path());
+        assert!(joins_automatically(&derived, workspace.path()));
+        // A configured name, including one a repository ships, is never claimed.
+        assert!(!joins_automatically("reviewer", workspace.path()));
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(!joins_automatically(&derived, elsewhere.path()));
+    }
+
+    #[test]
+    fn the_home_directory_never_joins_automatically() {
+        // Overridden configuration directories make home an ordinary workspace.
+        let overridden = [
+            "SCODE_GLOBAL_CONFIG_DIR",
+            "SUDO_CODE_CONFIG_HOME",
+            "SCODE_PROJECT_CONFIG_DIR",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+        let Some(home) = runtime::user_paths::home_dir().filter(|_| !overridden) else {
+            return;
+        };
+        let derived = runtime::mailbox::local_agent_name(None, &home);
+        assert!(!joins_automatically(&derived, &home));
+    }
 }

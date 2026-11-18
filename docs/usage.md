@@ -207,7 +207,16 @@ The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
 receiving recovers. `failing` means the node binding itself cannot be used.
 `SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
 
-The connection record alone does not start Nexus or mint an agent credential.
+The connection record alone does not start Nexus. In shared mode, an
+interactive or ACP session whose workspace-derived Agent has no credential yet
+is issued one by this OS user's registered local Box in the background, without
+a prompt or restart. `scode setup --mode shared` does the same for the current
+workspace and reports the outcome; `scode setup --check` shows the Agent's
+actual credential state. Configured `agentName` values are never claimed: ask
+the node owner to mint them. A node this user does not own is never asked to
+issue: the footer says A2A is not joined, and `/status` and setup say whether
+`scode setup --mode shared` or the node owner can fix it. Shared mode
+covers every workspace, so a verified peer is any session of the node owner.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still
 selects the same-machine disk namespace for that process. When a node was

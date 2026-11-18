@@ -143,6 +143,47 @@ async fn a_configured_agent_loads_without_a_bundle_and_resolves_it_in_the_same_p
     workspace.cleanup();
 }
 
+#[tokio::test]
+async fn a_bundle_whose_issuance_is_unconfirmed_is_not_used() {
+    const AGENT: &str = "joining-node-actor";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("start model spy");
+    let (workspace, agents) = pending_workspace(&server.base_url(), AGENT);
+    // The Box is still confirming this issuance: the bundle exists but must not
+    // become the session's identity until the marker is gone.
+    fs::create_dir_all(agents.join(AGENT)).unwrap();
+    fs::write(
+        agents.join(AGENT).join("credential.json"),
+        json!({"agent": AGENT}).to_string(),
+    )
+    .unwrap();
+    fs::write(runtime::nexus_mailbox::joining_marker(&agents, AGENT), "1").unwrap();
+
+    let mut client = spawn_stdio_client(&workspace);
+    client
+        .send_request("initialize", json!({"protocolVersion": 1}))
+        .await;
+    let (_, created) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root, "mcpServers": [],
+            }),
+        )
+        .await;
+    let peer = &created["result"]["_meta"]["sudocode"]["peer"];
+    assert_eq!(peer["namespace"], "node", "{created}");
+    assert!(
+        peer["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(runtime::nexus_mailbox::JOINING_CAUSE)),
+        "an unconfirmed bundle must not be used: {created}"
+    );
+
+    workspace.cleanup();
+}
+
 /// A real CA-signed bundle arrives after the original receiver started. The
 /// selected mailbox must recover in place, including inbound ACP delivery.
 #[tokio::test]

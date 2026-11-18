@@ -12,6 +12,56 @@ use acp_pty::Host;
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
 
+#[test]
+fn completion_connection_setup_precedes_prompts_management_and_resume() {
+    let env = TestEnv::new_mock("completion-connection-order");
+    let mut host = Host::with_client_capabilities(
+        &env,
+        true,
+        &[],
+        json!({"_meta":{"sudocode":{
+            "subagentEvents":{"version":1},"subagentCompletions":{"version":1}
+        }}}),
+    );
+    for turn in 1..=3 {
+        if turn == 3 {
+            host.close();
+            host.request(
+                "session/load",
+                &json!({
+                    "sessionId":host.session,"cwd":env.workspace_root(),"mcpServers":[]
+                }),
+            );
+        }
+        // Every legacy prompt rebinds its completion connection. The host must
+        // await that configuration, including after loading the original SID.
+        let response = host.request(
+            "session/prompt",
+            &json!({
+                "sessionId":host.session,
+                "prompt":[{"type":"text","text":"PARITY_SCENARIO:streaming_text"}],
+                "_meta":{"traceId":format!("connection-turn:{turn}")}
+            }),
+        );
+        assert_eq!(response["stopReason"], "end_turn", "{response}");
+        assert!(response["_meta"]["sudocode"]["contextRef"]["revision"]
+            .as_u64()
+            .is_some());
+        let model_calls = env.captured_message_count();
+        let help = host.request(
+            "session/prompt",
+            &json!({
+                "sessionId":host.session,"prompt":[{"type":"text","text":"/help"}],
+                "_meta":{"traceId":format!("connection-help:{turn}")}
+            }),
+        );
+        assert_eq!(help["stopReason"], "end_turn", "{help}");
+        assert_eq!(env.captured_message_count(), model_calls);
+    }
+    assert!(env.captured_message_count() >= 3);
+    host.close();
+}
+
 struct Release(std::path::PathBuf);
 impl Drop for Release {
     fn drop(&mut self) {

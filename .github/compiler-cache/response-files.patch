@@ -330,6 +330,18 @@ diff --git a/src/compiler/rust.rs b/src/compiler/rust.rs
 +    }
 +
 +    #[test]
+diff --git a/src/test/utils.rs b/src/test/utils.rs
+--- a/src/test/utils.rs
++++ b/src/test/utils.rs
+@@ -34 +34 @@
+-        vec!($( $x.to_owned(), )*)
++        vec![$( $x.to_owned(), )*]
+@@ -41 +41 @@
+-        vec!($( ::std::ffi::OsString::from($x), )*)
++        vec![$( ::std::ffi::OsString::from($x), )*]
+@@ -48 +48 @@
+-        vec!($( ::std::path::PathBuf::from($x), )*)
++        vec![$( ::std::path::PathBuf::from($x), )*]
 diff --git a/tests/system.rs b/tests/system.rs
 --- a/tests/system.rs
 +++ b/tests/system.rs

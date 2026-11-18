@@ -61,7 +61,7 @@ def configuration():
         assert re.fullmatch('[0-9a-f]{64}', value[name])
     for name in ['source_commit', 'upstream_fix_commit', 'baseline_helper_ref']:
         assert re.fullmatch('[0-9a-f]{40}', value[name])
-    assert set(value['compatibility_files']) == {'tests/system.rs'}
+    assert set(value['compatibility_files']) == {'tests/system.rs', 'src/test/utils.rs'}
     for pins in value['compatibility_files'].values():
         assert set(pins) == {'original_sha256', 'patched_sha256'}
         assert all(re.fullmatch('[0-9a-f]{64}', digest) for digest in pins.values())

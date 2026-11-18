@@ -9,8 +9,8 @@ The source is the immutable upstream 0.19.0 commit. Its archive, minimal backpor
 and original/patched Rust modules are SHA-256 pinned in
 `.github/compiler-cache/response-files.json`. The production hunks come from the
 merged upstream fix; the older module import and test-helper interfaces are adapted.
-The existing system-test vector macro uses conventional square brackets to pass
-Rust 1.100 Clippy; its expansion and every test/assertion remain unchanged. Both
+The existing system/shared-test vector macros use conventional square brackets to
+pass Rust 1.100 Clippy; their expansion and every test/assertion remain unchanged. All
 changed files have complete original/patched SHA-256 pins. No Cargo
 dependency or release-profile setting is changed. The upstream tool's tests are
 dependency qualification, not a new SudoCode unit-test layer or product coverage.

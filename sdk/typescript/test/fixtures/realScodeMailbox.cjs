@@ -32,10 +32,20 @@ exports.prepare = async function ({ root, executable, previousScode, library, in
       owner = { mailbox, close: () => mailbox.close() };
       return;
     }
-    owner = await openCodexMailboxOwner({ actor, threadId, connection, native,
+    const calls = [];
+    const observedNative = previousScode ? { ...native, request(method, params) {
+      calls.push({ method, includeTurns: params.includeTurns, threadId: params.threadId });
+      return native.request(method, params);
+    } } : native;
+    owner = await openCodexMailboxOwner({ actor, threadId, connection, native: observedNative,
       callbackLog: path.join(root, 'real-mailbox.callback.jsonl'),
       // Measurement only. This does not enable runtime JSON admission.
       admission: { encodedResultBytes: bound, encodedSubmissionBytes: bound, qualified: async () => true } });
+    if (previousScode) {
+      assert.deepEqual(calls, [{ method: 'thread/read', includeTurns: false, threadId }]);
+      evidence.migrationAttachmentReads ??= [];
+      evidence.migrationAttachmentReads.push(calls.slice());
+    }
   };
   const restart = async () => {
     completeModelBody();
@@ -202,6 +212,18 @@ exports.prepare = async function ({ root, executable, previousScode, library, in
     bound,
     async bind(nativeConnection, id) {
       threadId = id; native = nativeConnection;
+      if (previousScode) {
+        // Model a completed v2 callback in the isolated cross-version fixture.
+        // Its body has already left v2 custody. Only the binding needs checking.
+        const inbox = path.join(root, 'real-mailbox.callback.jsonl.inbox');
+        fs.mkdirSync(inbox, {mode: 0o700});
+        const eventId = crypto.randomUUID();
+        fs.writeFileSync(path.join(inbox, eventId + '.json'), JSON.stringify({
+          version: 1, threadId, sessionId: receiver.sessionId, eventId,
+          messageHash: crypto.createHash('sha256').update('retired fixture delivery').digest('hex'),
+          receivedAt: Date.now(), sequence: 1, state: 'done', attempts: 1,
+        }), {mode: 0o600, flag: 'wx'});
+      }
       await openOwner();
       if (multipleFrames) {
         const started = performance.now();

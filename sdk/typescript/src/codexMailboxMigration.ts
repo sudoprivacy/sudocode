@@ -16,15 +16,16 @@ const receipt = z.object({
 const outcome = z.object({ eventId: z.string(), receiptSha256: z.string(),
   state: z.enum(['native_custody', 'offered', 'committed']), possiblyDelivered: z.boolean() });
 
-/** Call only after joining the old v2 owner and enumerating every native queue
- * and history page. Never opens the old inbox writer or schedules a v2 retry.
+/** Call only after joining the old v2 owner. Pending receipts require every
+ * native queue and history page. Done receipts never transfer custody.
  * The separate journal contains outcomes and hashes, never message bodies. */
-export function openCodexMailboxMigration(inbox: string, ledger: string,
-  binding: { threadId: string; sessionId: string }, nativeClientIds: ReadonlySet<string>): {
+export async function openCodexMailboxMigration(inbox: string, ledger: string,
+  binding: { threadId: string; sessionId: string },
+  checkNative: (pendingEventIds: readonly string[]) => Promise<ReadonlySet<string>>): Promise<{
     pending(): readonly ScodeLegacyOffer[];
     committed(commits: ScodeMailboxOffer['commits']): void;
     close(): void;
-  } {
+  }> {
   if (!lstatSync(inbox).isDirectory()) throw new Error('Legacy inbox must be a regular directory');
   const snapshot = () => {
     const rows = readdirSync(inbox).filter(name => /^[a-f0-9-]{36}\.json$/.test(name)).sort().map(name => {
@@ -52,6 +53,14 @@ export function openCodexMailboxMigration(inbox: string, ledger: string,
   };
   const original = snapshot();
   const fingerprint = journalHash(original.map(row => [row.name, row.sha256]));
+  const pendingRows = original.filter(row => row.record.state === 'pending');
+  const nativeClientIds = await checkNative(pendingRows.map(row => row.record.eventId));
+  const checkFingerprint = () => {
+    if (journalHash(snapshot().map(row => [row.name, row.sha256])) !== fingerprint) {
+      throw new Error('Legacy inbox changed after cutover; recovery required');
+    }
+  };
+  checkFingerprint();
   const journal = openCodexJournal(ledger, { kind: 'codex-v2-migration', ...binding, inbox: path.resolve(inbox), fingerprint });
   const states = new Map<string, z.infer<typeof outcome>>();
   try {
@@ -66,7 +75,7 @@ export function openCodexMailboxMigration(inbox: string, ledger: string,
       }
       states.set(row.eventId, row);
     }
-    for (const row of original.filter(row => row.record.state === 'pending')) {
+    for (const row of pendingRows) {
       if (states.has(row.record.eventId)) continue;
       const value = { eventId: row.record.eventId, receiptSha256: row.sha256,
         state: nativeClientIds.has(row.record.eventId) ? 'native_custody' as const : 'offered' as const,
@@ -76,9 +85,7 @@ export function openCodexMailboxMigration(inbox: string, ledger: string,
     let closed = false;
     const unchanged = () => {
       if (closed) throw new Error('Legacy migration is closed');
-      if (journalHash(snapshot().map(row => [row.name, row.sha256])) !== fingerprint) {
-        throw new Error('Legacy inbox changed after cutover; recovery required');
-      }
+      checkFingerprint();
     };
     return {
       pending() {

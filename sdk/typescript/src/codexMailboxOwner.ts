@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import type { CodexConnection } from './codexConnection';
 import type { MailboxScodeUpgrade } from './codexBindings';
 import { openCodexMailboxMigration } from './codexMailboxMigration';
-import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnapshot } from './codexMailboxWake';
+import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnapshot, readCodexMailboxThread } from './codexMailboxWake';
 import { mailboxTextBudget, openScodeMailbox, scodeMailboxHeads, type ScodeMailbox } from './scodeMailbox';
 import type { ScodeConnection } from './scodeAcp';
 
@@ -32,17 +32,25 @@ export async function openCodexMailboxOwner(options: {
     if (!await qualified()) throw new Error('native_unqualified: actual owning server and queue/tool presentation settings require qualification');
   };
   await requireQualified();
-  let migration: ReturnType<typeof openCodexMailboxMigration> | undefined;
+  let migration: Awaited<ReturnType<typeof openCodexMailboxMigration>> | undefined;
   let raw: ScodeMailbox | undefined;
   let wake: ReturnType<typeof openCodexMailboxWake> | undefined;
   try {
     const inbox = callbackLog + '.inbox';
     if (existsSync(inbox)) {
-      const view = await readCodexMailboxSnapshot(native, threadId);
-      if (!view.loaded) throw new Error('Legacy cutover requires a loaded thread and complete native inventory');
-      await requireQualified();
-      migration = openCodexMailboxMigration(inbox, callbackLog + '.migration.jsonl',
-        { threadId, sessionId: connection.sessionId }, new Set([...view.queued, ...view.running, ...view.finished]));
+      migration = await openCodexMailboxMigration(inbox, callbackLog + '.migration.jsonl',
+        { threadId, sessionId: connection.sessionId }, async pendingIds => {
+          if (pendingIds.length) {
+            const view = await readCodexMailboxSnapshot(native, threadId, () => new Set(pendingIds));
+            if (!view.loaded) throw new Error('Legacy cutover requires a loaded thread and complete native inventory');
+            await requireQualified();
+            return new Set([...view.queued, ...view.running, ...view.finished]);
+          }
+          const thread = await readCodexMailboxThread(native, threadId, false);
+          if (thread.status.type === 'notLoaded') throw new Error('Legacy cutover requires a loaded thread');
+          await requireQualified();
+          return new Set<string>();
+        });
     }
     const maxTextBytes = Math.min(mailboxTextBudget(admission.encodedResultBytes),
       mailboxSubmissionTextBudget(actor, threadId, admission.encodedSubmissionBytes));

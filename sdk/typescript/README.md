@@ -712,6 +712,18 @@ An operator can use thread-scoped MCP inventory to identify which registration
 the native thread loaded. Presentation limits and recipient identity require
 independent verification.
 
+During v2 migration, a directory of completed callbacks needs only a read of
+the loaded thread's identity and status. Pending event IDs are reconciled with
+the native queue and history before the owner records who holds each message.
+The owner checks the callback files again after the native reads.
+
+On threads with paginated history, the owner reads turn headers and pages the
+inputs of active turns. To choose a wake budget, it walks completed turns back
+to the most recent one containing a non-wake input. A completed turn containing
+only tool work leaves the previous budget in place. Reconciliation can stop
+reading older terminal turns once it has found every requested ID. A missing ID
+requires walking the remaining pages.
+
 For that path, the elected owner obtains a fresh no-ACK offer immediately
 before submission and queues its text verbatim after a fixed peer-data
 provenance line. Offer sizing accounts for the provenance, identity and JSON

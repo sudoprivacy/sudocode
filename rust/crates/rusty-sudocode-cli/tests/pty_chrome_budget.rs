@@ -6,6 +6,92 @@ mod common;
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session};
 
+/// A no-op F6 follows the tested burst in the same native input stream.
+/// Seeing its local observation establishes delivery, unlike seeing a repaint.
+struct InputDelivery {
+    path: std::path::PathBuf,
+    acknowledged: u64,
+}
+
+impl InputDelivery {
+    fn new(env: &TestEnv) -> Self {
+        Self {
+            path: env.workspace_root().join("input-observations.jsonl"),
+            acknowledged: 0,
+        }
+    }
+
+    fn mark(&mut self) {
+        self.acknowledged = std::fs::read_to_string(&self.path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| record["sequence"].as_u64())
+            .max()
+            .expect("the UI observed the preparatory input");
+    }
+
+    fn expect_blocked_burst(
+        &mut self,
+        sess: &mut pty_expect::PtySession,
+        event: &str,
+        count: usize,
+    ) {
+        sess.send("\x1b[17~").unwrap();
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        loop {
+            let observations = std::fs::read_to_string(&self.path).unwrap_or_default();
+            let acknowledgment = observations
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|record| {
+                    record["event"] == "function"
+                        && record["function"] == 6
+                        && record["sequence"]
+                            .as_u64()
+                            .is_some_and(|sequence| sequence > self.acknowledged)
+                });
+            if let Some(record) = acknowledgment {
+                let sequence = record["sequence"].as_u64().unwrap();
+                let delivered: Vec<_> = observations
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter(|record| {
+                        record["event"] == event
+                            && record["sequence"].as_u64().is_some_and(|observed| {
+                                observed > self.acknowledged && observed < sequence
+                            })
+                    })
+                    .collect();
+                assert_eq!(
+                    delivered.len(),
+                    count,
+                    "the actual burst must precede its acknowledgment: {observations}"
+                );
+                assert!(
+                    delivered.iter().chain(std::iter::once(&record)).all(|record|
+                        record["reviewable"] == false || record["frame_current"] == false),
+                    "input delivery must be observed before restoring a reviewable frame: {observations}"
+                );
+                assert!(
+                    !observations.contains("MustNotAppear")
+                        && !observations.contains("DraftHeadTail"),
+                    "input diagnostics must omit typed and pasted contents"
+                );
+                self.acknowledged = sequence;
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native input was not observed within {:?}\nObservations:\n{observations}\nPTY:\n{}",
+                common::DEFAULT_TIMEOUT,
+                sess.render(common::screen_contents)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
 struct DraftWriterGate(std::path::PathBuf);
 
 impl Drop for DraftWriterGate {
@@ -191,7 +277,14 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
 #[test]
 fn resize_and_confirm_burst_keeps_the_unseen_picker_open() {
     let env = TestEnv::new("chrome-budget-resize-confirm-burst");
-    let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);
+    let mut delivery = InputDelivery::new(&env);
+    let mut sess = env.spawn_with_env(
+        &[],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("SCODE_TRACE_INPUT", delivery.path.to_str().unwrap()),
+        ],
+    );
     common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
     sess.send("/model\r").unwrap();
     common::expect_screen_settled(
@@ -201,10 +294,12 @@ fn resize_and_confirm_burst_keeps_the_unseen_picker_open() {
         "picker before resize",
     );
     for _ in 0..3 {
+        delivery.mark();
         sess.resize(6, 80).unwrap();
         // No paint, sleep or polling between resize and confirmation: admission
         // must use the new geometry even when events arrive in the same batch.
         sess.send("\r").unwrap();
+        delivery.expect_blocked_burst(&mut sess, "enter", 1);
         common::expect_screen_settled(
             &sess,
             |s| s.contains("Enlarge terminal to review"),
@@ -251,7 +346,14 @@ fn resize_and_paste_burst_cannot_edit_an_unreviewable_draft() {
 
 fn assert_resize_edit_burst_rejected(burst: &str, name: &str) {
     let env = TestEnv::new(name);
-    let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);
+    let mut delivery = InputDelivery::new(&env);
+    let mut sess = env.spawn_with_env(
+        &[],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("SCODE_TRACE_INPUT", delivery.path.to_str().unwrap()),
+        ],
+    );
     common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
     sess.send("DraftHeadTail").unwrap();
     common::expect_input_line(&sess, "DraftHeadTail", common::DEFAULT_TIMEOUT, "draft");
@@ -269,9 +371,16 @@ fn assert_resize_edit_burst_rejected(burst: &str, name: &str) {
         common::DEFAULT_TIMEOUT,
         "remove probe",
     );
+    delivery.mark();
     sess.resize(8, 12).unwrap();
     // Deliberately do not wait for the warning before this input burst.
     sess.send(burst).unwrap();
+    let (event, count) = if burst.starts_with("\x1b[200~") {
+        ("paste", 1)
+    } else {
+        ("character", burst.chars().count())
+    };
+    delivery.expect_blocked_burst(&mut sess, event, count);
     common::expect_screen_settled(
         &sess,
         |s| s.contains("Enlarge") && s.contains("terminal"),

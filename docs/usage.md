@@ -443,6 +443,15 @@ block; completed results remain visible while the provider is still streaming.
 Captured diagnostics use the same line framing and preserve UTF-8 characters
 split across reads.
 
+For local input/resize diagnosis, set `SCODE_TRACE_INPUT` to a writable file
+path before starting the REPL. It appends JSON lines when the UI observes
+keys and bracketed paste: a monotonic sequence, event category, callback frame
+dimensions, reviewability and the existing frame guard's result. Function-key
+numbers are recorded; typed characters, paste contents, modifiers and model
+traffic are not. This is opt-in local output and does not change admission or
+chrome. A size warning acknowledges a rendered frame, not delivery of input;
+diagnostics can distinguish those two boundaries without adding timing delays.
+
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
 commands can execute concurrently, with a default limit of ten. Each complete
 tool input becomes eligible while the provider is still streaming. Pre/post

@@ -366,6 +366,9 @@ the compiler key. Linked, legacy or changed cached Cargo configurations refuse
 before metadata/build execution; global/user Cargo settings are untouched.
 The candidate cohost and all release/performance profiles retain their original
 settings, and the original search case, assertions and 90s bounds remain.
+This ordinary journey no longer checks optimized fixed-driver/plugin artifacts.
+It supplies no replacement proof for optimization-specific driver/plugin behavior;
+the existing release/performance gates are unchanged.
 Cache hits never substitute a previous test result. The required command prints builds and stores timings and failure logs.
 The main publisher alone performs explicit prewarming. Consumers invoke normal
 `cargo test`, which compiles its driver and runs the original case's plugin build.

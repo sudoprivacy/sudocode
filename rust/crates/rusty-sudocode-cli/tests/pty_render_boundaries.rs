@@ -439,6 +439,7 @@ fn assert_interleaved_code_colors(sess: &pty_expect::PtySession, screen: &str) {
 /// wrapped to the terminal width, so its continuation rows are not marked by
 /// `TOOL_BATCH:` and must be cut off by position. The echo ends at the blank
 /// row that separates it from the response.
+#[cfg(unix)]
 fn after_prompt_echo(screen: &str) -> Vec<&str> {
     let rows: Vec<&str> = screen.lines().collect();
     let Some(echo) = rows.iter().position(|row| row.contains("TOOL_BATCH:")) else {

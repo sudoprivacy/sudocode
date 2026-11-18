@@ -110,7 +110,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   if (!path.isAbsolute(config.stateDirectory) || !Array.isArray(config.peers)
       || config.peers.some(peer => typeof peer !== 'string' || !peer)
       || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
-      || (config.mailbox && (typeof config.mailbox.qualified !== 'function'
+      || (config.mailbox !== undefined && (!config.mailbox || typeof config.mailbox.qualified !== 'function'
         || !Number.isSafeInteger(config.mailbox.encodedResultBytes) || config.mailbox.encodedResultBytes < 4096
         || config.mailbox.encodedResultBytes > 65536
         || !Number.isSafeInteger(config.mailbox.encodedSubmissionBytes) || config.mailbox.encodedSubmissionBytes < 4096

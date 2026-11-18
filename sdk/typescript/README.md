@@ -677,7 +677,7 @@ final handling, global idle, or exactly-once tool side effects. This recovery
 protocol does not restart a native server, change credentials, create threads
 or override approvals.
 
-The draft programmatic `CodexAutojoinConfig.mailbox` path uses negotiated scode
+The programmatic `CodexAutojoinConfig.mailbox` path uses negotiated scode
 `peerInput` v3 offers and model acknowledgements. It is not enabled by runtime
 JSON or by the v2 installer preflight. Its admission provider must qualify the
 actual owning native executable and effective thread settings on every call,
@@ -685,6 +685,12 @@ including two separate measured bounds: `encodedSubmissionBytes` for native
 queue-add params and `encodedResultBytes` for an MCP tool result (each 4096–65536
 bytes). Both require evidence from the actual model-endpoint request. A fixture
 provider returning `true` is not production admission.
+
+An operator embedding the elected SDK owner can pass this provider as the
+second argument to `runCodexMcpOwner(configFile, admission)`. Authenticated
+stdio clients then discover `scode_inbox` on the existing owner connection.
+Each call resolves the native caller thread and uses that thread's admitted
+receiver. The standard CLI owner invocation still selects the v2 path.
 
 For that path, the elected owner obtains a fresh no-ACK offer immediately
 before submission and queues its text verbatim after a fixed peer-data

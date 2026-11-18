@@ -4,51 +4,30 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { journalHash } from '../src/codexJournal';
-import { registerScodeMcpTools } from '../src/mcpTools';
 import { CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 
 const sdk = path.resolve(__dirname, '../..');
 const threadId = '33333333-3333-3333-3333-333333333333';
-const { connectCodexAutojoin } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
+const { connectCodexAutojoin, runCodexMcpOwner, shutdownCommand } = require(path.join(sdk, 'dist/index.cjs')) as typeof import('../src/index');
 const rows = (file: string): any[] => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(row => JSON.parse(row)) : [];
 const hash = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function child(directory: string) {
-  const server = new McpServer({ name: 'mailbox-owner-fixture', version: '1' });
-  const owner = await connectCodexAutojoin({ native: JSON.parse(fs.readFileSync(path.join(directory, 'native.json'), 'utf8')),
-    stateDirectory: path.join(directory, 'state'), peers: [], peerPolicy: 'node-namespace', pollIntervalMs: 100000,
-    onError: error => console.error('Fixture owner observation:', error),
-    // Private fixture admission only; this file is not a production certificate.
-    mailbox: { encodedResultBytes: 8192, encodedSubmissionBytes: 4096,
-      qualified: async () => fs.readFileSync(path.join(directory, 'qualified'), 'utf8') === 'yes' },
-    async resolveAgent(claim) {
-      fs.appendFileSync(path.join(directory, 'enrollment.jsonl'), JSON.stringify(claim) + '\n');
-      const configFile = path.join(directory, 'profile.json');
-      fs.writeFileSync(configFile, JSON.stringify({ scodeArgv: [process.execPath,
-        path.join(sdk, 'test/fixtures/scode-direct-a2a-agent.mjs'), 'mailbox'], workspace: claim.workspace,
-        acpSessionId: 'acp-session', closeTimeoutMs: 900,
-        env: { SCODE_DIRECT_FIXTURE_ACTOR: claim.actor, HYDRA_DIRECT_FIXTURE_JOURNAL: path.join(directory, 'acp.jsonl') },
-      }), { flag: 'wx', mode: 0o600 });
-      return { actor: claim.actor, configFile };
-    },
-  });
-  registerScodeMcpTools(server, async extra => {
-    await owner.refresh();
-    return { connection: owner.connectionFor(extra._meta?.threadId), mailbox: owner.mailboxFor(extra._meta?.threadId),
-      nativeThreadId: extra._meta?.threadId as string, auditLog: path.join(directory, 'audit.jsonl') };
-  }, undefined, () => ({ agents: owner.status() }), true);
-  let closing: Promise<void> | undefined;
-  const close = () => closing ??= (async () => { await server.close(); await owner.close(); })();
-  process.stdin.once('end', () => { void close().catch(error => { console.error(error); process.exitCode = 1; }); });
-  process.once('SIGTERM', () => { void close().catch(error => { console.error(error); process.exitCode = 1; }); });
-  await server.connect(new StdioServerTransport());
+async function enroll(directory: string) {
+  const claim = JSON.parse(fs.readFileSync(0, 'utf8'));
+  fs.appendFileSync(path.join(directory, 'enrollment.jsonl'), JSON.stringify(claim) + '\n');
+  const configFile = path.join(directory, 'profile.json');
+  fs.writeFileSync(configFile, JSON.stringify({ scodeArgv: [process.execPath,
+    path.join(sdk, 'test/fixtures/scode-direct-a2a-agent.mjs'), 'mailbox'], workspace: claim.workspace,
+    acpSessionId: 'acp-session', closeTimeoutMs: 900,
+    env: { SCODE_DIRECT_FIXTURE_ACTOR: claim.actor, HYDRA_DIRECT_FIXTURE_JOURNAL: path.join(directory, 'acp.jsonl') },
+  }), { flag: 'wx', mode: 0o600 });
+  process.stdout.write(JSON.stringify({ actor: claim.actor, configFile }) + '\n');
 }
 
 async function main() {
@@ -74,7 +53,6 @@ async function main() {
   const env: NodeJS.ProcessEnv = { ...process.env, SCODE_NATIVE_ENV_SENTINEL: 'owned-proxy' }; delete env.CODEX_THREAD_ID;
   const native = { codexArgv: [process.execPath, path.join(sdk, 'test/fixtures/codex-stdio-proxy.mjs'), String(address.port), 'normal'],
     socket: 'fixture-native.sock', env: env as Record<string, string>, closeTimeoutMs: 900 };
-  fs.writeFileSync(path.join(directory, 'native.json'), JSON.stringify(native), { mode: 0o600 });
   let loaded = true, failure: unknown;
   const calls: any[] = [], queue: any[] = [];
   endpoint.on('connection', socket => socket.on('message', bytes => {
@@ -101,9 +79,35 @@ async function main() {
     } catch (error) { failure = error; socket.terminate(); }
   }));
   let client: Client | undefined;
+  let owner: Promise<void> | undefined;
+  const audit = path.join(directory, 'audit.jsonl');
+  const runtime = path.join(directory, 'mcp.json');
+  const reservation = createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
+  const ownerAddress = reservation.address(); assert.ok(ownerAddress && typeof ownerAddress !== 'string');
+  await new Promise<void>(resolve => reservation.close(() => resolve()));
+  fs.writeFileSync(runtime, JSON.stringify({ version: 1, mode: 'codex-autojoin', native, stateDirectory, auditLog: audit,
+    peers: [], peerPolicy: 'node-namespace', enrollmentArgv: [process.execPath, __filename, '--enroll', directory],
+    endpoint: { port: ownerAddress.port, token: '12'.repeat(32) } }), { mode: 0o600 });
   const open = async () => {
-    const transport = new StdioClientTransport({ command: process.execPath, args: [__filename, '--child', directory], stderr: 'inherit' });
+    const offset = rows(audit).length;
+    // Only this private fixture supplies an artificial qualification verdict.
+    owner = runCodexMcpOwner(runtime, { encodedResultBytes: 8192, encodedSubmissionBytes: 4096,
+      qualified: async (_, id) => id === threadId && fs.readFileSync(path.join(directory, 'qualified'), 'utf8') === 'yes' });
+    const deadline = performance.now() + 5000;
+    while (!rows(audit).slice(offset).some(row => row.phase === 'native_inventory')) {
+      if (performance.now() >= deadline) throw new Error('Elected owner did not finish its initial inventory');
+      await Promise.race([pause(20), owner.then(() => { throw new Error('Elected owner exited during startup'); })]);
+    }
+    const transport = new StdioClientTransport({ command: process.execPath,
+      args: [path.join(sdk, 'dist/server.cjs'), '--codex', '--config', runtime], stderr: 'inherit' });
     client = new Client({ name: 'mailbox-owner-client', version: '1' }); await client.connect(transport);
+    assert.ok((await client.listTools()).tools.some(tool => tool.name === 'scode_inbox'));
+  };
+  const close = async () => {
+    try { await client?.close(); } finally {
+      client = undefined;
+      if (owner) { await shutdownCommand(); await owner; owner = undefined; }
+    }
   };
   const call = (name: string, args: object = {}, selectedThread = threadId) => client!.callTool({ name,
     arguments: args as Record<string, unknown>, _meta: { threadId: selectedThread } });
@@ -157,7 +161,7 @@ async function main() {
     assert.equal((await call('scode_inbox', { ack: ['fixture-ack'] })).isError, true);
     assert.equal((await status())[0].state, 'native_unqualified');
     assert.equal(offers().length, before, 'changed native/settings refuse before ACK reaches scode');
-    await client!.close(); client = undefined;
+    await close();
     fs.writeFileSync(path.join(directory, 'qualified'), 'yes');
     await open();
     assert.equal((await call('scode_inbox')).isError, undefined);
@@ -172,7 +176,7 @@ async function main() {
     assert.deepEqual(oldFiles.map(hash), originalHashes);
     console.log('PASS composed v3 owner/MCP process: admission before enrollment/ACP, verified identity, immutable v2 migration, persisted wake, revoked qualification, ready-binding restart, unload cleanup. Fixture admission is not native qualification.');
   } finally {
-    await client?.close();
+    await close();
     for (const socket of endpoint.clients) socket.terminate();
     await new Promise<void>((resolve, reject) => endpoint.close(error => error ? reject(error) : resolve()));
     assert.equal(path.dirname(directory), path.resolve(os.tmpdir())); assert.ok(path.basename(directory).startsWith('scode-mailbox-owner-'));
@@ -180,4 +184,4 @@ async function main() {
   }
 }
 
-void (process.argv[2] === '--child' ? child(process.argv[3]) : main()).catch(error => { console.error(error); process.exitCode = 1; });
+void (process.argv[2] === '--enroll' ? enroll(process.argv[3]) : main()).catch(error => { console.error(error); process.exitCode = 1; });

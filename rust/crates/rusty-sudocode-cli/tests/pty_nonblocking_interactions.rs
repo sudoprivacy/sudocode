@@ -1359,7 +1359,7 @@ fn unanswered_question_allows_continuation_and_reply_is_consumed_once() {
     clippy::too_many_lines,
     reason = "Keep the connected question, queued compaction and chat journey together."
 )]
-fn question_reply_survives_a_queued_compaction_and_preserves_later_chat() {
+fn question_reply_and_later_chat_survive_a_refused_queued_compaction() {
     let env = TestEnv::new_mock("interaction-queued-compaction");
     let mut terminal = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
@@ -1442,6 +1442,26 @@ fn question_reply_survives_a_queued_compaction_and_preserves_later_chat() {
     );
     finish_mock_question(&env);
     std::fs::write(env.workspace_root().join("release-shared-input"), "release").unwrap();
+    // This short conversation is entirely protected recent history. A
+    // refused compaction must retain the later chat and pause it until the
+    // user explicitly resumes; the answer already belongs to the session.
+    common::expect_screen(
+        &terminal,
+        |view| {
+            view.contains("retention_limited")
+                && view.contains("history preserved")
+                && view.contains("queued: ChatAfterQuestionCompaction")
+        },
+        env.timeout(),
+        "refused compaction preserves and pauses the later chat",
+    );
+    assert!(env
+        .captured_message_bodies()
+        .iter()
+        .all(|body| !body.contains("ChatAfterQuestionCompaction")));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+    assert_eq!(saved["records"][0]["status"], "delivered");
+    terminal.send("\x1b").unwrap();
     common::expect_screen(
         &terminal,
         |_| {
@@ -1450,13 +1470,13 @@ fn question_reply_survives_a_queued_compaction_and_preserves_later_chat() {
                 .any(|body| body.contains("ChatAfterQuestionCompaction"))
         },
         common::LIVE_TURN_BUDGET,
-        "later chat reaches the model after compaction",
+        "explicit resume delivers the chat retained after compaction refusal",
     );
     let screen = common::expect_screen(
         &terminal,
         |view| view.contains("Estimated tokens") && !view.contains("queued: "),
         env.timeout(),
-        "compaction finishes and the queue drains",
+        "the preserved queue drains after explicit resume",
     );
     let report = screen.find("Estimated tokens").unwrap();
     assert!(

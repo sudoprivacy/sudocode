@@ -1,7 +1,6 @@
 # Windows compiler-cache tool delivery
 
-The compiler-cache consumer still uses its existing pinned tool. This producer
-does not switch the consumer or establish a lifecycle speedup. It prepares a
+The producer does not itself switch the consumer or establish a lifecycle speedup. It prepares a
 maintained artifact for the Windows response-file defect fixed by upstream
 [sccache #3026](https://github.com/mozilla/sccache/pull/3026).
 
@@ -47,3 +46,22 @@ its exact archive/hash and qualify the real native/Docker cache fixture. Other
 platforms retain their original official tools and safe fallbacks. This does not
 change any product test assertions, deadlines, worker pools, native field
 ownership, installed runtime or production service.
+
+## Registered consumer
+
+The Windows x64 consumer pins the public `scode-responsefiles.1` archive at
+SHA-256 `f38c6dc470d04a28372f621c88bb74096d57e77083adcedd4b7b739ca9021562`.
+Archive/member/executable checks precede use, and the complete registered tool
+definition determines capability. A caller-provided boolean cannot enable it.
+The tool and object-store namespaces differ from official 0.19.0; those original
+bytes/stores remain available for the original direct-file controls. Other
+registered platforms keep their official tool and fallback.
+
+The wrapper inspects response files only to select a cacheable Cargo link
+compilation. It keeps the original compiler/arguments/files, leaves queries and
+unknown forms direct, and counts cache attempts separately from direct units.
+The normal guard retains real Cargo/nextest/PTY, original official-file,
+invalidation, source failure/repair, dispatcher and ownership controls. Fixed-tool
+controls require actual long-file misses/hits and linked output, and reject the
+restored old bypass and unsafe query routing. This does not establish a generic
+Cargo/shared-target freshness guarantee or population latency improvement.

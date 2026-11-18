@@ -193,7 +193,27 @@ async function main() {
       /original ready thread, actor and ACP session/);
     }
     const registrationId = randomUUID();
-    await open(existingBinding, registrationId);
+    const savedProfile = JSON.parse(fs.readFileSync(ready.configFile, 'utf8'));
+    // Make the persisted executable an unavailable old version. The same
+    // ready profile must still load its original SID through the chosen child.
+    savedProfile.scodeArgv[0] = path.join(directory, 'retired-scode');
+    fs.writeFileSync(ready.configFile, JSON.stringify(savedProfile));
+    const scodeUpgrade = { executable: process.execPath, executableSha256: hash(process.execPath),
+      profileSha256: hash(ready.configFile) };
+    const countBeforeSelection = rows(path.join(directory, 'acp.jsonl')).length;
+    for (const [changes, reason] of [
+      [{ executableSha256: '0'.repeat(64) }, /executable digest changed/],
+      [{ profileSha256: '0'.repeat(64) }, /ACP profile differs/],
+    ] as const) {
+      await open({ ...existingBinding, scodeUpgrade: { ...scodeUpgrade, ...changes } });
+      assert.match((await status())[0].error, reason);
+      assert.equal((await call('scode_inbox')).isError, true);
+      assert.equal(rows(path.join(directory, 'acp.jsonl')).length, countBeforeSelection);
+      await close();
+    }
+    await open({ ...existingBinding, scodeUpgrade }, registrationId);
+    assert.equal((await status())[0].receiver.sessionId, existingBinding.acpSessionId);
+    assert.equal(hash(ready.configFile), scodeUpgrade.profileSha256, 'Scoped launch preserves the on-disk executable and options');
     const otherClient = await attach(randomUUID());
     try {
       assert.notEqual(otherClient.getServerVersion()?.description, client!.getServerVersion()?.description);

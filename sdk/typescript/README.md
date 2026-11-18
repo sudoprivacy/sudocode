@@ -698,6 +698,14 @@ and its ACP profile before connecting. While the selected thread is unloaded
 the owner has no attached receiver. The scoped owner leaves other roots'
 enrollment records untouched.
 
+When that profile still selects a v2-only scode executable, the operator can
+set `existingBinding.scodeUpgrade` with the absolute `executable` path,
+`executableSha256` of the qualified release and `profileSha256` of the
+original on-disk profile. Each attachment verifies both files and changes
+only the executable used to launch the child. The child loads the original
+ACP session with the existing flags, environment and workspace. The normal
+v3 handshake and Node identity check apply before mailbox access.
+
 The MCP stdio client accepts an optional `--registration-id UUID`. Its MCP
 server description then reports `SCode registration UUID` on that connection.
 An operator can use thread-scoped MCP inventory to identify which registration

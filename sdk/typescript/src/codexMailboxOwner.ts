@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import type { CodexConnection } from './codexConnection';
+import type { MailboxScodeUpgrade } from './codexBindings';
 import { openCodexMailboxMigration } from './codexMailboxMigration';
 import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnapshot } from './codexMailboxWake';
 import { mailboxTextBudget, openScodeMailbox, scodeMailboxHeads, type ScodeMailbox } from './scodeMailbox';
@@ -13,7 +14,7 @@ export interface CodexMailboxAdmission {
   encodedSubmissionBytes: number;
   /** Adopt one already bound session. Other loaded roots and their enrollment
    * operations stay outside this owner's scope. */
-  existingBinding?: Readonly<{ threadId: string; actor: string; acpSessionId: string }>;
+  existingBinding?: Readonly<{ threadId: string; actor: string; acpSessionId: string; scodeUpgrade?: MailboxScodeUpgrade }>;
   qualified(native: CodexConnection, threadId: string): Promise<boolean>;
 }
 

@@ -8,7 +8,7 @@ import type { CodexDeliveryStatus } from './codexInbox';
 import { openCodexMailboxOwner, type CodexMailboxAdmission } from './codexMailboxOwner';
 import type { ScodeMailbox } from './scodeMailbox';
 import type { CodexMailboxWakeStatus } from './codexMailboxWake';
-import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings,
+import { assertWorkspace, boundProfile, claimBinding, identifier, provisionBinding, readBindings, upgradedMailboxProfile,
   settleInterruptedBindings, writeBinding, type CodexBinding as Binding, type CodexAgentClaim, type CodexWorkspaceBinding } from './codexBindings';
 export type { CodexAgentClaim, CodexWorkspaceBinding } from './codexBindings';
 
@@ -165,7 +165,13 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
         throw error;
       }
       if (closed) return;
-      const profile = boundProfile(binding);
+      const profile = selected?.scodeUpgrade
+        ? await upgradedMailboxProfile(binding, selected.scodeUpgrade) : boundProfile(binding);
+      if (closed) return;
+      if (selected?.scodeUpgrade && !await config.mailbox!.qualified(native, thread.id)) {
+        throw new Error('native_unqualified: native attachment changed during executable verification');
+      }
+      if (closed) return;
       let callback: CodexCallback | undefined;
 
       // Codex is the agent its peers address: the owned scode hands each peer
@@ -278,7 +284,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
               throw new Error('native_unqualified: actual owning server or tool settings changed');
             }
             assertWorkspace(owner.binding,thread.cwd);
-            if (owner.binding.state === 'ready') boundProfile(owner.binding);
+            if (owner.binding.state === 'ready') boundProfile(owner.binding, selected?.scodeUpgrade?.profileSha256);
           }
           catch (error) {
             owner.error=String(error);await stopOwner(owner);

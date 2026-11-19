@@ -550,6 +550,7 @@ fn main() {
     // the Windows console, and so the color-tier detection that reads the same
     // VT state sees it already enabled (see `windows_console`).
     startup::measure("console", windows_console::enable_vt_processing);
+    render::grapheme_probe::assume_from_environment();
 
     if let Err(error) = run() {
         // (error handling below — success path returns from main normally)
@@ -3071,6 +3072,7 @@ fn run_repl_iocraft_dispatch(
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     render::terminal_palette::initialize();
+    render::grapheme_probe::measure();
     cli.is_repl = true;
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from

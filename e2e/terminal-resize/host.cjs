@@ -19,9 +19,18 @@ function createHost(config) {
     windowsPty: process.platform === 'win32'
       ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined,
   });
-  terminal.loadAddon(new (load('@xterm/addon-unicode11').Unicode11Addon)());
-  terminal.unicode.activeVersion = '11';
+  // Unicode 11 lays out each code point of a ZWJ cluster, as VS Code does;
+  // `unicode: 'graphemes'` draws it as one glyph, as iTerm2, kitty, Ghostty
+  // and Windows Terminal do.
+  if (config.unicode === 'graphemes') {
+    terminal.loadAddon(new (load('@xterm/addon-unicode-graphemes').UnicodeGraphemesAddon)());
+    terminal.unicode.activeVersion = '15-graphemes';
+  } else {
+    terminal.loadAddon(new (load('@xterm/addon-unicode11').Unicode11Addon)());
+    terminal.unicode.activeVersion = '11';
+  }
   const metadata = { platform: process.platform, os: os.release(), arch: process.arch,
+    unicode: terminal.unicode.activeVersion,
     node: process.versions.node, electron: process.versions.electron,
     pty: load('node-pty/package.json').version,
     xterm: load('@xterm/headless/package.json').version, backend: config.backend };
@@ -46,7 +55,11 @@ function createHost(config) {
     }
     return false;
   });
-  terminal.onData(data => child.write(data));
+  // `silent: true` models a terminal that never reports its cursor position.
+  terminal.onData(data => {
+    const reply = config.silent ? data.replace(/\x1b\[\d+;\d+R/g, '') : data;
+    if (reply) child.write(reply);
+  });
   if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c' }, params => {
     if (!params.length || (params.length === 1 && params[0] === 0)) {
       child.write('\x1b[?61;4c'); return true;
@@ -101,7 +114,8 @@ function createHost(config) {
     fs.writeFileSync(path.join(config.logRoot, 'terminal.txt'), snapshot());
     terminal.dispose();
   }
-  return { child, terminal, state, metadata, sleep, snapshot, viewport, wait, resize, resizeFrame, close,
+  const output = () => wire.map(row => row.data || '').join('');
+  return { child, terminal, state, metadata, sleep, snapshot, viewport, wait, resize, resizeFrame, close, output,
     settle: (predicate, notBefore = 0) => wait(predicate, { notBefore, quietMs: 300, timeoutMs: 20000 }),
     frame: (predicate, notBefore = 0) => wait(predicate, { notBefore }),
     onPresentation: observer => subscribe(presentations, observer),

@@ -10,9 +10,10 @@ if (config.scenario === 'browser-links') {
 }
 const initial = config.scenario === 'budget' ? { cols: 80, rows: 18 }
   : config.scenario === 'parallel' ? { cols: 100, rows: 80 }
-  : config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
+  : config.scenario === 'a2a' ? { cols: 100, rows: 50 }
+  : config.scenario === 'graphemes' ? { cols: 60, rows: 30 } : { cols: 120, rows: 24 };
 const host = createHost({ ...initial, ...config });
-const { child, terminal, state, sleep, snapshot, viewport, settle, frame, resize, close } = host;
+const { child, terminal, state, sleep, snapshot, viewport, settle, frame, resize, close, output } = host;
 function check(label) {
   const text = snapshot();
   for (const marker of ['turn 1', '1 todos', 'ResizeCompletedTask', 'ResizeHistorySentinel', 'DraftSurvivesResize'])
@@ -158,6 +159,67 @@ async function sharedBudget() {
   history('submitted');
   console.log('SCODE_XTERM_SHARED_BUDGET_PASS');
 }
+// scode measures at startup how this terminal draws a ZWJ cluster, then lays
+// out history, the editor and its caret by that rule.
+async function graphemeWidth() {
+  const cluster = '\u{1F469}\u{1F3FD}\u200D\u{1F4BB}';
+  const width = config.unicode === 'graphemes' ? 2 : 6;
+  const prompt = 2;
+  await settle(text => text.includes('GraphemeHistoryEnd') && text.includes('❯'));
+  // The probe is drawn, then erased, before anything else; a terminal that
+  // never reports its cursor never sees it and gets the assumed rule.
+  const banner = output().indexOf('Cluster echo');
+  assert.equal(output().slice(0, banner).includes(cluster), !config.silent,
+    `probe drawn before the history (silent: ${config.silent})`);
+  const overflowed = () => {
+    const buffer = terminal.buffer.active;
+    for (let y = 1; y < buffer.length; y++)
+      if (buffer.getLine(y).isWrapped) return y;
+    return -1;
+  };
+  assert.equal(overflowed(), -1, `history overflowed the terminal edge\n${snapshot()}`);
+  const editor = () => {
+    const buffer = terminal.buffer.active;
+    for (let y = buffer.length - 1; y >= 0; y--) {
+      const line = buffer.getLine(y);
+      if (line.translateToString(true).startsWith('❯ ab')) return line;
+    }
+    assert.fail(`no editor row\n${snapshot()}`);
+  };
+  const column = char => {
+    const line = editor();
+    for (let x = 0; x < terminal.cols; x++) if (line.getCell(x).getChars() === char) return x;
+    return -1;
+  };
+  // The caret is the cell whose background differs from the shaded row's.
+  const caret = () => {
+    const line = editor();
+    const background = cell => `${cell.getBgColorMode()}:${cell.getBgColor()}`;
+    const row = background(line.getCell(0));
+    for (let x = prompt; x < terminal.cols; x++) if (background(line.getCell(x)) !== row) return x;
+    return -1;
+  };
+  const expectCaret = async (expected, label) => {
+    await settle(() => caret() === expected).catch(() => {});
+    assert.equal(caret(), expected, `${label}: caret column (${config.unicode})\n${snapshot()}`);
+  };
+  child.write(`ab${cluster}XY`);
+  await settle(text => text.includes('XY'));
+  assert.equal(column('X'), prompt + 2 + width, `text after the cluster (${config.unicode})\n${snapshot()}`);
+  await expectCaret(prompt + 4 + width, 'end of the draft');
+  child.write('\x1b[D\x1b[D');
+  await expectCaret(prompt + 2 + width, 'two Lefts: on X');
+  child.write('\x1b[D');
+  await expectCaret(prompt + 2, 'one more Left: before the whole cluster');
+  child.write('\x1b[C\x7f');
+  await settle(text => text.includes('❯ abXY'));
+  assert.equal(column('X'), prompt + 2, `Backspace removes the whole cluster\n${snapshot()}`);
+  await expectCaret(prompt + 2, 'after Backspace');
+  assert.equal(overflowed(), -1, `the editor overflowed the terminal edge\n${snapshot()}`);
+  child.write('\x15');
+  await settle(text => !text.includes('abXY'));
+}
+
 async function run() {
   try {
     fs.mkdirSync(config.logRoot, { recursive: true });
@@ -169,6 +231,8 @@ async function run() {
       await queuedPeer();
     } else if (config.scenario === 'parallel') {
       await parallelTools();
+    } else if (config.scenario === 'graphemes') {
+      await graphemeWidth();
     } else {
       await settle(text => text.includes('turn 1') && text.includes('❯'));
       child.write('DraftSurvivesResize');

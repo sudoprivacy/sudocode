@@ -703,7 +703,18 @@ impl Mailbox {
     /// the exclusive reader until acknowledgement or drop. A dropped batch
     /// stays unread, including after a process crash.
     pub fn read_unread(&self, peer: &str) -> Result<Option<UnreadBatch>, String> {
-        let Some(reader) = self.conversation_reader(peer).acquire()? else {
+        let Some(seat) = self.claim_receiver()? else {
+            return Ok(None);
+        };
+        self.read_unread_seated(peer, &seat)
+    }
+
+    fn read_unread_seated(
+        &self,
+        peer: &str,
+        seat: &Arc<HeldLease>,
+    ) -> Result<Option<UnreadBatch>, String> {
+        let Some(reader) = self.conversation_reader(peer).acquire(Arc::clone(seat))? else {
             return Ok(None);
         };
         let (messages, next) = self.poll_conversation(peer, reader.offset, 0)?;
@@ -747,10 +758,10 @@ impl Mailbox {
     /// Move this agent's register in the conversation with `peer` from `start`
     /// to `end`, if it is still at `start`.
     ///
-    /// The reader is claimed for this write alone and released afterwards.
+    /// The receiver seat is claimed for this write alone and released afterwards.
     /// A register already at or past `end` is left as it is: the range was
     /// committed before, so the call succeeds without moving it backwards. A
-    /// register anywhere else, or a reader held by another instance, refuses.
+    /// register anywhere else, or a seat held by another instance, refuses.
     ///
     /// # Errors
     /// Returns an error when the reader cannot be claimed or the register
@@ -761,7 +772,12 @@ impl Mailbox {
         start: u64,
         end: u64,
     ) -> Result<CommitOutcome, String> {
-        let Some(mut reader) = self.conversation_reader(peer).acquire()? else {
+        let Some(mut reader) = self
+            .claim_receiver()?
+            .map(|seat| self.conversation_reader(peer).acquire(seat))
+            .transpose()?
+            .flatten()
+        else {
             return Ok(CommitOutcome::Refused(CommitRefusalReason::LeaseLost));
         };
         if reader.offset >= end {
@@ -782,8 +798,11 @@ impl Mailbox {
     /// Gather pending deliveries across conversations, retaining their receipts.
     pub fn read_pending(&self) -> Result<PendingMessages, String> {
         let mut batches = Vec::new();
+        let Some(seat) = self.claim_receiver()? else {
+            return Ok(PendingMessages { batches });
+        };
         for peer in self.list_conversations()? {
-            if let Some(batch) = self.read_unread(&peer)? {
+            if let Some(batch) = self.read_unread_seated(&peer, &seat)? {
                 batches.push(batch);
             }
         }
@@ -1338,7 +1357,7 @@ impl Mailbox {
 }
 
 /// An agent's durable position in one conversation. Exclusive ownership comes
-/// from the backend lock. Where that lock is an expiring lease, writes to this
+/// from the agent's receiver seat. Where that seat is an expiring lease, writes to this
 /// register are additionally fenced by a conditional write when the backend has
 /// one ([`crate::cursor_fence`]), so a holder that outlived its lease cannot
 /// overwrite a newer holder's position.
@@ -1365,23 +1384,23 @@ fn is_unfenced(epoch: &u64) -> bool {
 
 /// How long a claimed seat stays claimed without being renewed.
 ///
-/// This is a deadlock escape, not a safety boundary: it bounds how long a
-/// conversation goes untailed after an instance dies without releasing. It
+/// This is a deadlock escape, not a safety boundary: it bounds how long an
+/// agent goes without a receiver after an instance dies without releasing. It
 /// is enforced by the backend lock manager. This client never steals a seat
 /// based on a timestamp stored in the cursor file.
-const READER_LEASE_MS: u64 = 30_000;
+const SEAT_LEASE_MS: u64 = 30_000;
 
 /// Renew once the lease is half spent, so a renewal has a full half-lease to
 /// be retried in before anyone else may claim the seat.
 ///
-/// Renewing on every poll return instead would be one replicated write per
-/// `block_ms` per conversation, most of them carrying no new information.
-const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
+/// This is the receiver's one standing replicated write: one per agent per
+/// renewal, however many conversations it tails.
+const SEAT_RENEW_MS: u64 = SEAT_LEASE_MS / 2;
 
 /// How far ahead of the lease TTL a holder stops acting on a lease it last
 /// proved a while ago.
 ///
-/// The backend expires the lock `READER_LEASE_MS` after it *received* the last
+/// The backend expires the lock `SEAT_LEASE_MS` after it *received* the last
 /// renewal, so every age here is measured from when a renewal was *requested*.
 /// The margin bounds how old a successful renewal may be and still count, and
 /// how long belief in the last one lasts while the next is still out. It is a
@@ -1433,7 +1452,7 @@ fn claim_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// A durable cursor guarded by the backend's atomic exclusive lock.
+/// A durable cursor, claimed under the agent's receiver seat.
 pub struct ConversationReader {
     backend: MailboxBackend,
     path: String,
@@ -1448,15 +1467,11 @@ impl ConversationReader {
         crate::cursor_fence::load_plain(self.backend.resolve()?.as_ref(), &self.path)
     }
 
-    /// Hold the conversation's lock, then claim its register through
-    /// [`crate::cursor_fence`]. `None` while another instance holds either.
-    fn acquire(self) -> Result<Option<OwnedReader>, String> {
+    /// Claim this conversation's register through [`crate::cursor_fence`] under
+    /// the agent's receiver `seat`, which is what makes the claimer the agent's
+    /// only reader. `None` when another claimer won the register this round.
+    fn acquire(self, seat: Arc<HeldLease>) -> Result<Option<OwnedReader>, String> {
         let backend = self.backend.resolve()?;
-        let Some(lease) = HeldLease::try_acquire(&backend, &format!("{}.lock", self.path))
-            .map_err(|e| format!("claim reader {}: {e}", self.path))?
-        else {
-            return Ok(None);
-        };
         let Some((cursor, offset)) =
             crate::cursor_fence::RegisterCursor::claim(backend, self.path, self.holder)?
         else {
@@ -1464,7 +1479,7 @@ impl ConversationReader {
         };
         record_cursor_guarantee(&self.agent, cursor.guarantee());
         Ok(Some(OwnedReader {
-            lease,
+            lease: seat,
             cursor,
             offset,
         }))
@@ -1474,7 +1489,7 @@ impl ConversationReader {
 /// Whether a lease last proven `elapsed_ms` ago may still be acted on: it has to
 /// leave [`LEASE_SAFETY_MARGIN_MS`] before the TTL the lock was taken with.
 fn within_grace(elapsed_ms: u64) -> bool {
-    elapsed_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < READER_LEASE_MS
+    elapsed_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < SEAT_LEASE_MS
 }
 
 /// Milliseconds elapsed since `at`.
@@ -1626,7 +1641,7 @@ impl HeldLease {
         }
         let requested = std::time::Instant::now();
         let Some(lock) = backend
-            .try_lock(lock_path, READER_LEASE_MS)
+            .try_lock(lock_path, SEAT_LEASE_MS)
             .map_err(|e| e.to_string())?
         else {
             return Ok(None);
@@ -1656,7 +1671,7 @@ impl HeldLease {
                 // Every renewal is timed from when the last successful one was
                 // requested, never from when its reply came back: a slow reply
                 // must not push the next renewal past the TTL.
-                let mut wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
+                let mut wait_ms = SEAT_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 loop {
                     let stopped = mutex
                         .lock()
@@ -1682,7 +1697,7 @@ impl HeldLease {
                         break;
                     }
                     mark_renewed(&worker_last_renewed, requested);
-                    wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
+                    wait_ms = SEAT_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 }
             })
             .map_err(|e| format!("start lease renewal: {e}"))?;
@@ -1775,7 +1790,8 @@ impl Drop for HeldLease {
 }
 
 struct OwnedReader {
-    lease: HeldLease,
+    /// The agent's receiver seat, shared by every conversation it reads.
+    lease: Arc<HeldLease>,
     cursor: crate::cursor_fence::RegisterCursor,
     offset: u64,
 }
@@ -1882,18 +1898,20 @@ impl Mailbox {
     /// `None` while another instance of the same agent holds it. Without this
     /// seat, two instances of one agent each claim whichever conversations they
     /// reach first, and one agent's messages end up answered by two sessions.
-    fn claim_receiver(&self) -> Result<Option<HeldLease>, String> {
+    fn claim_receiver(&self) -> Result<Option<Arc<HeldLease>>, String> {
         let path = format!(
             "{}/{}/receiver.lock",
             self.convention.agents_dir(),
             self.self_id
         );
-        HeldLease::try_acquire(&self.backend.resolve()?, &path).map_err(|e| {
-            format!(
-                "claim the receiver seat for {} at {path}: {e}",
-                self.self_id
-            )
-        })
+        HeldLease::try_acquire(&self.backend.resolve()?, &path)
+            .map(|seat| seat.map(Arc::new))
+            .map_err(|e| {
+                format!(
+                    "claim the receiver seat for {} at {path}: {e}",
+                    self.self_id
+                )
+            })
     }
 }
 
@@ -2205,10 +2223,10 @@ impl Drop for ReceiverStateEntry {
 /// An agent has one receiver at a time, wherever it runs. The receiver tails
 /// nothing until it holds the agent's receiver seat ([`Mailbox::claim_receiver`]);
 /// until then it stands by and retries, so a second instance of the agent takes
-/// over when the first stops. Each conversation's reader seat still guards that
-/// conversation's read position, so a tail finishing a delivery while the agent
-/// seat changes hands cannot be read twice. [`receiver_state`] reports which of
-/// the two this process is doing.
+/// over when the first stops. The seat is the only lease: every tail reads and
+/// commits under it, and each conversation's register is fenced by its own
+/// conditional write, so a previous holder cannot move a read position back.
+/// [`receiver_state`] reports which of the two this process is doing.
 #[inline]
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
@@ -2339,7 +2357,7 @@ pub fn spawn_inbox_record_poller_with_notices(
 /// an agent this instance no longer receives for.
 fn receive_while_seated(
     mailbox: &Arc<Mailbox>,
-    seat: &HeldLease,
+    seat: &Arc<HeldLease>,
     block_ms: u64,
     diagnostics: &Arc<telemetry::RetryDiagnostics>,
     abort: &crate::HookAbortSignal,
@@ -2358,6 +2376,7 @@ fn receive_while_seated(
                     }
                     let tail = spawn_conversation_tail(
                         Arc::clone(mailbox),
+                        Arc::clone(seat),
                         peer.clone(),
                         block_ms,
                         Arc::clone(diagnostics),
@@ -2386,7 +2405,7 @@ fn receive_while_seated(
         let _ = tail.join();
     }
 }
-/// One conversation's tail: hold the reader seat, park on the transcript,
+/// One conversation's tail: under the receiver seat, park on the transcript,
 /// deliver, commit.
 /// Why a delivery attempt left the reader where it was.
 ///
@@ -2621,6 +2640,7 @@ pub fn delivery_events() -> Vec<DeliveryEvent> {
 
 fn spawn_conversation_tail(
     mailbox: Arc<Mailbox>,
+    seat: Arc<HeldLease>,
     peer: String,
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
@@ -2629,6 +2649,7 @@ fn spawn_conversation_tail(
 ) -> std::thread::JoinHandle<()> {
     let tail = ConversationTail {
         mailbox,
+        seat,
         peer,
         block_ms,
         diagnostics,
@@ -2643,6 +2664,7 @@ fn spawn_conversation_tail(
 
 struct ConversationTail {
     mailbox: Arc<Mailbox>,
+    seat: Arc<HeldLease>,
     peer: String,
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
@@ -2658,8 +2680,19 @@ impl ConversationTail {
         let diagnostics = self.diagnostics.as_ref();
         let abort = &self.abort;
         let scope = format!("conversation with {peer}");
-        while !abort.is_aborted() {
-            let mut reader = match mailbox.conversation_reader(peer).acquire() {
+        let mut reclaiming = false;
+        while !abort.is_aborted() && self.seat.is_valid() {
+            // A reader this tail gave up means its commit was refused, which
+            // another claimer's fence also causes. Only a seat the backend
+            // confirms now may fence the register again.
+            if reclaiming && !matches!(self.seat.confirm(), Ok(true)) {
+                break;
+            }
+            reclaiming = true;
+            let mut reader = match mailbox
+                .conversation_reader(peer)
+                .acquire(Arc::clone(&self.seat))
+            {
                 Ok(Some(reader)) => reader,
                 Ok(None) => {
                     sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
@@ -2673,13 +2706,6 @@ impl ConversationTail {
                 }
             };
             self.poll_reader(&mut reader, &scope);
-            if let Some(loss) = reader.lease.loss() {
-                report_receiver_error(
-                    mailbox,
-                    diagnostics.component(),
-                    format!("reader for {peer} lost: {loss}"),
-                );
-            }
         }
     }
     fn poll_reader(&self, reader: &mut OwnedReader, scope: &str) {
@@ -2773,7 +2799,7 @@ impl ConversationTail {
                     .observe(mailbox, diagnostics, scope, None);
                 }
                 sleep_unless_aborted(abort, retry_delay_ms);
-                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
+                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(SEAT_RENEW_MS);
             }
             diagnostics.succeeded(scope);
         }

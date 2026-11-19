@@ -3963,7 +3963,7 @@ fn run_repl_iocraft_dispatch(
     }
 
     // Refuse inputs that never ran, then finish cursor commits and release
-    // reader seats before process exit. No queued receipt remains in RAM.
+    // receiver seat before process exit. No queued receipt remains in RAM.
     mailbox_abort.abort();
     drop(coord_rx);
     coord.lock().unwrap().clear();

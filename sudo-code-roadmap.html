@@ -2007,6 +2007,16 @@ interval still unresolved. The median last queue-entry-to-merge span is
 581s and includes validation and dispatch. The first scheduled workspace
 run, remaining source cohort, and author-side time are measured separately.
 The whole-lifecycle one-tenth target remains unproven.</p>
+<p><strong>Author-side clocks for the seven tracked merges.</strong>
+The public Git acceptance notes provide 14 verified original receipts across
+the seven PRs. Joining each PR's earliest available signed author start to its
+merge gives a median observed span of 248.672 minutes. The median signed author
+span through that receipt's completion is 128.208 minutes. GitHub's PR-created
+to merge median alone is 190.000 minutes. These medians describe different
+intervals and cannot be added. Two of the available author starts predate the
+policy activation. Earlier unpublished attempts and the first-failure clock
+are still incomplete. These observations give lower bounds on the recorded
+successful spans, with no whole-lifecycle one-tenth conclusion.</p>
 <p><strong>Native dependency cache lookup.</strong> The Windows complement
 for <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795383">PR #1520</a>
 restored a 2,458,357,241-byte fallback in 74s. Its requested suffix differed

@@ -181,6 +181,9 @@ def scope_acceptance(directory):
             if path == ".github/scripts/ci_input_scope.py":
                 assert result["selector_only_product_checks_skipped"] is True, result
                 assert set(selected_checks(base)) == {"preflight", "guard-contract"}
+                assert result["vfs_archive_required"] == "false", result
+            else:
+                assert result["vfs_archive_required"] == result["vfs_cache_required"], result
     # A selection-only edit cannot suppress a mixed workflow, product or
     # daemon-harness change. Use the same real committed PR/push/queue events.
     selector = repository / ".github/scripts/ci_input_scope.py"
@@ -202,6 +205,7 @@ def scope_acceptance(directory):
             result = expect_scope(event_name, event, live, True, clippy,
                 benchmark=True, container=True, clippy_executor=True, gzip_codec=True, vfs_cache=True)
             assert result["selector_only_product_checks_skipped"] is False, result
+            assert result["vfs_archive_required"] == str(companion == ".github/workflows/rust-ci.yml").lower(), result
     for source_path, target_path in [(".github/scripts/ci_input_scope.py",
                                     "rust/crates/runtime/src/moved_selector.rs"),
                                    ("rust/crates/runtime/src/moved_selector.rs",

@@ -1110,7 +1110,10 @@ the original receipt, signature and logs remain in their output directory. The
 required command prints `LOCAL_ACCEPTANCE_OUTPUT_INDEX` with both paths. These
 references only locate evidence: reuse still verifies its signature, source,
 host, protected commands and original log hashes. Invalid references cannot
-approve checks. An index write failure prints
+approve checks. If a newer locator exposes only part of an exact-source run,
+automatic discovery can select an older receipt whose verified compatible
+profiles contain all of those checks plus additional required profiles. The
+original explicit resume path still takes priority. An index write failure prints
 `LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
 explicit `check --resume-from /path/to/output` recovery.
 Older external outputs can be discovered without rerunning or re-signing them:

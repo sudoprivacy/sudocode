@@ -1948,6 +1948,14 @@ the producer's original key in a 58s job. The prior exact caches were still
 present. A subsequent matching consumer remains pending.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44462781193/job/135353624928">#1518 queue</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179">#1518 main publication</a>.</p>
+<p><strong>Exact VFS restore and redundant queue export.</strong> PR #1522
+restored the exact compiler key recorded in its queue artifact and passed the
+original search and restart journey. The selector change also caused the queue
+to re-export a 956,066,756-byte archive. Export and data upload occupied 34s
+of the co-host job. The parallel A2A job finished later, so that export did
+not extend this merge's queue span.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451174032">Original co-host job</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original A2A job</a>.</p>
 <p><strong>First observed cold Windows warmer after #1512.</strong> The automatic
 main job ran the dev/test compiler command in 219s and skipped the optimized
 release warmer. It published 2,458,357,241 bytes. The older original job spent
@@ -1963,6 +1971,13 @@ interval still unresolved. The median last queue-entry-to-merge span is
 582.5s and includes validation and dispatch. The first scheduled workspace
 run, remaining source cohort, and author-side time are measured separately.
 The whole-lifecycle one-tenth target remains unproven.</p>
+<p><strong>Stronger signed author progress.</strong> Automatic exact-source
+resume now prefers an older signed record that proves a strict superset of
+currently required, compatible profiles. In a replay of original #1510
+records, this restored workspace and services in addition to preflight while
+keeping the changed guard required. The two restored commands originally ran
+for 1,065.001s combined. Subsequent real attempts are needed to measure actual
+repeat work avoided. <a href="https://github.com/sudoprivacy/sudocode/pull/1522">PR #1522</a>.</p>
 <p><strong>Windows compiler-cache delivery completed (2026-11-18).</strong> <a href="https://github.com/sudoprivacy/sudocode/pull/1488">PR #1488</a> qualified and publicly published the minimal upstream response-file backport; original format, strict Clippy and 619 upstream tests passed with one original ignored case. <a href="https://github.com/sudoprivacy/sudocode/pull/1489">PR #1489</a> then normally landed the exact-hash Windows consumer after all three signed author profiles, the full native/Docker guard and Windows workspace (1,205 passed, 78 skipped). Its merge tree equals the qualified tree. The real Cargo long-file control changes hits/misses from 1/36 to 1/37 and then 2/37; restoring the old bypass still links the correct program but adds no cache hit. Original query, official-tool, invalidation, failure/repair and ownership controls remain. <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-compiler-cache-delivery-20261118.json">The immutable source/job/cost inventory</a> records 47.750 known hosted runner-minutes across producer, consumer, queue and publication, including failed attempts; later documentation cost is additional. Earliest recorded author start to final consumer checks is 40.616 minutes, including the original API403 and resume gap, and excludes earlier authoring plus later publication. These are engineering costs and bounded cache controls, not representative PR savings, product coverage credit or a shared-target freshness guarantee. The one-tenth lifecycle target remains unproven.</p>
 <p><strong>Reproduce the linked measurements.</strong>
 The <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-lifecycle-measurement-20261117.json">original fixed cohort and job record inventory</a>

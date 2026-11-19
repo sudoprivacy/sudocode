@@ -15,6 +15,8 @@ enum Fault {
     None,
     /// The frame is written, then the caller is told the append timed out.
     CommitThenTimeOut,
+    /// The sender's concurrent reader also advances before the append reply.
+    ConsumeThenTimeOut,
     /// Nothing is written and the append times out.
     TimeOut,
     /// The append is refused outright.
@@ -35,6 +37,21 @@ impl Faulty {
     fn set(&self, fault: Fault) {
         *self.fault.lock().unwrap() = fault;
     }
+
+    fn advance_alice_reader(&self) {
+        let reader = Mailbox::new(
+            Arc::clone(&self.inner),
+            "alice".into(),
+            InboxConvention::new("/workspace/mail"),
+        );
+        reader
+            .read_unread("bob")
+            .unwrap()
+            .unwrap()
+            .acknowledge()
+            .unwrap();
+        assert!(reader.read_position("bob").unwrap().unwrap() > 0);
+    }
 }
 
 impl FsBackend for Faulty {
@@ -47,10 +64,14 @@ impl FsBackend for Faulty {
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         let timed_out =
             || io::Error::new(io::ErrorKind::TimedOut, "append did not commit: deadline");
-        match *self.fault.lock().unwrap() {
+        let fault = *self.fault.lock().unwrap();
+        match fault {
             Fault::None => self.inner.append(path, data),
-            Fault::CommitThenTimeOut => {
+            Fault::CommitThenTimeOut | Fault::ConsumeThenTimeOut => {
                 self.inner.append(path, data)?;
+                if fault == Fault::ConsumeThenTimeOut {
+                    self.advance_alice_reader();
+                }
                 Err(timed_out())
             }
             Fault::TimeOut => Err(timed_out()),
@@ -194,6 +215,15 @@ fn an_append_that_committed_before_its_error_is_delivered() {
 }
 
 #[test]
+fn a_reader_passing_the_committed_frame_does_not_hide_it_from_the_sender() {
+    let (alice, bob, faulty) = pair();
+    faulty.set(Fault::ConsumeThenTimeOut);
+    alice.send(message("seen before reply", 0)).unwrap();
+    assert_eq!(bodies(&bob), ["seen before reply"]);
+    assert!(alice.read_position("bob").unwrap().unwrap() > 0);
+}
+
+#[test]
 fn a_missing_message_is_unconfirmed_not_undelivered() {
     let (alice, bob, faulty) = pair();
     faulty.set(Fault::TimeOut);
@@ -244,8 +274,17 @@ fn a_retransmission_of_a_committed_send_is_delivered() {
     let mut original = message("once only", 100);
     original.send_id = Some("logical-send-1".into());
     alice.send(original.clone()).unwrap();
+    faulty.advance_alice_reader();
     faulty.set(Fault::TimeOut);
-    alice.send(original).unwrap();
+    let mut retry = original.clone();
+    retry.timestamp = 0;
+    alice.send(retry).unwrap();
+    original.body = "a different operation".into();
+    let error = alice.send(original).unwrap_err();
+    assert!(
+        error.contains("same send ID has different content"),
+        "{error}"
+    );
     assert_eq!(bodies(&bob), ["once only"]);
 }
 

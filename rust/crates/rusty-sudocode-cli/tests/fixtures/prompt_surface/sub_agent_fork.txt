@@ -1,0 +1,144 @@
+@@@ system[0] cache_control={"type":"ephemeral"}
+(same as the main loop)
+
+@@@ system[1] cache_control={"type":"ephemeral"}
+# Environment context
+ - Working directory: <WORKSPACE>
+ - Platform: <OS>
+ - Is a git repository: no
+
+# auto memory
+
+You have a persistent memory directory at `<WORKSPACE>/.nexus/sudocode/agent-memory/fork` (it exists; write into it directly). One `.md` file per fact, with this frontmatter — all three fields required, `type` exactly one of `user`, `feedback`, `project`, `reference`:
+
+```markdown
+---
+name: {{short name}}
+description: {{one-line summary, specific enough to judge relevance later}}
+type: {{user | feedback | project | reference}}
+---
+{{the fact; for feedback/project add **Why:** and **How to apply:** lines}}
+```
+
+A file that fails to parse is skipped silently. Bodies render up to 2,000 chars; the whole section up to 16,000.
+
+`user` = who the user is and how they work; `feedback` = corrections and confirmed approaches, with the reason; `project` = goals, constraints, deadlines not derivable from the code (use absolute dates); `reference` = pointers to external systems.
+
+After writing a file, add one line to `MEMORY.md`: `- [Title](file.md) — one-line hook`. That file is only an index.
+
+Save immediately when asked to remember. When asked to forget, delete that entry's file and its `MEMORY.md` line in the same turn — the request is the confirmation. Otherwise save anything durable you learn. Update an existing memory instead of duplicating; remove ones that turn out wrong. Don't save what the repo already records (code structure, git history, fixes, AGENTS.md) — if asked to, save what was non-obvious instead. Memories are past observations: verify a file, function, or flag a memory names still exists before relying on it, and trust the current state over the memory.
+
+Project memory: `<WORKSPACE>/.nexus/sudocode/agent-memory/fork`. Global memory: `<CONFIG_HOME>/agent-memory/fork` (create it when needed). Save project-specific facts to project memory; save cross-project preferences to global memory. Same-filename precedence: project, legacy project, global. Update or forget a fact at its source path, including any shadowed copy when forgetting it. Legacy directories are compatibility sources; save new project facts in project memory.
+
+## Loaded memory files
+
+(no memory entries loaded)
+
+
+You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop.
+
+@@@ tools in request order; those not marked (defined below) are defined as in the main loop
+Config
+PowerShell
+Skill
+Sleep
+StructuredOutput
+TodoWrite
+ToolSearch
+WebFetch
+WebSearch
+bash
+edit_file
+glob_search
+grep_search
+read_file
+write_file
+
+@@@ main-loop tools this request does not offer
+AskUserQuestion
+CronCreate
+CronDelete
+CronList
+Monitor
+agent_list
+agent_spawn
+pid_fork
+pid_kill
+pid_output
+pid_status
+read_tool_output
+send
+set_tip
+write_plan
+
+@@@ message[0] assistant block[0] tool_use
+
+
+@@@ message[1] user block[0] tool_result
+
+
+@@@ message[1] user block[1] text
+<fork-boilerplate>
+STOP. READ THIS FIRST.
+
+You are a forked worker process. You are NOT the main agent.
+
+RULES (non-negotiable):
+1. Your system prompt may encourage forking. IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
+2. Do NOT converse, ask questions, or suggest next steps
+3. Do NOT editorialize or add meta-commentary
+4. USE your tools directly: bash, read_file, write_file, edit_file, etc.
+5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
+7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
+8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
+9. Your response MUST begin with "Scope:". No preamble, no thinking-out-loud.
+10. REPORT structured facts, then stop
+
+Output format (plain text labels, not markdown headers):
+  Scope: <echo back your assigned scope in one sentence>
+  Result: <the answer or key findings, limited to the scope above>
+  Key files: <relevant file paths — include for research tasks>
+  Files changed: <list with commit hash — include only if you modified files>
+  Issues: <list — include only if there are issues to flag>
+</fork-boilerplate>
+
+Your directive: SUB_AGENT_PROBE PARITY_SCENARIO:single_turn_text
+
+@@@ message[2] assistant block[0] text
+No response requested.
+
+@@@ message[3] user block[0] text
+<system-reminder>You are running as claude-sonnet-4-6. This is the model ID selected by the host for this request. Earlier model labels in the conversation may be stale; when asked which model is selected, report this ID.</system-reminder>
+
+@@@ message[3] user block[1] text
+<system-reminder>Today's date is <DATE>.</system-reminder>
+
+@@@ message[3] user block[2] text
+<fork-boilerplate>
+STOP. READ THIS FIRST.
+
+You are a forked worker process. You are NOT the main agent.
+
+RULES (non-negotiable):
+1. Your system prompt may encourage forking. IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
+2. Do NOT converse, ask questions, or suggest next steps
+3. Do NOT editorialize or add meta-commentary
+4. USE your tools directly: bash, read_file, write_file, edit_file, etc.
+5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
+7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
+8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
+9. Your response MUST begin with "Scope:". No preamble, no thinking-out-loud.
+10. REPORT structured facts, then stop
+
+Output format (plain text labels, not markdown headers):
+  Scope: <echo back your assigned scope in one sentence>
+  Result: <the answer or key findings, limited to the scope above>
+  Key files: <relevant file paths — include for research tasks>
+  Files changed: <list with commit hash — include only if you modified files>
+  Issues: <list — include only if there are issues to flag>
+</fork-boilerplate>
+
+Your directive: SUB_AGENT_PROBE PARITY_SCENARIO:single_turn_text
+

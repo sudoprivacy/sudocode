@@ -1,0 +1,50 @@
+@@@ system[0] cache_control={"type":"ephemeral"}
+(same as the main loop)
+
+@@@ system[1] cache_control={"type":"ephemeral"}
+(same as the main loop)
+
+@@@ tools in request order; those not marked (defined below) are defined as in the main loop
+AskUserQuestion
+Config (deferred)
+CronCreate (deferred)
+CronDelete (deferred)
+CronList (deferred)
+Monitor (deferred)
+PowerShell (deferred)
+Skill
+Sleep
+StructuredOutput (deferred)
+TodoWrite (deferred)
+ToolSearch
+WebFetch
+WebSearch
+agent_list
+agent_spawn
+bash
+edit_file
+glob_search
+grep_search
+pid_fork
+pid_kill (deferred)
+pid_output
+pid_status (deferred)
+read_file
+read_tool_output
+send
+set_tip
+write_file
+write_plan
+
+@@@ main-loop tools this request does not offer
+
+
+@@@ message[0] user block[0] text
+<system-reminder>You are running as claude-sonnet-4-6. This is the model ID selected by the host for this request. Earlier model labels in the conversation may be stale; when asked which model is selected, report this ID.</system-reminder>
+
+@@@ message[0] user block[1] text
+<system-reminder>Today's date is <DATE>.</system-reminder>
+
+@@@ message[0] user block[2] text
+PRINT_MODE_PROBE PARITY_SCENARIO:single_turn_text
+

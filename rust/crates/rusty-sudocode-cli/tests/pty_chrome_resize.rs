@@ -400,10 +400,7 @@ fn grapheme_clusters_follow_the_terminal_rule_measured_at_startup() {
         let env = TestEnv::new(&format!("grapheme-width-{unicode}-{silent}"));
         let mut saved = Session::new().with_workspace_root(env.workspace_root());
         saved
-            .push_user_text(&format!(
-                "Cluster echo {}",
-                format!("{cluster} ").repeat(12)
-            ))
+            .push_user_text(format!("Cluster echo {}", format!("{cluster} ").repeat(12)))
             .unwrap();
         saved
             .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {

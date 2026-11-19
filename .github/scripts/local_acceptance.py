@@ -525,6 +525,9 @@ except subprocess.TimeoutExpired:
         "51b69bebd2b48ed2b2fc90552c624a525d61f9db280ae1599e16b53bcf62bd83",
         "5a1503cd97bac0fb7ec58689f14b64530d2c564606a91484cecca76fd380ea14",
         "8d2689e3285deeb2e17695bb58f28a93b584365a3aae8f59e34bc99ed41fbe41",
+        "f9c4f0cd610f4f9f6c954360b0b6364fce4dc4f962dac42236b7cc833f64c71b",
+        "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
+        "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -600,6 +603,50 @@ def execute(command, cwd, log, env=None):
         return previous[0] != updated[0] and previous[1] == updated[1]
     except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
         return False
+
+
+def reviewed_native_dependency_cache_transition(before, after, protected):
+    """Accept the two reviewed native cache changes, in isolation or together."""
+    toolchain_step = (b"      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain\n"
+                      b"        if: matrix.family == 'native'\n")
+    cache_step = (b"      - uses: Swatinem/rust-cache@v2\n"
+                  b"        if: matrix.family == 'native'\n"
+                  b"        with:\n"
+                  b"          workspaces: ${{ steps.cache_layout.outputs.workspaces }}\n"
+                  b"          shared-key: ci-dependencies\n"
+                  b"          env-vars: ImageOS\n"
+                  b"          save-if: false\n")
+    alternatives = []
+    if before.count(toolchain_step) == before.count(cache_step) == 1:
+        alternatives.append(before.replace(toolchain_step, toolchain_step + b"        id: rust_toolchain\n").replace(
+            cache_step, cache_step.replace(
+                b"          save-if:", b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+                b"          save-if:")))
+    # The upstream cache hashes raw configuration files in path order. The
+    # new checkout sorts after the root pin, like the publisher's rust tree.
+    paths = (
+        b"        working-directory: candidate\n",
+        b"          path: candidate\n",
+        b"            candidate/rust-toolchain.toml\n",
+        b" --source candidate/rust --github-output\n",
+        b"          path: candidate/sdk/typescript/artifacts/*\n",
+    )
+    for workflow in (before, *alternatives):
+        if all(workflow.count(path) == 1 for path in paths):
+            for path in paths:
+                workflow = workflow.replace(path, path.replace(b"candidate", b"worktree"))
+            alternatives.append(workflow)
+    if after not in alternatives:
+        return False
+    # The new outputs must come from the reviewed regular-file action and
+    # adapter. Their blobs are outside the native workflow's own byte hash.
+    for path, identity in (
+            (".github/actions/rust-toolchain/action.yml", "ce7b8ad4ca80cc495808d0862d91bdbade600f70"),
+            (".github/actions/rust-toolchain/cache-command.mjs", "973592bd8bdc233854295869e87dc24ae00fd6d7"),
+            (".github/local-acceptance/cache_layout.py", "82bdafe46048139a6aae326580feca70ab543396")):
+        if value("ls-tree", protected, "--", path) != f"100644 blob {identity}\t{path}":
+            return False
+    return True
 
 
 def approved_equivalent_profiles(before, current, policy_ref, names, head):
@@ -1548,8 +1595,11 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
-    if (tracked(head, workflow) != tracked(planned_policy, workflow)
-            or tracked(protected, workflow) != tracked(planned_policy, workflow)):
+    planned_workflow = tracked(planned_policy, workflow)
+    current_workflow = tracked(protected, workflow)
+    cache_only_workflow_change = planned_workflow != current_workflow
+    if (tracked(head, workflow) != planned_workflow or (cache_only_workflow_change
+            and not reviewed_native_dependency_cache_transition(planned_workflow, current_workflow, protected))):
         raise RuntimeError("Early native scheduling requires the current protected native workflow definition; integrate that workflow before starting")
     if receipt.get("checks") != {}:
         raise RuntimeError("An execution plan must contain no completed checks")
@@ -1597,6 +1647,9 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
               "author/native responsibility, selected command effects and native workflow verified; "
               "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
+    if cache_only_workflow_change:
+        print("LOCAL_ACCEPTANCE_PLAN_DEPENDENCY_CACHE_ONLY: a reviewed cache-key change; "
+              "the original signature, checks and complementary jobs remain required.", flush=True)
     return receipt
 
 
@@ -2554,6 +2607,10 @@ def perform_check(args, attempt):
                    branch=git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None,
                    host=host(), policy_ref=policy_ref, signers_ref=signers_ref, output=str(output))
     (output / "attempt.json").write_bytes(canonical(attempt))
+    resume_command = (f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--signers-ref {signers_ref} --resume-from "{output}" --publish --remote {args.remote}')
+    if getattr(args, "dispatch_publish", None):
+        resume_command += f" --dispatch-publish {args.dispatch_publish}"
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
@@ -2626,9 +2683,7 @@ def perform_check(args, attempt):
         timing["checks_finished_at"] = time.time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-              "If this process exits, resume with: "
-              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-              f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+              f"If this process exits, resume with: {resume_command}", flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
@@ -2688,9 +2743,8 @@ def perform_check(args, attempt):
             try:
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
                                         sign_carried())
-                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: {resume_command}",
+                      flush=True)
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
@@ -3309,6 +3363,7 @@ def start_pr(args, api=None, context=None):
         except RuntimeError:
             check(argparse.Namespace(head=head, base=trusted, policy_ref=trusted, signers_ref=trusted,
                 output=str(output / "author"), resume_from=None, publish=True, remote=args.remote,
+                dispatch_publish=pull["number"],
                 outer_started_at=wall_start, outer_monotonic_started_at=started, execution_plan=envelope))
         else:
             if existing["host"] != host():

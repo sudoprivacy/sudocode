@@ -5,12 +5,15 @@ author OS; this grants no Linux/macOS/Windows product journey coverage.
 """
 import argparse
 import base64
+import contextlib
 import copy
 from datetime import datetime, timezone
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +22,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
 import urllib.request
+from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -67,14 +71,27 @@ def run_case(output, order):
     key = output / "fixture-key"
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
     platform = load("parallel_owner", SOURCE / ".github/scripts/local_acceptance.py").host()
+    native_workflow = ".github/workflows/local-acceptance.yml"
+    toolchain_adapter = ".github/actions/rust-toolchain/cache-command.mjs"
+    layout_runner = ".github/local-acceptance/cache_layout.py"
+    relocated_workflow = (SOURCE / native_workflow).read_text(encoding="utf-8").encode()
+    assert relocated_workflow.count(b"worktree") == 5
+    cache_workflow = relocated_workflow.replace(b"worktree", b"candidate")
+    cache_output = b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+    assert cache_workflow.count(cache_output) == cache_workflow.count(b"        id: rust_toolchain\n") == 1
+    original_workflow = cache_workflow.replace(cache_output, b"").replace(b"        id: rust_toolchain\n", b"")
     for relative in [".github/scripts/local_acceptance.py", ".github/local-acceptance/gate.py",
                      ".github/local-acceptance/publish.py", ".github/local-acceptance/cross_platform.py",
-                     ".github/workflows/local-acceptance.yml",
+                     native_workflow, ".github/actions/rust-toolchain/action.yml", toolchain_adapter, layout_runner,
                      ".github/workflows/local-acceptance-workspace.yml",
                      ".github/workflows/local-acceptance-publish.yml"]:
         destination = work / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SOURCE / relative, destination)
+        if relative == native_workflow:
+            destination.write_bytes(original_workflow if order == "ci-first" else cache_workflow)
+        if relative.startswith(".github/actions/rust-toolchain/") or relative == layout_runner:
+            destination.write_bytes(destination.read_text(encoding="utf-8").encode())
         if relative == ".github/scripts/local_acceptance.py":
             # Protected main is newer than the installed client. Its marker
             # proves that refresh executes the new code, not only new bytes.
@@ -303,7 +320,16 @@ def run_case(output, order):
         urllib.request.urlopen = redirected
         os.environ["SCODE_PARALLEL_FIXTURE_CONTROL"] = str(control)
         args = argparse.Namespace(remote="origin", output=str(output / "execution"), title="Parallel fixture", body_file=None)
-        helper.start_pr(args, api=http_api)
+        author_stdout = io.StringIO()
+        with contextlib.redirect_stdout(author_stdout):
+            helper.start_pr(args, api=http_api)
+        transcript = author_stdout.getvalue()
+        (output / "initial-author.stdout").write_text(transcript, encoding="utf-8")
+        print(transcript, end="", flush=True)
+        hint, = [line.split("resume with: ", 1)[1] for line in transcript.splitlines()
+                 if line.startswith("Saved completed profiles (")]
+        resume = shlex.split(hint)
+        assert resume[-2:] == ["--dispatch-publish", "1"], hint
         marker = json.loads((output / "execution/protected-entry-code-ran.json").read_text())
         initial_attempt = json.loads((output / "execution/parallel-attempt.json").read_text())
         assert marker["refreshes"] == initial_attempt["runner_refreshes"] == 1
@@ -360,6 +386,34 @@ def run_case(output, order):
         assert not (output / "current-retry/author").exists()
         assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
         assert len(started_workers) == 2
+        replayed_resume = order == "ci-first"
+        if replayed_resume:
+            # Replaying the command publishes a new proof envelope. Use a
+            # separate copy so the original note-stability tests stay intact.
+            resume_origin, resume_source = output / "r.git", output / "r"
+            git("clone", "--mirror", "--no-hardlinks", str(origin), str(resume_origin))
+            git("clone", "--config", "core.autocrlf=false", "--config", "user.name=Parallel native fixture",
+                "--config", "user.email=fixture@example.invalid", "--branch", "source",
+                str(resume_origin), str(resume_source))
+            git("config", "localAcceptance.signer", "fixture", cwd=resume_source)
+            git("config", "localAcceptance.key", str(key), cwd=resume_source)
+            git("fetch", "origin", "+refs/notes/*:refs/notes/*", cwd=resume_source)
+            resume_helper = load("parallel_resume_helper", managed)
+            resumed_output = output / "resume-from-command"
+            previous_requests = len(requests)
+            argv = [*resume[1:], "--output", str(resumed_output)]
+            with contextlib.chdir(resume_source), patch.object(sys, "argv", argv), \
+                    patch.object(resume_helper, "github_api", http_api):
+                assert resume_helper.main() == 0
+            new_requests = requests[previous_requests:]
+            assert new_requests == [{"method": "POST",
+                "path": f"/repos/{repository}/actions/workflows/local-acceptance-publish.yml/dispatches",
+                "body": {"ref": "main", "inputs": {"pr": "1", "head": head}}}], new_requests
+            resumed = json.loads((resumed_output / "receipt.json").read_text())
+            assert resumed["resumed_from"]["profiles"] == ["native-workspace"]
+            assert resumed["checks"] == receipt["checks"]
+            assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+            assert len(started_workers) == 2
 
         refused = []
         envelope = next(iter(helper.read_note(head, helper.PLAN_NOTE_REF)["attestations"].values()))
@@ -417,7 +471,10 @@ def run_case(output, order):
         def protected_commit(relative, contents, message, parent):
             git("switch", "--detach", parent, cwd=trusted)
             destination = trusted / relative
-            destination.write_text(contents, encoding="utf-8")
+            if isinstance(contents, bytes):
+                destination.write_bytes(contents)
+            else:
+                destination.write_text(contents, encoding="utf-8")
             git("add", "--", relative, cwd=trusted)
             git("-c", "commit.gpgsign=false", "commit", "-m", message, cwd=trusted)
             changed = git("rev-parse", "HEAD", cwd=trusted)
@@ -593,6 +650,62 @@ def run_case(output, order):
                                   "accepted": True, "old_and_new_recipes": [old_hash, new_hash],
                                   "original_notes_logs_and_processes_reused": True})
         metadata = approved
+        if order == "ci-first":
+            updated = protected_commit(native_workflow, cache_workflow, "Use the pinned cache key", metadata)
+            assert helper.verify_execution_plan(envelope, head, updated, updated) == pending
+            assert helper.verify_envelope(completed, head, updated, updated)["plan"] == pending["plan"]
+            publisher_run["head_sha"] = updated
+            publish({"workflow_run": source_run}, 941)
+            assert statuses[-1]["state"] == "success"
+            assert notes_before == (helper.canonical(helper.read_note(head)),
+                                    helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+            assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+            assert len(started_workers) == 2
+            metadata_controls.append({"case": "reviewed cache-only workflow keeps original author and native checks",
+                                      "accepted": True, "original_notes_logs_and_processes_reused": True})
+
+            original_adapter = (trusted / toolchain_adapter).read_bytes()
+            for label, relative, contents in [
+                ("changed cache adapter", toolchain_adapter, original_adapter + b"\nprocess.exit(17);\n"),
+                ("changed workflow deadline", native_workflow,
+                 cache_workflow.replace(b"timeout-minutes: ${{ matrix.timeout }}", b"timeout-minutes: 20")),
+            ]:
+                git("--git-dir", str(origin), "update-ref", "refs/heads/main", updated, cwd=output)
+                changed = protected_commit(relative, contents, "Refuse " + label, updated)
+                try:
+                    helper.verify_execution_plan(envelope, head, changed, changed)
+                except RuntimeError as error:
+                    assert "current protected native workflow definition" in str(error)
+                    metadata_controls.append({"case": label, "accepted": False, "reason": str(error)})
+                else:
+                    raise AssertionError("An original scheduling plan accepted " + label)
+        git("--git-dir", str(origin), "update-ref", "refs/heads/main", metadata, cwd=output)
+        relocated = protected_commit(native_workflow, relocated_workflow, "Align the native cache input order", metadata)
+        assert helper.verify_execution_plan(envelope, head, relocated, relocated) == pending
+        assert helper.verify_envelope(completed, head, relocated, relocated)["plan"] == pending["plan"]
+        publisher_run["head_sha"] = relocated
+        publish({"workflow_run": source_run}, 942)
+        assert statuses[-1]["state"] == "success"
+        assert notes_before == (helper.canonical(helper.read_note(head)),
+                                helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        metadata_controls.append({"case": "reviewed checkout relocation keeps original author and native checks",
+                                  "accepted": True, "original_notes_logs_and_processes_reused": True})
+        for label, relative, contents in [
+            ("changed cache layout runner", layout_runner, (trusted / layout_runner).read_bytes() + b"\n# Modified layout\n"),
+            ("only partly relocated checkout", native_workflow,
+             relocated_workflow.replace(b"        working-directory: worktree\n", b"        working-directory: candidate\n")),
+        ]:
+            git("--git-dir", str(origin), "update-ref", "refs/heads/main", relocated, cwd=output)
+            changed = protected_commit(relative, contents, "Refuse " + label, relocated)
+            try:
+                helper.verify_execution_plan(envelope, head, changed, changed)
+            except RuntimeError as error:
+                assert "current protected native workflow definition" in str(error)
+                metadata_controls.append({"case": label, "accepted": False, "reason": str(error)})
+            else:
+                raise AssertionError("An original scheduling plan accepted " + label)
         helper_path = ".github/scripts/local_acceptance.py"
         executor = (trusted / helper_path).read_text()
         signature = next(line for line in executor.splitlines() if line.startswith("def run_command("))
@@ -664,6 +777,7 @@ def run_case(output, order):
             "idempotent_installed_self_install_passed": True,
             "already_loaded_stale_code_refreshed_even_with_current_file": True,
             "current_runner_retry_skipped_refresh_and_completed_work": True,
+            "logged_resume_command_reuses_signed_work_and_dispatches": replayed_resume,
             "scope": "Real local Git remote/hooks, SSH, HTTP metadata, author command and native children. Metadata models GitHub; every actual child uses this one OS. No hosted or cross-OS coverage inferred."}
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         return result

@@ -924,6 +924,22 @@ def native_compiler_run(name, root, output, base, execute):
         return run(name, root, output, base, command)
 
 
+def hosted_service_journeys(journeys, root, output, execute, env, start):
+    """Run independent hosted journeys concurrently, retaining command order and logs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run_one(numbered):
+        index, command = numbered
+        # The original scripts each create private test users and state
+        # beneath their temporary directory. Do not upload that state.
+        with tempfile.TemporaryDirectory(prefix="scode-service-") as temporary:
+            isolation = {key: temporary for key in ("TMPDIR", "TEMP", "TMP")}
+            return execute(command, root, output / f"{index:03d}.log", {**env, **isolation})
+
+    with ThreadPoolExecutor(max_workers=len(journeys)) as pool:
+        return list(pool.map(run_one, enumerate(journeys, start)))
+
+
 def run(name, root, output, base, execute):
     if name in {"native-workspace", "native-resize", "native-release", "native-services",
                 "native-context", "native-cohost", "native-examples"}:
@@ -1110,10 +1126,17 @@ def run(name, root, output, base, execute):
         cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
-        command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
-                "--artifacts", str(output / "services"))
-        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
-                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
+        journeys = (
+            (sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
+             "--artifacts", str(output / "services")),
+            (sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+             "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box")),
+        )
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            results.extend(hosted_service_journeys(journeys, root, output, execute, env, len(results)))
+        else:
+            for arguments in journeys:
+                command(*arguments)
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -1180,7 +1203,7 @@ def native_guard_files():
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
         ".github/local-acceptance/compiler_cache.py": "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1",
-        "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
+        "e2e/nexus-a2a/lib.sh": "44bd7d3f6a857c6397ebdece41a396825c43d6d1b8382a3d8279089ca3d90073",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
         ".github/actions/rust-toolchain/action.yml": "f4df1878c64a86d2c4258bc2fd572680739f64f5934eea3b703b01ae81cdb73f",
@@ -1191,12 +1214,12 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "ee323315f1b068825ff17a27b1fa1ab67cf03062c716254c817fbcfdb34e007e",
+        ".github/scripts/ci_input_scope.py": "44b10cc1adc694f3c8a6971421cdc5ba9d5ba78f01b1d2caee481ffdc2d19aaf",
         ".github/workflows/rust-ci.yml": "9ae262f1e15e4824e6308f021b37f827ce270fc7a19a0bb4bf9a3af02c377299",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
         ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415",
-        ".github/workflows/ci-vfs-search-cache.yml": "e1907d872ade41ad38eeb55ec0d39555d9d64ab6e491d41aa9edf252d149dd9e",
+        ".github/workflows/ci-vfs-search-cache.yml": "6e294838acd72f0283ae777c8d366755552cef960a8fe7c84ea0e9c0311d7a8e",
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
         ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
@@ -1206,13 +1229,13 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "eb3f86374374ddf4093d5926fb672ff07dfe8ab12a25f3e1bbbaf07db399dee6",
+        ".github/scripts/local_acceptance.py": "35e6fe4c35920194525e0ccd160fc26d3ccf4d8e5636d91004c28a26a9b268fd",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
-        ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",
-        ".github/workflows/local-acceptance-workspace.yml": "c501c66c31ba758329fbf2424e85834b741d2cb5c15807fa900c98171e4a9418",
+        ".github/workflows/local-acceptance.yml": "4c68140aae586b40ce0cb61217e77359f3c273f92eebbc4974bcacb67c8a4808",
+        ".github/workflows/local-acceptance-workspace.yml": "ef46222e71c38e472b6ca53a86792efb50dd4ba40b96369ded9afba19b1d3a1b",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
@@ -1221,13 +1244,13 @@ def native_guard_files():
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
-        "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
+        "e2e/local-acceptance/grouped_targets_acceptance.py": "d28aee206a7538b334ff1143916cf44a1c512f8d7118cfcd9f0c40e55425a385",
         "e2e/local-acceptance/host_lease_acceptance.py": "2681ac28620f89c383220b774c727aa75774d90ce51d4802e0768979e7a192dc",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "9f33dc29121165c7de767dac64482c43f277e20bb95fb66325051c7477893928",
-        "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
-        "e2e/local-acceptance/parallel_acceptance.py": "188389bfaa34facf7ac9e148eb0c21aeba28a4630aebe52f6a4162a2327b29e3",
+        "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
+        "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
+        "e2e/local-acceptance/parallel_acceptance.py": "e790719488538aedb216eea3caa6883b71ef7c608b9c11fd33c9c9ca043ecd60",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
@@ -1236,7 +1259,7 @@ def native_guard_files():
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
         "e2e/local-acceptance/resume_acceptance.py": "fd8cda7f271679d874c6812c291135d58243aafc37f0a223c46ec5b616aaea43",
         "e2e/local-acceptance/run.py": "ef574453aa72104babcef103db27f47c9c7f781abab6b0be70a625b5cf7218c5",
-        "e2e/local-acceptance/vfs_search_publication_acceptance.py": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
+        "e2e/local-acceptance/vfs_search_publication_acceptance.py": "dda7c89b497769b50b66e92a2e96fee63477faab67299b19ee49ee9319d1ccd5",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
         "e2e/startup/run.py": "4fb4ac6b52331b8278459c18f54355bf8f8209d1ea0e87bca01a54c0ba3f77e4",
@@ -1293,7 +1316,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': 'cb0c5ee358360bfc092c9e6e1c8b56f14f36e367d2a0c0c4e60125239c769e75'}
+    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': '8efcd5884b48d577d312f705a61f35a780dd7c809ced72b2c7666531f9eadcbc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

@@ -112,6 +112,7 @@ jobs:
         with:
           fetch-depth: 2
       - uses: ./.github/actions/rust-toolchain
+        id: rust_toolchain
         with:
           components: clippy
       - uses: ./.github/actions/setup-protoc
@@ -120,6 +121,7 @@ jobs:
           workspaces: rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
       - name: Run workspace clippy
         run: python ../.github/scripts/ci_clippy.py
@@ -242,11 +244,13 @@ jobs:
             echo "CLI source does not build the independent co-host/search fixture; those unchanged components are skipped."
           fi
       - uses: ./.github/actions/rust-toolchain
+        id: rust_toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
       - uses: actions/setup-python@v5
         with:
@@ -351,11 +355,13 @@ jobs:
           test "$COHOST_REQUIRED" = true
           echo 'DAEMON_ACCEPTANCE_SCOPE: cohost/search runs independently of CLI A2A; both selected jobs must pass.'
       - uses: ./.github/actions/rust-toolchain
+        id: rust_toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
       # Everything above is an agent that TALKS TO a daemon. This one runs
       # INSIDE one: `nexusd-cohost` is built from this checkout, so the agent

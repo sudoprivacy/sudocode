@@ -34,6 +34,40 @@ def git_for_windows_bash(path=None):
     return None
 
 
+def pinned_cache_command(output, environment):
+    """Run the Linux cache command with and without an unused installed Rust."""
+    tools = output / "cache-tools"
+    tools.mkdir()
+    rustup = tools / "rustup"
+    rustup.write_text('''#!/usr/bin/env bash
+case "$*" in
+  "show active-toolchain") printf '%s (directory override)\\n' "$FIXTURE_ACTIVE" ;;
+  "toolchain list --quiet") printf '%s\\n' "$FIXTURE_INVENTORY" ;;
+  *) printf '%s\\n' "$@"; exit 17 ;;
+esac
+''', encoding="utf-8")
+    rustup.chmod(0o755)
+    script = SOURCE / ".github/actions/rust-toolchain/cache-command.mjs"
+    pin = "1.100.0"
+    active = pin + "-x86_64-unknown-linux-gnu"
+    extra = "1.99.1-x86_64-unknown-linux-gnu"
+    inventory = active + "\n" + extra
+    fixture = {**environment, "PATH": str(tools) + os.pathsep + environment["PATH"],
+               "FIXTURE_ACTIVE": active, "FIXTURE_INVENTORY": inventory}
+    node = shutil.which("node", path=fixture["PATH"])
+    assert node, "Linux cache command acceptance requires Node"
+
+    def versions(current):
+        return subprocess.check_output([node, script, pin, "rustup", "toolchain", "list", "--quiet"],
+                                       env=current).decode().splitlines()
+
+    assert versions(fixture) == versions({**fixture, "FIXTURE_INVENTORY": active}) == [active]
+    assert versions({**fixture, "FIXTURE_ACTIVE": extra}) == [active, extra]
+    result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
+                            env=fixture, capture_output=True)
+    assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+
+
 def workflow_scope(output, environment):
     """Execute the actual workflow guards and bind their conditional steps."""
     output.mkdir()
@@ -45,8 +79,16 @@ def workflow_scope(output, environment):
         bash = shutil.which("bash", path=environment.get("PATH"))
     if not bash:
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
+    if sys.platform.startswith("linux"):
+        pinned_cache_command(output, environment)
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
+    cache_command = "          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}"
+    toolchain = (SOURCE / ".github/actions/rust-toolchain/action.yml").read_text(encoding="utf-8")
+    assert "value: ${{ steps.install.outputs.dependency-cache-command }}" in toolchain
+    assert "echo 'dependency-cache-command={0}'" in toolchain
+    publisher = (SOURCE / ".github/workflows/ci-dependency-cache.yml").read_text(encoding="utf-8")
+    assert publisher.count(cache_command) == 2
     # Bind the real native guard cases below to the production queue wiring.
     # The PR must not allocate a duplicate lint matrix, while the final gate
     # must continue to wait for all three native platforms.
@@ -58,6 +100,7 @@ def workflow_scope(output, environment):
         "github.event_name == 'merge_group'"), predicate
     assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in lint
     assert "      fail-fast: true" in lint
+    assert lint.count(cache_command) == 1
     gate = re.search(r"^  integrated-acceptance:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
     assert "    if: always() && github.event_name == 'merge_group'" in gate
     assert "    needs: [one-nexus-vfs-pin, a2a-live, cohost-live, clippy-workspace]" in gate
@@ -65,6 +108,7 @@ def workflow_scope(output, environment):
         block = re.search(rf"^  {job}:\n.*?(?=^  [a-z]|\Z)", workflow, re.M | re.S).group()
         assert "    needs: one-nexus-vfs-pin\n" in block
         assert f"    if: github.event_name == 'merge_group' && needs.one-nexus-vfs-pin.outputs.{flag}_required == 'true'" in block
+        assert block.count(cache_command) == 1
     assert "          COHOST_RESULT: ${{ needs.cohost-live.result }}" in gate
     branches = workflow.split("  push:\n    branches:\n", 1)[1].split("    paths:", 1)[0]
     assert {line.strip() for line in branches.splitlines() if line.strip().startswith("- ")} == {
@@ -914,12 +958,14 @@ def run(output):
     queue_base = command("git", "rev-parse", "HEAD")
     queue_branch = command("git", "branch", "--show-current")
     command("git", "switch", "--detach", queue_base)
-    for path, product_required in [(".github/workflows/rust-ci.yml", True),
-                                   (".github/scripts/ci_input_scope.py", False)]:
+    for path, product_required, benchmark_required in [
+            (".github/workflows/rust-ci.yml", True, True),
+            (".github/scripts/ci_input_scope.py", False, True),
+            (".github/actions/rust-toolchain/cache-command.mjs", True, False)]:
         original = (repository / path).read_text() if (repository / path).exists() else ""
         write(path, original + "\n# Changed queue execution input.\n")
         commit("Update queue workflow or selection script")
-        ci_scope(queue_base, product_required, benchmark=True, live_required=False,
+        ci_scope(queue_base, product_required, benchmark=benchmark_required, live_required=False,
                  clippy_required=product_required)
         command("git", "switch", "--detach", queue_base)
     command("git", "switch", queue_branch)

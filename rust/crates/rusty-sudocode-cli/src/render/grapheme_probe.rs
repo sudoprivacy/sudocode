@@ -1,8 +1,8 @@
 //! How the terminal draws grapheme clusters, decided once at startup.
 //!
 //! Terminals disagree on a cluster of several code points. iTerm2, kitty,
-//! WezTerm, Ghostty and Windows Terminal draw `👩🏽‍💻` as one 2-cell glyph;
-//! xterm.js with Unicode 11 (VS Code) lays out each code point, 6 cells.
+//! WezTerm, Ghostty and Windows Terminal draw `👨‍💻` as one 2-cell glyph;
+//! xterm.js with Unicode 11 (VS Code) lays out each code point, 4 cells.
 //! iocraft's live frame and scode's history measure text by the rule set
 //! here (`iocraft::width`), so the caret, text after such a cluster and
 //! wrapped rows land where the terminal draws them.
@@ -13,8 +13,10 @@ use std::time::Duration;
 
 use iocraft::width::{set_grapheme_width, GraphemeWidth};
 
-/// The cluster measured: 2 columns where it is one glyph, 6 per code point.
-const PROBE: &str = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}";
+/// The cluster measured: 2 columns where it is one glyph, 4 per code point.
+/// A two-part ZWJ sequence, the form clustering implementations agree on;
+/// some count longer sequences, such as `👩🏽‍💻`, as neither rule.
+const PROBE: &str = "\u{1F468}\u{200D}\u{1F4BB}";
 
 /// Each cursor query's deadline. Terminals answer in milliseconds; this only
 /// bounds the cost of one that never does.
@@ -69,7 +71,7 @@ fn probe() -> Option<GraphemeWidth> {
     let _ = stdout.flush();
     match drawn? {
         2 => Some(GraphemeWidth::Clustered),
-        6 => Some(GraphemeWidth::PerCodePoint),
+        4 => Some(GraphemeWidth::PerCodePoint),
         _ => None,
     }
 }

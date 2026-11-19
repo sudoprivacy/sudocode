@@ -386,11 +386,13 @@ fn shared_budget_preserves_history_draft_and_cursor_in_the_real_terminal() {
 #[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
 fn grapheme_clusters_follow_the_terminal_rule_measured_at_startup() {
     // xterm.js with Unicode 11 (VS Code) lays out each code point of the
-    // cluster, 6 cells; the graphemes addon draws one 2-cell glyph, as iTerm2,
+    // cluster, 4 cells; the graphemes addon draws one 2-cell glyph, as iTerm2,
     // kitty and Windows Terminal do. The resumed history wraps at 60 columns.
+    // The cluster has two parts: the graphemes addon on Node 22 counts longer
+    // ones such as 👩🏽‍💻 as 3 cells, which is neither rule.
     // A terminal that never reports its cursor gets the rule its kind is
     // known for: VS Code's per code point, any other clustered.
-    let cluster = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}";
+    let cluster = "\u{1F468}\u{200D}\u{1F4BB}";
     for (unicode, silent, program) in [
         ("11", false, ""),
         ("graphemes", false, ""),

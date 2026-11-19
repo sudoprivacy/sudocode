@@ -162,8 +162,8 @@ async function sharedBudget() {
 // scode measures at startup how this terminal draws a ZWJ cluster, then lays
 // out history, the editor and its caret by that rule.
 async function graphemeWidth() {
-  const cluster = '\u{1F469}\u{1F3FD}\u200D\u{1F4BB}';
-  const width = config.unicode === 'graphemes' ? 2 : 6;
+  const cluster = '\u{1F468}\u200D\u{1F4BB}';
+  const width = config.unicode === 'graphemes' ? 2 : 4;
   const prompt = 2;
   await settle(text => text.includes('GraphemeHistoryEnd') && text.includes('❯'));
   // The probe is drawn, then erased, before anything else; a terminal that

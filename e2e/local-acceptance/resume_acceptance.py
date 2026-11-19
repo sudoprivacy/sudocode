@@ -262,6 +262,35 @@ def verify_resume(directory, source, command, host_smoke=False):
     assert "LOCAL_ACCEPTANCE_TIMING=" in result.stdout and "LOCAL_ACCEPTANCE_OPERATION_TIMING=" in result.stdout
     print("PASS: actual later failure preserves completed signed profiles; partial notes and wrong SSH purpose cannot pass; explicit/automatic resume reruns only unfinished work")
 
+    def index_then_resume(complete, output, *, damage=None):
+        for origin in (complete, failed):
+            indexed = subprocess.run([sys.executable, str(helper), "index-output", "--directory", str(origin),
+                                      "--policy-ref", "main"], cwd=work, env=environment, capture_output=True, text=True)
+            assert indexed.returncode == 0, indexed.stdout + indexed.stderr
+        if damage:
+            damage.write_text("changed rendering evidence\n")
+        restored = subprocess.run([sys.executable, str(helper), "check", "--base", "main", "--policy-ref", "main",
+                                   "--output", str(output)], cwd=work, env=environment, capture_output=True, text=True)
+        assert restored.returncode == 0, restored.stdout + restored.stderr
+        return json.loads((output / "receipt.json").read_text()), restored.stdout
+
+    before_indexed_resume = events()
+    indexed_resume = fixture / "indexed-resume"
+    reused, _ = index_then_resume(completed, indexed_resume)
+    assert reused["resumed_from"]["profiles"] == ["native-workspace", "rendering"], reused
+    assert reused["resumed_from"]["directory"] == str(completed.resolve()), reused
+    assert reused["timing"]["first_recorded_started_at"] == failed_attempt["started_at"], reused
+    assert reused["checks"] == receipt["checks"] and events() == before_indexed_resume
+
+    damaged = fixture / "damaged-older-full"
+    shutil.copytree(completed, damaged)
+    reused, diagnostics = index_then_resume(damaged, fixture / "damaged-index-resume",
+                                            damage=damaged / "rendering/000.log")
+    assert "Not reusing additional local progress" in diagnostics and "Resume log missing or changed for rendering" in diagnostics
+    assert reused["resumed_from"]["directory"] == str(indexed_resume.resolve()), reused
+    assert reused["checks"] == receipt["checks"] and events() == before_indexed_resume
+    print("PASS: reindexing an exact partial does not hide a verified superset; a damaged alternative grants no reuse")
+
     # os._exit bypasses every exception/finally handler in the actual runner.
     # Its earlier successful profile must already have a complete signed proof.
     run("git", "checkout", "main")

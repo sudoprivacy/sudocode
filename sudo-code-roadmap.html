@@ -1216,6 +1216,18 @@ Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselecte
 profile controls cover this ordering. Both original service journeys remain
 required; product coverage counts and budgets are unchanged. This adds
 infrastructure fault coverage and makes no whole-PR speedup claim.</p>
+<p><strong>Preserve a failed service-client process (2026-11-18).</strong>
+Existing-Box polling saves the complete original stderr and stops on process
+exit 2, including an RPC-looking prefix or successful JSON followed by a crash.
+The original pinned client offsets RPC status exits by 64: remote Unknown66
+retains its original retry behavior, as do transport failures, other RPC statuses,
+malformed JSON and typed VFS errors. The original 5s client timeout,30s predicate,
+real mTLS journeys and client selection remain unchanged. Required author-native
+and Linux container guards use real synthetic child processes and the exact old
+response-body negative control to prove that a failed process cannot be retried
+to a passing result. These controls add no product journey credit. This is a
+process-result acceptance correction, not a cause or fix of the retained Go
+runtime crash or a measured whole-lifecycle speedup.</p>
 <p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
 Each running reservation keeps the existing exclusive host lease through execution
 and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
@@ -2258,6 +2270,12 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       remain; restart stays before both lanes and SIGSTOP stays after both pass.
       Original per-lane logs and command receipts remain in the fault artifact;
       an existing result directory is refused before either lane starts.
+      The Linux A2A job can start the managed CLI and mock-service bin build
+      after the serial CLI lane completes, while prepared fault binaries still
+      run. The original four test slots remain. The two Cargo writers stay
+      serial. After the full join, the original managed harness checks the bin
+      build with Cargo and runs its original real-daemon tests. Record the early
+      build and later check separately before crediting a queue saving.
       Cargo preparation and ignored-case enumeration finish before the lanes
       start. The fixed nextest executor then uses those same build metadata and
       binaries without reacquiring the CLI build lock. Source contents, helper,

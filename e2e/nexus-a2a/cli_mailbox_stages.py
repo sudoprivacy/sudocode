@@ -37,10 +37,15 @@ def execute_stage(arguments):
         bash = shutil.which('bash')
         if not bash:
             raise RuntimeError('Bash is required for the original CLI daemon journeys')
-        # One CLI case may create multiple actual scode processes; its original
-        # assertions and deadlines stay unchanged while cases run serially.
-        environment = {**os.environ, 'RUST_TEST_THREADS': '1'}
-        result = subprocess.run([bash, str(arguments.cli_script)], cwd=ROOT, env=environment)
+        if arguments.stage == 'managed-build':
+            command = [bash, str(arguments.managed_prepare_script), '--prepare-only']
+            environment = dict(os.environ)
+        else:
+            # One CLI case may create multiple actual scode processes. Preserve
+            # the original serial case execution and join before the extra build.
+            command = [bash, str(arguments.cli_script)]
+            environment = {**os.environ, 'RUST_TEST_THREADS': '1'}
+        result = subprocess.run(command, cwd=ROOT, env=environment)
         if result.returncode:
             raise SystemExit(result.returncode)
 
@@ -50,6 +55,8 @@ def run(arguments):
     workers = int(os.environ.get('SCODE_ACCEPTANCE_TEST_THREADS', '4'))
     if not 1 <= workers <= 4:
         raise RuntimeError('SCODE_ACCEPTANCE_TEST_THREADS must be between 1 and 4')
+    if arguments.managed_prepare_script and workers == 1:
+        raise RuntimeError('Early managed build requires overlapping CLI and fault lanes')
     if arguments.output.exists():
         raise RuntimeError(f'A fresh mailbox fault output directory is required before starting either lane: {arguments.output}')
     caller = {name: os.environ.get(name) for name in CALLER_ENVIRONMENT}
@@ -68,6 +75,16 @@ def run(arguments):
                                                '--fault-workers', str(max(1, workers - 1))],
                                     'log': str(output / (stage + '.log'))}]}
         for name, stage in [('protocol', 'faults'), ('native', 'cli')]]}
+    if arguments.managed_prepare_script:
+        # The fault branch executes only the previously prepared test binaries.
+        # Keep managed and CLI Cargo writes serial in the existing native branch.
+        data['branches'][1]['commands'].append({
+            'command': [*common, '--stage', 'managed-build', '--managed-prepare-script',
+                        str(arguments.managed_prepare_script)],
+            'log': str(output / 'managed-build.log'),
+        })
+        print('A2A_MANAGED_BUILD: original bin build follows CLI in the native lane. '
+              'The managed tests and Cargo freshness check follow the full join.', flush=True)
     configuration = output / 'commands.json'
     configuration.write_text(json.dumps(data, indent=2) + '\n')
     data = supervisor.read_configuration(configuration)
@@ -110,7 +127,8 @@ if __name__ == '__main__':
     parser.add_argument('--manifest', type=Path, default=ROOT / 'rust/Cargo.toml')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--cli-script', type=Path, default=ROOT / 'e2e/nexus-a2a/run-cli.sh')
-    parser.add_argument('--stage', choices=['cli', 'faults'], help=argparse.SUPPRESS)
+    parser.add_argument('--managed-prepare-script', type=Path)
+    parser.add_argument('--stage', choices=['cli', 'faults', 'managed-build'], help=argparse.SUPPRESS)
     parser.add_argument('--fault-workers', type=int, default=1, help=argparse.SUPPRESS)
     parser.add_argument('--prepared-sha', help=argparse.SUPPRESS)
     parser.add_argument('--caller-environment', type=json.loads, help=argparse.SUPPRESS)
@@ -118,6 +136,8 @@ if __name__ == '__main__':
     arguments.manifest = arguments.manifest.resolve()
     arguments.output = arguments.output.resolve()
     arguments.cli_script = arguments.cli_script.resolve()
+    if arguments.managed_prepare_script:
+        arguments.managed_prepare_script = arguments.managed_prepare_script.resolve()
     if arguments.stage:
         if (not isinstance(arguments.caller_environment, dict)
                 or set(arguments.caller_environment) != set(CALLER_ENVIRONMENT)
@@ -126,6 +146,8 @@ if __name__ == '__main__':
             raise RuntimeError('Stage caller environment must contain exactly the declared compiler/color settings')
         if not arguments.prepared_sha:
             raise RuntimeError('Stage requires the fresh preparation handoff')
+        if arguments.stage == 'managed-build' and not arguments.managed_prepare_script:
+            raise RuntimeError('Managed build requires its original harness script')
         execute_stage(arguments)
     else:
         run(arguments)

@@ -1,7 +1,6 @@
 """Real acceptance commands shared by the author's hook and opposite-OS CI."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import importlib.util
@@ -927,6 +926,8 @@ def native_compiler_run(name, root, output, base, execute):
 
 def hosted_service_journeys(journeys, root, output, execute, env, start):
     """Run independent hosted journeys concurrently, retaining command order and logs."""
+    from concurrent.futures import ThreadPoolExecutor
+
     def run_one(numbered):
         index, command = numbered
         # The original scripts each create private test users and state
@@ -1315,7 +1316,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': '581db72026406cc79f2005d28df391083efb17da0ec88191c2eef69c27629cd0', 'native-context': 'e7e93e4725e4d216c64bcdec6d99d9b0793071e9ac0f5146891a70dd069a0562', 'native-services': 'a8cde628702d83dcd094aeeaff2de9b49272b12fcf45a602151f400fe17a27eb'}
+    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': '8efcd5884b48d577d312f705a61f35a780dd7c809ced72b2c7666531f9eadcbc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

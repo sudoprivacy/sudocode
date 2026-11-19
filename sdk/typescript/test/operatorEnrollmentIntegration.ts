@@ -56,6 +56,7 @@ async function main(){
   try {
     assert.equal(network.status().filter(row=>row.state==='connected').length,2,JSON.stringify(network.status()));
     assert.equal(new Set(network.status().map(row=>row.actor)).size,2,'same project has distinct actual actors');
+    for(const row of network.status())assert.match(row.actor,/^codex-project-[0-9a-f]{8}$/,'a new actor names its workspace folder');
     const sid=network.connectionFor(ids[0]).sessionId;
     for(const row of network.status()){
       const sent=await sendScodeMessage(network.connectionFor(row.threadId),{to:'fixture-peer',message:'exact 🧪\0',summary:'private actor'});

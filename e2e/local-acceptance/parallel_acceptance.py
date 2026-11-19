@@ -67,14 +67,24 @@ def run_case(output, order):
     key = output / "fixture-key"
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
     platform = load("parallel_owner", SOURCE / ".github/scripts/local_acceptance.py").host()
+    native_workflow = ".github/workflows/local-acceptance.yml"
+    toolchain_adapter = ".github/actions/rust-toolchain/cache-command.mjs"
+    cache_workflow = (SOURCE / native_workflow).read_text(encoding="utf-8").encode()
+    cache_output = b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+    assert cache_workflow.count(cache_output) == cache_workflow.count(b"        id: rust_toolchain\n") == 1
+    original_workflow = cache_workflow.replace(cache_output, b"").replace(b"        id: rust_toolchain\n", b"")
     for relative in [".github/scripts/local_acceptance.py", ".github/local-acceptance/gate.py",
                      ".github/local-acceptance/publish.py", ".github/local-acceptance/cross_platform.py",
-                     ".github/workflows/local-acceptance.yml",
+                     native_workflow, ".github/actions/rust-toolchain/action.yml", toolchain_adapter,
                      ".github/workflows/local-acceptance-workspace.yml",
                      ".github/workflows/local-acceptance-publish.yml"]:
         destination = work / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SOURCE / relative, destination)
+        if relative == native_workflow:
+            destination.write_bytes(original_workflow if order == "ci-first" else cache_workflow)
+        if relative.startswith(".github/actions/rust-toolchain/"):
+            destination.write_bytes(destination.read_text(encoding="utf-8").encode())
         if relative == ".github/scripts/local_acceptance.py":
             # Protected main is newer than the installed client. Its marker
             # proves that refresh executes the new code, not only new bytes.
@@ -417,7 +427,10 @@ def run_case(output, order):
         def protected_commit(relative, contents, message, parent):
             git("switch", "--detach", parent, cwd=trusted)
             destination = trusted / relative
-            destination.write_text(contents, encoding="utf-8")
+            if isinstance(contents, bytes):
+                destination.write_bytes(contents)
+            else:
+                destination.write_text(contents, encoding="utf-8")
             git("add", "--", relative, cwd=trusted)
             git("-c", "commit.gpgsign=false", "commit", "-m", message, cwd=trusted)
             changed = git("rev-parse", "HEAD", cwd=trusted)
@@ -593,6 +606,35 @@ def run_case(output, order):
                                   "accepted": True, "old_and_new_recipes": [old_hash, new_hash],
                                   "original_notes_logs_and_processes_reused": True})
         metadata = approved
+        if order == "ci-first":
+            updated = protected_commit(native_workflow, cache_workflow, "Use the pinned cache key", metadata)
+            assert helper.verify_execution_plan(envelope, head, updated, updated) == pending
+            assert helper.verify_envelope(completed, head, updated, updated)["plan"] == pending["plan"]
+            publisher_run["head_sha"] = updated
+            publish({"workflow_run": source_run}, 941)
+            assert statuses[-1]["state"] == "success"
+            assert notes_before == (helper.canonical(helper.read_note(head)),
+                                    helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+            assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+            assert len(started_workers) == 2
+            metadata_controls.append({"case": "reviewed cache-only workflow keeps original author and native checks",
+                                      "accepted": True, "original_notes_logs_and_processes_reused": True})
+
+            original_adapter = (trusted / toolchain_adapter).read_bytes()
+            for label, relative, contents in [
+                ("changed cache adapter", toolchain_adapter, original_adapter + b"\nprocess.exit(17);\n"),
+                ("changed workflow deadline", native_workflow,
+                 cache_workflow.replace(b"timeout-minutes: ${{ matrix.timeout }}", b"timeout-minutes: 20")),
+            ]:
+                git("--git-dir", str(origin), "update-ref", "refs/heads/main", updated, cwd=output)
+                changed = protected_commit(relative, contents, "Refuse " + label, updated)
+                try:
+                    helper.verify_execution_plan(envelope, head, changed, changed)
+                except RuntimeError as error:
+                    assert "current protected native workflow definition" in str(error)
+                    metadata_controls.append({"case": label, "accepted": False, "reason": str(error)})
+                else:
+                    raise AssertionError("An original scheduling plan accepted " + label)
         helper_path = ".github/scripts/local_acceptance.py"
         executor = (trusted / helper_path).read_text()
         signature = next(line for line in executor.splitlines() if line.startswith("def run_command("))

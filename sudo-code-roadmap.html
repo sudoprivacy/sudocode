@@ -1971,6 +1971,27 @@ cache. The two runs do not establish how much of the total time difference
 was due to cache reuse.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original hit</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44505502638/job/135496336484">Original miss</a>.</p>
+<p><strong>Native Linux consumers share the active-toolchain cache prefix.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1525">PR #1525</a>
+made Linux queue Clippy, A2A and co-host use the same dependency key as the main
+publisher. The first queue jobs ran cold and passed. The subsequent main
+publisher saved cache 10788615872 (1,461,886,294 bytes), and the earlier Linux
+entry was absent from the next main cache listing. The complementary Linux
+workflow now uses the same trusted toolchain adapter. Its workspace layout can
+still change the exact dependency suffix. The cache action can restore by the
+verified prefix while Cargo retains its own freshness checks. The signed-plan
+controls preserve both completion orders, the original checks, and rejection
+of altered deadlines or adapters. The next ordinary merge queue, for
+<a href="https://github.com/sudoprivacy/sudocode/pull/1526">PR #1526</a>,
+restored the exact published cache on both Linux daemon jobs. A2A ran for 397
+seconds compared with 427 seconds in the original cold queue. Co-host ran for
+463 seconds compared with 509. The tracked Rust inputs matched, and the Windows
+grpcurl preparation and its pin changed between those queues. These are observed
+job durations. Complementary Linux cache timing remains unmeasured.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44531123726">First queue run</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44532752476/job/135590101558">Main Linux publication</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44560622130/job/135689180016">Warm A2A</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44560622130/job/135689179969">Warm co-host</a>.</p>
 <p><strong>First observed cold Windows warmer after #1512.</strong> The automatic
 main job ran the dev/test compiler command in 219s and skipped the optimized
 release warmer. It published 2,458,357,241 bytes. The older original job spent

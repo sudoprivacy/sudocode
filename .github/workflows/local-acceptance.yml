@@ -81,6 +81,7 @@ jobs:
           persist-credentials: false
       - uses: ./.trusted-acceptance/.github/actions/rust-toolchain
         if: matrix.family == 'native'
+        id: rust_toolchain
         with:
           # The candidate's own pin decides what its Cargo commands resolve.
           # A branch created before the pin uses the protected one.
@@ -104,6 +105,7 @@ jobs:
           workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
       - name: Install acceptance observer dependencies
         run: python -m pip install psutil jsonschema

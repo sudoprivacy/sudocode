@@ -57,8 +57,8 @@ MSVC_ENV = None
 RUNNER_CODE = sys._getframe().f_code
 
 
-def git(*args, root=None, data=None, check=True):
-    result = subprocess.run(["git", *args], cwd=root or ROOT, input=data,
+def git(*args, root=None, data=None, check=True, env=None):
+    result = subprocess.run(["git", *args], cwd=root or ROOT, input=data, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
@@ -67,6 +67,22 @@ def git(*args, root=None, data=None, check=True):
 
 def value(*args, root=None):
     return git(*args, root=root).stdout.decode().strip()
+
+
+# Git's repository selectors, mirroring `git rev-parse --local-env-vars`
+# without requiring Git in minimal execution containers. The native guard
+# injects the installed Git's full list, so an added selector requires an
+# explicit update. Git exports them to a hook for the checkout running it.
+GIT_LOCAL_ENV = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR"})
+
+
+def without_git_selectors(environment):
+    return {key: setting for key, setting in environment.items() if key not in GIT_LOCAL_ENV
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
 
 
 def canonical(obj):
@@ -489,7 +505,7 @@ except subprocess.TimeoutExpired:
         used = referenced_globals(symbols.lookup(name).get_namespace())
         pending.extend(used & definitions.keys() - consumers.keys())
     layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
-    reviewed = "70b0ba75cdebf76162e16f9a8bfab48f479c597265f6161c1c2aa837e072a644"
+    reviewed = "83c7116f8d7e143dda12e23ef9458b1b98a7dbc3b30c7230f73ce8351af533c9"
     if layout != reviewed:
         print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
             "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
@@ -523,6 +539,7 @@ except subprocess.TimeoutExpired:
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
         "51b69bebd2b48ed2b2fc90552c624a525d61f9db280ae1599e16b53bcf62bd83",
+        "85f680e4e34efb6c338421e29cd04b8e3b997eab010aecaca301930220d1d6fb",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -1322,15 +1339,7 @@ def run_command(command, cwd, log, env=None):
     # SDK discovery also captures hook-exported repository selectors. Fixtures
     # run Git in their own repositories, so clear inherited selectors after
     # setup and before applying explicit per-command settings.
-    # Mirror Git's local environment contract without requiring Git in minimal
-    # execution containers. The native guard injects the installed Git's full
-    # --local-env-vars list, so an added selector requires an explicit update.
-    local_git = {"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-                 "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
-                 "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
-                 "GIT_SHALLOW_FILE", "GIT_COMMON_DIR"}
-    environment = {key: setting for key, setting in environment.items() if key not in local_git
-                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    environment = without_git_selectors(environment)
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
@@ -2733,7 +2742,9 @@ def deferred_state(branch):
     """This clone's per-branch state for deferred checks, outside every checkout.
     The name is short: Windows linkers refuse paths over 260 characters, and the
     branch worktree under it builds the whole workspace."""
-    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    # Git may name the common directory relative to the checkout, which is not
+    # always this process's working directory.
+    common = (ROOT / value("rev-parse", "--git-common-dir")).resolve()
     return Path.home() / ".nexus/local-acceptance/deferred" / sha(f"{common}\0{branch}".encode())[:12]
 
 
@@ -2789,12 +2800,17 @@ def defer_check(head, remote, pull, trusted):
         print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
               f"see {state / 'deferred.json'}", flush=True)
         return
+    # Git runs pre-push with selectors for the pushing checkout: from a linked
+    # worktree, GIT_DIR names it. The acceptance worktree and its check find
+    # their own repository, or they would check out into the author's HEAD and
+    # index and judge cleanliness against them.
+    own = without_git_selectors(os.environ)
     worktree = state / "w"
     if (worktree / ".git").exists():
-        git("checkout", "--detach", "--force", head, root=worktree)
-        git("clean", "-ffd", root=worktree)
+        git("checkout", "--detach", "--force", head, root=worktree, env=own)
+        git("clean", "-ffd", root=worktree, env=own)
     else:
-        git("worktree", "add", "--detach", str(worktree), head)
+        git("worktree", "add", "--detach", str(worktree), head, env=own)
     command = [sys.executable, str(Path(__file__).resolve()), "check", "--head", head, "--base", "origin/main",
                "--policy-ref", "origin/main", "--publish", "--remote", remote,
                "--output", str(output), "--dispatch-publish", str(pull["number"])]
@@ -2805,10 +2821,10 @@ def defer_check(head, remote, pull, trusted):
         try:
             # Outlive a terminal or agent job that kills its tree on exit.
             breakaway = {"creationflags": detached["creationflags"] | 0x01000000} if os.name == "nt" else detached
-            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+            process = subprocess.Popen(command, cwd=worktree, env=own, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, **breakaway)
         except OSError:
-            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+            process = subprocess.Popen(command, cwd=worktree, env=own, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, **detached)
     import psutil
 

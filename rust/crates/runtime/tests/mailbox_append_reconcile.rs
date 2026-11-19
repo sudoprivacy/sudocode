@@ -1,13 +1,16 @@
 //! A framed append that returns an error may still have committed. `send`
-//! looks for the exact envelope in the conversation before it reports.
+//! looks for the exact envelope in the conversation before it reports, queues
+//! a send it cannot confirm, and a retry of it reaches the receiver once.
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kernel::kernel::Kernel;
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::{FsDirEntry, FsMetadata};
 use runtime::mailbox::{InboxConvention, Mailbox};
+use runtime::send_outbox::{SendOutbox, SendOutcome, SettledSend, MAX_ATTEMPTS};
 use runtime::{FsBackend, KernelFsBackend};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -29,11 +32,18 @@ struct Faulty {
     /// keeps growing for as long as anyone reads it.
     growing: AtomicBool,
     tail_reads: AtomicUsize,
+    /// Holds each mailbox's queued sends, so no test writes under the real
+    /// config home.
+    outboxes: tempfile::TempDir,
 }
 
 impl Faulty {
     fn set(&self, fault: Fault) {
         *self.fault.lock().unwrap() = fault;
+    }
+
+    fn outbox(&self, agent: &str) -> SendOutbox {
+        SendOutbox::new(self.outboxes.path().join(agent))
     }
 }
 
@@ -138,14 +148,17 @@ fn pair() -> (Mailbox, Mailbox, Arc<Faulty>) {
         unreadable: AtomicBool::new(false),
         growing: AtomicBool::new(false),
         tail_reads: AtomicUsize::new(0),
+        outboxes: tempfile::tempdir().unwrap(),
     });
     let root = "/workspace/mail".to_string();
     let alice = Mailbox::new(
         Arc::clone(&faulty) as Arc<dyn FsBackend>,
         "alice".into(),
         InboxConvention::new(root.clone()),
-    );
-    let bob = Mailbox::new(fs, "bob".into(), InboxConvention::new(root));
+    )
+    .with_outbox(faulty.outbox("alice"));
+    let bob = Mailbox::new(fs, "bob".into(), InboxConvention::new(root))
+        .with_outbox(faulty.outbox("bob"));
     let transcript = alice.transcript_path("bob");
     let parent = std::path::Path::new(&transcript).parent().unwrap();
     faulty.create_dir_all(parent.to_str().unwrap()).unwrap();
@@ -177,6 +190,37 @@ fn bodies(bob: &Mailbox) -> Vec<String> {
         .collect()
 }
 
+/// Run `bob`'s receiver until it has handed over `last`, then stop it and
+/// return every body it handed over, in order.
+fn receive_through(bob: Mailbox, last: &str) -> Vec<String> {
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let abort = runtime::HookAbortSignal::new();
+    let sink = Arc::clone(&delivered);
+    let receiver = runtime::mailbox::spawn_inbox_record_poller(
+        Arc::new(bob),
+        100,
+        "reconcile-test",
+        abort.clone(),
+        move |record| {
+            sink.lock().unwrap().push(record.envelope().body.clone());
+            true
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while delivered.lock().unwrap().last().map(String::as_str) != Some(last) {
+        assert!(
+            Instant::now() < deadline,
+            "the receiver never handed over {last:?}: {:?}",
+            delivered.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    abort.abort();
+    receiver.join().unwrap();
+    let bodies = delivered.lock().unwrap().clone();
+    bodies
+}
+
 #[test]
 fn a_successful_send_does_not_read_the_conversation() {
     let (alice, bob, faulty) = pair();
@@ -198,8 +242,8 @@ fn a_missing_message_is_unconfirmed_not_undelivered() {
     let (alice, bob, faulty) = pair();
     faulty.set(Fault::TimeOut);
     let error = alice.send(message("lost", 0)).unwrap_err();
-    assert!(error.contains("delivery unconfirmed"), "{error}");
-    assert!(error.contains("before resending"), "{error}");
+    assert!(error.starts_with("delivery unconfirmed"), "{error}");
+    assert!(error.contains("do not resend it yourself"), "{error}");
     assert_eq!(bodies(&bob), Vec::<String>::new());
 }
 
@@ -262,5 +306,118 @@ fn a_check_against_a_growing_stream_ends_unconfirmed() {
         started.elapsed() < std::time::Duration::from_secs(10),
         "the check must stop on its own: {:?}",
         started.elapsed()
+    );
+}
+
+/// A retry whose append succeeds after the original also landed puts one send
+/// in the conversation twice. The receiver hands it over once.
+#[test]
+fn a_retransmission_that_lands_is_delivered_once() {
+    let (alice, bob, _faulty) = pair();
+    let mut original = message("said once", 100);
+    original.send_id = Some("logical-send-2".into());
+    alice.send(original.clone()).unwrap();
+    alice.send(original).unwrap();
+    alice.send(message("after", 101)).unwrap();
+    assert_eq!(bodies(&bob), ["said once", "said once", "after"]);
+    assert_eq!(receive_through(bob, "after"), ["said once", "after"]);
+}
+
+/// An append that keeps failing past the check leaves the send queued, and
+/// once the link is back a retry delivers it exactly once and says so, once.
+#[test]
+fn an_unconfirmed_send_is_queued_and_retried_once_the_link_is_back() {
+    let (alice, bob, faulty) = pair();
+    faulty.set(Fault::TimeOut);
+    let error = alice.send(message("queued", 0)).unwrap_err();
+    let queued = faulty.outbox("alice").list().unwrap();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    let send_id = queued[0].send_id().to_string();
+    assert!(error.starts_with("delivery unconfirmed"), "{error}");
+    assert!(
+        error.contains(&format!("queued as send {send_id}")),
+        "{error}"
+    );
+    assert_eq!(bodies(&bob), Vec::<String>::new());
+
+    faulty.set(Fault::None);
+    alice.retry_outbox(None).unwrap();
+    assert_eq!(bodies(&bob), ["queued"]);
+    assert!(
+        faulty.outbox("alice").list().unwrap().is_empty(),
+        "a delivered send leaves the queue"
+    );
+    let settled = alice.take_settled_outcomes();
+    assert_eq!(
+        settled,
+        [SettledSend {
+            to: "bob".into(),
+            send_id: send_id.clone(),
+            outcome: SendOutcome::Delivered,
+            attempts: 2,
+        }]
+    );
+    assert_eq!(
+        settled[0].to_string(),
+        format!("Earlier queued send {send_id} to bob: delivered after retry (2 attempts)")
+    );
+    alice.retry_outbox(None).unwrap();
+    assert_eq!(bodies(&bob), ["queued"], "a settled send is not retried");
+    assert!(
+        alice.take_settled_outcomes().is_empty(),
+        "an outcome is reported once"
+    );
+}
+
+/// A send that never gets through is abandoned at the attempt limit, and the
+/// agent is told to resend it if it still matters.
+#[test]
+fn a_send_that_never_gets_through_is_abandoned_at_the_attempt_limit() {
+    let (alice, _bob, faulty) = pair();
+    faulty.set(Fault::TimeOut);
+    // Every check fails at once instead of waiting out a late commit.
+    faulty.unreadable.store(true, Ordering::SeqCst);
+    let error = alice.send(message("never", 0)).unwrap_err();
+    assert!(error.starts_with("delivery unknown"), "{error}");
+    assert!(error.contains("queued as send"), "{error}");
+    for attempts in 2..MAX_ATTEMPTS {
+        alice.retry_outbox(None).unwrap();
+        assert_eq!(faulty.outbox("alice").list().unwrap()[0].attempts, attempts);
+        assert!(
+            alice.take_settled_outcomes().is_empty(),
+            "a send under its limits has not ended"
+        );
+    }
+    alice.retry_outbox(None).unwrap();
+    assert!(
+        faulty.outbox("alice").list().unwrap().is_empty(),
+        "an abandoned send leaves the queue"
+    );
+    let settled = alice.take_settled_outcomes();
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0].outcome, SendOutcome::Abandoned);
+    assert_eq!(settled[0].attempts, MAX_ATTEMPTS);
+    assert!(
+        settled[0].to_string().ends_with(&format!(
+            "abandoned after {MAX_ATTEMPTS} attempts — resend if still needed"
+        )),
+        "{}",
+        settled[0]
+    );
+}
+
+/// Envelopes without a send id are independent sends, however alike: the
+/// receiver hands over every one.
+#[test]
+fn envelopes_without_a_send_id_are_never_taken_for_repeats() {
+    let (alice, bob, faulty) = pair();
+    let path = alice.transcript_path("bob");
+    let legacy = br#"{"from":"alice","to":"bob","body":"no identity"}"#;
+    faulty.append(&path, legacy).unwrap();
+    faulty.append(&path, legacy).unwrap();
+    alice.send(message("marker", 0)).unwrap();
+    assert_eq!(
+        receive_through(bob, "marker"),
+        ["no identity", "no identity", "marker"]
     );
 }

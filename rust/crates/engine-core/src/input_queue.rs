@@ -351,6 +351,13 @@ impl<R> TurnInputCoordinator<R> {
         self.steering.remove(&id).and_then(|input| input.receipt)
     }
 
+    /// The first input's transport can require completed handling, while
+    /// steering receipts transfer ownership when their input is committed.
+    #[must_use]
+    pub fn is_initial(&self, id: u64) -> bool {
+        self.initial.contains(&id)
+    }
+
     /// Return only a machine decision's transient delivery lease. Its durable
     /// request remains in the session journal; ordinary chat stays queued.
     pub fn return_interaction(

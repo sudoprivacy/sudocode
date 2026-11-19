@@ -2487,9 +2487,13 @@ enum CoordinatorEvent {
     InteractionDeliveryReturned(engine_events::InteractionReceipt),
     PumpQueue,
     TurnStarted,
-    TurnComplete {
-        is_failed: bool,
-    },
+    TurnComplete(ReplTurnOutcome),
+}
+
+enum ReplTurnOutcome {
+    Completed,
+    Cancelled,
+    Failed,
 }
 
 /// Build a mailbox sink that waits for terminal handling by the coordinator.
@@ -3351,6 +3355,9 @@ fn run_repl_iocraft_dispatch(
     // Coordinator loop on the current thread. All events arrive through
     // `coord_rx` — no timeout-based polling needed.
     let mut runner_handle: Option<thread::JoinHandle<()>> = None;
+    // Persisting the initial prompt does not finish its peer operation. Keep
+    // that receipt until terminal handling; shutdown drops it without an ACK.
+    let mut initial_peer_receipts = Vec::new();
     // Pending interactive slash command state: when a slash command needs
     // user selection (e.g. `/model` without args), we show a question via
     // iocraft's InputSlot and store the callback here. The coordinator
@@ -3416,9 +3423,14 @@ fn run_repl_iocraft_dispatch(
                 }
             }
             CoordinatorEvent::InputCommitted(id) => {
-                // This receipt means the prompt is durable, not just in a channel.
-                if let Some(receipt) = coord.lock().unwrap().committed(id) {
-                    let _ = receipt.send(());
+                let mut queue = coord.lock().unwrap();
+                let initial = queue.is_initial(id);
+                if let Some(receipt) = queue.committed(id) {
+                    if initial {
+                        initial_peer_receipts.push(receipt);
+                    } else {
+                        let _ = receipt.send(());
+                    }
                 }
                 repl_ui_cmd.pending_input_remove(id);
             }
@@ -3442,18 +3454,23 @@ fn run_repl_iocraft_dispatch(
                     let _ = coord_tx.send(CoordinatorEvent::PumpQueue);
                 }
             }
-            event @ (CoordinatorEvent::TurnComplete { .. } | CoordinatorEvent::PumpQueue) => {
+            event @ (CoordinatorEvent::TurnComplete(_) | CoordinatorEvent::PumpQueue) => {
                 if matches!(event, CoordinatorEvent::PumpQueue)
                     && coord.lock().unwrap().is_running()
                 {
                     continue;
                 }
-                if let CoordinatorEvent::TurnComplete { is_failed } = event {
+                if let CoordinatorEvent::TurnComplete(outcome) = event {
                     let mut queue = coord.lock().unwrap();
-                    if is_failed {
+                    if !matches!(outcome, ReplTurnOutcome::Completed) {
                         queue.finish_failed_turn();
                     } else {
                         queue.finish_turn();
+                    }
+                    for receipt in initial_peer_receipts.drain(..) {
+                        if !matches!(outcome, ReplTurnOutcome::Failed) {
+                            let _ = receipt.send(());
+                        }
                     }
                 }
                 if let Some(h) = runner_handle.take() {
@@ -4086,6 +4103,7 @@ fn run_repl_iocraft_dispatch(
     mailbox_abort.abort();
     drop(coord_rx);
     coord.lock().unwrap().clear();
+    drop(initial_peer_receipts);
     let _ = mailbox_receiver.join();
 
     // Persist the session before shutting down the REPL — the UI thread may
@@ -4280,18 +4298,18 @@ fn spawn_iocraft_turn(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = captured;
             }
-            let is_failed = match cli.run_turn_iocraft(&work, &output, &ui, &spinner) {
-                Ok(committed) => !committed,
+            let outcome = match cli.run_turn_iocraft(&work, &output, &ui, &spinner) {
+                Ok(outcome) => outcome,
                 Err(error) => {
                     output.println(&format!(
                         "{}{error}{}",
                         theme().fg_seq(TextRole::Error),
                         RESET
                     ));
-                    true
+                    ReplTurnOutcome::Failed
                 }
             };
-            let _ = done_tx.send(CoordinatorEvent::TurnComplete { is_failed });
+            let _ = done_tx.send(CoordinatorEvent::TurnComplete(outcome));
         })
         .expect("spawn repl-runner thread")
 }
@@ -5303,7 +5321,7 @@ impl LiveCli {
         output: &repl_ui::OutputSender,
         ui: &repl_ui::UiCommandSender,
         spinner_state: &render::activity::ActivityState,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    ) -> Result<ReplTurnOutcome, Box<dyn std::error::Error>> {
         let input = match work {
             ReplWork::Prompt(next) => next
                 .inputs
@@ -5349,12 +5367,13 @@ impl LiveCli {
             None,
         )?;
 
-        // Durable input events acknowledge ownership independently of turn
-        // success. Failure/cancellation pauses any input still awaiting commit.
-        let is_handled = outcome
-            .complete
-            .as_ref()
-            .is_some_and(|turn| !turn.cancelled);
+        // Explicit cancellation handles the peer input but still pauses any
+        // uncommitted follow-up. Shutdown never consumes this completion event.
+        let handling = match outcome.complete.as_ref() {
+            Some(turn) if turn.cancelled => ReplTurnOutcome::Cancelled,
+            Some(_) => ReplTurnOutcome::Completed,
+            None => ReplTurnOutcome::Failed,
+        };
         if matches!(work, ReplWork::Compact) {
             // Maintenance does not create a model turn or reset its statistics.
             // The management response owns the full result, including message
@@ -5364,7 +5383,7 @@ impl LiveCli {
             }
             self.refresh_completions();
             ui.set_cache_tip(self.cache_ttl_tip());
-            return Ok(is_handled);
+            return Ok(handling);
         }
         match outcome.complete {
             Some(tc) if tc.cancelled => {
@@ -5383,7 +5402,7 @@ impl LiveCli {
             // Error already rendered by the EngineEventRenderer (Error event).
             None => {}
         }
-        Ok(is_handled)
+        Ok(handling)
     }
 
     fn run_turn_with_output(

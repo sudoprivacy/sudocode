@@ -2020,6 +2020,25 @@ comparison establishes the mismatch without measuring a time saving.</p>
 tool change</a> also triggered the normal <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44581106560">VFS publisher</a>.
 The job found the exact key in 29 assigned runner seconds. It skipped compiler
 data download, import, and save.</p>
+<p><strong>SDK integration fixture scheduling.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1532">PR #1532</a>
+overlaps the autojoin fixture with independent process fixtures, then runs the
+portable-package test after both groups finish. All original test entries,
+assertions and time limits remain in force. On one Windows host with the same
+Node and npm, <code>npm test</code> fell from 156.780s to 110.111s (29.8%).
+On separate GitHub assignments using Node 20.20.2, the prior SDK tree matched
+main before this change. Linux x64 recorded
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795461">111.377s</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44604309309/job/135844076757">98.919s</a>.
+Linux ARM64 recorded
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795306">128.139s</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44604309309/job/135844077938">94.159s</a>.
+Those two assigned job totals were 285s and 237s. The macOS test passed at
+95.109s in the new run. The final merge tree matched the qualified tree, and
+the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44605182586">main package run</a>
+passed on all four platforms in 97 assigned runner seconds combined.
+This SDK-only change falls outside the fixed Rust-source cohort.
+The whole-lifecycle one-tenth target remains unproven.</p>
 <p><strong>Stronger signed author progress.</strong> Automatic exact-source
 resume now prefers an older signed record that proves a strict superset of
 currently required, compatible profiles. In a replay of original #1510

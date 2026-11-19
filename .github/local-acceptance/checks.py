@@ -1155,6 +1155,11 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Co-host build version stamp was lost")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
+            if name == "rendering":
+                with rendering_source_inputs(root.parent) as inputs:
+                    if inputs != root.parent:
+                        # Build commands use the frozen candidate as their working directory.
+                        return run(name, inputs / "candidate", output, base, execute)
             benchmark(name, root, output, base, command, target)
         else:
             try:
@@ -1600,6 +1605,88 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
+def pack_rendering_sources(root, snapshots, directory):
+    """Transport ordinary Git trees as sequential reads across the Windows bind mount."""
+    for ref in dict.fromkeys(snapshots.values()):
+        tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref], cwd=root)
+        if any(entry.split(b" ", 1)[0] not in {b"100644", b"100755"}
+               for entry in tree.split(b"\0") if entry):
+            # The existing archive extractor remains responsible for links and submodules.
+            return {}
+    directory.mkdir()
+    digests = {}
+    for label, ref in snapshots.items():
+        with (directory / f"{label}.tar").open("xb+") as archive:
+            subprocess.run(["git", "archive", "--format=tar", ref], cwd=root, stdout=archive, check=True)
+            archive.seek(0)
+            digests[label] = hashlib.file_digest(archive, "sha256").hexdigest()
+    return digests
+
+
+def extract_rendering_source(path, destination, ref, expected_hash):
+    """Read a regular-file Git archive safely on the pinned container Python."""
+    from pathlib import PurePosixPath
+
+    if checkout_link(path) or not path.is_file():
+        raise RuntimeError(f"Rendering archive is missing or is not a regular file: {path}")
+    destination.mkdir()
+    # Git's ordinary files all reach the legacy Linux checkout with the mode
+    # supplied by the Windows bind mount. Keep those modes across the transport
+    # change so identical cached inputs do not need to be rewritten by Cargo.
+    directory_mode = stat.S_IMODE(path.parent.stat().st_mode) & 0o777
+    with path.open("rb") as payload:
+        file_mode = stat.S_IMODE(os.fstat(payload.fileno()).st_mode) & 0o777
+        if hashlib.file_digest(payload, "sha256").hexdigest() != expected_hash:
+            raise RuntimeError(f"Rendering archive digest mismatch: {path}")
+        payload.seek(0)
+        with tarfile.open(fileobj=payload, mode="r:") as archive:
+            if archive.pax_headers.get("comment") != ref:
+                raise RuntimeError(f"Rendering archive revision mismatch: {path}")
+            seen = set()
+            for member in archive:
+                relative = PurePosixPath(member.name)
+                if (not relative.parts or relative.is_absolute() or ".." in relative.parts
+                        or relative in seen or not (member.isdir() or member.isfile())):
+                    raise RuntimeError(f"Unexpected entry in rendering Git archive: {member.name}")
+                seen.add(relative)
+                target = destination.joinpath(*relative.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    target.chmod(directory_mode)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.extractfile(member) as contents, target.open("xb") as copy:
+                        shutil.copyfileobj(contents, copy)
+                    target.chmod(file_mode)
+
+
+def rendering_source_inputs(inputs):
+    """Expand packed inputs on the container disk before syncing the leased checkout."""
+    from contextlib import nullcontext
+
+    packed = inputs / "archives"
+    if checkout_link(packed):
+        raise RuntimeError("Rendering archive directory must not be a link")
+    if not packed.exists():
+        return nullcontext(inputs)
+    identity = json.loads((inputs / "identity.json").read_bytes())
+    digests = identity.get("rendering_archive_sha256")
+    labels = ("candidate", "baseline", "trusted")
+    if not isinstance(digests, dict) or set(digests) != set(labels):
+        raise RuntimeError("Rendering archive inventory is incomplete")
+
+    @contextmanager
+    def unpacked():
+        # Do not occupy the tmpfs reserved for measured fixtures.
+        with tempfile.TemporaryDirectory(prefix="scode-rendering-inputs-", dir="/tmp") as folder:
+            staged = Path(folder)
+            for label in labels:
+                extract_rendering_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
+            yield staged
+
+    return unpacked()
+
+
 def container_storage():
     return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
 
@@ -1630,8 +1717,12 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         snapshots.update(baseline=revision(policy["baseline_commit"]), trusted=protected)
     sources = output / "inputs"
     sources.mkdir()
-    for label, ref in snapshots.items():
-        snapshot(root, ref, sources / label)
+    archives = {}
+    if name == "rendering" and os.name == "nt":
+        archives = pack_rendering_sources(root, snapshots, sources / "archives")
+    if not archives:
+        for label, ref in snapshots.items():
+            snapshot(root, ref, sources / label)
     context = output / "image-context"
     context_hash = hashlib.sha256()
     for source, destination in [
@@ -1669,6 +1760,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
         "rendering_release_reused": previous is not None,
     }
+    if archives:
+        identity["rendering_archive_sha256"] = archives
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
     if previous is not None:

@@ -1232,7 +1232,7 @@ def native_guard_files():
         "e2e/local-acceptance/publication_acceptance.py": "e45db30c079925d8e193d4aea2fe28f10773e6c54922ede15f405b1c9fb97aae",
         "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
-        "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
+        "e2e/local-acceptance/resume_acceptance.py": "fd8cda7f271679d874c6812c291135d58243aafc37f0a223c46ec5b616aaea43",
         "e2e/local-acceptance/run.py": "ca995044695c85e95e16d54cd288d10b673d5da7122ed74161c52dcc7af99ca8",
         "e2e/local-acceptance/vfs_search_publication_acceptance.py": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",

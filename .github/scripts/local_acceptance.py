@@ -2020,8 +2020,8 @@ def index_existing_output(directory, policy_ref):
           "reuse still verifies the source, host, recipe, signature and original logs.", flush=True)
 
 
-def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref=None):
-    """Reuse signed exact-source checks only while their commands and logs match."""
+def prepare_resume_checks(directory, head, base, policy_ref, needed, signers_ref):
+    """Read and verify exact-source resume evidence before copying any logs."""
     directory = Path(directory).resolve()
     proof = local_proof_directory(directory)
     completed_only = proof != directory
@@ -2038,16 +2038,12 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
                                completed_only=completed_only, store=stored)
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
-    reusable = {}
+    reusable, logs = {}, {}
     owners = carried_profiles(previous)
     for name in needed:
         if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
             continue
-        logs = verified_profile_logs(directory, previous, name, "Resume")
-        target = output / name
-        target.mkdir()
-        for filename, contents in logs.items():
-            (target / filename).write_bytes(contents)
+        logs[name] = verified_profile_logs(directory, previous, name, "Resume")
         reusable[name] = previous["checks"][name]
     # A reused profile that the earlier attempt carried keeps its origin,
     # referenced by SHA-256 even when that attempt embedded the envelope.
@@ -2063,7 +2059,22 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
                       "timing": previous.get("timing"),
-                      "profiles": sorted(reusable)}, list(groups.values()), store
+                      "profiles": sorted(reusable)}, list(groups.values()), store, logs
+
+
+def restore_resume_checks(prepared, output):
+    reusable, resumed, groups, store, logs = prepared
+    for name, files in logs.items():
+        target = output / name
+        target.mkdir()
+        for filename, contents in files.items():
+            (target / filename).write_bytes(contents)
+    return reusable, resumed, groups, store
+
+
+def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref=None):
+    """Reuse signed exact-source checks only while their commands and logs match."""
+    return restore_resume_checks(prepare_resume_checks(directory, head, base, policy_ref, needed, signers_ref), output)
 
 
 def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
@@ -2098,16 +2109,53 @@ def save_completed_profiles(receipt, output, identity, key, head, base_ref, poli
               f"resume with --resume-from that directory. Index error: {error}", flush=True)
 
 
-def previous_local_output(head, base):
-    """Find exact-source local progress automatically for the installed push hook."""
+def resume_start(resumed):
+    timing = resumed.get("timing")
+    return timing.get("first_recorded_started_at") if isinstance(timing, dict) else None
+
+
+def resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref):
+    """Keep the newest matching output unless an older output proves strictly more checks."""
+    required = set(needed)
+    selected = None
+    profiles = set()
+    first_start = None
     for directory in local_output_directories(head):
-        proof = local_proof_directory(directory)
-        if not (proof / "envelope.json").is_file():
+        try:
+            proof = local_proof_directory(directory)
+            if not (proof / "envelope.json").is_file():
+                continue
+            receipt = json.loads((proof / "receipt.json").read_bytes())
+            if not isinstance(receipt, dict):
+                raise RuntimeError("Invalid resume receipt metadata")
+            if receipt.get("head") != head or receipt.get("base") != base or receipt.get("host") != host():
+                continue
+            # This inventory only rules out candidates that cannot improve the current selection.
+            recorded = receipt.get("checks", {})
+            if not isinstance(recorded, dict):
+                raise RuntimeError("Invalid resume check inventory")
+            if selected is not None and not profiles < required.intersection(recorded):
+                continue
+            prepared = prepare_resume_checks(directory, head, base_ref, policy_ref, needed, signers_ref)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as error:
+            if selected is None:
+                raise
+            print(f"Not reusing additional local progress from {directory}: {error}", flush=True)
             continue
-        receipt = json.loads((proof / "receipt.json").read_bytes())
-        if receipt.get("head") == head and receipt.get("base") == base and receipt.get("host") == host():
-            return directory
-    return None
+        candidate_profiles = set(prepared[0])
+        if selected is None or profiles < candidate_profiles:
+            selected, profiles = prepared, candidate_profiles
+            start = resume_start(prepared[1])
+            if type(start) in (int, float) and 0 < start <= time.time():
+                first_start = start if first_start is None else min(first_start, start)
+            if profiles == required:
+                break
+    if selected is None:
+        return {}, None, [], {}
+    reusable, resumed, groups, store = restore_resume_checks(selected, output)
+    if first_start is not None and first_start != resume_start(resumed):
+        resumed["earliest_verified_start_at"] = first_start
+    return reusable, resumed, groups, store
 
 
 def try_host_lock(descriptor):
@@ -2492,10 +2540,11 @@ def perform_check(args, attempt):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
-    reusable, resumed, groups, store = {}, None, [], {}
-    previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
+    previous = getattr(args, "resume_from", None)
     if previous:
         reusable, resumed, groups, store = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
+    else:
+        reusable, resumed, groups, store = resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref)
     # Earlier heads of this branch lend profiles that later changes do not select.
     carried, new_groups, store = carry_checks(head, base, base_ref, policy_ref, output,
                                               [name for name in needed if name not in reusable], signers_ref, store)
@@ -2509,8 +2558,8 @@ def perform_check(args, attempt):
     if carried:
         print("CARRIED_PROFILES=" + json.dumps({"head": head, "origins": {
             group["head"]: group["profiles"] for group in new_groups}}), flush=True)
-    prior_timing = (resumed or {}).get("timing")
-    prior_start = prior_timing.get("first_recorded_started_at") if isinstance(prior_timing, dict) else None
+    prior = resumed or {}
+    prior_start = prior.get("earliest_verified_start_at", resume_start(prior))
     known_start = type(prior_start) in (int, float) and 0 < prior_start <= attempt["started_at"]
     timing = {"started_at": attempt["started_at"],
               "first_recorded_started_at": prior_start if known_start else attempt["started_at"],

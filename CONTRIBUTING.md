@@ -395,6 +395,8 @@ Absent older exports retain the existing main prewarm fallback. A present corrup
 foreign, stale-attempt or mismatched export refuses instead of masking the error.
 Only this existing main workflow saves the cache; no second cache writer, compiler
 image alias, acceptance signer or cached test-result authority is introduced.
+Changes to the main Rust CI workflow select this publisher as well. The
+accepted merge-group run still supplies the artifact and its original key.
 Archive transfer/storage costs and a subsequent matching-image consumer must be
 measured before claiming warm savings; local fixture success alone is insufficient.
 PR #1497 supplied actual hosted publication after its full native/Docker contract
@@ -580,6 +582,12 @@ toolchain in a reusable Docker build layer. The version comes from the
 protected VFS cache helper. The image checks the compiler and Cargo offline
 before any fixture uses them. The first build still downloads the toolchain.
 Report warm image results separately from the initial preparation.
+
+The native guard can install both pinned terminal executables from the existing
+checksum-verified archive. The isolated Git/SSH/HTTP protocol cases create
+their own home and lease without seeding compiler and terminal tools they never
+invoke. The full native and Docker executions, command logs and checks remain
+required.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
@@ -1798,6 +1806,13 @@ Credentials are only needed when invoking a live model; the build,
 tests, and lints run without them.
 
 ## Rust toolchain
+
+The shared dependency cache warms dev/test inputs on automatic main pushes on
+the existing Linux, Windows and macOS hosts. A cache-only manual dispatch on a
+missing key also warms optimized release dependencies. Tags retain their
+original release builds and acceptance. For a nested native complement, the
+cache layout mirrors the candidate's exact root toolchain file into the action's
+outer workspace. An existing mismatched file refuses before cache use.
 
 `rust-toolchain.toml` pins one exact Rust release with `clippy` and
 `rustfmt`. Local builds, every CI job and both local acceptance images

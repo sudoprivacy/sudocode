@@ -214,7 +214,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -1118,7 +1118,7 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/sudoprivacy/crossterm.git?rev=5af25c339cba545b174e132e33970f8c832ec677#5af25c339cba545b174e132e33970f8c832ec677"
+source = "git+https://github.com/sudoprivacy/crossterm.git?rev=a904db39c5794206d89a9ff21fe9eb25712da4d6#a904db39c5794206d89a9ff21fe9eb25712da4d6"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -1623,7 +1623,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2459,7 +2459,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=3f63c2f7c4f69b0f2a0f9c75cc7d214dbacee800#3f63c2f7c4f69b0f2a0f9c75cc7d214dbacee800"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=e7377bf6e4921d4ce70955c772f8a70031c1a090#e7377bf6e4921d4ce70955c772f8a70031c1a090"
 dependencies = [
  "async-io",
  "bitflags 2.13.1",
@@ -2476,7 +2476,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=3f63c2f7c4f69b0f2a0f9c75cc7d214dbacee800#3f63c2f7c4f69b0f2a0f9c75cc7d214dbacee800"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=e7377bf6e4921d4ce70955c772f8a70031c1a090#e7377bf6e4921d4ce70955c772f8a70031c1a090"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2497,7 +2497,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3147,7 +3147,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3871,7 +3871,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 [[package]]
 name = "pty-expect"
 version = "0.1.4"
-source = "git+https://github.com/sudoprivacy/pty-expect?rev=32375d27a26c8eac761fff086f3c45b65561e0af#32375d27a26c8eac761fff086f3c45b65561e0af"
+source = "git+https://github.com/sudoprivacy/pty-expect?rev=ad4cd6b1128c7044b7f51f62ea1d49cbafaed26a#ad4cd6b1128c7044b7f51f62ea1d49cbafaed26a"
 dependencies = [
  "portable-pty",
  "regex",
@@ -3981,7 +3981,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4503,7 +4503,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4516,7 +4516,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4574,7 +4574,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5407,7 +5407,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

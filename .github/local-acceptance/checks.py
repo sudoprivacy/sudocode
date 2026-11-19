@@ -1189,7 +1189,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "c154f67ff217ab5e47156f606d87a048eb9dec781170ee317b759b95058af4d5",
+        ".github/scripts/ci_input_scope.py": "522c0a71592926d628e915974981ce672862999f22f937e56d8bee49e16944d8",
         ".github/workflows/rust-ci.yml": "cf6471df68a33130594ef8cfc82a628632339bec47a322dc4dbb3a2fb919f2fc",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1204,7 +1204,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "f67caa3d4c0b7f883acbfafdba87d6ffc5a0a66b6274ae2e6a4b9cb932658b70",
+        ".github/scripts/local_acceptance.py": "9933f697b0ab9d62d1779f057ec015bf81b411411739652f97b46d87f1806e08",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "85df2c9f413fc3c5b416f404cd1aee94c0ee7756a4d86c8effcc1e7d8de69122",
@@ -1214,7 +1214,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/deferred_push_acceptance.py": "35486dbd718f9f4236811d23d32d82a9771b02a54d34bc9477bd5b0c7b39616d",
+        "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "4fe0969d5ad3b2e37e03de615ad69ba1b484f61e48a24b02e03473a050286d8b",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
@@ -1291,7 +1291,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': 'cb0c5ee358360bfc092c9e6e1c8b56f14f36e367d2a0c0c4e60125239c769e75'}
+    expected = {'native-release': 'e8f48f465d0cc74dfd46f7a9ad97f0903f7fd263a617f7dc0d710fc5b865db97', 'native-context': 'd0b9ff35df23ce5cd89c82bb220c7a9062f9a9b9f053723789b05ca1f7d1162d', 'native-services': '01077aa769be0f217ab752351bda1c9056e36fe0e1e3c6bc85fda822413ed4f0'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

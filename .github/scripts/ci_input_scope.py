@@ -33,6 +33,7 @@ REVIEWED_VERIFIER_LAYOUTS = {
     "bda03cd870bb222bcbb38092f32c11b0d5ff51231f6d9d23cd4bf299e8b5efdd",
     "ee11ddac8a14ea9a0d79355589c50fff2bac9f76f0c3dadce1ead90d4292000f",
     "e34b53b967976f01755ce30d77584a5e8465d73075c7e0f97de15eac5279f8f4",
+    "3ec9f842e44c2ade101b4cab02f4f2c37d8c819fbb75bd1829591ba6af331e24",
 }
 
 
@@ -467,7 +468,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "4a465cd8487ad28e6b1302b48940a0b1cad03256"
+        "18331da9a7d787bf95f082a32c23106a26946775"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",

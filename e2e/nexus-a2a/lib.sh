@@ -211,7 +211,12 @@ grpcurl_bin() {
   local version="1.9.4" os suffix
   # Keep downloads versioned so an older cached client cannot survive an update.
   local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/${version}/grpcurl${exe}"
-  if [ -x "$cache" ]; then printf '%s' "$cache"; return; fi
+  local legacy_zip="$cache.dl.zip"
+  # Older Windows extraction could leave both a partial executable and its ZIP.
+  if [ -x "$cache" ] && { [ "$exe" != .exe ] || [ ! -e "$legacy_zip" ]; }; then
+    printf '%s' "$cache"
+    return
+  fi
   case "$(uname -s)" in
     Linux) os=linux; suffix=tar.gz ;;
     Darwin) os=osx; suffix=tar.gz ;;
@@ -223,18 +228,25 @@ grpcurl_bin() {
     aarch64|arm64) arch=arm64 ;;
     *) arch=x86_64 ;;
   esac
-  mkdir -p "$(dirname "$cache")"
+  mkdir -p "$(dirname "$cache")" || return 1
   local url="https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_${os}_${arch}.${suffix}"
-  local download="$cache.dl.$suffix"
-  curl -fsSL --retry 3 -o "$download" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
   if [ "$suffix" = zip ]; then
     # Git Bash's own tar is GNU tar, which reads no zip. Windows ships bsdtar,
-    # which does, and it depends on nothing the calling shell exported.
-    "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$download")" \
-      -C "$(cygpath -w "$(dirname "$cache")")" grpcurl.exe \
-      || { echo "!! could not unzip $download" >&2; return 1; }
-    rm -f "$download"
+    # which does. Keep partial downloads and extractions out of the shared cache.
+    (
+      stage="$(mktemp -d "$cache.tmp.XXXXXXXX")" || exit 1
+      trap 'rm -f -- "$stage/download.zip" "$stage/grpcurl.exe"; rmdir -- "$stage"' EXIT
+      curl -fsSL --retry 3 -o "$stage/download.zip" "$url" || { echo "!! could not fetch $url" >&2; exit 1; }
+      "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$stage/download.zip")" \
+        -C "$(cygpath -w "$stage")" grpcurl.exe \
+        || { echo "!! could not unzip $url" >&2; exit 1; }
+      [ -f "$stage/grpcurl.exe" ] && [ ! -L "$stage/grpcurl.exe" ] &&
+        chmod +x "$stage/grpcurl.exe" && mv -f -- "$stage/grpcurl.exe" "$cache" || exit 1
+      rm -f -- "$legacy_zip"
+    ) || return 1
   else
+    local download="$cache.dl.$suffix"
+    curl -fsSL --retry 3 -o "$download" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
     tar -xzf "$download" -C "$(dirname "$cache")" grpcurl && rm -f "$download"
   fi
   chmod +x "$cache"

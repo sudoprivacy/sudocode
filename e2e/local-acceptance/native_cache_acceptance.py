@@ -203,18 +203,12 @@ def run(name, root, output, base, execute):
         assert pin_path.read_bytes() == pin
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_bytes(b'[build]\r\nincremental = false\r\n')
-    key_program = """const fs = require('node:fs'), crypto = require('node:crypto');
-const keys = JSON.parse(process.argv[1]).map(paths => {
-  const hash = crypto.createHash('sha1');
-  for (const path of paths.sort((a, b) => a.localeCompare(b))) hash.update(fs.readFileSync(path));
-  return hash.digest('hex');
-});
-console.log(JSON.stringify(keys));
-"""
-    keys_log = output / "cache-key-order.log"
-    helper.run_command(["node", "-e", key_program, json.dumps([[str(path) for path in pair] for pair in raw_inputs])],
-                       SOURCE, keys_log)
-    publisher_key, native_key, old_key = json.loads(keys_log.read_bytes())
+    # These fixed lowercase ASCII paths have the same order under Node's
+    # localeCompare and a bytewise sort. Use slash paths on either host.
+    publisher_key, native_key, old_key = (
+        hashlib.sha1(b"".join(path.read_bytes() for path in sorted(pair, key=Path.as_posix))).hexdigest()
+        for pair in raw_inputs
+    )
     assert publisher_key == native_key and publisher_key != old_key
     compiler = load("compiler_objects_native_fixture", SOURCE / "e2e/local-acceptance/compiler_objects_acceptance.py")
     if terminal_archive is not None:

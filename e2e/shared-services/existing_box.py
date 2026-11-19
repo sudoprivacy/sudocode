@@ -35,6 +35,30 @@ class VfsRpcError(AssertionError):
         super().__init__(f'{method} returned a VFS error: {self.detail}')
 
 
+class GrpcurlProcessError(RuntimeError):
+    """Retain process diagnostics and stop retrying a failed client process."""
+
+
+def checked_grpcurl_response(result, method, payload, root):
+    """Decode one actual process result after retaining its original errors."""
+    if result.returncode:
+        with (root / 'grpc-errors.log').open('ab') as output:
+            output.write(f'{method} {payload.get("path", payload.get("zone_id", ""))}:\n'.encode())
+            output.write(result.stderr)
+        # grpcurl v1.9.4 offsets RPC status exits by 64; exit 2 is a
+        # process/flag/runtime failure, not remote Unknown (exit 66).
+        if result.returncode == 2:
+            raise GrpcurlProcessError(
+                f'grpcurl process exited 2 for {method}; original stderr: {root / "grpc-errors.log"}')
+        result.check_returncode()
+    response = json.loads(result.stdout)
+    if response.get('isError'):
+        error = VfsRpcError(method, response)
+        with (root / 'grpc-errors.log').open('ab') as output:
+            output.write((json.dumps({'method': method, 'response': error.response, 'error': error.detail}) + '\n').encode())
+        raise error
+    return response
+
 def sha(path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
@@ -145,18 +169,7 @@ def run(args, root):
                 'path': payload.get('path'), 'zone': payload.get('zone_id'),
                 'exit': result.returncode,
                 'error': result.stderr.decode('utf-8', errors='replace')}) + '\n')
-        if result.returncode:
-            with (root / 'grpc-errors.log').open('ab') as output:
-                output.write(f'{method} {payload.get("path", payload.get("zone_id", ""))}:\n'.encode())
-                output.write(result.stderr)
-            result.check_returncode()
-        response = json.loads(result.stdout)
-        if response.get('isError'):
-            error = VfsRpcError(method, response)
-            with (root / 'grpc-errors.log').open('ab') as output:
-                output.write((json.dumps({'method': method, 'response': error.response, 'error': error.detail}) + '\n').encode())
-            raise error
-        return response
+        return checked_grpcurl_response(result, method, payload, root)
 
     def peer_messaging_resident():
         # Readiness loads the zone that holds /agents before it is published.

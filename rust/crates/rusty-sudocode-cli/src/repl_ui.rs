@@ -2699,10 +2699,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
-    split_lines(text, terminated, |op| match op {
-        OutputOp::Println(line) => stdout.println(line),
-        OutputOp::Print(chunk) => stdout.print(chunk),
-    });
+    split_lines(
+        text,
+        terminated,
+        crate::render::query_terminal_width(),
+        |op| match op {
+            OutputOp::Println(line) => stdout.println(line),
+            OutputOp::Print(chunk) => stdout.print(chunk),
+        },
+    );
 }
 
 /// Spawn the iocraft REPL UI on a dedicated thread and return a handle
@@ -2757,7 +2762,9 @@ pub fn spawn_repl_ui(
             // Print banner before entering the render loop so the user sees
             // session info in the scrollback. iocraft's render_loop enters
             // raw mode immediately, so we print first.
-            println!("{banner}");
+            // Through the shared line framing, like all later history, so a
+            // replayed row's background fill is erased rather than written.
+            let _ = crate::render::output::write_stdout(&format!("{banner}\n"));
 
             // Activate stderr redirect before entering raw mode so that
             // any library writing to fd 2 is captured and routed through

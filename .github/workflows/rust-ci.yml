@@ -280,6 +280,7 @@ jobs:
         if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         env:
           NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
+          NEXUS_A2A_EARLY_MANAGED_BUILD: '1'
         run: e2e/nexus-a2a/run.sh
       - name: Retain mailbox fault inventory and exact case results
         if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'

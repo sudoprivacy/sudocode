@@ -8,9 +8,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 SOURCE = Path(__file__).resolve().parents[2]
+TERMINAL_ARCHIVE = Path(".cache/sudocode-terminal-host/host.zip")
 
 
 def load(name, path):
@@ -20,8 +22,27 @@ def load(name, path):
     return module
 
 
+def seed_terminal_archive(source, destination):
+    """Reuse only a verified archive in the private fixture home."""
+    if not source.is_file() or destination.exists():
+        return
+    installer = load("terminal_fixture_installer", SOURCE / "e2e/terminal-resize/setup_windows.py")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
+        archive = Path(staging) / destination.name
+        try:
+            shutil.copyfile(source, archive)
+            installer.verify_archive(archive)
+        except (OSError, ValueError):
+            print("Prepared Windows terminal archive could not be reused; running the original installer.", flush=True)
+            return
+        archive.replace(destination)
+    print("Verified a prepared Windows terminal archive in the private fixture cache.", flush=True)
+
+
 def run(output, runner=None):
     output.mkdir(parents=True, exist_ok=False)
+    terminal_archive = Path.home() / TERMINAL_ARCHIVE if os.name == "nt" else None
     parent = load("cache_fixture_environment", SOURCE / "e2e/local-acceptance/run.py")
     os.environ.clear()
     os.environ.update(parent.FIXTURE_ENV)
@@ -69,6 +90,7 @@ fn main() {
                             "--source", relative, "--github-output"], SOURCE, output / f"{name}-layout.log",
                            {**environment, "GITHUB_OUTPUT": str(github_output), "GITHUB_ENV": str(sentinel)})
         layouts.append(dict(line.split("=", 1) for line in github_output.read_text(encoding="utf-8").splitlines()))
+    assert not (workspace / "rust-toolchain.toml").exists()
     assert layouts[0]["target"] == layouts[1]["target"]
     assert layouts[0]["workspaces"] == "rust -> target"
     assert layouts[1]["workspaces"] == "candidate/rust -> ../../rust/target"
@@ -156,7 +178,19 @@ def run(name, root, output, base, execute):
             assert message in (output / f"{name}.log").read_text(encoding="utf-8")
         else:
             raise AssertionError(f"Native launcher accepted {name}")
+    # The native consumer's checkout is nested, while the cache action
+    # hashes root-level toolchain files at GITHUB_WORKSPACE. Test the real CLI.
+    pin = b'[toolchain]\r\nprofile = "minimal"\r\n'
+    candidate_pin = candidate / "rust-toolchain.toml"
+    candidate_pin.write_bytes(pin)
+    helper.run_command([sys.executable, str(SOURCE / ".github/local-acceptance/cache_layout.py"),
+                        "--source", "candidate/rust", "--github-output"], SOURCE, output / "toolchain-key-layout.log",
+                       {**environment, "GITHUB_OUTPUT": str(output / "toolchain-key-outputs"), "GITHUB_ENV": str(sentinel)})
+    assert (workspace / "rust-toolchain.toml").read_bytes() == candidate_pin.read_bytes() == pin
+    assert sentinel.read_text(encoding="utf-8") == "UNCHANGED=1\n"
     compiler = load("compiler_objects_native_fixture", SOURCE / "e2e/local-acceptance/compiler_objects_acceptance.py")
+    if terminal_archive is not None:
+        seed_terminal_archive(terminal_archive, Path.home() / TERMINAL_ARCHIVE)
     compiler.run(output / "compiler-objects")
     result = {"status": "PASS", "publisher_consumer_target_identical": True,
               "pre_restore_environment_unchanged": True, "actual_candidate_executed": True,

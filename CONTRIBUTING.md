@@ -329,6 +329,15 @@ results; the outer harness still closes its private daemon. Daemon
 restart and SIGSTOP stay serial, outside the batch. Real native control
 processes verify overlap, failure and missing/non-ignored-case refusal;
 they add no product coverage. The same seven real daemon cases still run in CI.
+The Linux A2A queue can start the original managed CLI and mock-service bin
+build after the serial CLI lane completes, while the previously prepared fault
+tests run. Both lanes keep the original four-worker allocation. The early step
+only builds binaries. After the join and post-join daemon checks, the original
+managed command verifies freshness with Cargo and runs all managed tests on its
+private daemon. Custom runs keep the original schedule unless explicitly opted
+in. The command artifact records the early build and the CI log marks the later
+freshness check. Compare both timings and the full queue job before crediting a
+saving.
 Changes confined to the A2A shell/Python harness leave the native Rust workspace
 unchanged. They skip its Cargo/PTY product reruns on the author and complementary
 hosts; the Linux queue still executes the changed real-daemon harness. Author
@@ -386,6 +395,13 @@ Absent older exports retain the existing main prewarm fallback. A present corrup
 foreign, stale-attempt or mismatched export refuses instead of masking the error.
 Only this existing main workflow saves the cache; no second cache writer, compiler
 image alias, acceptance signer or cached test-result authority is introduced.
+Changes to the main Rust CI workflow select this publisher as well. The
+accepted merge-group run still supplies the artifact and its original key.
+An accepted queue on image `20261111.82.6` later published under its own key
+from main image `20261111.196.1`. Main verified the original archive and skipped
+the fallback compile. Subsequent consumers still require their own exact
+image and compiler inputs.
+[Original publication job](https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179).
 Archive transfer/storage costs and a subsequent matching-image consumer must be
 measured before claiming warm savings; local fixture success alone is insufficient.
 PR #1497 supplied actual hosted publication after its full native/Docker contract
@@ -554,6 +570,29 @@ The later service journey uses that exact resolved file and verifies its bytes
 again; both original service journeys still run. Real Bash/curl proxy-504,
 invalid-executable, offline-cache and unselected-profile controls protect this
 ordering. These are infrastructure checks and add no product journey credit.
+
+Existing-Box polling retains the full original grpcurl stderr before classifying
+its result. Process exit 2 stops immediately as `GrpcurlProcessError`, even when
+stderr begins with an RPC-looking message or stdout contains successful JSON.
+The pinned client's RPC status codes use an offset of 64, so remote Unknown is
+66 and remains distinct. Existing transport, RPC-status, malformed-JSON and typed
+VFS retry behavior, the 5s client timeout and 30s predicate deadline stay unchanged.
+Both required contract-guard hosts run a real synthetic-process regression with
+the original response body as a negative control. This prevents retrying a failed
+client to a later success; it neither diagnoses nor fixes the retained Windows
+Go runtime crash, replaces the pinned client, nor establishes a lifecycle saving.
+
+The contract image prepares the VFS fixture's independently pinned Rust
+toolchain in a reusable Docker build layer. The version comes from the
+protected VFS cache helper. The image checks the compiler and Cargo offline
+before any fixture uses them. The first build still downloads the toolchain.
+Report warm image results separately from the initial preparation.
+
+The native guard can install both pinned terminal executables from the existing
+checksum-verified archive. The isolated Git/SSH/HTTP protocol cases create
+their own home and lease without seeding compiler and terminal tools they never
+invoke. The full native and Docker executions, command logs and checks remain
+required.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
@@ -1772,6 +1811,13 @@ Credentials are only needed when invoking a live model; the build,
 tests, and lints run without them.
 
 ## Rust toolchain
+
+The shared dependency cache warms dev/test inputs on automatic main pushes on
+the existing Linux, Windows and macOS hosts. A cache-only manual dispatch on a
+missing key also warms optimized release dependencies. Tags retain their
+original release builds and acceptance. For a nested native complement, the
+cache layout mirrors the candidate's exact root toolchain file into the action's
+outer workspace. An existing mismatched file refuses before cache use.
 
 `rust-toolchain.toml` pins one exact Rust release with `clippy` and
 `rustfmt`. Local builds, every CI job and both local acceptance images

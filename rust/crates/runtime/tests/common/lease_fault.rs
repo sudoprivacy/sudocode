@@ -349,8 +349,12 @@ fn is_seat(path: &str) -> bool {
     path.ends_with("/receiver.lock")
 }
 
+/// A reader's register, not its delivered-send record beside it.
 fn is_reader_register(path: &str) -> bool {
     path.contains("/readers/")
+        && !std::path::Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("seen"))
 }
 
 struct FaultyLock {

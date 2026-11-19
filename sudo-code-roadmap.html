@@ -1216,6 +1216,18 @@ Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselecte
 profile controls cover this ordering. Both original service journeys remain
 required; product coverage counts and budgets are unchanged. This adds
 infrastructure fault coverage and makes no whole-PR speedup claim.</p>
+<p><strong>Preserve a failed service-client process (2026-11-18).</strong>
+Existing-Box polling saves the complete original stderr and stops on process
+exit 2, including an RPC-looking prefix or successful JSON followed by a crash.
+The original pinned client offsets RPC status exits by 64: remote Unknown66
+retains its original retry behavior, as do transport failures, other RPC statuses,
+malformed JSON and typed VFS errors. The original 5s client timeout,30s predicate,
+real mTLS journeys and client selection remain unchanged. Required author-native
+and Linux container guards use real synthetic child processes and the exact old
+response-body negative control to prove that a failed process cannot be retried
+to a passing result. These controls add no product journey credit. This is a
+process-result acceptance correction, not a cause or fix of the retained Go
+runtime crash or a measured whole-lifecycle speedup.</p>
 <p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
 Each running reservation keeps the existing exclusive host lease through execution
 and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
@@ -1588,13 +1600,27 @@ retain full integrity checks; this removes duplicate post-merge work.</p>
 <p>ACP package integration stays on all four PR hosts. Main keeps builds and
 commit-bound package artifacts for its merged revision, reusing the PR's
 integration result. Obsolete package heads cancel within the same PR/ref.
-Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
-publisher changes still check for new dependency/toolchain/image keys.</p>
+Unrelated workflow-only edits skip the multi-platform Rust dependency warmers.
+Rust and dependency publisher changes still check for new
+dependency/toolchain/image keys.</p>
 <p>Cold cache publishers compile library/bin test targets to retain dev dependencies
 but omit standalone integration executables that the dependency cache discards.
-Full native acceptance still compiles and runs those journeys. The three host
-pools, production release warming and 10 GB quota remain; warm cache hits already
-skip this work. This removes redundant compilation, with no coverage reduction.</p>
+Full native acceptance still compiles and runs those journeys. Automatic main
+publication warms dev/test inputs on the three existing hosts. Cache-only
+manual dispatch retains optimized release warming on a missing key, and tags
+retain their original release builds. The cache quota remains 10 GB.</p>
+<p><strong>Dependency layout and guard input reuse.</strong> The nested native
+complement mirrors the exact toolchain pin into the cache action's outer
+workspace. A local run of the original cache action verified equal keys for the
+publisher and nested consumer. The guard reuses the verified terminal archive
+and skips build-tool copies for the private Git/SSH/HTTP-only fixtures. Both
+original full guard branches remain required. In the inspected signed runs
+the parallel guard took 1,172.246s before and 972.331s after. The bounded
+terminal installer took 201.676s and 3.593s respectively, with archive staging
+outside that interval. Separate sources and host conditions limit the
+comparison. The accepted main dependency warmers found existing keys, so
+they skipped both compile steps in that run.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1512">PR #1512</a>.</p>
 <p>Local benchmark snapshots retain identical source bytes and modes at their
 canonical paths, allowing Cargo to reuse valid artifacts. Changed bytes get fresh
 mtimes; unexpected sources and cached entry links are removed. The exclusive Linux
@@ -1892,6 +1918,51 @@ and Windows. Added real Git/SSH/HTTP signed-plan controls cover all three author
 platform representations, exact earlier-full-plan reuse, and refusal of missing
 author/CI coverage or changed metadata. They infer no other-platform product pass.
 The periodic workspace policy and workflow normally landed through <a href="https://github.com/sudoprivacy/sudocode/pull/1473">PR #1473</a> at <code>a78aefb1</code> on 2026-11-17 22:35 UTC. The exact candidate <code>616e7b6b</code> passed all eight original signed author groups and all three hosted full workspace jobs; the normal combined-tree queue passed its three-platform Clippy and real daemon journeys. The original selected author workspace remains required. Other-OS full workspace regression now runs weekly or by manual main dispatch, while selected complementary native journeys remain; an OS-specific workspace failure may first appear after merge. The accepted merge includes newer main source, including Nexus rc.10, so the earlier full candidate receipts are not claimed as a full run of that whole combined tree. Earlier publication refusals, hosted HTTP403 and the first new negative-control failure remain preserved. <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workspace-policy-activation-20261118.json">The source, job, normal-merge and measurement boundaries</a> record this activation. The first twenty post-policy Rust-source merges will be selected before reading cost; no new benefit is inferred from activation. The one-tenth lifecycle target remains unproven.</p>
+<p><strong>Observed VFS cache hits and miss.</strong> Three accepted co-host
+jobs requested the same exact key and ran the original search/restart case.
+GitHub step clocks totalled 48s and 48s for the hits, and 242s for the miss.
+These sums include checkout and restore, search, export and identity/data
+uploads. The search step alone took 25s, 23s and 188s. The complete co-host jobs
+took 399s, 364s and 567s. Runner and candidate differences are unadjusted.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44350660116/job/134965607282">#1503 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44398971076/job/135136967219">#1507 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44448338115/job/135306189510">#1510 queue</a>.</p>
+<p><strong>VFS publisher trigger and exact-key readback.</strong> Changes to the
+main Rust CI workflow now select the existing VFS publisher. In the accepted
+#1514 queue, the original search/restart command passed in 172.094s on a cache
+miss with the same key as the three jobs above. The main publisher spent 71s
+verifying and retaining that exact queue archive. It skipped fallback
+compilation and saved a 773,942,858-byte cache under the producer's key. The
+queue and publisher both used image <code>20261111.196.1</code>. A later
+matching-image consumer of this new cache is still pending.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1514">PR #1514</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44456445288/job/135332771097">queue producer</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44457998116/job/135337636687">main publisher</a>.</p>
+<p><strong>Cold queue on a third hosted image.</strong> PR #1518 requested the
+same VFS source and compiler recipe on image <code>20261111.82.6</code>.
+<code>ImageVersion</code> was the only recorded compiler-key input that changed
+from the #1514 comparison. The original search/restart command passed in
+130.228s after an exact-key miss. The accepted main publisher ran on
+<code>20261111.196.1</code>, verified the queue archive and retained it under
+the producer's original key in a 58s job. The prior exact caches were still
+present. A subsequent matching consumer remains pending.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44462781193/job/135353624928">#1518 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179">#1518 main publication</a>.</p>
+<p><strong>First observed cold Windows warmer after #1512.</strong> The automatic
+main job ran the dev/test compiler command in 219s and skipped the optimized
+release warmer. It published 2,458,357,241 bytes. The older original job spent
+315s in the release warmer and published 3,205,321,643 bytes. The two runs used
+different compiler environment keys and restore states, so the observed cache
+sizes and job clocks describe those runs. The cache inventory at this
+observation listed 11,771,056,003 bytes against the configured 10 GB limit.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
+<p><strong>Post-policy source cohort, 6 of 20.</strong> The first six eligible
+merges account for 548.700 known GitHub runner-minutes, with one unassigned
+interval still unresolved. The median last queue-entry-to-merge span is
+582.5s and includes validation and dispatch. The first scheduled workspace
+run, remaining source cohort, and author-side time are measured separately.
+The whole-lifecycle one-tenth target remains unproven.</p>
 <p><strong>Windows compiler-cache delivery completed (2026-11-18).</strong> <a href="https://github.com/sudoprivacy/sudocode/pull/1488">PR #1488</a> qualified and publicly published the minimal upstream response-file backport; original format, strict Clippy and 619 upstream tests passed with one original ignored case. <a href="https://github.com/sudoprivacy/sudocode/pull/1489">PR #1489</a> then normally landed the exact-hash Windows consumer after all three signed author profiles, the full native/Docker guard and Windows workspace (1,205 passed, 78 skipped). Its merge tree equals the qualified tree. The real Cargo long-file control changes hits/misses from 1/36 to 1/37 and then 2/37; restoring the old bypass still links the correct program but adds no cache hit. Original query, official-tool, invalidation, failure/repair and ownership controls remain. <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-compiler-cache-delivery-20261118.json">The immutable source/job/cost inventory</a> records 47.750 known hosted runner-minutes across producer, consumer, queue and publication, including failed attempts; later documentation cost is additional. Earliest recorded author start to final consumer checks is 40.616 minutes, including the original API403 and resume gap, and excludes earlier authoring plus later publication. These are engineering costs and bounded cache controls, not representative PR savings, product coverage credit or a shared-target freshness guarantee. The one-tenth lifecycle target remains unproven.</p>
 <p><strong>Reproduce the linked measurements.</strong>
 The <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-lifecycle-measurement-20261117.json">original fixed cohort and job record inventory</a>
@@ -2258,6 +2329,12 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       remain; restart stays before both lanes and SIGSTOP stays after both pass.
       Original per-lane logs and command receipts remain in the fault artifact;
       an existing result directory is refused before either lane starts.
+      The Linux A2A job can start the managed CLI and mock-service bin build
+      after the serial CLI lane completes, while prepared fault binaries still
+      run. The original four test slots remain. The two Cargo writers stay
+      serial. After the full join, the original managed harness checks the bin
+      build with Cargo and runs its original real-daemon tests. Record the early
+      build and later check separately before crediting a queue saving.
       Cargo preparation and ignored-case enumeration finish before the lanes
       start. The fixed nextest executor then uses those same build metadata and
       binaries without reacquiring the CLI build lock. Source contents, helper,

@@ -1171,6 +1171,9 @@ def native_guard_files():
     """Bind external tool bytes through the existing executable fingerprint format."""
     return {
         **preflight_guard_files(),
+        "e2e/shared-services/existing_box.py": "1594cb4ad1dfa97b72d37b37465d06a6cdbb1571cd417e44f8038a2353897404",
+        "e2e/shared-services/grpcurl_process_acceptance.py": "cf981be3f4fe49dd81aa79fea387b3f01f78a91aa66ff9fe40e5f4af2e1e72a2",
+        "e2e/shared-services/run.py": "861aedd1b69edfd764929f6631289e79d14debe2aaadae6a63936dded224fb66",
         "e2e/local-acceptance/compiler_storage_acceptance.py": "98e5f5b223ae900da913ed6d1a3f6306ed509def067f26d226dab6d9e7038a1f",
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
@@ -1186,17 +1189,17 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "bdda990ce106b8eaecd9d8a4b3526a7898a63f657b520156196a036ccb6d8d09",
-        ".github/workflows/rust-ci.yml": "3480291d6bee260074e5187080119b36745bd72cdd40bbd39ac45b1fdf3a5545",
+        ".github/scripts/ci_input_scope.py": "c154f67ff217ab5e47156f606d87a048eb9dec781170ee317b759b95058af4d5",
+        ".github/workflows/rust-ci.yml": "cf6471df68a33130594ef8cfc82a628632339bec47a322dc4dbb3a2fb919f2fc",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
         ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415",
-        ".github/workflows/ci-vfs-search-cache.yml": "6d5590f96f245a85bd841e301cdef9c4dd3d14e7a1dc7645e00f45739eb44139",
+        ".github/workflows/ci-vfs-search-cache.yml": "e1907d872ade41ad38eeb55ec0d39555d9d64ab6e491d41aa9edf252d149dd9e",
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
-        ".github/local-acceptance/cache_layout.py": "a05dddec002f81abe0b3e928bf9ff6bf435bb693fb977ec9982e19acb3cca5a2",
+        ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
         ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
-        ".github/local-acceptance/native_guard.py": "54fcccd60beb9319112350a8b4502d49a97ee47336b4e010ce3c7f26aa09df48",
+        ".github/local-acceptance/native_guard.py": "ac7016f16686a2c8b50353c30f3d2914d7e3e5efbdf0588a40d0c274c280878c",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
@@ -1204,7 +1207,7 @@ def native_guard_files():
         ".github/scripts/local_acceptance.py": "f67caa3d4c0b7f883acbfafdba87d6ffc5a0a66b6274ae2e6a4b9cb932658b70",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
-        ".github/workflows/ci-dependency-cache.yml": "2f10d4348f5935d91cdd3d1f0159b8782def1c0a5f3e6d21222688ff8b28b92e",
+        ".github/workflows/ci-dependency-cache.yml": "85df2c9f413fc3c5b416f404cd1aee94c0ee7756a4d86c8effcc1e7d8de69122",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "778fd837986163865db373e5f483ca5a19867a697d1e24faa044e9f1ebff57d5",
         ".github/workflows/local-acceptance-workspace.yml": "c501c66c31ba758329fbf2424e85834b741d2cb5c15807fa900c98171e4a9418",
@@ -1215,13 +1218,14 @@ def native_guard_files():
         "e2e/local-acceptance/dependency_scope_acceptance.py": "4fe0969d5ad3b2e37e03de615ad69ba1b484f61e48a24b02e03473a050286d8b",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
+        "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "e6cce07c074efcc1a62293fbfc13aa0581f41114e751a7103f7186046c0de320",
-        "e2e/local-acceptance/host_lease_acceptance.py": "c10e55ff16cd7785257fd380d4691dd767451a04e212b4f04362ac1e0b09fcca",
+        "e2e/local-acceptance/host_lease_acceptance.py": "2681ac28620f89c383220b774c727aa75774d90ce51d4802e0768979e7a192dc",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "378a8fde4d2d3f9f3c04a690aa7bfa226300a67a6584f9f11860f63905a8958f",
+        "e2e/local-acceptance/native_cache_acceptance.py": "9f33dc29121165c7de767dac64482c43f277e20bb95fb66325051c7477893928",
         "e2e/local-acceptance/native_lint_acceptance.py": "4df1f1dd8855d260bba9305cffe34bb9e48652fef03d673bcfd2388d4c4c10e0",
-        "e2e/local-acceptance/parallel_acceptance.py": "ac3e9f6409f4145dccdbb5958fbd4784d8e10438c36ae8c2626955b239c6ac9a",
+        "e2e/local-acceptance/parallel_acceptance.py": "188389bfaa34facf7ac9e148eb0c21aeba28a4630aebe52f6a4162a2327b29e3",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
@@ -1229,7 +1233,7 @@ def native_guard_files():
         "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
         "e2e/local-acceptance/resume_acceptance.py": "e5f80815740f65075ffd74894b5f5eadfd51e804576c38bbef64730004ffedd5",
-        "e2e/local-acceptance/run.py": "761454a71f645f71567af35b8982e0e6df1a11708ba69ab3d15e4ab597080fc3",
+        "e2e/local-acceptance/run.py": "ca995044695c85e95e16d54cd288d10b673d5da7122ed74161c52dcc7af99ca8",
         "e2e/local-acceptance/vfs_search_publication_acceptance.py": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
         "e2e/local-acceptance/vfs_search_cache_acceptance.py": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",
         "e2e/startup/reference.rs": "327e5a6fadd9dc707d8bbbd6268ecaa8f27df4945029a6cb51c41b9fc8162578",
@@ -1411,7 +1415,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "23c74b5e91932c62b4ac4b04732b1e63c0015edb7c8669d81a384ce68881b994",
+        "Dockerfile.guard": "18e43024b70b296e4e8ae9cf33c4e54ae3e27bd2019ba91eb6743f5cdbf6bada",
         "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -1436,6 +1440,17 @@ def guard_image_context(root, policy_ref, context):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
         inputs_hash.update(relative.encode() + b"\0" + contents + b"\0")
+    # Use the pinned VFS key's compiler, independent of the workspace compiler.
+    driver_path = ".github/scripts/vfs_search_cache.py"
+    driver = subprocess.check_output(["git", "show", f"{policy_ref}:{driver_path}", "--"], cwd=root)
+    if hashlib.sha256(driver).hexdigest() != native_guard_files()[driver_path]:
+        raise RuntimeError("VFS driver source differs from its protected pin before guard image preparation")
+    versions = re.findall(rb'(?m)^DRIVER_TOOLCHAIN = "([0-9]+\.[0-9]+\.[0-9]+)"$', driver)
+    if len(versions) != 1:
+        raise RuntimeError("Expected one pinned VFS driver Rust release for guard image preparation")
+    version = versions[0] + b"\n"
+    (context / "vfs-rust-version").write_bytes(version)
+    inputs_hash.update(b"vfs-rust-version\0" + version + b"\0")
     for filename, compiler in [("nextest_seed.py", False), ("compiler_seed.py", True)]:
         seed = guard_tool_variant_source(root, policy_ref, compiler)
         (context / filename).write_bytes(seed)

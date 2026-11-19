@@ -394,14 +394,19 @@ fn grapheme_clusters_follow_the_terminal_rule_measured_at_startup() {
     // known for: VS Code's per code point, any other clustered. Where scode
     // measures, the environment names the other kind, so only the measured
     // rule passes. Windows never measures (ConPTY reports the console host's
-    // cursor), so there the environment names the terminal's own kind.
+    // cursor), so there the environment names the terminal's own kind. Its
+    // host is the pinned VS Code build, whose bundled terminal has only VS
+    // Code's own rule, so Windows runs the Unicode 11 cases.
     let cluster = "\u{1F468}\u{200D}\u{1F4BB}";
     for (unicode, silent) in [
         ("11", false),
         ("graphemes", false),
         ("11", true),
         ("graphemes", true),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(unicode, _)| !cfg!(windows) || *unicode == "11")
+    {
         let own_kind = if unicode == "11" { "vscode" } else { "" };
         let other_kind = if unicode == "11" { "" } else { "vscode" };
         let program = if silent || cfg!(windows) {

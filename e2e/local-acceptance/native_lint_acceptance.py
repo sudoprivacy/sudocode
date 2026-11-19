@@ -631,6 +631,65 @@ def formatting_scope(output, helper, profiles):
             "scope": "Real Cargo and rustfmt, mixed editions, recursive external path dependencies, module/config discovery and native argv limit."}
 
 
+def overlap_service_journeys(output, profiles, helper):
+    """Require both real processes to enter before either finishes."""
+    output.mkdir()
+    driver = output / "journey.py"
+    driver.write_text("""import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+
+directory, name, expected_exit = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+private = Path(tempfile.gettempdir()).resolve()
+assert all(Path(os.environ[key]).resolve() == private for key in ("TMP", "TEMP", "TMPDIR"))
+assert os.environ["SCODE_TEST_BACKEND"] == "mock"
+with (private / "isolated.txt").open("x", encoding="utf-8") as handle:
+    handle.write(name)
+marker = directory / name
+source = marker.with_suffix(".new")
+source.write_text(str(private), encoding="utf-8")
+source.replace(marker)
+other = directory / ("existing" if name == "managed" else "managed")
+deadline = time.monotonic() + 10
+while not other.is_file():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("Other journey did not run concurrently")
+    time.sleep(0.02)
+assert Path(other.read_text(encoding="utf-8")) != private
+print(json.dumps({"name": name, "temporary": str(private), "exit": expected_exit}))
+raise SystemExit(expected_exit)
+""", encoding="utf-8")
+    results = {}
+    for label, expected in [("success", (0, 0)), ("failure", (0, 19))]:
+        evidence = output / label
+        evidence.mkdir()
+        commands = tuple((sys.executable, driver, evidence, name, str(code))
+                         for name, code in zip(("managed", "existing"), expected))
+        try:
+            receipts = profiles.hosted_service_journeys(
+                commands, SOURCE, evidence, helper.run_command, {"SCODE_TEST_BACKEND": "mock"}, 2)
+        except RuntimeError as error:
+            assert label == "failure" and "Local acceptance failed (19)" in str(error), error
+        else:
+            assert label == "success" and [row["exit_code"] for row in receipts] == [0, 0], receipts
+        actual = []
+        for index, code in enumerate(expected, 2):
+            log = evidence / f"{index:03d}.log"
+            receipt = json.loads(log.with_suffix(".command.json").read_bytes())
+            result = json.loads(log.read_bytes())
+            assert receipt["exit_code"] == result["exit"] == code
+            assert receipt["log_sha256"] == hashlib.sha256(log.read_bytes()).hexdigest()
+            assert not Path(result["temporary"]).exists()
+            actual.append(result)
+        assert [item["name"] for item in actual] == ["managed", "existing"]
+        assert actual[0]["temporary"] != actual[1]["temporary"]
+        results[label] = actual
+    return results
+
+
 def run(output, executor=None):
     output.mkdir(parents=True, exist_ok=False)
     parent = load("lint_fixture_environment", SOURCE / "e2e/local-acceptance/run.py")
@@ -640,6 +699,7 @@ def run(output, executor=None):
     helper.ROOT = SOURCE
     profiles = load("lint_fixture_profiles", executor or SOURCE / ".github/local-acceptance/checks.py")
     tool_preflight = nextest_preflight(output / "nextest-preflight", profiles)
+    service_overlap = overlap_service_journeys(output / "service-overlap", profiles, helper)
     service_tool_preflight = grpcurl_preflight(output / "grpcurl-preflight", profiles, helper)
     prepared = None
     for kind in ["workspace", "selected"]:
@@ -720,6 +780,7 @@ def run(output, executor=None):
     result = {"status": "PASS", "workspace_warning_refused": True, "selected_test_warning_refused": True,
               "nextest_preflight": tool_preflight,
               "grpcurl_preflight": service_tool_preflight,
+              "hosted_service_overlap": service_overlap,
               "grouped_lint": grouped,
               "formatting": formatting,
               "prepared_lint": prepared,

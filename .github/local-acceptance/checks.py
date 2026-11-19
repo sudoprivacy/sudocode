@@ -1180,7 +1180,7 @@ def native_guard_files():
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
         "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
         ".github/local-acceptance/compiler_cache.py": "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1",
-        "e2e/nexus-a2a/lib.sh": "93afc06508571b4a4b70615ec3f639e59b486d5c94f696b11f728d90f0d34662",
+        "e2e/nexus-a2a/lib.sh": "a860bc5adb53738ac47e53178a3466974bad2c407b80699cefa83bfe6de3c985",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
         ".github/actions/rust-toolchain/action.yml": "f4df1878c64a86d2c4258bc2fd572680739f64f5934eea3b703b01ae81cdb73f",

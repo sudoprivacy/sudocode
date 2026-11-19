@@ -1116,6 +1116,9 @@ profiles contain all of those checks plus additional required profiles. The
 original explicit resume path still takes priority. An index write failure prints
 `LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
 explicit `check --resume-from /path/to/output` recovery.
+When the original check knows the PR, its printed resume command retains
+`--dispatch-publish <PR>` so the trusted publisher can finish the existing
+native CI run after the author receipt is published.
 Older external outputs can be discovered without rerunning or re-signing them:
 
 ```bash

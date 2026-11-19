@@ -478,7 +478,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "f456ce67c8bb0e2b0d8741a2bef084a294999025"
+        "a9a3435a516c4f4f2415158226fc99cc1265a73d"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",
@@ -686,13 +686,16 @@ def main():
                      or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
-    vfs_cache = any(path in {".github/ci/cohost-plugin-crypto.toml",
+    vfs_archive = any(path in {".github/ci/cohost-plugin-crypto.toml",
                              ".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
                              ".github/workflows/rust-ci.yml",
-                             ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
+                             ".github/workflows/ci-vfs-search-cache.yml",
                              "e2e/local-acceptance/vfs_search_cache_acceptance.py",
                              "e2e/local-acceptance/vfs_search_publication_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
+    # Selector edits exercise the VFS fixtures. An exact queue cache hit only
+    # needs a new archive when the cache/publication contract itself changed.
+    vfs_cache = vfs_archive or ".github/scripts/ci_input_scope.py" in paths
     policy_fixtures = {}
     policy_fixtures_required = policy_fixture_scope(paths, name, policy_fixtures)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
@@ -703,6 +706,7 @@ def main():
               "gzip_codec_required": str(gzip_codec).lower(),
               "release_artifact_required": str(release_artifact).lower()}
     result["vfs_cache_required"] = str(vfs_cache).lower()
+    result["vfs_archive_required"] = str(vfs_archive).lower()
     result["policy_fixtures_required"] = str(policy_fixtures_required).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():

@@ -397,6 +397,11 @@ Only this existing main workflow saves the cache; no second cache writer, compil
 image alias, acceptance signer or cached test-result authority is introduced.
 Changes to the main Rust CI workflow select this publisher as well. The
 accepted merge-group run still supplies the artifact and its original key.
+An accepted queue on image `20261111.82.6` later published under its own key
+from main image `20261111.196.1`. Main verified the original archive and skipped
+the fallback compile. Subsequent consumers still require their own exact
+image and compiler inputs.
+[Original publication job](https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179).
 Archive transfer/storage costs and a subsequent matching-image consumer must be
 measured before claiming warm savings; local fixture success alone is insufficient.
 PR #1497 supplied actual hosted publication after its full native/Docker contract

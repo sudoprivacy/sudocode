@@ -69,13 +69,16 @@ def run_case(output, order):
     platform = load("parallel_owner", SOURCE / ".github/scripts/local_acceptance.py").host()
     native_workflow = ".github/workflows/local-acceptance.yml"
     toolchain_adapter = ".github/actions/rust-toolchain/cache-command.mjs"
-    cache_workflow = (SOURCE / native_workflow).read_text(encoding="utf-8").encode()
+    layout_runner = ".github/local-acceptance/cache_layout.py"
+    relocated_workflow = (SOURCE / native_workflow).read_text(encoding="utf-8").encode()
+    assert relocated_workflow.count(b"worktree") == 5
+    cache_workflow = relocated_workflow.replace(b"worktree", b"candidate")
     cache_output = b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
     assert cache_workflow.count(cache_output) == cache_workflow.count(b"        id: rust_toolchain\n") == 1
     original_workflow = cache_workflow.replace(cache_output, b"").replace(b"        id: rust_toolchain\n", b"")
     for relative in [".github/scripts/local_acceptance.py", ".github/local-acceptance/gate.py",
                      ".github/local-acceptance/publish.py", ".github/local-acceptance/cross_platform.py",
-                     native_workflow, ".github/actions/rust-toolchain/action.yml", toolchain_adapter,
+                     native_workflow, ".github/actions/rust-toolchain/action.yml", toolchain_adapter, layout_runner,
                      ".github/workflows/local-acceptance-workspace.yml",
                      ".github/workflows/local-acceptance-publish.yml"]:
         destination = work / relative
@@ -83,7 +86,7 @@ def run_case(output, order):
         shutil.copyfile(SOURCE / relative, destination)
         if relative == native_workflow:
             destination.write_bytes(original_workflow if order == "ci-first" else cache_workflow)
-        if relative.startswith(".github/actions/rust-toolchain/"):
+        if relative.startswith(".github/actions/rust-toolchain/") or relative == layout_runner:
             destination.write_bytes(destination.read_text(encoding="utf-8").encode())
         if relative == ".github/scripts/local_acceptance.py":
             # Protected main is newer than the installed client. Its marker
@@ -635,6 +638,33 @@ def run_case(output, order):
                     metadata_controls.append({"case": label, "accepted": False, "reason": str(error)})
                 else:
                     raise AssertionError("An original scheduling plan accepted " + label)
+        git("--git-dir", str(origin), "update-ref", "refs/heads/main", metadata, cwd=output)
+        relocated = protected_commit(native_workflow, relocated_workflow, "Align the native cache input order", metadata)
+        assert helper.verify_execution_plan(envelope, head, relocated, relocated) == pending
+        assert helper.verify_envelope(completed, head, relocated, relocated)["plan"] == pending["plan"]
+        publisher_run["head_sha"] = relocated
+        publish({"workflow_run": source_run}, 942)
+        assert statuses[-1]["state"] == "success"
+        assert notes_before == (helper.canonical(helper.read_note(head)),
+                                helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        metadata_controls.append({"case": "reviewed checkout relocation keeps original author and native checks",
+                                  "accepted": True, "original_notes_logs_and_processes_reused": True})
+        for label, relative, contents in [
+            ("changed cache layout runner", layout_runner, (trusted / layout_runner).read_bytes() + b"\n# Modified layout\n"),
+            ("only partly relocated checkout", native_workflow,
+             relocated_workflow.replace(b"        working-directory: worktree\n", b"        working-directory: candidate\n")),
+        ]:
+            git("--git-dir", str(origin), "update-ref", "refs/heads/main", relocated, cwd=output)
+            changed = protected_commit(relative, contents, "Refuse " + label, relocated)
+            try:
+                helper.verify_execution_plan(envelope, head, changed, changed)
+            except RuntimeError as error:
+                assert "current protected native workflow definition" in str(error)
+                metadata_controls.append({"case": label, "accepted": False, "reason": str(error)})
+            else:
+                raise AssertionError("An original scheduling plan accepted " + label)
         helper_path = ".github/scripts/local_acceptance.py"
         executor = (trusted / helper_path).read_text()
         signature = next(line for line in executor.splitlines() if line.startswith("def run_command("))

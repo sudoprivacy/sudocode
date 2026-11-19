@@ -526,6 +526,7 @@ except subprocess.TimeoutExpired:
         "5a1503cd97bac0fb7ec58689f14b64530d2c564606a91484cecca76fd380ea14",
         "8d2689e3285deeb2e17695bb58f28a93b584365a3aae8f59e34bc99ed41fbe41",
         "f9c4f0cd610f4f9f6c954360b0b6364fce4dc4f962dac42236b7cc833f64c71b",
+        "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -604,7 +605,7 @@ def execute(command, cwd, log, env=None):
 
 
 def reviewed_native_dependency_cache_transition(before, after, protected):
-    """Allow the one reviewed cache-only workflow transition for signed plans."""
+    """Accept the two reviewed native cache changes, in isolation or together."""
     toolchain_step = (b"      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain\n"
                       b"        if: matrix.family == 'native'\n")
     cache_step = (b"      - uses: Swatinem/rust-cache@v2\n"
@@ -614,21 +615,34 @@ def reviewed_native_dependency_cache_transition(before, after, protected):
                   b"          shared-key: ci-dependencies\n"
                   b"          env-vars: ImageOS\n"
                   b"          save-if: false\n")
-    if before.count(toolchain_step) != 1 or before.count(cache_step) != 1:
-        return False
-    expected = before.replace(toolchain_step, toolchain_step + b"        id: rust_toolchain\n").replace(
-        cache_step, cache_step.replace(
-            b"          save-if:", b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
-            b"          save-if:"))
-    if after != expected:
+    alternatives = []
+    if before.count(toolchain_step) == before.count(cache_step) == 1:
+        alternatives.append(before.replace(toolchain_step, toolchain_step + b"        id: rust_toolchain\n").replace(
+            cache_step, cache_step.replace(
+                b"          save-if:", b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+                b"          save-if:")))
+    # The upstream cache hashes raw configuration files in path order. The
+    # new checkout sorts after the root pin, like the publisher's rust tree.
+    paths = (
+        b"        working-directory: candidate\n",
+        b"          path: candidate\n",
+        b"            candidate/rust-toolchain.toml\n",
+        b" --source candidate/rust --github-output\n",
+        b"          path: candidate/sdk/typescript/artifacts/*\n",
+    )
+    for workflow in (before, *alternatives):
+        if all(workflow.count(path) == 1 for path in paths):
+            for path in paths:
+                workflow = workflow.replace(path, path.replace(b"candidate", b"worktree"))
+            alternatives.append(workflow)
+    if after not in alternatives:
         return False
     # The new outputs must come from the reviewed regular-file action and
     # adapter. Their blobs are outside the native workflow's own byte hash.
-    action = ".github/actions/rust-toolchain/"
-    for filename, identity in (
-            ("action.yml", "ce7b8ad4ca80cc495808d0862d91bdbade600f70"),
-            ("cache-command.mjs", "973592bd8bdc233854295869e87dc24ae00fd6d7")):
-        path = action + filename
+    for path, identity in (
+            (".github/actions/rust-toolchain/action.yml", "ce7b8ad4ca80cc495808d0862d91bdbade600f70"),
+            (".github/actions/rust-toolchain/cache-command.mjs", "973592bd8bdc233854295869e87dc24ae00fd6d7"),
+            (".github/local-acceptance/cache_layout.py", "82bdafe46048139a6aae326580feca70ab543396")):
         if value("ls-tree", protected, "--", path) != f"100644 blob {identity}\t{path}":
             return False
     return True

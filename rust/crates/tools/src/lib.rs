@@ -1645,11 +1645,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Send a message to an agent by name or pid. ",
                 "Delivery is chosen by the host, not by you: on an agent-to-agent \
-                 network the message is delivered to the peer over the network; \
-                 otherwise it is appended to your conversation with the recipient in \
-                 this workspace's mailbox. The result confirms the hand-off, not a \
-                 reply: a reply, if the recipient sends one, arrives later as a new \
-                 message in this conversation. ",
+                 network the message is appended to your conversation with the peer on \
+                 that network; otherwise it is appended to your conversation with the \
+                 recipient in this workspace's mailbox. A success reads \"Message sent \
+                 to <name>'s inbox\": it confirms the hand-off to that inbox, not that \
+                 the recipient read it. A reply, if the recipient sends one, arrives \
+                 later as a new message in this conversation. ",
+                "If the result says delivery is unconfirmed and the send is queued, it \
+                 is retried automatically with the same id and the recipient drops a \
+                 duplicate, so do not resend it yourself; a later `send` or `agent_list` \
+                 result reports whether it was delivered or abandoned. ",
                 "When `to` is a pid it is routed to the running process. ",
                 "A pid that has already exited is an error — its message cannot be \
                  delivered, so use `agent_list` to find a live agent (or a name, \
@@ -2296,7 +2301,10 @@ fn run_agent_list(
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    collect_agent_directory(active_only, fs, host, attention).and_then(to_pretty_json)
+    with_settled_sends(
+        &runtime::mailbox::sending_mailbox(),
+        collect_agent_directory(active_only, fs, host, attention).and_then(to_pretty_json),
+    )
 }
 
 /// Read-only directory shared by the model tool and engine navigation.
@@ -3056,16 +3064,47 @@ fn run_send_message(
     } else {
         // A name with no presence yet still lands in its durable inbox, which
         // holds the message until that peer first runs.
-        peer
+        Arc::clone(&peer)
     };
     let sender = resolve_sender(&input, &mailbox);
 
     // ── Plain text branch ──────────────────────────────────────────
-    if let Some(text) = input.message.as_str() {
-        return send_plain_message(&input, &mailbox, &sender, text);
-    }
+    let result = if let Some(text) = input.message.as_str() {
+        send_plain_message(&input, &mailbox, &sender, text)
+    } else {
+        send_structured_message(&input, &mailbox, &sender)
+    };
+    with_settled_sends(&peer, result)
+}
 
-    send_structured_message(&input, &mailbox, &sender)
+/// Add how queued sends have ended since the model last heard, one line each.
+///
+/// A send whose delivery could not be confirmed is queued and retried on its
+/// own, and the model was told not to resend it, so a later `send` or
+/// `agent_list` result is where it learns whether that send arrived. A JSON
+/// result keeps parsing: the lines go in its `earlier_queued_sends` array.
+fn with_settled_sends(
+    mailbox: &runtime::mailbox::Mailbox,
+    result: Result<String, String>,
+) -> Result<String, String> {
+    let lines: Vec<String> = mailbox
+        .take_settled_outcomes()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if lines.is_empty() {
+        return result;
+    }
+    match result {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(mut object)) => {
+                object.insert("earlier_queued_sends".into(), json!(lines));
+                to_pretty_json(Value::Object(object))
+            }
+            _ => Ok(format!("{text}\n{}", lines.join("\n"))),
+        },
+        Err(text) => Err(format!("{text}\n{}", lines.join("\n"))),
+    }
 }
 
 // ── Agent runtime registry ────────────────────────────────────

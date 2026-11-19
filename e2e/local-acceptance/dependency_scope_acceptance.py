@@ -66,6 +66,8 @@ esac
     result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
                             env=fixture, capture_output=True)
     assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+    print("PASS: the cache command binds the active pin, preserves conservative inventory, and forwards command results",
+          flush=True)
 
 
 def workflow_scope(output, environment):
@@ -79,8 +81,6 @@ def workflow_scope(output, environment):
         bash = shutil.which("bash", path=environment.get("PATH"))
     if not bash:
         raise RuntimeError("Workflow guard acceptance requires Bash; on Windows install Git for Windows with Bash")
-    if sys.platform.startswith("linux"):
-        pinned_cache_command(output, environment)
     workflow = (SOURCE / ".github/workflows/rust-ci.yml").read_text(encoding="utf-8")
     lines = workflow.splitlines()
     cache_command = "          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}"
@@ -89,6 +89,9 @@ def workflow_scope(output, environment):
     assert "echo 'dependency-cache-command={0}'" in toolchain
     publisher = (SOURCE / ".github/workflows/ci-dependency-cache.yml").read_text(encoding="utf-8")
     assert publisher.count(cache_command) == 2
+    cache_test = lines.index("      - name: Exercise the pinned dependency cache command")
+    assert lines[cache_test + 1] == "        if: github.event_name == 'pull_request' && steps.scope.outputs.policy_fixtures_required == 'true'"
+    assert "--pinned-cache-command-only" in lines[cache_test + 2]
     # Bind the real native guard cases below to the production queue wiring.
     # The PR must not allocate a duplicate lint matrix, while the final gate
     # must continue to wait for all three native platforms.
@@ -1345,10 +1348,16 @@ def run(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--policy-fixtures-only", action="store_true",
-                        help="Run only the real Git policy-fixture controls under the existing host lease")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--policy-fixtures-only", action="store_true",
+                       help="Run only the real Git policy-fixture controls under the existing host lease")
+    scope.add_argument("--pinned-cache-command-only", action="store_true",
+                       help="Run only the Linux dependency-cache command with the hosted Node prerequisite")
     args = parser.parse_args()
-    if args.policy_fixtures_only:
+    if args.pinned_cache_command_only:
+        args.output.mkdir(parents=True, exist_ok=False)
+        pinned_cache_command(args.output.resolve(), os.environ)
+    elif args.policy_fixtures_only:
         spec = importlib.util.spec_from_file_location("policy_fixture_host_lease", SOURCE / ".github/scripts/local_acceptance.py")
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)

@@ -691,6 +691,9 @@ jobs:
       - name: Verify response gzip bytes, concurrent files and quota failures
         if: github.event_name == 'pull_request' && steps.scope.outputs.gzip_codec_required == 'true'
         run: python3 e2e/response-gzip/run.py --output "$RUNNER_TEMP/response-gzip"
+      - name: Exercise the pinned dependency cache command
+        if: github.event_name == 'pull_request' && steps.scope.outputs.policy_fixtures_required == 'true'
+        run: python3 e2e/local-acceptance/dependency_scope_acceptance.py --pinned-cache-command-only --output "$RUNNER_TEMP/pinned-cache-command"
       - name: Verify fixed-driver restoration and current runtime refusal
         if: github.event_name == 'pull_request' && steps.scope.outputs.vfs_cache_required == 'true'
         run: python3 e2e/local-acceptance/vfs_search_cache_acceptance.py --output "$RUNNER_TEMP/vfs-search-cache-fixture"

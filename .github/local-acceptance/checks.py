@@ -1194,7 +1194,7 @@ def native_guard_files():
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
         ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415",
-        ".github/workflows/ci-vfs-search-cache.yml": "6d5590f96f245a85bd841e301cdef9c4dd3d14e7a1dc7645e00f45739eb44139",
+        ".github/workflows/ci-vfs-search-cache.yml": "e1907d872ade41ad38eeb55ec0d39555d9d64ab6e491d41aa9edf252d149dd9e",
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
         ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",

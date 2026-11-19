@@ -1645,16 +1645,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Send a message to an agent by name or pid. ",
                 "Delivery is chosen by the host, not by you: on an agent-to-agent \
-                 network the message is appended to your conversation with the peer on \
-                 that network; otherwise it is appended to your conversation with the \
-                 recipient in this workspace's mailbox. A success reads \"Message sent \
-                 to <name>'s inbox\": it confirms the hand-off to that inbox, not that \
-                 the recipient read it. A reply, if the recipient sends one, arrives \
-                 later as a new message in this conversation. ",
-                "If the result says delivery is unconfirmed and the send is queued, it \
-                 is retried automatically with the same id and the recipient drops a \
-                 duplicate, so do not resend it yourself; a later `send` or `agent_list` \
-                 result reports whether it was delivered or abandoned. ",
+                 network the message is delivered to the peer over the network; \
+                 otherwise it is appended to your conversation with the recipient in \
+                 this workspace's mailbox. The result confirms the hand-off, not a \
+                 reply: a reply, if the recipient sends one, arrives later as a new \
+                 message in this conversation. A send reported as queued is retried \
+                 with the same id; do not resend it. ",
                 "When `to` is a pid it is routed to the running process. ",
                 "A pid that has already exited is an error — its message cannot be \
                  delivered, so use `agent_list` to find a live agent (or a name, \

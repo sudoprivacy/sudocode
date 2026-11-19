@@ -478,7 +478,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "a9a3435a516c4f4f2415158226fc99cc1265a73d"
+        "0005e1e46f890ed4b2656ad9827db80fea27f851"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",
@@ -498,7 +498,17 @@ POLICY_FIXTURE_INPUTS = {
     ".github/actions/rust-toolchain/action.yml": [
         "100644",
         "blob",
-        "b02330ea66170c3c96003e8732bfbd55987d2e0f"
+        "ce7b8ad4ca80cc495808d0862d91bdbade600f70"
+    ],
+    ".github/actions/rust-toolchain/cache-command.mjs": [
+        "100644",
+        "blob",
+        "973592bd8bdc233854295869e87dc24ae00fd6d7"
+    ],
+    ".github/workflows/ci-dependency-cache.yml": [
+        "100644",
+        "blob",
+        "c774bfc820c05df59d3c161dd6c252ff4829e551"
     ],
     ".gitignore": [
         "100644",
@@ -572,9 +582,10 @@ def main():
     ignored_disabled_test_sources = []
     # The workflow changes real compiler/daemon commands; this selector does
     # not. Its own edits retain preflight and the complete contract guard.
-    # The toolchain pin and its installer change the compiler of every job.
+    # Toolchain setup and dependency cache commands are used by the queue jobs.
     queue_inputs = {".github/workflows/rust-ci.yml", "rust-toolchain.toml",
-                    ".github/actions/rust-toolchain/action.yml"}
+                    ".github/actions/rust-toolchain/action.yml",
+                    ".github/actions/rust-toolchain/cache-command.mjs"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":

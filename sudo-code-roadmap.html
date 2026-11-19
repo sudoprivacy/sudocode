@@ -1956,6 +1956,21 @@ of the co-host job. The parallel A2A job finished later, so that export did
 not extend this merge's queue span.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451174032">Original co-host job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original A2A job</a>.</p>
+<p>PR #1524 then restored that same VFS key, passed the original co-host and
+search/restart checks, and uploaded the identity and journey evidence. The
+compiler data upload was skipped. The new identity-only export and upload
+took at most one recorded second in that job.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44515545676/job/135530889592">First observed exact hit without re-export</a>.</p>
+<p><strong>Same Rust tree, different hosted dependency keys.</strong> The
+#1522 and #1523 A2A jobs shared the Rust tree, daemon harness, lockfile and
+effective Rust 1.100.0 compiler. Their job times were 428s and 575s. The cache
+action also fingerprinted an unused Rust 1.99.1 installed in the first image.
+Recomputing the original digests shows that this changed the environment
+key, while the dependency digest stayed the same. The second job found no
+cache. The two runs do not establish how much of the total time difference
+was due to cache reuse.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original hit</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44505502638/job/135496336484">Original miss</a>.</p>
 <p><strong>First observed cold Windows warmer after #1512.</strong> The automatic
 main job ran the dev/test compiler command in 219s and skipped the optimized
 release warmer. It published 2,458,357,241 bytes. The older original job spent

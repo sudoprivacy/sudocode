@@ -527,6 +527,7 @@ except subprocess.TimeoutExpired:
         "8d2689e3285deeb2e17695bb58f28a93b584365a3aae8f59e34bc99ed41fbe41",
         "f9c4f0cd610f4f9f6c954360b0b6364fce4dc4f962dac42236b7cc833f64c71b",
         "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
+        "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -2606,6 +2607,10 @@ def perform_check(args, attempt):
                    branch=git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None,
                    host=host(), policy_ref=policy_ref, signers_ref=signers_ref, output=str(output))
     (output / "attempt.json").write_bytes(canonical(attempt))
+    resume_command = (f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--signers-ref {signers_ref} --resume-from "{output}" --publish --remote {args.remote}')
+    if getattr(args, "dispatch_publish", None):
+        resume_command += f" --dispatch-publish {args.dispatch_publish}"
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
@@ -2678,9 +2683,7 @@ def perform_check(args, attempt):
         timing["checks_finished_at"] = time.time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-              "If this process exits, resume with: "
-              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-              f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+              f"If this process exits, resume with: {resume_command}", flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
@@ -2740,9 +2743,8 @@ def perform_check(args, attempt):
             try:
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
                                         sign_carried())
-                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: {resume_command}",
+                      flush=True)
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
@@ -3361,6 +3363,7 @@ def start_pr(args, api=None, context=None):
         except RuntimeError:
             check(argparse.Namespace(head=head, base=trusted, policy_ref=trusted, signers_ref=trusted,
                 output=str(output / "author"), resume_from=None, publish=True, remote=args.remote,
+                dispatch_publish=pull["number"],
                 outer_started_at=wall_start, outer_monotonic_started_at=started, execution_plan=envelope))
         else:
             if existing["host"] != host():

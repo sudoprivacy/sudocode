@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+from zipfile import ZipFile
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -153,6 +155,67 @@ finally:
     return cases
 
 
+def windows_grpcurl_cache(output, bash, path, binary):
+    output.mkdir()
+    script = r'''
+curl() {
+  [ "$#" = 6 ] && [ "$4" = -o ] || return 97
+  printf '%s\n' "$6" >> "$REQUESTS"
+  cp -- "$ARCHIVE" "$5"
+}
+source "$1"
+grpcurl_bin
+'''
+    contents = binary.read_bytes()
+    valid = output / "valid.zip"
+    with ZipFile(valid, "w") as archive:
+        archive.writestr("grpcurl.exe", contents)
+    broken_bytes = io.BytesIO()
+    with ZipFile(broken_bytes, "w") as archive:
+        archive.writestr("grpcurl.exe", contents[:8192])
+    damaged = bytearray(broken_bytes.getvalue())
+    damaged[30 + len("grpcurl.exe") + 128] ^= 1
+    corrupt = output / "corrupt.zip"
+    corrupt.write_bytes(damaged)
+    library = SOURCE / "e2e/nexus-a2a/lib.sh"
+    results = {}
+    for label in ("fresh", "retry-after-bad-crc", "repair-legacy-cache"):
+        directory = output / label
+        directory.mkdir()
+        cache = directory / "client's cache" / "1.9.4"
+        client = cache / "grpcurl.exe"
+        requests = directory / "requests.log"
+        env = {**os.environ, "PATH": path, "GRPCURL_CACHE": str(cache.parent), "REQUESTS": str(requests)}
+        command = [bash, "-o", "igncr", "-ec", script, "grpcurl-cache-fixture", library.as_posix()]
+
+        def run(name, archive):
+            process = subprocess.run(command, cwd=SOURCE, env={**env, "ARCHIVE": str(archive)},
+                                     capture_output=True, timeout=30)
+            (directory / f"{name}.stdout").write_bytes(process.stdout)
+            (directory / f"{name}.stderr").write_bytes(process.stderr)
+            return process
+
+        if label == "retry-after-bad-crc":
+            failed = run("bad-crc", corrupt)
+            assert failed.returncode != 0 and not failed.stdout and b"CRC" in failed.stderr, failed
+            assert not list(cache.iterdir()), "Failed extraction leaked executable or staging files"
+        elif label == "repair-legacy-cache":
+            cache.mkdir(parents=True)
+            client.write_bytes(damaged)
+            client.chmod(0o755)
+            client.with_suffix(".exe.dl.zip").write_bytes(damaged)
+        restored = run("official", valid)
+        assert restored.returncode == 0 and client.read_bytes() == contents, restored
+        assert [entry.name for entry in cache.iterdir()] == ["grpcurl.exe"]
+        count = len(requests.read_text(encoding="utf-8").splitlines())
+        assert count == (2 if label == "retry-after-bad-crc" else 1), count
+        warm = run("warm-with-corrupt-download-input", corrupt)
+        assert warm.returncode == 0 and warm.stdout == restored.stdout
+        assert len(requests.read_text(encoding="utf-8").splitlines()) == count
+        results[label] = {"cold_fetches": count, "warm_fetches": 0, "complete_cache_restored": True}
+    return results
+
+
 def grpcurl_preflight(output, profiles, helper):
     """Exercise the original Bash/curl resolver and actual cached native client."""
     output.mkdir(parents=True)
@@ -167,6 +230,8 @@ def grpcurl_preflight(output, profiles, helper):
                                          lambda command, cwd, log: helper.run_command(command, cwd, log, {"PATH": path}))
     binary = Path(seed["tool"]["executable"])
     assert "1.9.4" in seed["tool"]["version"], seed
+    archive_controls = (windows_grpcurl_cache(output / "windows-archives", profiles.git_for_windows_bash(), path, binary)
+                        if os.name == "nt" else {})
     requests = []
 
     class UnavailableProxy(BaseHTTPRequestHandler):
@@ -267,6 +332,7 @@ finally:
         thread.join(timeout=5)
     print("PASS: actual grpcurl proxy504/invalid executable refuse before native compilation; "
           "the unchanged cached client runs offline and unselected profiles do not resolve it", flush=True)
+    cases.extend({"windows_cache_recovery": name, **result} for name, result in archive_controls.items())
     return cases
 
 

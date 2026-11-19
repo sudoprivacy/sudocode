@@ -648,17 +648,14 @@ assert all(Path(os.environ[key]).resolve() == private for key in ("TMP", "TEMP",
 assert os.environ["SCODE_TEST_BACKEND"] == "mock"
 with (private / "isolated.txt").open("x", encoding="utf-8") as handle:
     handle.write(name)
-marker = directory / name
-source = marker.with_suffix(".new")
-source.write_text(str(private), encoding="utf-8")
-source.replace(marker)
-other = directory / ("existing" if name == "managed" else "managed")
+(directory / (name + "-" + private.name)).mkdir()
+other = "existing-" if name == "managed" else "managed-"
 deadline = time.monotonic() + 10
-while not other.is_file():
+while not (peers := list(directory.glob(other + "*"))):
     if time.monotonic() >= deadline:
         raise RuntimeError("Other journey did not run concurrently")
     time.sleep(0.02)
-assert Path(other.read_text(encoding="utf-8")) != private
+assert len(peers) == 1 and peers[0].name[len(other):] != private.name
 print(json.dumps({"name": name, "temporary": str(private), "exit": expected_exit}))
 raise SystemExit(expected_exit)
 """, encoding="utf-8")

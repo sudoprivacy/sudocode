@@ -1249,7 +1249,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
-        "e2e/local-acceptance/native_lint_acceptance.py": "a5a606859bcf128cf294931c8a02d7245742b5144d2cc4447925916cfbee538a",
+        "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
         "e2e/local-acceptance/parallel_acceptance.py": "e790719488538aedb216eea3caa6883b71ef7c608b9c11fd33c9c9ca043ecd60",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",

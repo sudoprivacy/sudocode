@@ -228,9 +228,10 @@ grpcurl_bin() {
   local download="$cache.dl.$suffix"
   curl -fsSL --retry 3 -o "$download" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
   if [ "$suffix" = zip ]; then
-    # git bash ships GNU tar (no zip); PowerShell's Expand-Archive is always
-    # there and requires a .zip suffix plus Windows paths.
-    powershell -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$download")' -DestinationPath '$(cygpath -w "$(dirname "$cache")")' -Force" \
+    # Git Bash's own tar is GNU tar, which reads no zip. Windows ships bsdtar,
+    # which does, and it depends on nothing the calling shell exported.
+    "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$download")" \
+      -C "$(cygpath -w "$(dirname "$cache")")" grpcurl.exe \
       || { echo "!! could not unzip $download" >&2; return 1; }
     rm -f "$download"
   else

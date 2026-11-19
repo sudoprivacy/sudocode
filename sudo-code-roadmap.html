@@ -2001,12 +2001,25 @@ sizes and job clocks describe those runs. The cache inventory at this
 observation listed 11,771,056,003 bytes against the configured 10 GB limit.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
-<p><strong>Post-policy source cohort, 6 of 20.</strong> The first six eligible
-merges account for 548.700 known GitHub runner-minutes, with one unassigned
+<p><strong>Post-policy source cohort, 7 of 20.</strong> The first seven eligible
+merges account for 634.450 known GitHub runner-minutes, with one unassigned
 interval still unresolved. The median last queue-entry-to-merge span is
-582.5s and includes validation and dispatch. The first scheduled workspace
+581s and includes validation and dispatch. The first scheduled workspace
 run, remaining source cohort, and author-side time are measured separately.
 The whole-lifecycle one-tenth target remains unproven.</p>
+<p><strong>Native dependency cache lookup.</strong> The Windows complement
+for <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795383">PR #1520</a>
+restored a 2,458,357,241-byte fallback in 74s. Its requested suffix differed
+from the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44576879047/job/135746630132">main publisher</a>
+even though all 23 committed inputs matched. The upstream action hashes the
+raw toolchain pin and Cargo configuration in path order. The old nested
+checkout reversed that order. A source-layout change aligns the exact key;
+the observed fallback already contained the publisher's bytes, so this
+comparison establishes the mismatch without measuring a time saving.</p>
+<p>The <a href="https://github.com/sudoprivacy/sudocode/pull/1528">shared daemon
+tool change</a> also triggered the normal <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44581106560">VFS publisher</a>.
+The job found the exact key in 29 assigned runner seconds. It skipped compiler
+data download, import, and save.</p>
 <p><strong>Stronger signed author progress.</strong> Automatic exact-source
 resume now prefers an older signed record that proves a strict superset of
 currently required, compatible profiles. In a replay of original #1510

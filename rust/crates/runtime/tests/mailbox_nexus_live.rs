@@ -39,7 +39,7 @@
 #[path = "common/lease_fault.rs"]
 #[expect(
     dead_code,
-    reason = "Register-write fault controls are exercised by receiver_retry_diagnostics, which shares this fixture."
+    reason = "Register-write fault controls and the lock-request record are exercised by receiver_retry_diagnostics and receiver_single_lease, which share this fixture."
 )]
 mod lease_fault;
 #[path = "common/managed_subprocess.rs"]
@@ -1891,7 +1891,7 @@ fn shared_history_tool_origins(history: &str) -> std::collections::BTreeSet<Stri
     origins
 }
 
-/// Atomic reader claims and receipt recovery through mTLS, gRPC and Raft.
+/// Atomic seat claims and receipt recovery through mTLS, gRPC and Raft.
 #[test]
 #[ignore = "requires the daemon started by e2e/nexus-a2a/run-cohost.sh"]
 fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
@@ -1910,7 +1910,7 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
         let batch = first
             .read_unread(peer)
             .unwrap()
-            .expect("first reader available");
+            .expect("the first client takes the seat");
         if batch.messages().iter().any(|message| message.body == body) {
             break batch;
         }
@@ -1929,13 +1929,13 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
     thread::sleep(Duration::from_secs(35));
     assert!(
         second.read_unread(peer).unwrap().is_none(),
-        "reader must renew while consumer is blocked"
+        "the seat must renew while the consumer is blocked"
     );
     drop(pending);
     let replay = second
         .read_unread(peer)
         .unwrap()
-        .expect("dropped receipt releases lock");
+        .expect("a dropped receipt releases the seat");
     assert!(replay.messages().iter().any(|message| message.body == body));
     replay.acknowledge().unwrap();
     let after = first.read_unread(peer).unwrap().unwrap();
@@ -1945,23 +1945,23 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
     );
 }
 
-/// BASELINE evidence on a REAL node: what the pre-#1014 lease code does when a
-/// conversation reader's renewal fails at commit time.
+/// What a seat renewal that fails at commit time costs, on a REAL node.
 ///
 /// One instance of an agent over a real mTLS client, behind the test-only fault
-/// boundary (`common/lease_fault.rs`). Exactly ONE renewal of the reader's lock
-/// is failed (INJECTED: it never reaches the node), and the re-claim that follows
-/// is held back (INJECTED delay) so the window in which the position must not
+/// boundary (`common/lease_fault.rs`). Exactly ONE seat renewal is failed
+/// (INJECTED: it never reaches the node), and the seat claim that follows is
+/// held back (INJECTED delay) so the window in which the position must not
 /// move is long enough to observe; everything else is real. Asserted, with
 /// monotonic instants:
 ///
 /// - the failed renewal is the commit's own `confirm()`, after the message was
-///   delivered, and the commit is refused: the durable read position stays put;
-/// - the tail drops that reader, releases its lock on the node, re-acquires it,
-///   and reloads the position from the register, so the message is delivered
-///   once more (at-least-once) and then committed;
-/// - the receiver seat is never touched, and nothing writes the position except
-///   the reader's own commit (this test only reads it).
+///   delivered, and the commit is refused with that renewal as its recorded
+///   loss: the durable read position stays put;
+/// - the receiver lets the seat go, releasing it on the node, claims it again
+///   on a new grant, and reloads the position from the register, so the message
+///   is delivered once more (at-least-once) and then committed;
+/// - nothing writes the position except the receiver's own commit (this test
+///   only reads it).
 #[test]
 #[ignore = "requires the harness's real mTLS Nexus daemon"]
 fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset() {
@@ -2032,10 +2032,10 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
     let samples: Arc<std::sync::Mutex<Vec<PositionSample>>> = Arc::default();
     let sampling_thread = sample_reader_position(&sampling, &samples, &observer, peer);
 
-    let acquired_before = probe.reader_acquisitions().len();
+    let acquired_before = probe.acquisitions().len();
     let armed = Instant::now();
-    probe.delay_next_reader_claim(CLAIM_DELAY);
-    probe.set(Fault::ReaderRenewFails(1));
+    probe.delay_next_seat_claim(CLAIM_DELAY);
+    probe.set(Fault::SeatRenewFails(1));
     let body = "m1 committed under a failing renewal";
     send_to(&sender, peer, &agent, body, &auth).expect("send");
     wait(
@@ -2055,14 +2055,15 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
         "m1 must be delivered once, refused at commit, and redelivered exactly once: {delivered:?}"
     );
     // With m1 delivered exactly twice, m0 delivered exactly once pins where the
-    // re-acquired reader resumed: at the durable offset, neither before it
-    // (m0 again) nor after it (no second m1).
+    // receiver resumed on its new grant: at the durable offset, neither before
+    // it (m0 again) nor after it (no second m1).
     assert_eq!(
         deliveries("m0 warm-up").len(),
         1,
-        "the re-acquired reader must resume at the durable offset, not before it"
+        "the re-seated receiver must resume at the durable offset, not before it"
     );
-    assert_reader_commit_evidence(
+    assert_refused_commit_recorded(peer);
+    assert_refused_commit_evidence(
         &probe,
         &delivered,
         acquired_before,
@@ -2082,10 +2083,10 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
 ///
 /// A gate message holds the receiver inside its consumer while two more
 /// messages are appended, so they arrive as one batch. On the first of them the
-/// consumer arms ONE failing reader renewal and waits until the reader's own
-/// renewal worker has hit it. No commit happens meanwhile, so that renewal can
-/// only be the worker's, and the lease is gone while the consumer is still
-/// deciding. Then:
+/// consumer arms ONE failing seat renewal and waits until the seat's renewal
+/// worker has hit it. No commit happens meanwhile, so that renewal can only be
+/// the worker's, and the seat is gone while the consumer is still deciding.
+/// Then:
 ///
 /// - the consumer accepts: the lease check before the second message stops the
 ///   batch, so the stall must be recorded as `LeaseLost`, never as
@@ -2094,8 +2095,8 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
 ///   refused it, so the stall must be `ConsumerRefused`, never `LeaseLost`, even
 ///   though the lease is gone by the time the batch is abandoned.
 ///
-/// Either way the tail lets the reader go, re-acquires it and hands the batch
-/// over again from the durable offset.
+/// Either way the receiver lets the seat go, claims it again and hands the
+/// batch over again from the durable offset.
 #[test]
 #[ignore = "requires the harness's real mTLS Nexus daemon"]
 fn live_stall_from_lease_lost_mid_batch_is_recorded_as_lease_lost() {
@@ -2237,9 +2238,9 @@ impl StallRig {
 
 impl Drop for StallRig {
     fn drop(&mut self) {
-        // A held renewal parks the lease worker, and dropping the reader joins
+        // A held renewal parks the lease worker, and dropping the seat joins
         // it: release before joining, or a failed assertion hangs instead.
-        self.probe.release_reader_renewal();
+        self.probe.release_seat_renewal();
         self.abort.abort();
         if let Some(receiver) = self.receiver.take() {
             let _ = receiver.join();
@@ -2300,11 +2301,11 @@ fn stall_cause_mid_batch(consumer_accepts: bool) {
             if m.body == M1 && armed_at.lock().unwrap().is_none() {
                 let armed = Instant::now();
                 *armed_at.lock().unwrap() = Some(armed);
-                probe.set(Fault::ReaderRenewFails(1));
+                probe.set(Fault::SeatRenewFails(1));
                 let deadline = armed + Duration::from_secs(30);
                 while Instant::now() < deadline
                     && !probe
-                        .reader_renewals()
+                        .renewals()
                         .iter()
                         .any(|r| r.requested >= armed && r.outcome == Outcome::Injected)
                 {
@@ -2340,14 +2341,14 @@ fn stall_cause_mid_batch(consumer_accepts: bool) {
         .expect("the consumer decided on m1");
     let injected: Vec<_> = rig
         .probe
-        .reader_renewals()
+        .renewals()
         .into_iter()
         .filter(|r| r.outcome == Outcome::Injected)
         .collect();
     assert_eq!(
         injected.len(),
         1,
-        "exactly one INJECTED reader renewal: {injected:?}"
+        "exactly one INJECTED seat renewal: {injected:?}"
     );
     let failed = injected[0];
     assert!(
@@ -2357,7 +2358,7 @@ fn stall_cause_mid_batch(consumer_accepts: bool) {
     let (released, reached_node, reacquired) = assert_redelivered_once(&rig, GATE, M1, M2, decided);
 
     println!(
-        "STALL CAUSE OK: m1 and m2 arrived as one batch at offset {p_gate}; ONE INJECTED reader renewal, by the worker, {:?} after the consumer took m1; the consumer {} m1 {:?} after that; recorded {expected:?} at offset {p_gate} and no {wrong:?}; reader released {:?} after the decision (reached node: {reached_node}) and re-acquired {:?} later; m1 delivered twice, m2 once, position {p_gate} -> {p_end}; seat untouched",
+        "STALL CAUSE OK: m1 and m2 arrived as one batch at offset {p_gate}; ONE INJECTED seat renewal, by the worker, {:?} after the consumer took m1; the consumer {} m1 {:?} after that; recorded {expected:?} at offset {p_gate} and no {wrong:?}; seat released {:?} after the decision (reached node: {reached_node}) and claimed again {:?} later; m1 delivered twice, m2 once, position {p_gate} -> {p_end}",
         failed.requested.saturating_duration_since(armed),
         if consumer_accepts { "accepted" } else { "refused" },
         decided.saturating_duration_since(failed.returned),
@@ -2394,10 +2395,9 @@ fn assert_one_batch_stall(
 }
 
 /// After a stall decided at `decided`: the gate was delivered once, `m1` twice
-/// and `m2` once, after the stall; the tail let the reader go, re-acquired it
-/// and handed the batch over again from it; the seat was never touched.
-/// Returns when the reader was released, whether that reached the node, and
-/// when it was re-acquired.
+/// and `m2` once, after the stall; the receiver let the seat go, claimed it
+/// again and handed the batch over again on that grant. Returns when the seat
+/// was released, whether that reached the node, and when it was claimed again.
 fn assert_redelivered_once(
     rig: &StallRig,
     gate: &str,
@@ -2419,27 +2419,28 @@ fn assert_redelivered_once(
         "m2 is never handed over before the stall, and once after it: {m2:?}"
     );
     assert!(m2[0] > decided, "m2 only comes with the redelivered batch");
-    let release = rig
+    let let_go: Vec<_> = rig
         .probe
-        .reader_releases()
+        .releases()
         .into_iter()
-        .find(|release| release.requested >= decided)
-        .expect("the tail let the reader go after the stall");
-    let released = release.requested;
-    let reached_node = release.reached_node;
+        .filter(|release| release.requested >= decided)
+        .collect();
+    assert_eq!(
+        let_go.len(),
+        1,
+        "the receiver let the seat go once after the stall: {let_go:?}"
+    );
+    let released = let_go[0].requested;
+    let reached_node = let_go[0].reached_node;
     let reacquired = rig
         .probe
-        .reader_acquisitions()
+        .acquisitions()
         .into_iter()
         .find(|at| *at >= released)
-        .expect("the tail re-acquired the reader");
+        .expect("the receiver claimed the seat again");
     assert!(
         reacquired <= m1[1],
-        "the batch is handed over again by the re-acquired reader"
-    );
-    assert!(
-        rig.probe.releases().is_empty(),
-        "the receiver seat must not be touched"
+        "the batch is handed over again on the new grant"
     );
     (released, reached_node, reacquired)
 }
@@ -2449,7 +2450,7 @@ fn assert_redelivered_once(
 /// through the test-only fault boundary (the held renewal is INJECTED).
 ///
 /// A gate holds the consumer while two messages are appended, so they arrive
-/// as one batch. On the first, the consumer holds the reader's next renewal in
+/// as one batch. On the first, the consumer holds the seat's next renewal in
 /// flight (it neither fails nor answers) and keeps the message until the last
 /// renewal that did answer was requested longer ago than the grace allows: the
 /// TTL less the safety margin, 30 s - 10 s. Nothing failed, so only the age
@@ -2489,7 +2490,7 @@ fn live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age() {
             if m.body == M1 && armed_at.lock().unwrap().is_none() {
                 let armed = Instant::now();
                 *armed_at.lock().unwrap() = Some(armed);
-                hold_reader_renewal_past(probe, armed, GRACE + PAST_GRACE);
+                hold_seat_renewal_past(probe, armed, GRACE + PAST_GRACE);
                 *decided_at.lock().unwrap() = Some(Instant::now());
                 return true;
             }
@@ -2500,9 +2501,9 @@ fn live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age() {
     wait_until("the stall to be recorded", Duration::from_mins(1), &|| {
         !rig.stalls().is_empty()
     });
-    // The renewal was in flight for all of it; let it go, so the tail can drop
-    // the reader (dropping it joins the worker) and claim it again.
-    rig.probe.release_reader_renewal();
+    // The renewal was in flight for all of it; let it go, so the receiver can
+    // drop the seat (dropping it joins the worker) and claim it again.
+    rig.probe.release_seat_renewal();
     wait_until(
         "the batch to be handed over again and committed",
         Duration::from_mins(1),
@@ -2529,15 +2530,15 @@ fn live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age() {
         .lock()
         .unwrap()
         .expect("the consumer decided on m1");
-    let renewals = rig.probe.reader_renewals();
+    let renewals = rig.probe.renewals();
     assert!(
         renewals.iter().all(|r| r.outcome != Outcome::Injected),
         "no renewal failed; only the age ended the lease: {renewals:?}"
     );
     let held_since = rig
         .probe
-        .reader_hold_started()
-        .expect("a reader renewal was held");
+        .seat_hold_started()
+        .expect("a seat renewal was held");
     assert!(
         held_since >= armed,
         "the held renewal came after the consumer took m1"
@@ -2553,7 +2554,7 @@ fn live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age() {
     let (released, reached_node, reacquired) = assert_redelivered_once(&rig, GATE, M1, M2, decided);
 
     println!(
-        "LAPSE OK: m1 and m2 arrived as one batch at offset {p_gate}; the reader's renewal was held {:?} after the consumer took m1 and answered {:?} only after release, {:?} after it was requested; recorded LeaseLost with Lapsed {{ since_ms: {since_ms} }} at offset {p_gate}; reader released {:?} after the decision (reached node: {reached_node}) and re-acquired {:?} later; position {p_gate} -> {p_end}; seat untouched",
+        "LAPSE OK: m1 and m2 arrived as one batch at offset {p_gate}; the seat's renewal was held {:?} after the consumer took m1 and answered {:?} only after release, {:?} after it was requested; recorded LeaseLost with Lapsed {{ since_ms: {since_ms} }} at offset {p_gate}; seat released {:?} after the decision (reached node: {reached_node}) and claimed again {:?} later; position {p_gate} -> {p_end}",
         held.requested.saturating_duration_since(armed),
         held.outcome,
         held.returned.saturating_duration_since(held.requested),
@@ -2604,13 +2605,13 @@ fn live_retry_diagnostics_distinguish_commit_lapse_from_register_io() {
     let armed = AtomicBool::new(false);
     let rig = StallRig::start("commit-retry", move |probe, message| {
         if message.body == LAPSE && !armed.swap(true, Ordering::AcqRel) {
-            hold_reader_renewal_past(probe, Instant::now(), Duration::from_secs(21));
+            hold_seat_renewal_past(probe, Instant::now(), Duration::from_secs(21));
         }
         true
     });
-    rig.send("settle the original reader");
+    rig.send("settle the receiver");
     wait_until(
-        "the original reader's first commit",
+        "the receiver's first commit",
         Duration::from_secs(20),
         &|| rig.position().is_some_and(|offset| offset > 0),
     );
@@ -2623,7 +2624,7 @@ fn live_retry_diagnostics_distinguish_commit_lapse_from_register_io() {
     assert_eq!(first.len(), 1, "one commit refusal: {first:?}");
     assert_eq!(first[0].stall, DeliveryStall::CommitRefused);
     assert!(matches!(first[0].loss, Some(LeaseLoss::Lapsed { .. })));
-    rig.probe.release_reader_renewal();
+    rig.probe.release_seat_renewal();
     wait_until(
         "natural redelivery and commit",
         Duration::from_mins(1),
@@ -2649,7 +2650,7 @@ fn live_retry_diagnostics_distinguish_commit_lapse_from_register_io() {
 
     // Positive control: do not pass by suppressing all commit diagnostics.
     let recovered = rig.position().unwrap();
-    rig.probe.set(Fault::ReaderRegisterWriteFailsAfterLeaseLoss);
+    rig.probe.set(Fault::RegisterWriteFailsAfterSeatLoss);
     rig.send("a real register I/O refusal");
     wait_until(
         "the I/O refusal and natural recovery",
@@ -2672,22 +2673,20 @@ fn live_retry_diagnostics_distinguish_commit_lapse_from_register_io() {
     );
 }
 
-/// Hold the reader's next renewal in flight, from `armed` on, and return once
+/// Hold the seat's next renewal in flight, from `armed` on, and return once
 /// the last renewal the node answered (or the claim) was requested `past` ago.
 /// The probe stamps each renewal a moment after the lease does, so the lease's
 /// own count is never shorter than this.
-fn hold_reader_renewal_past(probe: &lease_fault::Probe, armed: Instant, past: Duration) {
+fn hold_seat_renewal_past(probe: &lease_fault::Probe, armed: Instant, past: Duration) {
     use lease_fault::{Fault, LockEvent, Outcome};
-    probe.set(Fault::ReaderRenewHeld);
+    probe.set(Fault::SeatRenewHeld);
     let deadline = armed + Duration::from_secs(30);
-    while Instant::now() < deadline && probe.reader_hold_started().is_none_or(|held| held < armed) {
+    while Instant::now() < deadline && probe.seat_hold_started().is_none_or(|held| held < armed) {
         thread::sleep(Duration::from_millis(20));
     }
-    let held = probe
-        .reader_hold_started()
-        .expect("a reader renewal was held");
+    let held = probe.seat_hold_started().expect("a seat renewal was held");
     let proven = probe
-        .reader_events()
+        .seat_events()
         .into_iter()
         .filter_map(|e| match e {
             LockEvent::Acquired(at) => Some(at),
@@ -2696,21 +2695,22 @@ fn hold_reader_renewal_past(probe: &lease_fault::Probe, armed: Instant, past: Du
         })
         .filter(|at| *at < held)
         .max()
-        .expect("the reader was claimed");
+        .expect("the seat was claimed");
     while Instant::now() < proven + past {
         thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// A commit the register write refused records no lease loss, even when the
-/// lease is lost while that write is in flight, on a REAL node through the
+/// seat is lost while that write is in flight, on a REAL node through the
 /// test-only fault boundary (both faults are INJECTED).
 ///
-/// The commit's own renewal succeeds. Its register write then fails one
-/// renewal of the reader's lock, waits until the renewal worker has hit it, and
-/// fails itself. The write is what refused the commit, so the stall is
-/// `CommitRefused` with no loss: reading the lease afterwards would find the
-/// worker's loss and give the commit a cause it did not have.
+/// The commit's own renewal succeeds. Its register write then fails one seat
+/// renewal, waits until the renewal worker has hit it, and fails itself. The
+/// write is what refused the commit, so the stall is `CommitRefused` with no
+/// loss: reading the seat afterwards would find the worker's loss and give the
+/// commit a cause it did not have. The seat is lost all the same, so the
+/// receiver lets it go and redelivers on a new grant.
 #[test]
 #[ignore = "requires the harness's real mTLS Nexus daemon"]
 fn live_commit_refused_by_its_register_write_records_no_lease_loss() {
@@ -2719,15 +2719,15 @@ fn live_commit_refused_by_its_register_write_records_no_lease_loss() {
     const M1: &str = "w1 refused by its write";
 
     let rig = StallRig::start("commit-write", |_, _| true);
-    rig.send("w0 settles the reader");
+    rig.send("w0 settles the receiver");
     wait_until(
-        "the reader to commit once",
+        "the receiver to commit once",
         Duration::from_secs(20),
         &|| rig.position().is_some_and(|p| p > 0),
     );
     let p_before = rig.position().unwrap();
     let armed = Instant::now();
-    rig.probe.set(Fault::ReaderRegisterWriteFailsAfterLeaseLoss);
+    rig.probe.set(Fault::RegisterWriteFailsAfterSeatLoss);
     rig.send(M1);
     wait_until("the commit to be refused", Duration::from_secs(45), &|| {
         !rig.stalls().is_empty()
@@ -2753,7 +2753,7 @@ fn live_commit_refused_by_its_register_write_records_no_lease_loss() {
         .probe
         .register_write_failed_at()
         .expect("the armed register write failed");
-    let renewals = rig.probe.reader_renewals();
+    let renewals = rig.probe.renewals();
     let injected: Vec<_> = renewals
         .iter()
         .filter(|r| r.outcome == Outcome::Injected)
@@ -2779,16 +2779,37 @@ fn live_commit_refused_by_its_register_write_records_no_lease_loss() {
         injected[0].requested > confirmed && injected[0].returned < failed_write,
         "the lease was lost after the commit's renewal held and before its write failed"
     );
-    assert_eq!(rig.deliveries(M1).len(), 2, "m1 is redelivered once");
-    assert!(
-        rig.probe.releases().is_empty(),
-        "the receiver seat must not be touched"
+    let m1 = rig.deliveries(M1);
+    assert_eq!(m1.len(), 2, "m1 is redelivered once");
+    let releases: Vec<_> = rig
+        .probe
+        .releases()
+        .into_iter()
+        .filter(|release| release.requested >= failed_write)
+        .collect();
+    assert_eq!(
+        releases.len(),
+        1,
+        "the receiver let the lost seat go once after the refused commit: {releases:?}"
     );
+    assert!(
+        releases[0].reached_node,
+        "not partitioned, so the release reached the node"
+    );
+    let reacquired = rig
+        .probe
+        .acquisitions()
+        .into_iter()
+        .find(|at| *at >= releases[0].requested)
+        .expect("the receiver claimed the seat again");
+    assert!(reacquired <= m1[1], "m1 is redelivered on the new grant");
 
     println!(
-        "COMMIT WRITE OK: the commit's renewal held; the worker's renewal was INJECTED to fail {:?} later and the register write failed {:?} after that; recorded CommitRefused with no lease loss; m1 redelivered once and committed past {p_before}",
+        "COMMIT WRITE OK: the commit's renewal held; the worker's renewal was INJECTED to fail {:?} later and the register write failed {:?} after that; recorded CommitRefused with no lease loss; seat released {:?} after the failed write and claimed again {:?} later; m1 redelivered once and committed past {p_before}",
         injected[0].requested.saturating_duration_since(confirmed),
         failed_write.saturating_duration_since(injected[0].returned),
+        releases[0].requested.saturating_duration_since(failed_write),
+        reacquired.saturating_duration_since(releases[0].requested),
     );
 }
 /// The receiver seat on a REAL node, through a test-only fault boundary
@@ -3710,7 +3731,33 @@ fn authorize_shared_sid_link(
     (linked_agent, linked_request)
 }
 
-fn assert_reader_commit_evidence(
+/// The one stall recorded for `peer` is the refused commit, and its loss is the
+/// commit's own failed renewal: the INJECTED I/O error, of kind `Other`.
+fn assert_refused_commit_recorded(peer: &str) {
+    use runtime::mailbox::{DeliveryStall, LeaseLoss, LeaseSite};
+    let recorded: Vec<_> = runtime::mailbox::delivery_events()
+        .into_iter()
+        .filter(|e| e.peer == peer)
+        .collect();
+    assert_eq!(
+        recorded.iter().map(|e| e.stall).collect::<Vec<_>>(),
+        vec![DeliveryStall::CommitRefused],
+        "exactly one stall, recorded as CommitRefused: {recorded:?}"
+    );
+    assert!(
+        matches!(
+            recorded[0].loss,
+            Some(LeaseLoss::RenewFailed {
+                site: LeaseSite::Confirm,
+                kind: std::io::ErrorKind::Other,
+                ..
+            })
+        ),
+        "the refused commit records its own failed renewal: {recorded:?}"
+    );
+}
+
+fn assert_refused_commit_evidence(
     probe: &lease_fault::Probe,
     delivered: &[Instant],
     acquired_before: usize,
@@ -3722,48 +3769,54 @@ fn assert_reader_commit_evidence(
     use lease_fault::Outcome;
     let (p0, p1) = positions;
     let injected: Vec<_> = probe
-        .reader_renewals()
+        .renewals()
         .into_iter()
         .filter(|r| r.requested >= armed && r.outcome == Outcome::Injected)
         .collect();
     assert_eq!(
         injected.len(),
         1,
-        "exactly one INJECTED reader renewal: {injected:?}"
+        "exactly one INJECTED seat renewal: {injected:?}"
     );
     let failed = injected[0];
     assert!(
         failed.requested >= delivered[0] && failed.returned <= delivered[1],
         "the failed renewal must be the commit's confirm(), between the two deliveries"
     );
-    let release = probe
-        .reader_releases()
+    let let_go: Vec<_> = probe
+        .releases()
         .into_iter()
-        .find(|release| release.requested >= failed.returned)
-        .expect("the tail released the reader after the refused commit");
+        .filter(|release| release.requested >= failed.returned)
+        .collect();
+    assert_eq!(
+        let_go.len(),
+        1,
+        "the receiver let the seat go once after the refused commit: {let_go:?}"
+    );
+    let release = let_go[0];
     assert!(
         release.reached_node,
         "not partitioned, so the release reached the node"
     );
     let released = release.requested;
     let reacquired = probe
-        .reader_acquisitions()
+        .acquisitions()
         .into_iter()
         .skip(acquired_before)
         .find(|at| *at >= released)
-        .expect("the tail re-acquired the reader");
+        .expect("the receiver claimed the seat again");
     assert!(
         reacquired <= delivered[1],
-        "m1 must be redelivered by the re-acquired reader"
+        "m1 must be redelivered on the new grant"
     );
     assert!(
         reacquired.saturating_duration_since(released) >= claim_delay,
         "the INJECTED claim delay must have held the window open"
     );
     let samples = samples.lock().unwrap().clone();
-    // Up to the re-acquisition, which the probe records once the lock is held
-    // and before the claim rewrites the register. A read concurrent with that
-    // write is a different question from whether the refused commit moved it.
+    // Up to the new grant, which the probe records once the seat is held and
+    // before any tail claims its register. A read concurrent with that claim
+    // is a different question from whether the refused commit moved it.
     let held: Vec<_> = samples
         .iter()
         .filter(|(start, end, _)| *start >= failed.returned && *end <= reacquired)
@@ -3781,13 +3834,9 @@ fn assert_reader_commit_evidence(
         "the refused commit must leave the durable position at {p0}: {held:?}"
     );
     assert!(p1 > p0, "the redelivered batch was committed");
-    assert!(
-        probe.releases().is_empty(),
-        "the receiver seat must not be touched"
-    );
 
     println!(
-        "BASELINE COMMIT OK: m1 delivered; ONE INJECTED reader renewal requested {:?} after that delivery and failed (the commit's confirm); commit refused, position held at {p0} in {} read-only samples; reader released {:?} and re-acquired {:?} after the failure (reached node: {reached_node}); m1 redelivered {:?} after the first delivery and committed, position {p0} -> {p1}; m1 delivered exactly twice and m0 once (resumed at the durable offset); seat untouched",
+        "COMMIT RENEWAL OK: m1 delivered; ONE INJECTED seat renewal requested {:?} after that delivery and failed (the commit's confirm); commit refused, position held at {p0} in {} read-only samples; seat released {:?} and claimed again {:?} after the failure (reached node: {reached_node}); m1 redelivered {:?} after the first delivery and committed, position {p0} -> {p1}; m1 delivered exactly twice and m0 once (resumed at the durable offset)",
         failed.requested.saturating_duration_since(delivered[0]),
         held.len(),
         released.saturating_duration_since(failed.returned),

@@ -865,7 +865,7 @@ therefore do not establish scode commit behaviour.
 after building. It exercises ACP/MCP refusals, serialized ACKs, migration,
 paged native observations and owner reopens with protocol peers. It does not
 replace the actual native PTY cases or the remaining crash, compaction,
-reader-lease and Node enrollment acceptance.
+receiver-seat and Node enrollment acceptance.
 The close-drain process case holds an ACK inside an actual ACP child while its
 root unloads, then requires the original response and one commit before the
 child is closed. Its native endpoint and mailbox contents are protocol fixtures.

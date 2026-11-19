@@ -20,6 +20,14 @@ function check(label) {
   for (let i = 0; i < 70; i++)
     assert.equal(countRows(text, `Earlier history line ${i}`),
       1, `${label}: history ${i} was lost or duplicated\n${text}`);
+  // The resumed prompt's echo is shaded to the edge it was laid out at. Its
+  // fill must be erased, not written: written spaces are text and reflow into
+  // extra shaded rows when the terminal narrows.
+  const buffer = terminal.buffer.active;
+  for (let y = 0; y + 1 < buffer.length; y++) {
+    if (buffer.getLine(y).translateToString(true).includes('❯ Saved resize conversation'))
+      assert(!buffer.getLine(y + 1).isWrapped, `${label}: the shaded echo reflowed into extra rows\n${text}`);
+  }
   console.log(JSON.stringify({ label, history: 70, chrome: 1, draft: true }));
 }
 async function queuedPeer() {

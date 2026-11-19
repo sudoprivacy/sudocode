@@ -1,6 +1,6 @@
 //! Terminal columns, grapheme boundaries and style-preserving line layout.
 
-use std::{borrow::Cow, ops::Range};
+use std::{borrow::Cow, fmt::Write as _, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -185,6 +185,88 @@ pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) ->
             output
         })
         .collect()
+}
+
+/// A history line with its background padding erased instead of written.
+/// `wrap_ansi_with_indent` pads a background-coloured row to the full width
+/// with spaces in that colour. The terminal holds those spaces as text, so
+/// when it narrows each such row wraps into blank shaded rows. When a line
+/// reaches the terminal's edge (`width`) and ends in spaces that carry one
+/// background, the spaces become that background and EL. The terminal
+/// paints the same colour to the edge, and erased cells never wrap. This is
+/// the rule iocraft applies to a live frame's shaded tail (`erased_tail`),
+/// applied here where history leaves scode. Any other line comes back
+/// unchanged: one narrower than `width` (EL would colour past it), one laid
+/// out for another width, or one with controls other than SGR and links.
+pub(crate) fn erase_filled_tail(line: &str, width: usize) -> Cow<'_, str> {
+    if !line.contains('\x1b') || !only_styles_and_links(line) {
+        return Cow::Borrowed(line);
+    }
+    let styled = StyledText::from_ansi(line);
+    let end = styled.text.len();
+    let start = styled.text.trim_end_matches(' ').len();
+    if start == end || display_width(&styled.text) != width {
+        return Cow::Borrowed(line);
+    }
+    let mut background = None;
+    for (style, _, link) in styled.rich_spans(start..end) {
+        let Some(color) = style.background_color else {
+            return Cow::Borrowed(line);
+        };
+        if link.is_some() || background.is_some_and(|other| other != color) {
+            return Cow::Borrowed(line);
+        }
+        background = Some(color);
+    }
+    let Some(background) = background else {
+        return Cow::Borrowed(line);
+    };
+    let mut erased = String::with_capacity(line.len());
+    styled.write_ansi(0..start, &mut erased);
+    let _ = write!(
+        erased,
+        "{}\x1b[K{}",
+        crossterm::style::SetBackgroundColor(background),
+        super::RESET
+    );
+    Cow::Owned(erased)
+}
+
+/// Whether every control in `line` is SGR or an OSC 8 hyperlink, the only ones
+/// a styled row carries. Rewriting any other line could drop its controls.
+fn only_styles_and_links(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => match bytes.get(index + 1) {
+                Some(b'[') => {
+                    let Some(length) = bytes[index + 2..]
+                        .iter()
+                        .position(|b| (0x40..=0x7e).contains(b))
+                    else {
+                        return false;
+                    };
+                    if bytes[index + 2 + length] != b'm' {
+                        return false;
+                    }
+                    index += length + 3;
+                }
+                Some(b']') if bytes[index + 2..].starts_with(b"8;") => {
+                    let rest = &bytes[index + 2..];
+                    let Some(end) = rest.iter().position(|b| *b == 0x07 || *b == 0x1b) else {
+                        return false;
+                    };
+                    index += 2 + end + if rest[end] == 0x07 { 1 } else { 2 };
+                }
+                _ => return false,
+            },
+            b'\r' => return false,
+            byte if byte < 0x20 && byte != b'\t' => return false,
+            _ => index += 1,
+        }
+    }
+    true
 }
 
 /// [`wrap_line_with_indent`] for prose: rows end between words. A row ends

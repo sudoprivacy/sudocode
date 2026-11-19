@@ -5,6 +5,14 @@ cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . ./lib.sh
 
+prepare_only=false
+if [ "$#" -eq 1 ] && [ "$1" = --prepare-only ]; then
+  prepare_only=true
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: $0 [--prepare-only]" >&2
+  exit 2
+fi
+
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 AUTHON_PORT="${NEXUS_A2A_MANAGED_PORT:-2145}"
 AUTHON_ZONE="${NEXUS_A2A_ZONE:-sharedzone}"
@@ -15,7 +23,12 @@ BUILD=(cargo_in_workspace build "${MANIFEST[@]}" --locked -q --bins -p rusty-sud
 if [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ]; then
   BUILD+=(-p mock-anthropic-service)
 fi
+echo "A2A_MANAGED_CARGO_BEGIN prepare_only=$prepare_only"
 "${BUILD[@]}"
+echo "A2A_MANAGED_CARGO_END prepare_only=$prepare_only"
+if $prepare_only; then
+  exit 0
+fi
 MANAGED_TARGET_DIR="$(cargo_in_workspace metadata "${MANIFEST[@]}" --locked --format-version 1 --no-deps \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 SCODE_BIN="$MANAGED_TARGET_DIR/debug/scode"

@@ -301,6 +301,7 @@ mod numbered_choice_tests {
         };
         assert_eq!(values("3,1"), Some(vec!["c", "a"]));
         assert_eq!(values(" 2  3 "), Some(vec!["b", "c"]));
+        assert_eq!(values("1,1,2"), Some(vec!["a", "b"]), "each option once");
         assert_eq!(values("1,4"), None, "every number must name an option");
         assert_eq!(values("a"), None);
         assert_eq!(values(""), None);
@@ -309,7 +310,8 @@ mod numbered_choice_tests {
 
 impl QuestionField {
     /// The options a typed list of option numbers such as `1,3` or `1 3`
-    /// chooses, in that order; `None` unless every entry names an option.
+    /// chooses, in that order and each once; `None` unless every entry names
+    /// an option.
     #[must_use]
     pub fn numbered_choices(&self, answer: &str) -> Option<Vec<&QuestionOption>> {
         let chosen = answer
@@ -321,8 +323,14 @@ impl QuestionField {
                     .and_then(|number| number.checked_sub(1))
                     .and_then(|index| self.options.get(index))
             })
-            .collect::<Option<Vec<_>>>()?;
-        (!chosen.is_empty()).then_some(chosen)
+            .collect::<Option<Vec<&QuestionOption>>>()?;
+        let mut unique: Vec<&QuestionOption> = Vec::with_capacity(chosen.len());
+        for option in chosen {
+            if !unique.iter().any(|kept| std::ptr::eq(*kept, option)) {
+                unique.push(option);
+            }
+        }
+        (!unique.is_empty()).then_some(unique)
     }
 }
 

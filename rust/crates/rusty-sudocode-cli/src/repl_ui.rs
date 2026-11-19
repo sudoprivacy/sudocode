@@ -166,10 +166,20 @@ impl QuestionPromptView {
     }
 
     /// An earlier answer that was typed rather than picked from the options.
-    fn initial_text(&self) -> Option<&str> {
+    fn initial_text(&self) -> Option<String> {
+        if self.multi_select {
+            // A typed answer sent with the chosen options: the value no option has.
+            let values = self
+                .initial_value
+                .as_deref()
+                .and_then(multi_select_values)?;
+            return values
+                .into_iter()
+                .find(|value| !self.options.iter().any(|option| &option.value == value));
+        }
         self.initial_value
-            .as_deref()
-            .filter(|_| !self.multi_select && self.initial_option().is_none())
+            .clone()
+            .filter(|_| self.initial_option().is_none())
     }
 
     /// The options an earlier multi-select answer chose.
@@ -268,8 +278,7 @@ impl FuzzySelectState {
         let filter = question
             .initial_text()
             .filter(|_| question.allow_custom_input)
-            .unwrap_or_default()
-            .to_string();
+            .unwrap_or_default();
         let mut state = Self {
             question,
             filter,
@@ -1587,8 +1596,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     }
                                 } else {
                                     if question.multi_select {
+                                        let raw = dialpad_input.read().clone();
+                                        let typed = expand_paste_placeholders(&raw, &paste_store.read()).0;
                                         if let Some(answer) =
-                                            question.multi_answer(&dialpad_checked.read(), Some(selected), "")
+                                            question.multi_answer(&dialpad_checked.read(), Some(selected), &typed)
                                         {
                                             let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(answer));
                                         }
@@ -1745,7 +1756,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         toggle_choice(&mut dialpad_checked.write(), dialpad_cursor.get());
                     }
                     KeyCode::Char(' ')
-                        if matches!(current_slot, InputSlot::FuzzySelect(ref fs) if fs.question.multi_select)
+                        if matches!(current_slot, InputSlot::FuzzySelect(ref fs)
+                            if fs.question.multi_select && !fs.filtered.is_empty())
                             && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
                         let mut slot = input_slot.write();
@@ -2058,7 +2070,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     question.initial_cursor()
                                 };
                                 dialpad_cursor.set(cursor);
-                                dialpad_input.set(question.initial_text().unwrap_or_default().to_string());
+                                dialpad_input.set(question.initial_text().unwrap_or_default());
                                 dialpad_checked.set(question.initial_checked());
                                 InputSlot::DialPad(question)
                             };
@@ -3199,6 +3211,18 @@ mod tests {
         );
         assert_eq!(multi_select_values(r#"["a","b"]"#), None);
         assert_eq!(multi_select_values("project"), None);
+    }
+
+    #[test]
+    fn going_back_restores_a_typed_answer_sent_with_the_choices() {
+        let mut question = multi_select_question();
+        question.allow_custom_input = true;
+        question.initial_value = Some(multi_select_answer(&[
+            "user".to_string(),
+            "typed text".to_string(),
+        ]));
+        assert_eq!(question.initial_checked(), BTreeSet::from([1]));
+        assert_eq!(question.initial_text().as_deref(), Some("typed text"));
     }
 
     #[test]

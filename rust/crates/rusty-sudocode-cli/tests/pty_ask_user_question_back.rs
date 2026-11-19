@@ -286,8 +286,8 @@ fn a_multi_select_question_sends_every_chosen_option() {
         .map(|n| json!({"label":format!("ManyOption{n}"), "value":format!("many{n}")}))
         .collect::<Vec<_>>();
     let input = json!({"questions":[
-        {"id":"few", "prompt":"PICK_SEVERAL", "kind":"multi_select", "allowCustomInput":false, "options":few},
-        {"id":"many", "prompt":"PICK_FROM_MANY", "kind":"multi_select", "allowCustomInput":false, "options":many}
+        {"id":"few", "prompt":"PICK_SEVERAL", "kind":"multi_select", "options":few},
+        {"id":"many", "prompt":"PICK_FROM_MANY", "kind":"multi_select", "options":many}
     ]});
     let prompt = env.tool_batch_prompt(
         &json!([{"id":"question-multi", "name":"AskUserQuestion", "input":input}]),
@@ -326,13 +326,24 @@ fn a_multi_select_question_sends_every_chosen_option() {
             && marked[1].ends_with("OptionGamma"),
         "chosen rows are marked:\n{chosen}"
     );
+    // A typed answer goes with the chosen options, even when Enter is
+    // pressed back on an option row.
+    sess.send("extra").unwrap();
+    expect_area(&env, &sess, "extra");
+    sess.send(UP).unwrap();
     sess.send("\r").unwrap();
 
     // Going back restores the chosen options.
     expect_question(&env, &sess, "PICK_FROM_MANY");
     sess.send(LEFT).unwrap();
     expect_question(&env, &sess, "PICK_SEVERAL");
-    expect_area(&env, &sess, "(2 chosen)");
+    let restored = expect_area(&env, &sess, "(2 chosen)");
+    assert!(
+        restored
+            .lines()
+            .any(|line| line.trim_start().starts_with("> [+]") && line.contains("extra")),
+        "the typed answer is restored on its row:\n{restored}"
+    );
     sess.send("\r").unwrap();
 
     // The filterable list chooses with Space too.
@@ -340,6 +351,9 @@ fn a_multi_select_question_sends_every_chosen_option() {
     assert!(long.contains("(0 chosen)"), "long list hints:\n{long}");
     sess.send(&format!("{DOWN} {DOWN} ")).unwrap();
     expect_area(&env, &sess, "(2 chosen)");
+    // Once the filter matches nothing, a space is part of the typed answer.
+    sess.send("zz top").unwrap();
+    expect_area(&env, &sess, "filter: zz top");
     sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &turn, env.timeout(), "multi-select answered");
 
@@ -349,8 +363,10 @@ fn a_multi_select_question_sends_every_chosen_option() {
         json!([
             {"id":"few", "value":"alpha", "label":"OptionAlpha"},
             {"id":"few", "value":"gamma", "label":"OptionGamma"},
+            {"id":"few", "value":"extra", "label":"extra"},
             {"id":"many", "value":"many2", "label":"ManyOption2"},
-            {"id":"many", "value":"many3", "label":"ManyOption3"}
+            {"id":"many", "value":"many3", "label":"ManyOption3"},
+            {"id":"many", "value":"zz top", "label":"zz top"}
         ])
     );
     assert_eq!(result["questions"][0]["kind"], "multi_select");

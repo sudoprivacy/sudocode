@@ -204,7 +204,12 @@ pub(crate) fn run_with_io(
                 writeln!(out, "  {}. {}", index + 1, option.label)?;
             }
             let multi_select = field.kind == QuestionKind::MultiSelect;
-            if multi_select {
+            if multi_select && field.allow_custom_input {
+                write!(
+                    out,
+                    "Your choices (option numbers such as 1,3, or type your own): "
+                )?;
+            } else if multi_select {
                 write!(out, "Your choices (option numbers such as 1,3): ")?;
             } else if field.allow_custom_input {
                 write!(out, "Your answer (choose an option or type your own): ")?;

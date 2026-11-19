@@ -4417,10 +4417,10 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
                 println!("  [{}] {}", idx + 1, option.label);
             }
             let multi_select = field.kind == runtime::QuestionKind::MultiSelect;
-            let trimmed = prompt_choice_line(if multi_select {
-                "Your choices (e.g. 1,3): "
-            } else {
-                "Your choice: "
+            let trimmed = prompt_choice_line(match (multi_select, field.allow_custom_input) {
+                (true, true) => "Your choices (e.g. 1,3), or type your own: ",
+                (true, false) => "Your choices (e.g. 1,3): ",
+                (false, _) => "Your choice: ",
             })?;
             let trimmed = trimmed.as_str();
             if let Some(chosen) = field.numbered_choices(trimmed).filter(|_| multi_select) {

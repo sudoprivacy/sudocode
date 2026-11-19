@@ -2039,6 +2039,34 @@ the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44605182586">m
 passed on all four platforms in 97 assigned runner seconds combined.
 This SDK-only change falls outside the fixed Rust-source cohort.
 The whole-lifecycle one-tenth target remains unproven.</p>
+<p><strong>Periodic native dependency-cache lookup.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1534">PR #1534</a>
+aligned the periodic workspace checkout and compiler-key adapter with the main
+publisher. All three jobs in the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44623303864">original PR-triggered run</a>
+restored exact keys. Ubuntu passed in 749 assigned runner seconds and macOS
+passed in 1,483. The Windows complementary journeys passed, then the full
+workspace stopped after a terminal-border assertion failed. The original
+nextest log identifies one assertion failure and seven immediately terminated
+peers. The previous successful periodic run took 737s on Ubuntu and 1,557s on
+macOS. Different source revisions and assignments limit this comparison to
+the observed durations. Windows full-workspace timing remains open.</p>
+<p><strong>Hosted service-journey scheduling.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1535">PR #1535</a>
+starts the two independent service journeys concurrently after the original
+Cargo preparation and gives each its own temporary directory. Both original
+journeys, their assertions, deadlines and individual logs are required. The
+author-host path stays sequential. On one Windows host with the same published
+<a href="https://github.com/sudoprivacy/sudocode/releases/tag/v0.2.44">v0.2.44 CLI</a>
+and pinned grpcurl, the original serial journeys took 118.781s in total across
+two leases and the parallel launch-to-last-exit took 62.017s. Fifteen observations
+confirmed simultaneous listeners on separate ports. The supported Windows and
+Docker guard passed on the final source. The released-binary comparison covers
+these two journeys. The earlier Windows hosted complement ran these same
+entry points sequentially in 58.891s and 82.297s, for 141.188s of process
+execution. That is the hosted serial reference. A hosted concurrent run must
+measure first launch through last exit. Hosted and whole-lifecycle timing
+remain open.</p>
 <p><strong>Stronger signed author progress.</strong> Automatic exact-source
 resume now prefers an older signed record that proves a strict superset of
 currently required, compatible profiles. In a replay of original #1510

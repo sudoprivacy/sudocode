@@ -524,6 +524,7 @@ except subprocess.TimeoutExpired:
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
         "51b69bebd2b48ed2b2fc90552c624a525d61f9db280ae1599e16b53bcf62bd83",
         "5a1503cd97bac0fb7ec58689f14b64530d2c564606a91484cecca76fd380ea14",
+        "8d2689e3285deeb2e17695bb58f28a93b584365a3aae8f59e34bc99ed41fbe41",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -1736,35 +1737,54 @@ def publish(head, envelope, remote, note_ref=NOTE_REF, store=None):
     # Use a private temporary notes ref. Fetch+lease retries preserve evidence
     # another author publishes concurrently; never overwrite their notes tree.
     temporary = f"refs/notes/scode-publish-{os.getpid()}"
+
+    def tls_connect_eof(message):
+        message = message.lower()
+        return "tls connect error:" in message and "unexpected eof while reading" in message
+
     try:
-        for _attempt in range(5):
-            previous = remote_note_tip(remote, note_ref)
-            if previous:
-                git("fetch", "--no-tags", remote, f"+{note_ref}:{temporary}")
-                # The fetch may observe a newer tip than the preceding query.
-                # Lease exactly the notes tree this attempt actually extends.
-                previous = value("rev-parse", temporary)
-            else:
-                git("update-ref", "-d", temporary)
-            notes = read_note(head, temporary)
-            notes["attestations"][envelope["signer"]] = envelope
-            # Store each earlier envelope any current attestation references
-            # exactly once; drop those only a replaced attestation used.
-            kept = carried_store(notes["attestations"].values(), {**notes.get("envelopes", {}), **(store or {})})
-            if kept:
-                notes["envelopes"] = kept
-            else:
-                notes.pop("envelopes", None)
-            git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
-            result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
-                         f"{temporary}:{note_ref}", check=False)
-            if result.returncode == 0:
-                return
-            # Both client-side stale leases and receive-pack transaction races
-            # mean the remote advanced. Compare state instead of Git's wording;
-            # unrelated failures with an unchanged ref remain immediate errors.
-            if remote_note_tip(remote, note_ref) == previous:
-                raise RuntimeError(result.stderr.decode(errors="replace"))
+        for attempt in range(5):
+            try:
+                previous = remote_note_tip(remote, note_ref)
+                if previous:
+                    git("fetch", "--no-tags", remote, f"+{note_ref}:{temporary}")
+                    # Lease the tree the fetch actually observed.
+                    previous = value("rev-parse", temporary)
+                else:
+                    git("update-ref", "-d", temporary)
+                notes = read_note(head, temporary)
+                notes["attestations"][envelope["signer"]] = envelope
+                # Keep each envelope still referenced by an attestation once.
+                kept = carried_store(notes["attestations"].values(), {**notes.get("envelopes", {}), **(store or {})})
+                if kept:
+                    notes["envelopes"] = kept
+                else:
+                    notes.pop("envelopes", None)
+                git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
+                result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
+                             f"{temporary}:{note_ref}", check=False)
+                if result.returncode == 0:
+                    return
+                message = result.stderr.decode(errors="replace")
+                try:
+                    current = remote_note_tip(remote, note_ref)
+                except RuntimeError as read_error:
+                    if not tls_connect_eof(message):
+                        raise RuntimeError(message) from read_error
+                    raise
+                if current == previous:
+                    raise RuntimeError(message)
+                if tls_connect_eof(message) and current == value("rev-parse", temporary):
+                    print("Acceptance note reached the remote before the Git TLS connection closed.", flush=True)
+                    return
+                # A different remote tip can be a concurrent receive transaction.
+                # Retry from that tree without overwriting its original notes.
+            except RuntimeError as error:
+                if not tls_connect_eof(str(error)) or attempt == 4:
+                    raise
+                print("Git TLS connection closed during acceptance note publication; retrying the same signed evidence.",
+                      flush=True)
+                time.sleep(0.5 * (attempt + 1))
         raise RuntimeError("Concurrent acceptance publishers: retry the push")
     finally:
         git("update-ref", "-d", temporary)

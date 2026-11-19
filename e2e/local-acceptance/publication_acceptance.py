@@ -1,6 +1,7 @@
 """Exercise event ordering through real publisher processes, HTTP, Git and SSH notes."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -386,8 +387,67 @@ def verify_note_reference_race(directory, clean_environment):
     assert rejected.returncode != 0 and len(refusals) == 1, refusals
     assert "publication denied by fixture" in refusals[0]["stderr"], refusals
     assert git("rev-parse", notes_ref, cwd=origin) == final_tip
+
+    # Inject the observed Git client error at the transport boundary. Every
+    # successful lookup, fetch and push still talks to the private bare remote.
+    receive.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("notes_transport_fixture",
+        SOURCE / ".github/scripts/local_acceptance.py")
+    publisher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(publisher)
+    publisher.ROOT = work
+    error = (b"fatal: unable to access 'https://github.com/fixture/repo.git/': TLS connect error: "
+             b"error:0A000126:SSL routines::unexpected eof while reading\n")
+    transport = []
+    for case, operation, loss_after_push, persistent, expected_pushes in [
+        ("read-eof", "ls-remote", False, False, 1),
+        ("fetch-eof", "fetch", False, False, 1),
+        ("push-before-update-eof", "push", False, False, 2),
+        ("push-after-update-eof", "push", True, False, 1),
+        ("persistent-eof", "ls-remote", False, True, 0),
+        ("refused-with-readback-eof", "ls-remote", False, False, 1),
+    ]:
+        calls = []
+        signer = "transport-" + case
+        before = git("rev-parse", notes_ref, cwd=origin)
+        refused = case == "refused-with-readback-eof"
+        if refused:
+            receive.write_text('#!/bin/sh\nprintf "publication denied by fixture\\n" >&2\nexit 1\n',
+                               encoding="utf-8")
+
+        def observed(*args, root=None, data=None, check=True):
+            calls.append(args[0])
+            injected = args[0] == operation and (persistent or calls.count(operation) == (2 if refused else 1))
+            if not injected or loss_after_push:
+                result = subprocess.run(["git", *args], cwd=root or work, env=git_environment, input=data,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if injected:
+                if loss_after_push:
+                    assert result.returncode == 0, result.stderr
+                result = subprocess.CompletedProcess(args, 128, b"", error)
+            if check and result.returncode:
+                raise RuntimeError(result.stderr.decode(errors="replace").strip())
+            return result
+
+        publisher.git = observed
+        try:
+            publisher.publish(head, {"signer": signer, "payload": "opaque transport fixture data"}, "origin")
+        except RuntimeError as problem:
+            explanation = "publication denied by fixture" if refused else "unexpected eof while reading"
+            assert (persistent or refused) and explanation in str(problem), (case, problem)
+            assert calls.count(operation) == (2 if refused else 5)
+            assert git("rev-parse", notes_ref, cwd=origin) == before
+        else:
+            assert not persistent and not refused, case
+            final = json.loads(git("notes", "--ref=" + notes_ref, "show", head, cwd=origin))["attestations"]
+            assert final[signer]["payload"] == "opaque transport fixture data"
+            assert final[other["signer"]] == other
+        assert calls.count("push") == expected_pushes, (case, calls)
+        transport.append({"case": case, "git_operations": calls, "pushes": expected_pushes})
+
     (output / "result.json").write_text(json.dumps({"status": "PASS", "head": head,
         "before": previous, "concurrent": concurrent, "pushes": pushes, "stable_refusals": refusals,
+        "transport": transport,
         "scope": "Real Git receive-pack ref race and note preservation; no acceptance attestation or product test credit."},
         indent=2) + "\n", encoding="utf-8")
     print("PASS: real receive transaction race preserves concurrent notes and publishes the intended note")

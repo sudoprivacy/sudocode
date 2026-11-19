@@ -105,8 +105,31 @@ pub fn record(name: &str) {
         std::fs::create_dir_all(&observed).unwrap();
         let marker = active.join(std::process::id().to_string());
         std::fs::write(&marker, name).unwrap();
+        let minimum = std::env::var("SCODE_GROUP_POOL_MINIMUM")
+            .map_or(1, |value| value.parse::<usize>().unwrap());
+        let mut arrival_count = 0;
+        if minimum > 1 {
+            // The higher-pool controls need real simultaneously active
+            // workers. Keep arrivals live until one observes the original
+            // lower bound, even if the runner starts children unevenly.
+            let ready = pool.join("minimum-observed");
+            let started = std::time::Instant::now();
+            while !ready.exists() {
+                let count = std::fs::read_dir(&active).unwrap().count();
+                if count >= minimum {
+                    arrival_count = count;
+                    std::fs::write(&ready, []).unwrap();
+                    break;
+                }
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "pool never reached {minimum} concurrently active processes; observed {count}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let count = std::fs::read_dir(&active).unwrap().count();
+        let count = arrival_count.max(std::fs::read_dir(&active).unwrap().count());
         std::fs::write(observed.join(name), count.to_string()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
         std::fs::remove_file(marker).unwrap();
@@ -255,8 +278,15 @@ pub fn record(name: &str) {
     def execute(arguments, cwd, log, extra=None):
         return helper.run_command(arguments, cwd, log, {**environment, **(extra or {})})
 
+    cpus = os.cpu_count() or 0
+    hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
+                        and profiles.supports_hosted_eight_workers(root))
+    hosted_minimum = 3 if platform.system() == "Darwin" else 4
+    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= hosted_minimum) else 4
+    default_minimum = 5 if expected_workers == 8 else 1
     explicit_workers = os.environ.pop("SCODE_ACCEPTANCE_TEST_THREADS", None)
     environment["SCODE_GROUP_POOL_DIR"] = str(output / "default-pool")
+    environment["SCODE_GROUP_POOL_MINIMUM"] = str(default_minimum)
     try:
         with patch.dict(os.environ, {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]}):
             dispatched = profiles.run("native-workspace", root, output / "production-workspace", base, execute)
@@ -264,6 +294,7 @@ pub fn record(name: &str) {
         assert legacy[legacy.index("--test-threads") + 1] == "4"
         os.environ["SCODE_ACCEPTANCE_TEST_THREADS"] = "4"
         environment["SCODE_GROUP_POOL_DIR"] = str(output / "limited-pool")
+        environment["SCODE_GROUP_POOL_MINIMUM"] = "1"
         limited = profiles.workspace_nextest_options(output, True, False)
         command(str(executable), "nextest", "run", *limited, "--workspace", "--locked", *integration_arguments)
     finally:
@@ -275,14 +306,9 @@ pub fn record(name: &str) {
     actual = next(row["command"] for row in dispatched if "nextest" in row["command"] and "run" in row["command"])
     assert "--lib" not in actual and "--bins" not in actual
     assert actual[-len(integration_arguments):] == integration_arguments
-    cpus = os.cpu_count() or 0
-    hosted_qualified = (os.environ.get("GITHUB_ACTIONS") == "true"
-                        and profiles.supports_hosted_eight_workers(root))
-    hosted_minimum = 3 if platform.system() == "Darwin" else 4
-    expected_workers = 8 if cpus >= 8 or (hosted_qualified and cpus >= hosted_minimum) else 4
     assert actual[actual.index("--test-threads") + 1] == str(expected_workers)
     observed_workers = {}
-    for label, lower, upper in [("default-pool", 5 if expected_workers == 8 else 1, expected_workers),
+    for label, lower, upper in [("default-pool", default_minimum, expected_workers),
                                 ("limited-pool", 1, 4)]:
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())
@@ -315,6 +341,7 @@ pub fn record(name: &str) {
                 output, True, hosted_source_ready=source_ready)
         assert controlled[controlled.index("--test-threads") + 1] == str(expected_count)
         environment["SCODE_GROUP_POOL_DIR"] = str(output / label)
+        environment["SCODE_GROUP_POOL_MINIMUM"] = str(minimum)
         command(str(executable), "nextest", "run", *controlled, "--workspace", "--locked", *integration_arguments)
         observed = output / label / "observed"
         maximum = max(int(path.read_text()) for path in observed.iterdir())

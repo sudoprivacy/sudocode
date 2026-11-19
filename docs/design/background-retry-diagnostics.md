@@ -80,7 +80,7 @@ lease lapsed, moved to another holder or answered too late: the captured
 errors returned by the commit's own confirmation retain that returned message.
 If the background worker already lost the lease, the commit returns a generic
 ownership-loss message; its typed loss retains the worker's error kind, site and
-timing, not the original I/O error text. Reader/seat-loss causes remain visible
+timing, not the original I/O error text. Seat-loss causes remain visible
 through the existing status and tracing channel; they are distinct from the
 aggregated transport reconnect records. The real-node
 composition fixture checks both a lapse without an I/O failure and a subsequent register

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { closeSync, createReadStream, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
   realpathSync, unlinkSync, writeSync } from 'node:fs';
 import { rename } from 'node:fs/promises';
@@ -212,12 +212,22 @@ export interface NativeRoot { id: string; cwd: string; frontend: 'codex' | 'clau
 /** The enrollment authority's answer for one claim (see enrollCodexAgent). */
 export interface ProvisionedAgent { actor: string; configFile: string; workspaceBinding?: CodexWorkspaceBinding }
 
-/** Return the root's durable binding, persisting a new pending one first. A new
- * actor is `<frontend>-<32 hex>`, the only names operator enrollment issues. */
+/** Names operator enrollment issues: `<frontend>-<32 hex>` (before readable
+ * names) or `<frontend>-<workspace slug>-<8 hex>`. */
+export const ENROLLED_ACTOR = /^(?:codex|claude)-(?:[0-9a-f]{32}|[a-z0-9][a-z0-9-]{0,23}-[0-9a-f]{8})$/;
+
+/** A new actor names its workspace folder so a peer list shows who it is. */
+export function mintActor(root: NativeRoot): string {
+  const slug = path.win32.basename(root.cwd).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '').slice(0, 24).replace(/-+$/, '') || 'workspace';
+  return `${root.frontend}-${slug}-${randomBytes(4).toString('hex')}`;
+}
+
+/** Return the root's durable binding, persisting a new pending one first. */
 export async function claimBinding(directory: string, bindings: Map<string, CodexBinding>, root: NativeRoot): Promise<CodexBinding> {
   const existing = bindings.get(root.id);
   if (existing) return existing;
-  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: `${root.frontend}-${randomUUID().replaceAll('-', '')}`,
+  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: mintActor(root),
     operationId: randomUUID(), threadId: root.id, workspace: root.cwd,
     canonicalWorkspace: canonicalWorkspace(root.cwd), state: 'pending' };
   // Persist the original operation BEFORE asking any enrollment authority.

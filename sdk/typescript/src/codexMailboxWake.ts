@@ -41,6 +41,8 @@ export function mailboxSubmissionTextBudget(actor: string, threadId: string, enc
 export interface CodexMailboxSnapshot {
   loaded: boolean;
   idle: boolean;
+  /** The lost-submission timer may accrue while this snapshot holds. */
+  recoveryIdle: boolean;
   queueEmpty: boolean;
   epoch: string;
   queued: ReadonlySet<string>;
@@ -88,22 +90,30 @@ async function paginatedWakeHistory(pages: PageReader, threadId: string, finishe
     inputs.set(id, ids);
     return ids;
   }
-  let epoch = 'none';
-  for (const entry of turns) {
+  let epochIndex = turns.length;
+  for (const [index, entry] of turns.entries()) {
     if (entry.status === 'completed' && (await readInputs(entry.id)).some(id => !id || !isWake(id))) {
-      epoch = entry.id;
+      epochIndex = index;
       break;
     }
   }
+  const epoch = turns[epochIndex]?.id ?? 'none';
   const remaining = finishedIds && new Set(finishedIds(epoch)), running = new Set<string>(), finished = new Set<string>();
-  for (const entry of turns) {
+  let blocksRecovery = false;
+  for (const [index, entry] of turns.entries()) {
     if (entry.status === 'inProgress') {
-      for (const id of await readInputs(entry.id)) if (id) running.add(id);
+      for (const id of await readInputs(entry.id)) {
+        if (!id) continue;
+        running.add(id);
+        // Native can retain inProgress headers across completed human turns.
+        // Keep their IDs for reconciliation. A wake of any age still blocks.
+        if (index < epochIndex || isWake(id)) blocksRecovery = true;
+      }
     } else if (!remaining || remaining.size) {
       for (const id of await readInputs(entry.id)) if (id && (!remaining || remaining.delete(id))) finished.add(id);
     }
   }
-  return { epoch, running, finished };
+  return { epoch, running, finished, blocksRecovery };
 }
 
 /** Read every page. A malformed, repeated or overlarge cursor walk refuses;
@@ -123,7 +133,7 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
     throw new Error('Native mailbox inventory is incomplete after 10000 pages');
   };
   const loaded = await pages('thread/loaded/list', {}, value => z.object({ data: z.array(nonempty), nextCursor: cursor }).parse(value));
-  if (!loaded.includes(threadId)) return { loaded: false, idle: false, queueEmpty: false, epoch: 'none',
+  if (!loaded.includes(threadId)) return { loaded: false, idle: false, recoveryIdle: false, queueEmpty: false, epoch: 'none',
     queued: new Set(), running: new Set(), finished: new Set() };
   const queue = await pages('thread/queue/list', { threadId }, value => z.object({
     data: z.array(z.object({ id: nonempty, clientUserMessageId: nonempty })), nextCursor: cursor,
@@ -131,10 +141,11 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
   const queued = new Set(queue.map(row => row.clientUserMessageId));
   const metadata = await readCodexMailboxThread(native, threadId, false);
   if (metadata.historyMode === 'paginated') {
-    const history = await paginatedWakeHistory(pages, threadId, finishedIds);
+    const { blocksRecovery, ...history } = await paginatedWakeHistory(pages, threadId, finishedIds);
     const fresh = await readCodexMailboxThread(native, threadId, false);
     if (fresh.historyMode !== 'paginated') throw new Error('Native mailbox history mode changed during observation');
     return { ...history, loaded: fresh.status.type !== 'notLoaded', idle: fresh.status.type === 'idle',
+      recoveryIdle: metadata.status.type === 'idle' && fresh.status.type === 'idle' && !queue.length && !blocksRecovery,
       queueEmpty: queue.length === 0, queued };
   }
   const turns = await pages('thread/turns/list', { threadId, sortDirection: 'desc', itemsView: 'full' },
@@ -156,6 +167,7 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
     if (inputs.some(id => !id || !isWake(id))) { epoch = value.id; break; }
   }
   return { loaded: thread.status.type !== 'notLoaded', idle: thread.status.type === 'idle',
+    recoveryIdle: thread.status.type === 'idle' && !queue.length && !running.size,
     queueEmpty: queue.length === 0, epoch, queued, running, finished };
 }
 
@@ -213,7 +225,7 @@ export function openCodexMailboxWake(options: {
         });
         if (closed) return;
         if (!view.loaded) { idleSince = undefined; status = { state: 'waiting' }; return; }
-        if (view.idle && view.queueEmpty && !view.running.size) idleSince ??= performance.now();
+        if (view.recoveryIdle) idleSince ??= performance.now();
         else idleSince = undefined;
         if ([...view.queued, ...view.running].some(isWake)) { status = { state: 'waiting' }; return; }
         let exhausted: CodexMailboxWakeStatus | undefined;

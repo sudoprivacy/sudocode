@@ -239,6 +239,15 @@ const RECONCILE_WAIT_MS: u64 = 1_000;
 /// How much of the conversation an append-error check may read.
 const RECONCILE_MAX_BYTES: usize = 8 << 20;
 
+/// What looking for one send in a conversation found.
+enum SendSearch {
+    Found,
+    /// Not there when checked, for this reason. It may still commit.
+    Missing(&'static str),
+    /// The conversation could not be read.
+    Unreadable(String),
+}
+
 /// The envelopes in one `tail_read` chunk: a single frame, or JSONL lines.
 fn envelopes_in(data: &[u8]) -> Vec<MailboxEnvelope> {
     MailboxEnvelope::from_bytes(data).map_or_else(
@@ -404,6 +413,10 @@ pub struct Mailbox {
     /// transport, so a frame's `from` is the writer's identity rather than its
     /// claim. Set by the constructor that knows: never by a sender.
     authenticated_senders: bool,
+    /// Sends whose delivery could not be confirmed, until a retry settles them.
+    outbox: crate::send_outbox::SendOutbox,
+    /// Held for one retry pass, so two passes never retry one send at once.
+    outbox_pass: std::sync::Mutex<()>,
 }
 
 impl Mailbox {
@@ -415,11 +428,25 @@ impl Mailbox {
     fn with_backend(backend: MailboxBackend, self_id: String, convention: InboxConvention) -> Self {
         Self {
             backend,
+            outbox: crate::send_outbox::SendOutbox::in_config_home(
+                &crate::config::default_config_home(),
+                &convention.agents_dir(),
+                &self_id,
+            ),
             self_id,
             convention,
             provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
             authenticated_senders: false,
+            outbox_pass: std::sync::Mutex::new(()),
         }
+    }
+
+    /// Keep this mailbox's queued sends in `outbox` instead of under the
+    /// config home.
+    #[must_use]
+    pub fn with_outbox(mut self, outbox: crate::send_outbox::SendOutbox) -> Self {
+        self.outbox = outbox;
+        self
     }
 
     /// Declare that the transport behind this mailbox authenticates every
@@ -703,7 +730,18 @@ impl Mailbox {
     /// the exclusive reader until acknowledgement or drop. A dropped batch
     /// stays unread, including after a process crash.
     pub fn read_unread(&self, peer: &str) -> Result<Option<UnreadBatch>, String> {
-        let Some(reader) = self.conversation_reader(peer).acquire()? else {
+        let Some(seat) = self.claim_receiver()? else {
+            return Ok(None);
+        };
+        self.read_unread_seated(peer, &seat)
+    }
+
+    fn read_unread_seated(
+        &self,
+        peer: &str,
+        seat: &Arc<HeldLease>,
+    ) -> Result<Option<UnreadBatch>, String> {
+        let Some(reader) = self.conversation_reader(peer).acquire(Arc::clone(seat))? else {
             return Ok(None);
         };
         let (messages, next) = self.poll_conversation(peer, reader.offset, 0)?;
@@ -747,10 +785,10 @@ impl Mailbox {
     /// Move this agent's register in the conversation with `peer` from `start`
     /// to `end`, if it is still at `start`.
     ///
-    /// The reader is claimed for this write alone and released afterwards.
+    /// The receiver seat is claimed for this write alone and released afterwards.
     /// A register already at or past `end` is left as it is: the range was
     /// committed before, so the call succeeds without moving it backwards. A
-    /// register anywhere else, or a reader held by another instance, refuses.
+    /// register anywhere else, or a seat held by another instance, refuses.
     ///
     /// # Errors
     /// Returns an error when the reader cannot be claimed or the register
@@ -761,7 +799,12 @@ impl Mailbox {
         start: u64,
         end: u64,
     ) -> Result<CommitOutcome, String> {
-        let Some(mut reader) = self.conversation_reader(peer).acquire()? else {
+        let Some(mut reader) = self
+            .claim_receiver()?
+            .map(|seat| self.conversation_reader(peer).acquire(seat))
+            .transpose()?
+            .flatten()
+        else {
             return Ok(CommitOutcome::Refused(CommitRefusalReason::LeaseLost));
         };
         if reader.offset >= end {
@@ -782,8 +825,11 @@ impl Mailbox {
     /// Gather pending deliveries across conversations, retaining their receipts.
     pub fn read_pending(&self) -> Result<PendingMessages, String> {
         let mut batches = Vec::new();
+        let Some(seat) = self.claim_receiver()? else {
+            return Ok(PendingMessages { batches });
+        };
         for peer in self.list_conversations()? {
-            if let Some(batch) = self.read_unread(&peer)? {
+            if let Some(batch) = self.read_unread_seated(&peer, &seat)? {
                 batches.push(batch);
             }
         }
@@ -925,6 +971,10 @@ impl Mailbox {
         self.ensure_provisioned(&envelope.to)?;
 
         if self.backend_frames(&path)? {
+            // Older sends to this peer still queued after an outage go first.
+            if let Err(error) = self.retry_outbox(Some(&envelope.to)) {
+                tracing::warn!(%path, %error, "mailbox retry of queued sends failed");
+            }
             let backend = self.backend.resolve()?;
             let bytes = envelope.to_bytes();
             return match backend.append(&path, &bytes) {
@@ -961,14 +1011,13 @@ impl Mailbox {
     /// Settle an append that returned an error but may have committed.
     ///
     /// A replicated append that times out can still commit after the error,
-    /// and a sender told "failed" resends, so its peer gets the message
-    /// twice. Only this send's identity proves that it landed: two sends of
-    /// the same words in the same second are byte-identical, so matching bytes
-    /// would report a send that wrote nothing as delivered. The check reads
-    /// the conversation from this agent's read position under one deadline
-    /// and one byte budget. Not finding the message proves nothing (the commit
-    /// may still land), so every way the check can end without finding it
-    /// says the outcome is unconfirmed, never that nothing was sent.
+    /// and a sender told "failed" resends, so its peer gets the message twice.
+    /// [`Self::find_send`] looks for this send's identity. Not finding it
+    /// proves nothing (the commit may still land), so every way the check can
+    /// end without finding it says the outcome is unconfirmed, never that
+    /// nothing was sent. Such a send is queued for [`Self::retry_outbox`] with
+    /// its identity intact, and a receiver drops it if the original did land,
+    /// so the agent must not resend it by hand.
     fn reconcile_append(
         &self,
         backend: &dyn FsBackend,
@@ -976,52 +1025,90 @@ impl Mailbox {
         sent: &MailboxEnvelope,
         error: &std::io::Error,
     ) -> Result<(), String> {
+        let uncertain = match self.find_send(backend, path, sent, RECONCILE_DEADLINE) {
+            SendSearch::Found => {
+                tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
+                return Ok(());
+            }
+            SendSearch::Missing(why) => format!(
+                "delivery unconfirmed: append to {path} failed ({error}); {why}, but a timed-out \
+                 append can still commit"
+            ),
+            SendSearch::Unreadable(read_error) => format!(
+                "delivery unknown: append to {path} failed ({error}) and the conversation could \
+                 not be read to check ({read_error})"
+            ),
+        };
+        let send_id = sent.send_id.as_deref().unwrap_or_default();
+        Err(match self.outbox.queue(sent) {
+            Ok(()) => format!(
+                "{uncertain}, so it is queued as send {send_id}; it will be retried automatically \
+                 with the same id once the link is back, and the peer drops a duplicate — do not \
+                 resend it yourself"
+            ),
+            Err(queue_error) => format!(
+                "{uncertain}, so check the conversation before resending (it could not be queued \
+                 for retry: {queue_error})"
+            ),
+        })
+    }
+
+    /// Look for `sent` in the conversation at `path`, reading from this agent's
+    /// read position under one deadline and one byte budget.
+    ///
+    /// Only the send's identity proves that it landed: two sends of the same
+    /// words in the same second are byte-identical, so matching bytes would
+    /// report a send that wrote nothing as delivered. Once caught up, the
+    /// search waits up to `settle` for a late commit; zero only drains what is
+    /// already there.
+    fn find_send(
+        &self,
+        backend: &dyn FsBackend,
+        path: &str,
+        sent: &MailboxEnvelope,
+        settle: std::time::Duration,
+    ) -> SendSearch {
+        const NOT_THERE: &str = "the message was not in the conversation when checked";
         // `send` set it; an unset one matches nothing and ends unconfirmed.
         let send_id = sent.send_id.as_deref().unwrap_or_default();
-        let unconfirmed = |why: &str| {
-            Err(format!(
-                "delivery unconfirmed: append to {path} failed ({error}); {why}, but a timed-out \
-                 append can still commit, so check the conversation before resending"
-            ))
-        };
-        let deadline = std::time::Instant::now() + RECONCILE_DEADLINE;
+        let started = std::time::Instant::now();
+        let deadline = started + RECONCILE_DEADLINE;
+        let settle_by = started + settle.min(RECONCILE_DEADLINE);
         let mut cursor = self.read_position(&sent.to).ok().flatten().unwrap_or(0);
         let mut scanned = 0usize;
         let mut wait_ms = 0;
         loop {
             let (data, next, eof) = match backend.tail_read(path, cursor, wait_ms) {
                 Ok(read) => read,
-                Err(read_error) => {
-                    return Err(format!(
-                        "delivery unknown: append to {path} failed ({error}) and the \
-                         conversation could not be read to check ({read_error})"
-                    ));
-                }
+                Err(read_error) => return SendSearch::Unreadable(read_error.to_string()),
             };
             scanned += data.len();
             if envelopes_in(&data)
                 .iter()
                 .any(|env| env.send_id.as_deref() == Some(send_id) && env.from == sent.from)
             {
-                tracing::warn!(%path, %error, "mailbox append reported an error after committing; delivered");
-                return Ok(());
+                return SendSearch::Found;
             }
             let advanced = next > cursor;
             if advanced {
                 cursor = next;
             }
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return unconfirmed("the message was not in the conversation when checked");
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return SendSearch::Missing(NOT_THERE);
             }
             if scanned >= RECONCILE_MAX_BYTES {
-                return unconfirmed(
+                return SendSearch::Missing(
                     "the check stopped at its size limit before finding the message",
                 );
             }
             // Drain what is there without waiting; once caught up, wait for a
-            // late commit until the deadline.
+            // late commit until `settle_by`.
             wait_ms = if eof || !advanced {
+                let left = settle_by.saturating_duration_since(now);
+                if left.is_zero() {
+                    return SendSearch::Missing(NOT_THERE);
+                }
                 u64::try_from(left.as_millis())
                     .unwrap_or(u64::MAX)
                     .min(RECONCILE_WAIT_MS)
@@ -1029,6 +1116,92 @@ impl Mailbox {
                 0
             };
         }
+    }
+
+    /// Retry the sends queued after an unconfirmed delivery, those addressed to
+    /// `only_to` or all of them.
+    ///
+    /// Each is looked for first, since a late commit may have landed it, and
+    /// otherwise appended again with its original identity, which a receiver
+    /// that already has it drops. A send settles as delivered once it is
+    /// found or appended, and as abandoned once it is past its limits
+    /// ([`crate::send_outbox::QueuedSend::past_limits`]). A send to a peer that
+    /// fails again ends that peer's turn in this pass: its later sends would
+    /// overtake it, and while the link is down each would only wait out its
+    /// own timeout.
+    ///
+    /// # Errors
+    /// The outbox cannot be listed, the backend cannot be resolved, or a
+    /// queued send's record cannot be updated.
+    pub fn retry_outbox(&self, only_to: Option<&str>) -> Result<(), String> {
+        use crate::send_outbox::{QueuedSend, SendOutcome};
+        let _pass = self
+            .outbox_pass
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued: Vec<QueuedSend> = self
+            .outbox
+            .list()?
+            .into_iter()
+            .filter(|entry| only_to.is_none_or(|to| entry.envelope.to == to))
+            .collect();
+        if queued.is_empty() {
+            return Ok(());
+        }
+        let backend = self.backend.resolve()?;
+        let mut stalled: Vec<String> = Vec::new();
+        for entry in queued {
+            if stalled.contains(&entry.envelope.to) {
+                continue;
+            }
+            let path = self.transcript_path(&entry.envelope.to);
+            // Only a framed send is ever queued, and a raw frame appended to a
+            // byte-addressed transcript would corrupt it.
+            if !self.backend_frames(&path)? {
+                continue;
+            }
+            let envelope = &entry.envelope;
+            if matches!(
+                self.find_send(backend.as_ref(), &path, envelope, std::time::Duration::ZERO),
+                SendSearch::Found
+            ) {
+                self.outbox.settle(&entry, SendOutcome::Delivered)?;
+                continue;
+            }
+            let now = crate::agent_mailbox::now_secs();
+            if entry.past_limits(now) {
+                self.outbox.settle(&entry, SendOutcome::Abandoned)?;
+                continue;
+            }
+            let delivered = match backend.append(&path, &envelope.to_bytes()) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::info!(%path, %error, send_id = entry.send_id(), "queued mailbox send failed again");
+                    matches!(
+                        self.find_send(backend.as_ref(), &path, envelope, RECONCILE_DEADLINE),
+                        SendSearch::Found
+                    )
+                }
+            };
+            if delivered {
+                let attempted = QueuedSend {
+                    attempts: entry.attempts.saturating_add(1),
+                    ..entry
+                };
+                self.outbox.settle(&attempted, SendOutcome::Delivered)?;
+            } else {
+                self.outbox.bump(&entry, now)?;
+                stalled.push(entry.envelope.to);
+            }
+        }
+        Ok(())
+    }
+
+    /// Queued sends that have settled since this was last asked, each
+    /// returned once.
+    #[must_use]
+    pub fn take_settled_outcomes(&self) -> Vec<crate::send_outbox::SettledSend> {
+        self.outbox.take_settled()
     }
 
     /// Read new messages from own inbox starting at `cursor`.
@@ -1338,7 +1511,7 @@ impl Mailbox {
 }
 
 /// An agent's durable position in one conversation. Exclusive ownership comes
-/// from the backend lock. Where that lock is an expiring lease, writes to this
+/// from the agent's receiver seat. Where that seat is an expiring lease, writes to this
 /// register are additionally fenced by a conditional write when the backend has
 /// one ([`crate::cursor_fence`]), so a holder that outlived its lease cannot
 /// overwrite a newer holder's position.
@@ -1365,23 +1538,23 @@ fn is_unfenced(epoch: &u64) -> bool {
 
 /// How long a claimed seat stays claimed without being renewed.
 ///
-/// This is a deadlock escape, not a safety boundary: it bounds how long a
-/// conversation goes untailed after an instance dies without releasing. It
+/// This is a deadlock escape, not a safety boundary: it bounds how long an
+/// agent goes without a receiver after an instance dies without releasing. It
 /// is enforced by the backend lock manager. This client never steals a seat
 /// based on a timestamp stored in the cursor file.
-const READER_LEASE_MS: u64 = 30_000;
+const SEAT_LEASE_MS: u64 = 30_000;
 
 /// Renew once the lease is half spent, so a renewal has a full half-lease to
 /// be retried in before anyone else may claim the seat.
 ///
-/// Renewing on every poll return instead would be one replicated write per
-/// `block_ms` per conversation, most of them carrying no new information.
-const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
+/// This is the receiver's one standing replicated write: one per agent per
+/// renewal, however many conversations it tails.
+const SEAT_RENEW_MS: u64 = SEAT_LEASE_MS / 2;
 
 /// How far ahead of the lease TTL a holder stops acting on a lease it last
 /// proved a while ago.
 ///
-/// The backend expires the lock `READER_LEASE_MS` after it *received* the last
+/// The backend expires the lock `SEAT_LEASE_MS` after it *received* the last
 /// renewal, so every age here is measured from when a renewal was *requested*.
 /// The margin bounds how old a successful renewal may be and still count, and
 /// how long belief in the last one lasts while the next is still out. It is a
@@ -1433,7 +1606,7 @@ fn claim_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// A durable cursor guarded by the backend's atomic exclusive lock.
+/// A durable cursor, claimed under the agent's receiver seat.
 pub struct ConversationReader {
     backend: MailboxBackend,
     path: String,
@@ -1448,15 +1621,11 @@ impl ConversationReader {
         crate::cursor_fence::load_plain(self.backend.resolve()?.as_ref(), &self.path)
     }
 
-    /// Hold the conversation's lock, then claim its register through
-    /// [`crate::cursor_fence`]. `None` while another instance holds either.
-    fn acquire(self) -> Result<Option<OwnedReader>, String> {
+    /// Claim this conversation's register through [`crate::cursor_fence`] under
+    /// the agent's receiver `seat`, which is what makes the claimer the agent's
+    /// only reader. `None` when another claimer won the register this round.
+    fn acquire(self, seat: Arc<HeldLease>) -> Result<Option<OwnedReader>, String> {
         let backend = self.backend.resolve()?;
-        let Some(lease) = HeldLease::try_acquire(&backend, &format!("{}.lock", self.path))
-            .map_err(|e| format!("claim reader {}: {e}", self.path))?
-        else {
-            return Ok(None);
-        };
         let Some((cursor, offset)) =
             crate::cursor_fence::RegisterCursor::claim(backend, self.path, self.holder)?
         else {
@@ -1464,7 +1633,7 @@ impl ConversationReader {
         };
         record_cursor_guarantee(&self.agent, cursor.guarantee());
         Ok(Some(OwnedReader {
-            lease,
+            lease: seat,
             cursor,
             offset,
         }))
@@ -1474,7 +1643,7 @@ impl ConversationReader {
 /// Whether a lease last proven `elapsed_ms` ago may still be acted on: it has to
 /// leave [`LEASE_SAFETY_MARGIN_MS`] before the TTL the lock was taken with.
 fn within_grace(elapsed_ms: u64) -> bool {
-    elapsed_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < READER_LEASE_MS
+    elapsed_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < SEAT_LEASE_MS
 }
 
 /// Milliseconds elapsed since `at`.
@@ -1626,7 +1795,7 @@ impl HeldLease {
         }
         let requested = std::time::Instant::now();
         let Some(lock) = backend
-            .try_lock(lock_path, READER_LEASE_MS)
+            .try_lock(lock_path, SEAT_LEASE_MS)
             .map_err(|e| e.to_string())?
         else {
             return Ok(None);
@@ -1656,7 +1825,7 @@ impl HeldLease {
                 // Every renewal is timed from when the last successful one was
                 // requested, never from when its reply came back: a slow reply
                 // must not push the next renewal past the TTL.
-                let mut wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
+                let mut wait_ms = SEAT_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 loop {
                     let stopped = mutex
                         .lock()
@@ -1682,7 +1851,7 @@ impl HeldLease {
                         break;
                     }
                     mark_renewed(&worker_last_renewed, requested);
-                    wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
+                    wait_ms = SEAT_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 }
             })
             .map_err(|e| format!("start lease renewal: {e}"))?;
@@ -1775,7 +1944,8 @@ impl Drop for HeldLease {
 }
 
 struct OwnedReader {
-    lease: HeldLease,
+    /// The agent's receiver seat, shared by every conversation it reads.
+    lease: Arc<HeldLease>,
     cursor: crate::cursor_fence::RegisterCursor,
     offset: u64,
 }
@@ -1882,18 +2052,20 @@ impl Mailbox {
     /// `None` while another instance of the same agent holds it. Without this
     /// seat, two instances of one agent each claim whichever conversations they
     /// reach first, and one agent's messages end up answered by two sessions.
-    fn claim_receiver(&self) -> Result<Option<HeldLease>, String> {
+    fn claim_receiver(&self) -> Result<Option<Arc<HeldLease>>, String> {
         let path = format!(
             "{}/{}/receiver.lock",
             self.convention.agents_dir(),
             self.self_id
         );
-        HeldLease::try_acquire(&self.backend.resolve()?, &path).map_err(|e| {
-            format!(
-                "claim the receiver seat for {} at {path}: {e}",
-                self.self_id
-            )
-        })
+        HeldLease::try_acquire(&self.backend.resolve()?, &path)
+            .map(|seat| seat.map(Arc::new))
+            .map_err(|e| {
+                format!(
+                    "claim the receiver seat for {} at {path}: {e}",
+                    self.self_id
+                )
+            })
     }
 }
 
@@ -2205,10 +2377,10 @@ impl Drop for ReceiverStateEntry {
 /// An agent has one receiver at a time, wherever it runs. The receiver tails
 /// nothing until it holds the agent's receiver seat ([`Mailbox::claim_receiver`]);
 /// until then it stands by and retries, so a second instance of the agent takes
-/// over when the first stops. Each conversation's reader seat still guards that
-/// conversation's read position, so a tail finishing a delivery while the agent
-/// seat changes hands cannot be read twice. [`receiver_state`] reports which of
-/// the two this process is doing.
+/// over when the first stops. The seat is the only lease: every tail reads and
+/// commits under it, and each conversation's register is fenced by its own
+/// conditional write, so a previous holder cannot move a read position back.
+/// [`receiver_state`] reports which of the two this process is doing.
 #[inline]
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
@@ -2339,7 +2511,7 @@ pub fn spawn_inbox_record_poller_with_notices(
 /// an agent this instance no longer receives for.
 fn receive_while_seated(
     mailbox: &Arc<Mailbox>,
-    seat: &HeldLease,
+    seat: &Arc<HeldLease>,
     block_ms: u64,
     diagnostics: &Arc<telemetry::RetryDiagnostics>,
     abort: &crate::HookAbortSignal,
@@ -2358,6 +2530,7 @@ fn receive_while_seated(
                     }
                     let tail = spawn_conversation_tail(
                         Arc::clone(mailbox),
+                        Arc::clone(seat),
                         peer.clone(),
                         block_ms,
                         Arc::clone(diagnostics),
@@ -2386,7 +2559,7 @@ fn receive_while_seated(
         let _ = tail.join();
     }
 }
-/// One conversation's tail: hold the reader seat, park on the transcript,
+/// One conversation's tail: under the receiver seat, park on the transcript,
 /// deliver, commit.
 /// Why a delivery attempt left the reader where it was.
 ///
@@ -2621,6 +2794,7 @@ pub fn delivery_events() -> Vec<DeliveryEvent> {
 
 fn spawn_conversation_tail(
     mailbox: Arc<Mailbox>,
+    seat: Arc<HeldLease>,
     peer: String,
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
@@ -2629,6 +2803,7 @@ fn spawn_conversation_tail(
 ) -> std::thread::JoinHandle<()> {
     let tail = ConversationTail {
         mailbox,
+        seat,
         peer,
         block_ms,
         diagnostics,
@@ -2643,6 +2818,7 @@ fn spawn_conversation_tail(
 
 struct ConversationTail {
     mailbox: Arc<Mailbox>,
+    seat: Arc<HeldLease>,
     peer: String,
     block_ms: u64,
     diagnostics: Arc<telemetry::RetryDiagnostics>,
@@ -2658,8 +2834,19 @@ impl ConversationTail {
         let diagnostics = self.diagnostics.as_ref();
         let abort = &self.abort;
         let scope = format!("conversation with {peer}");
-        while !abort.is_aborted() {
-            let mut reader = match mailbox.conversation_reader(peer).acquire() {
+        let mut reclaiming = false;
+        while !abort.is_aborted() && self.seat.is_valid() {
+            // A reader this tail gave up means its commit was refused, which
+            // another claimer's fence also causes. Only a seat the backend
+            // confirms now may fence the register again.
+            if reclaiming && !matches!(self.seat.confirm(), Ok(true)) {
+                break;
+            }
+            reclaiming = true;
+            let mut reader = match mailbox
+                .conversation_reader(peer)
+                .acquire(Arc::clone(&self.seat))
+            {
                 Ok(Some(reader)) => reader,
                 Ok(None) => {
                     sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
@@ -2673,13 +2860,6 @@ impl ConversationTail {
                 }
             };
             self.poll_reader(&mut reader, &scope);
-            if let Some(loss) = reader.lease.loss() {
-                report_receiver_error(
-                    mailbox,
-                    diagnostics.component(),
-                    format!("reader for {peer} lost: {loss}"),
-                );
-            }
         }
     }
     fn poll_reader(&self, reader: &mut OwnedReader, scope: &str) {
@@ -2691,6 +2871,11 @@ impl ConversationTail {
         let sink = self.sink.as_ref();
         let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
         let mut stall_repeats = 0_u32;
+        // Read on every claim: another instance may have delivered from this
+        // conversation since this one last held it.
+        let mut seen = mailbox.load_seen_sends(peer);
+        let mut poll_failed = false;
+        let mut outbox_due = std::time::Instant::now();
         while !abort.is_aborted() && reader.is_valid() {
             let (msgs, next) =
                 match mailbox.poll_conversation_records(peer, reader.offset, block_ms) {
@@ -2706,11 +2891,13 @@ impl ConversationTail {
                             0,
                         )
                         .observe(mailbox, diagnostics, scope, Some(&e));
+                        poll_failed = true;
                         sleep_unless_aborted(abort, block_ms.max(1));
                         continue;
                     }
                 };
             let mut lease_lost = false;
+            let mut delivered = Vec::new();
             if msgs.iter().all(|m| {
                 // Record which step failed as it happens. Asking
                 // `is_valid()` again afterwards would be a second
@@ -2722,7 +2909,7 @@ impl ConversationTail {
                     lease_lost = true;
                     return false;
                 }
-                sink(m)
+                seen.offer(m, sink, &mut delivered)
             }) {
                 retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
                 stall_repeats = 0;
@@ -2745,6 +2932,14 @@ impl ConversationTail {
                         );
                         break;
                     }
+                }
+                // Remembered only once committed: a batch that is read again
+                // must be redelivered whole, not have its accepted sends
+                // dropped. Saved after the commit, a crash can only forget a
+                // send, letting a repeat through, never lose one.
+                if !delivered.is_empty() {
+                    seen.extend(delivered);
+                    mailbox.store_seen_sends(peer, &seen);
                 }
             } else {
                 // The batch is re-read from this same offset, so every
@@ -2773,9 +2968,121 @@ impl ConversationTail {
                     .observe(mailbox, diagnostics, scope, None);
                 }
                 sleep_unless_aborted(abort, retry_delay_ms);
-                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
+                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(SEAT_RENEW_MS);
+            }
+            // Sends to this peer queued during an outage go out once reading
+            // works again, and on an interval while any are queued.
+            if std::mem::take(&mut poll_failed) || std::time::Instant::now() >= outbox_due {
+                if let Err(error) = mailbox.retry_outbox(Some(peer)) {
+                    tracing::warn!(%peer, %error, "mailbox retry of queued sends failed");
+                }
+                outbox_due = std::time::Instant::now() + OUTBOX_RETRY_INTERVAL;
             }
             diagnostics.succeeded(scope);
+        }
+    }
+}
+
+/// How often a conversation tail retries the sends queued to its peer.
+const OUTBOX_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many delivered sends a conversation tail remembers.
+const SEEN_SENDS_CAP: usize = 512;
+
+/// The sends a reader recently delivered from one conversation, oldest first.
+///
+/// A sender that could not confirm an append retries the same envelope with
+/// the same `send_id`, so one send can be in the transcript twice. Bounded,
+/// because a retry normally follows its original closely and a sender gives up
+/// on a send within a day.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SeenSends {
+    ids: std::collections::VecDeque<(String, String)>,
+}
+
+impl SeenSends {
+    /// Hand `record` to `sink`, unless it repeats a send delivered before or
+    /// earlier in this batch: that counts as taken without reaching `sink`. A
+    /// record taken is added to `batch` by its sender and send id; one without
+    /// a send id is never taken for a repeat.
+    fn offer(
+        &self,
+        record: &MailboxRecord,
+        sink: &RecordSink,
+        batch: &mut Vec<(String, String)>,
+    ) -> bool {
+        let envelope = record.envelope();
+        let key = envelope
+            .send_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| (envelope.from.clone(), id.to_string()));
+        if let Some(key) = &key {
+            if self.ids.contains(key) || batch.contains(key) {
+                tracing::info!(from = %key.0, send_id = %key.1, "mailbox dropped a repeat of a delivered send");
+                return true;
+            }
+        }
+        let accepted = sink(record);
+        if let Some(key) = key.filter(|_| accepted) {
+            batch.push(key);
+        }
+        accepted
+    }
+
+    fn extend(&mut self, keys: Vec<(String, String)>) {
+        for key in keys {
+            if !self.ids.contains(&key) {
+                self.ids.push_back(key);
+            }
+        }
+        while self.ids.len() > SEEN_SENDS_CAP {
+            self.ids.pop_front();
+        }
+    }
+}
+
+impl Mailbox {
+    /// Where this agent records the sends it recently delivered from `peer`:
+    /// beside its read position in that conversation.
+    fn seen_sends_path(&self, peer: &str) -> String {
+        format!(
+            "{}.seen",
+            self.convention
+                .reader_path(&self.self_id, peer, &self.self_id)
+        )
+    }
+
+    /// Best-effort: a record that cannot be read only lets a repeat through.
+    fn load_seen_sends(&self, peer: &str) -> SeenSends {
+        let path = self.seen_sends_path(peer);
+        let loaded = self
+            .backend
+            .resolve()
+            .and_then(|backend| match backend.read(&path) {
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(SeenSends::default()),
+                Err(e) => Err(e.to_string()),
+            });
+        loaded.unwrap_or_else(|error| {
+            tracing::warn!(%path, %error, "mailbox delivered-send record unreadable; starting empty");
+            SeenSends::default()
+        })
+    }
+
+    /// Best-effort, for the same reason as [`Self::load_seen_sends`].
+    fn store_seen_sends(&self, peer: &str, seen: &SeenSends) {
+        let path = self.seen_sends_path(peer);
+        let stored = serde_json::to_vec(seen)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                self.backend
+                    .resolve()?
+                    .write(&path, &bytes)
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(error) = stored {
+            tracing::warn!(%path, %error, "mailbox delivered-send record not saved");
         }
     }
 }

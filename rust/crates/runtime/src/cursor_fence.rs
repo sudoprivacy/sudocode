@@ -1,8 +1,8 @@
 //! A conversation reader's durable position, written only by its current
 //! holder.
 //!
-//! A reader holds its conversation through a backend lock and records how far
-//! it has read in a register beside the transcript. On a backend whose lock
+//! A reader acts under its agent's receiver seat, a backend lock, and records
+//! how far it has read in a register beside the transcript. On a backend whose lock
 //! excludes a previous holder until that process exits, a plain store is
 //! already safe: a frozen holder still owns the lock, so nobody else writes.
 //! An expiring lease is weaker. A holder frozen past its lease can resume
@@ -77,7 +77,7 @@ impl RegisterCursor {
     /// offset to resume from. `Ok(None)` means another claimer won this round;
     /// the caller retries the way it would after losing the lock.
     ///
-    /// Call it only while holding the reader's lock.
+    /// Call it only while holding the agent's receiver seat.
     pub(crate) fn claim(
         backend: Arc<dyn FsBackend>,
         path: String,

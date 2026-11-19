@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const assert = require('node:assert/strict');
 const { performance } = require('node:perf_hooks');
+const { rowText } = require('./shade-rows.js');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -53,14 +54,14 @@ function createHost(config) {
     return false;
   });
   child.onExit(event => { state.exited = true; state.exitCode = event.exitCode; });
+  const row = line => rowText(line, terminal.cols);
   function snapshot() {
     const buffer = terminal.buffer.active;
-    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
+    return Array.from({ length: buffer.length }, (_, i) => row(buffer.getLine(i))).join('\n');
   }
   function viewport() {
     const buffer = terminal.buffer.active;
-    return Array.from({ length: terminal.rows }, (_, i) => buffer.getLine(buffer.baseY + i)
-      .translateToString(true)).join('\n');
+    return Array.from({ length: terminal.rows }, (_, i) => row(buffer.getLine(buffer.baseY + i))).join('\n');
   }
   async function wait(predicate, { notBefore = 0, quietMs = 0, timeoutMs = 45000, pollMs = 25 } = {}) {
     const deadline = performance.now() + timeoutMs;

@@ -1216,6 +1216,18 @@ Real Bash/curl proxy-504, invalid-native-executable, offline-cache and unselecte
 profile controls cover this ordering. Both original service journeys remain
 required; product coverage counts and budgets are unchanged. This adds
 infrastructure fault coverage and makes no whole-PR speedup claim.</p>
+<p><strong>Preserve a failed service-client process (2026-11-18).</strong>
+Existing-Box polling saves the complete original stderr and stops on process
+exit 2, including an RPC-looking prefix or successful JSON followed by a crash.
+The original pinned client offsets RPC status exits by 64: remote Unknown66
+retains its original retry behavior, as do transport failures, other RPC statuses,
+malformed JSON and typed VFS errors. The original 5s client timeout,30s predicate,
+real mTLS journeys and client selection remain unchanged. Required author-native
+and Linux container guards use real synthetic child processes and the exact old
+response-body negative control to prove that a failed process cannot be retried
+to a passing result. These controls add no product journey credit. This is a
+process-result acceptance correction, not a cause or fix of the retained Go
+runtime crash or a measured whole-lifecycle speedup.</p>
 <p><strong>Rejoin the FIFO between fresh reservations (2026-11-06, updated 2026-11-11).</strong>
 Each running reservation keeps the existing exclusive host lease through execution
 and each profile's signed checkpoint. Adjacent fresh workspace and compile-only
@@ -1588,13 +1600,27 @@ retain full integrity checks; this removes duplicate post-merge work.</p>
 <p>ACP package integration stays on all four PR hosts. Main keeps builds and
 commit-bound package artifacts for its merged revision, reusing the PR's
 integration result. Obsolete package heads cancel within the same PR/ref.
-Unrelated workflow-only edits skip the three Rust cache publishers; Rust and
-publisher changes still check for new dependency/toolchain/image keys.</p>
+Unrelated workflow-only edits skip the multi-platform Rust dependency warmers.
+Rust and dependency publisher changes still check for new
+dependency/toolchain/image keys.</p>
 <p>Cold cache publishers compile library/bin test targets to retain dev dependencies
 but omit standalone integration executables that the dependency cache discards.
-Full native acceptance still compiles and runs those journeys. The three host
-pools, production release warming and 10 GB quota remain; warm cache hits already
-skip this work. This removes redundant compilation, with no coverage reduction.</p>
+Full native acceptance still compiles and runs those journeys. Automatic main
+publication warms dev/test inputs on the three existing hosts. Cache-only
+manual dispatch retains optimized release warming on a missing key, and tags
+retain their original release builds. The cache quota remains 10 GB.</p>
+<p><strong>Dependency layout and guard input reuse.</strong> The nested native
+complement mirrors the exact toolchain pin into the cache action's outer
+workspace. A local run of the original cache action verified equal keys for the
+publisher and nested consumer. The guard reuses the verified terminal archive
+and skips build-tool copies for the private Git/SSH/HTTP-only fixtures. Both
+original full guard branches remain required. In the inspected signed runs
+the parallel guard took 1,172.246s before and 972.331s after. The bounded
+terminal installer took 201.676s and 3.593s respectively, with archive staging
+outside that interval. Separate sources and host conditions limit the
+comparison. The accepted main dependency warmers found existing keys, so
+they skipped both compile steps in that run.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1512">PR #1512</a>.</p>
 <p>Local benchmark snapshots retain identical source bytes and modes at their
 canonical paths, allowing Cargo to reuse valid artifacts. Changed bytes get fresh
 mtimes; unexpected sources and cached entry links are removed. The exclusive Linux
@@ -1839,8 +1865,10 @@ attempts remain included. The current sample adds 138 publisher attempts consumi
 57.450 physical runner minutes.
 The audited main-push inventory has 88 runs and 454 original attempt-job records,
 adding 2428.233/93.683 known minutes to the two samples.
-Job IDs are deduplicated. These are observational lower bounds from different source,
-coverage and policy epochs; the historical sample already contains early CI changes.</p>
+The original inventory deduplicates GitHub job IDs. The revised summary also coalesces
+confirmed representations of the same runner execution across rerun attempts.
+These are observational lower bounds from different source, coverage and policy epochs.
+The historical sample already contains early CI changes.</p>
 <p><strong>Keep the clocks separate.</strong> Original full-receipt SSH signatures
 for all twenty final source versions authenticate a median recorded author span of
 40.650 minutes. That span includes recorded preparation and waiting,
@@ -1882,32 +1910,141 @@ have four historical and two current PRs, with known hosted medians
 653.875/168.308 minutes.
 Shared production has thirteen/twelve PRs and medians
 924.550/79.808 minutes.
-These small, different groups do not establish a uniform or causal speedup.
-Actual post-policy lifecycle and periodic workspace costs remain required;
-omitted commands are not measured net savings.</p>
+These small, different groups give descriptive comparisons.
+Actual post-policy lifecycle and periodic workspace costs remain required.</p>
 <p><strong>Validator-first workspace migration.</strong> The schema compatibility
 stage retains the protected complete per-PR workspace split across Linux, macOS
 and Windows. Added real Git/SSH/HTTP signed-plan controls cover all three author
 platform representations, exact earlier-full-plan reuse, and refusal of missing
 author/CI coverage or changed metadata. They infer no other-platform product pass.
 The periodic workspace policy and workflow normally landed through <a href="https://github.com/sudoprivacy/sudocode/pull/1473">PR #1473</a> at <code>a78aefb1</code> on 2026-11-17 22:35 UTC. The exact candidate <code>616e7b6b</code> passed all eight original signed author groups and all three hosted full workspace jobs; the normal combined-tree queue passed its three-platform Clippy and real daemon journeys. The original selected author workspace remains required. Other-OS full workspace regression now runs weekly or by manual main dispatch, while selected complementary native journeys remain; an OS-specific workspace failure may first appear after merge. The accepted merge includes newer main source, including Nexus rc.10, so the earlier full candidate receipts are not claimed as a full run of that whole combined tree. Earlier publication refusals, hosted HTTP403 and the first new negative-control failure remain preserved. <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-workspace-policy-activation-20261118.json">The source, job, normal-merge and measurement boundaries</a> record this activation. The first twenty post-policy Rust-source merges will be selected before reading cost; no new benefit is inferred from activation. The one-tenth lifecycle target remains unproven.</p>
+<p><strong>Observed VFS cache hits and miss.</strong> Three accepted co-host
+jobs requested the same exact key and ran the original search/restart case.
+GitHub step clocks totalled 48s and 48s for the hits, and 242s for the miss.
+These sums include checkout and restore, search, export and identity/data
+uploads. The search step alone took 25s, 23s and 188s. The complete co-host jobs
+took 399s, 364s and 567s. Runner and candidate differences are unadjusted.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44350660116/job/134965607282">#1503 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44398971076/job/135136967219">#1507 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44448338115/job/135306189510">#1510 queue</a>.</p>
+<p><strong>VFS publisher trigger and exact-key readback.</strong> Changes to the
+main Rust CI workflow now select the existing VFS publisher. In the accepted
+#1514 queue, the original search/restart command passed in 172.094s on a cache
+miss with the same key as the three jobs above. The main publisher spent 71s
+verifying and retaining that exact queue archive. It skipped fallback
+compilation and saved a 773,942,858-byte cache under the producer's key. The
+queue and publisher both used image <code>20261111.196.1</code>. A later
+matching-image consumer of this new cache is still pending.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1514">PR #1514</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44456445288/job/135332771097">queue producer</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44457998116/job/135337636687">main publisher</a>.</p>
+<p><strong>Cold queue on a third hosted image.</strong> PR #1518 requested the
+same VFS source and compiler recipe on image <code>20261111.82.6</code>.
+<code>ImageVersion</code> was the only recorded compiler-key input that changed
+from the #1514 comparison. The original search/restart command passed in
+130.228s after an exact-key miss. The accepted main publisher ran on
+<code>20261111.196.1</code>, verified the queue archive and retained it under
+the producer's original key in a 58s job. The prior exact caches were still
+present. A subsequent matching consumer remains pending.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44462781193/job/135353624928">#1518 queue</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179">#1518 main publication</a>.</p>
+<p><strong>Exact VFS restore and redundant queue export.</strong> PR #1522
+restored the exact compiler key recorded in its queue artifact and passed the
+original search and restart journey. The selector change also caused the queue
+to re-export a 956,066,756-byte archive. Export and data upload occupied 34s
+of the co-host job. The parallel A2A job finished later, so that export did
+not extend this merge's queue span.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451174032">Original co-host job</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original A2A job</a>.</p>
+<p>PR #1524 then restored that same VFS key, passed the original co-host and
+search/restart checks, and uploaded the identity and journey evidence. The
+compiler data upload was skipped. The new identity-only export and upload
+took at most one recorded second in that job.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44515545676/job/135530889592">First observed exact hit without re-export</a>.</p>
+<p><strong>Same Rust tree, different hosted dependency keys.</strong> The
+#1522 and #1523 A2A jobs shared the Rust tree, daemon harness, lockfile and
+effective Rust 1.100.0 compiler. Their job times were 428s and 575s. The cache
+action also fingerprinted an unused Rust 1.99.1 installed in the first image.
+Recomputing the original digests shows that this changed the environment
+key, while the dependency digest stayed the same. The second job found no
+cache. The two runs do not establish how much of the total time difference
+was due to cache reuse.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44492314277/job/135451173973">Original hit</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44505502638/job/135496336484">Original miss</a>.</p>
+<p><strong>Native Linux consumers share the active-toolchain cache prefix.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1525">PR #1525</a>
+made Linux queue Clippy, A2A and co-host use the same dependency key as the main
+publisher. The first queue jobs ran cold and passed. The subsequent main
+publisher saved cache 10788615872 (1,461,886,294 bytes), and the earlier Linux
+entry was absent from the next main cache listing. The complementary Linux
+workflow now uses the same trusted toolchain adapter. Its workspace layout can
+still change the exact dependency suffix. The cache action can restore by the
+verified prefix while Cargo retains its own freshness checks. The signed-plan
+controls preserve both completion orders, the original checks, and rejection
+of altered deadlines or adapters. The next ordinary merge queue, for
+<a href="https://github.com/sudoprivacy/sudocode/pull/1526">PR #1526</a>,
+restored the exact published cache on both Linux daemon jobs. A2A ran for 397
+seconds compared with 427 seconds in the original cold queue. Co-host ran for
+463 seconds compared with 509. The tracked Rust inputs matched, and the Windows
+grpcurl preparation and its pin changed between those queues. These are observed
+job durations. Complementary Linux cache timing remains unmeasured.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44531123726">First queue run</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44532752476/job/135590101558">Main Linux publication</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44560622130/job/135689180016">Warm A2A</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44560622130/job/135689179969">Warm co-host</a>.</p>
+<p><strong>First observed cold Windows warmer after #1512.</strong> The automatic
+main job ran the dev/test compiler command in 219s and skipped the optimized
+release warmer. It published 2,458,357,241 bytes. The older original job spent
+315s in the release warmer and published 3,205,321,643 bytes. The two runs used
+different compiler environment keys and restore states, so the observed cache
+sizes and job clocks describe those runs. The cache inventory at this
+observation listed 11,771,056,003 bytes against the configured 10 GB limit.
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
+<p><strong>Post-policy source cohort, 7 of 20.</strong> The first seven eligible
+merges account for 634.450 known GitHub runner-minutes, with one unassigned
+interval still unresolved. The median last queue-entry-to-merge span is
+581s and includes validation and dispatch. The first scheduled workspace
+run, remaining source cohort, and author-side time are measured separately.
+The whole-lifecycle one-tenth target remains unproven.</p>
+<p><strong>Native dependency cache lookup.</strong> The Windows complement
+for <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795383">PR #1520</a>
+restored a 2,458,357,241-byte fallback in 74s. Its requested suffix differed
+from the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44576879047/job/135746630132">main publisher</a>
+even though all 23 committed inputs matched. The upstream action hashes the
+raw toolchain pin and Cargo configuration in path order. The old nested
+checkout reversed that order. A source-layout change aligns the exact key;
+the observed fallback already contained the publisher's bytes, so this
+comparison establishes the mismatch without measuring a time saving.</p>
+<p>The <a href="https://github.com/sudoprivacy/sudocode/pull/1528">shared daemon
+tool change</a> also triggered the normal <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44581106560">VFS publisher</a>.
+The job found the exact key in 29 assigned runner seconds. It skipped compiler
+data download, import, and save.</p>
+<p><strong>Stronger signed author progress.</strong> Automatic exact-source
+resume now prefers an older signed record that proves a strict superset of
+currently required, compatible profiles. In a replay of original #1510
+records, this restored workspace and services in addition to preflight while
+keeping the changed guard required. The two restored commands originally ran
+for 1,065.001s combined. Subsequent real attempts are needed to measure actual
+repeat work avoided. <a href="https://github.com/sudoprivacy/sudocode/pull/1522">PR #1522</a>.</p>
 <p><strong>Windows compiler-cache delivery completed (2026-11-18).</strong> <a href="https://github.com/sudoprivacy/sudocode/pull/1488">PR #1488</a> qualified and publicly published the minimal upstream response-file backport; original format, strict Clippy and 619 upstream tests passed with one original ignored case. <a href="https://github.com/sudoprivacy/sudocode/pull/1489">PR #1489</a> then normally landed the exact-hash Windows consumer after all three signed author profiles, the full native/Docker guard and Windows workspace (1,205 passed, 78 skipped). Its merge tree equals the qualified tree. The real Cargo long-file control changes hits/misses from 1/36 to 1/37 and then 2/37; restoring the old bypass still links the correct program but adds no cache hit. Original query, official-tool, invalidation, failure/repair and ownership controls remain. <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-compiler-cache-delivery-20261118.json">The immutable source/job/cost inventory</a> records 47.750 known hosted runner-minutes across producer, consumer, queue and publication, including failed attempts; later documentation cost is additional. Earliest recorded author start to final consumer checks is 40.616 minutes, including the original API403 and resume gap, and excludes earlier authoring plus later publication. These are engineering costs and bounded cache controls, not representative PR savings, product coverage credit or a shared-target freshness guarantee. The one-tenth lifecycle target remains unproven.</p>
 <p><strong>Reproduce the linked measurements.</strong>
-The <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-lifecycle-measurement-20261117.json">fixed cohort and job inventory</a>
-contains all forty source/merge associations, original phase events and 5,394
-deduplicated physical job IDs with their original run, attempt, timing and anonymous runner-assignment fields.
-Unknown runner intervals remain null. The table's sums and medians were recomputed
-from these rows; they do not establish a controlled or population-wide speedup.</p>
-<p><strong>Source-mix and outlier sensitivity.</strong> On these same fixed records,
-the ratio of known runner-minute means is 9.09%. Reweighting the four coarse source
-strata to the historical cohort mix changes that ratio to 10.40%; using the current
-mix gives 9.12%. Removing each single PR in turn gives ratios from 7.97% to 11.49%.
-These are descriptive arithmetic checks, not confidence intervals or matched-source
-causal estimates. The sample therefore does not robustly establish the one-tenth
-target. Unknown job costs, local author work, queue waits and separate maintenance
-investment retain their original boundaries; no failed run or validation requirement
-is removed by this calculation. The linked inventory includes every stratum weight,
-mean and all forty omission calculations.</p>
+The <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-lifecycle-measurement-20261117.json">original fixed cohort and job record inventory</a>
+preserves all forty source/merge associations, phase events and 5,394 original GitHub job IDs.
+The <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/ci-lifecycle-runner-executions-20261118.json">runner execution accounting audit</a>
+binds 108 original job API responses and identifies 58 carried job records across 50 groups.
+A group shares the same workflow run, source, named runner, start and end times, and complete step timestamps.
+Count its occupied interval once, with all original attempt records preserved.
+Known times total 24,479.700 historical and 2,220.833 current runner-minutes.
+The 355 historical and two current unknown runner intervals remain unknown.</p>
+<p><strong>Source-mix and outlier sensitivity.</strong> With the corrected execution accounting
+the unweighted ratio of known runner-minute means is 9.07%.
+Reweighting the four source strata to the historical mix gives 10.39%, and the current
+mix gives 9.11%. Removing each single PR in turn gives ratios
+from 7.92% to 11.53%.
+The linked audit preserves each weight, mean and omission. These are descriptive checks.
+The one-tenth target still requires comparable lifecycle evidence. Author work, queue waits
+and separate maintenance retain their original measurement scopes.</p>
 <p><strong>Separate repair investment.</strong> The maintained
 <a href="https://github.com/sudoprivacy/pty-expect/pull/10">PTY resize correction</a>
 records 19.150 known assigned runner-minutes across its original failed fixture,
@@ -2256,6 +2393,12 @@ CLI source retains pinned-daemon, cross-node CLI and authenticated
       remain; restart stays before both lanes and SIGSTOP stays after both pass.
       Original per-lane logs and command receipts remain in the fault artifact;
       an existing result directory is refused before either lane starts.
+      The Linux A2A job can start the managed CLI and mock-service bin build
+      after the serial CLI lane completes, while prepared fault binaries still
+      run. The original four test slots remain. The two Cargo writers stay
+      serial. After the full join, the original managed harness checks the bin
+      build with Cargo and runs its original real-daemon tests. Record the early
+      build and later check separately before crediting a queue saving.
       Cargo preparation and ignored-case enumeration finish before the lanes
       start. The fixed nextest executor then uses those same build metadata and
       binaries without reacquiring the CLI build lock. Source contents, helper,
@@ -4228,18 +4371,22 @@ namespace for the new TUI work.</p>
 
 <section id="prompt-viewport-experiment">
 <h5>Native inline prompt surfaces — 2026-10-31</h5>
-<p><strong>Experimental; off by default.</strong> The existing
-<code>promptViewport</code> setting now applies matching shading to the live
-editor and committed prompts. The fixed conversation viewport was removed after
-Windows VS Code testing exposed independent wheel and native scrollbar positions.
-All output uses the existing inline history writer, and the terminal owns
-scrolling and selection.</p>
+<p><strong>Graduated 2026-11-15; always on.</strong> The live editor and
+committed prompts share one shade drawn from the terminal background; it
+replaces the editor's separator lines, which remain wherever no shade can be
+drawn (<code>NO_COLOR</code>, small palettes). The <code>promptViewport</code>
+experiment was removed; a leftover setting is accepted and ignored. Measured on the real terminal host
+(release, three runs each): CPU, input latency and memory unchanged; terminal
+output about 20% larger from the colour codes. The fixed conversation viewport
+was removed earlier after Windows VS Code testing exposed independent wheel and
+native scrollbar positions. All output uses the existing inline history writer,
+and the terminal owns scrolling and selection.</p>
 <ul>
   <li>Keep one output path, one replay formatter and one prompt style. Styling
   must not introduce another transcript store or input/navigation owner.</li>
   <li>Verify native history growth, actual scrollbar dragging and wheel scrolling,
   selection, Unicode drafts, resize and resume through real PTYs and browser
-  terminal interaction. Retain enabled/disabled performance budgets.</li>
+  terminal interaction. Retain the viewport performance budget.</li>
   <li>A composer and prompt header that remain visible during native scrollback
   require terminal-host integration. They are deferred until the host can share
   its scroll position.</li>

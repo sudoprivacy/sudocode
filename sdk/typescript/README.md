@@ -714,6 +714,18 @@ An operator can use thread-scoped MCP inventory to identify which registration
 the native thread loaded. Presentation limits and recipient identity require
 independent verification.
 
+An embedding operator can pass a `CodexMailboxPresentation` as the third
+argument to `runCodexMcpOwner`. Call its `prepare(native, threadId,
+registrationId, encodedResultBytes)` to obtain a one-use `read` value and the
+expected synthetic text. The original thread can call `scode_inbox({read})`
+before ACP attachment. Both preparation and reading check the actual
+thread-scoped MCP catalog and the live connection. A new connection under the
+same registration requires a fresh sample. The encoded MCP response can be
+measured at 4096–65536 bytes. Compare the returned text with the actual
+model-facing input and use `cancel(read)` to discard an outstanding sample.
+The operator retains responsibility for ordinary queue submission measurements
+and for admitting the receiver.
+
 During v2 migration, a directory of completed callbacks needs only a read of
 the loaded thread's identity and status. Pending event IDs are reconciled with
 the native queue and history before the owner records who holds each message.
@@ -855,7 +867,7 @@ therefore do not establish scode commit behaviour.
 after building. It exercises ACP/MCP refusals, serialized ACKs, migration,
 paged native observations and owner reopens with protocol peers. It does not
 replace the actual native PTY cases or the remaining crash, compaction,
-reader-lease and Node enrollment acceptance.
+receiver-seat and Node enrollment acceptance.
 The close-drain process case holds an ACK inside an actual ACP child while its
 root unloads, then requires the original response and one commit before the
 child is closed. Its native endpoint and mailbox contents are protocol fixtures.

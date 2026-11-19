@@ -27,12 +27,14 @@ def git(*args):
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
 REVIEWED_VERIFIER_LAYOUTS = {
+    "af64ac6f658704650841120be08d66a9c88a6f36bc804bf8c7ceeb0dbaeb399e",
     "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
     "352ee3b249fb1e16aac60de13f8bfa442668eedd7a4b41c9981d4415d037b3d7",
     "bda03cd870bb222bcbb38092f32c11b0d5ff51231f6d9d23cd4bf299e8b5efdd",
     "ee11ddac8a14ea9a0d79355589c50fff2bac9f76f0c3dadce1ead90d4292000f",
     "e34b53b967976f01755ce30d77584a5e8465d73075c7e0f97de15eac5279f8f4",
+    "72f50d88ff07c17f53a740a571dede377dc52f03139f298dc11d72e17ef39c81",
 }
 
 
@@ -467,7 +469,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "4a465cd8487ad28e6b1302b48940a0b1cad03256"
+        "17540c0c748c39fe0dd963801f5b1dded2bd130f"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",
@@ -477,7 +479,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "e4b1db9ad9ff72d16f54c848962bc21115b4b08a"
+        "0005e1e46f890ed4b2656ad9827db80fea27f851"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",
@@ -497,7 +499,17 @@ POLICY_FIXTURE_INPUTS = {
     ".github/actions/rust-toolchain/action.yml": [
         "100644",
         "blob",
-        "b02330ea66170c3c96003e8732bfbd55987d2e0f"
+        "ce7b8ad4ca80cc495808d0862d91bdbade600f70"
+    ],
+    ".github/actions/rust-toolchain/cache-command.mjs": [
+        "100644",
+        "blob",
+        "973592bd8bdc233854295869e87dc24ae00fd6d7"
+    ],
+    ".github/workflows/ci-dependency-cache.yml": [
+        "100644",
+        "blob",
+        "c774bfc820c05df59d3c161dd6c252ff4829e551"
     ],
     ".gitignore": [
         "100644",
@@ -571,9 +583,10 @@ def main():
     ignored_disabled_test_sources = []
     # The workflow changes real compiler/daemon commands; this selector does
     # not. Its own edits retain preflight and the complete contract guard.
-    # The toolchain pin and its installer change the compiler of every job.
+    # Toolchain setup and dependency cache commands are used by the queue jobs.
     queue_inputs = {".github/workflows/rust-ci.yml", "rust-toolchain.toml",
-                    ".github/actions/rust-toolchain/action.yml"}
+                    ".github/actions/rust-toolchain/action.yml",
+                    ".github/actions/rust-toolchain/cache-command.mjs"}
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     name = os.environ["GITHUB_EVENT_NAME"]
     if name == "workflow_dispatch":
@@ -685,13 +698,16 @@ def main():
                      or path in executor_inputs | {"rust/crates/runtime/src/response_archive.rs",
                                                    "rust/crates/runtime/src/response_archive/gzip.rs"}
                      for path in paths)
-    vfs_cache = any(path in {".github/ci/cohost-plugin-crypto.toml",
+    vfs_archive = any(path in {".github/ci/cohost-plugin-crypto.toml",
                              ".github/scripts/vfs_search_cache.py", ".github/scripts/vfs_search_publication.py",
                              ".github/workflows/rust-ci.yml",
-                             ".github/workflows/ci-vfs-search-cache.yml", ".github/scripts/ci_input_scope.py",
+                             ".github/workflows/ci-vfs-search-cache.yml",
                              "e2e/local-acceptance/vfs_search_cache_acceptance.py",
                              "e2e/local-acceptance/vfs_search_publication_acceptance.py"}
                     or path.startswith(".github/actions/vfs-search-cache/") for path in paths)
+    # Selector edits exercise the VFS fixtures. An exact queue cache hit only
+    # needs a new archive when the cache/publication contract itself changed.
+    vfs_cache = vfs_archive or ".github/scripts/ci_input_scope.py" in paths
     policy_fixtures = {}
     policy_fixtures_required = policy_fixture_scope(paths, name, policy_fixtures)
     result = {"live_required": str(live).lower(), "daemon_required": str(daemon).lower(),
@@ -702,6 +718,7 @@ def main():
               "gzip_codec_required": str(gzip_codec).lower(),
               "release_artifact_required": str(release_artifact).lower()}
     result["vfs_cache_required"] = str(vfs_cache).lower()
+    result["vfs_archive_required"] = str(vfs_archive).lower()
     result["policy_fixtures_required"] = str(policy_fixtures_required).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         for key, value in result.items():

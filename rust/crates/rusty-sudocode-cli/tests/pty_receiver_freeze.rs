@@ -1,7 +1,7 @@
-//! A frozen receiver keeps its reader lease, so a second receiver on the same
+//! A frozen receiver keeps its receiver seat, so a second receiver on the same
 //! identity cannot take over while the first is only stopped — not dead.
 //!
-//! This is the disk side of the reader-lease handoff. On disk the lease is an
+//! This is the disk side of the seat handoff. On disk the seat is an
 //! OS file lock held for as long as the holder's process exists: its renew is a
 //! no-op and the lock lives with the open descriptor, so freezing the holder —
 //! a laptop asleep, a paused VM, a `SIGSTOP` — does not release it even past the
@@ -33,9 +33,9 @@ use runtime::mailbox::{local_pair_root_in, Mailbox};
 const AGENT: &str = "freeze-receiver";
 /// The peer whose conversation carries the delivery cursor under test.
 const SENDER: &str = "freeze-sender";
-/// `READER_LEASE_MS` in `runtime::mailbox`. The freeze outlasts it, so the test
+/// `SEAT_LEASE_MS` in `runtime::mailbox`. The freeze outlasts it, so the test
 /// proves the disk lock ignores the TTL rather than merely racing under it.
-const READER_LEASE_MS: u64 = 30_000;
+const SEAT_LEASE_MS: u64 = 30_000;
 
 #[test]
 fn a_frozen_receiver_keeps_its_lease_so_a_second_one_cannot_take_over() {
@@ -67,7 +67,7 @@ fn a_frozen_receiver_keeps_its_lease_so_a_second_one_cannot_take_over() {
     );
 
     // Receiver A starts, consumes the first message, and commits the cursor: it
-    // now holds the reader lease for this conversation.
+    // now holds the agent's receiver seat.
     let mut a = spawn_receiver(&env);
     let committed = wait_until(Duration::from_secs(90), || read_offset(&inbox) > 0);
     assert!(
@@ -100,7 +100,7 @@ fn a_frozen_receiver_keeps_its_lease_so_a_second_one_cannot_take_over() {
 
     // Across the whole freeze — held deliberately past the TTL — the cursor must
     // not move: A's lock is still held, so B cannot take over.
-    let hold = Duration::from_millis(READER_LEASE_MS + 5_000);
+    let hold = Duration::from_millis(SEAT_LEASE_MS + 5_000);
     while froze_at.elapsed() < hold {
         assert_eq!(
             read_offset(&inbox),

@@ -23,7 +23,7 @@ describes.
 
 | Component | Holds | Does |
 |---|---|---|
-| Nexus mailbox | Each message as a record in a conversation transcript. Per conversation, this Agent's reader register: a frame offset behind an exclusive reader lease | The only durable copy of a peer message and of how far each conversation was read |
+| Nexus mailbox | Each message as a record in a conversation transcript. Per conversation, this Agent's reader register: a frame offset fenced by its own conditional write, written under the Agent's one receiver seat | The only durable copy of a peer message and of how far each conversation was read |
 | Owned scode session | The mailbox reader, its credentials and the Agent's acknowledgement key | Offers whole frames, verifies acknowledgement tokens and commits register prefixes. Starts no turn (`peerInput` version 3) |
 | Codex attachment (shared owner) | Per bound thread: the binding and its delivery submission log | Submits budgeted deliveries into the thread's queue; serves `scode_inbox` for acknowledgements and window reads |
 | Claude Code bridge | Per session: the binding, its delivery submission log and its spool | Appends budgeted deliveries to the spool; serves `scode_inbox` the same way |
@@ -132,10 +132,10 @@ window start, window end and SHA-256 of the window.
 - Peers never see a token, and tokens of another thread, session or Agent never
   verify.
 
-A commit takes the conversation's reader lease, then moves the register from
+A commit takes the Agent's receiver seat for that write, then moves the register from
 the start of the acknowledged run to its end when the register is still at
 that start. When the register is already past the end, the commit is a no-op
-success. Any other position, or a lease lost to another owner, refuses the
+success. Any other position, or a seat held by another owner, refuses the
 commit. The tool result then reports the refusal, and the records stay unread.
 Each conversation commits independently, and a later call with the same tokens
 retries a refused commit.

@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 fn footer(session: &PtySession) -> String {
     session.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        let rows = common::screen_rows(screen);
+        let rows: Vec<_> = rows.lines().collect();
         let separator = rows
             .iter()
             .rposition(|row| row.contains('─') && row.trim().chars().all(|c| c == '─'))

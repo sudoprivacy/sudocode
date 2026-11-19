@@ -24,7 +24,7 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 
-The seven independent reader/stall/receiver-seat fault cases run with the
+The seven independent commit/stall/receiver-seat fault cases run with the
 repository's checksum-pinned nextest runner. They overlap the independent CLI
 journeys after restart, with one serial CLI lane and at most three fault workers
 (at most four test cases at once). `SCODE_ACCEPTANCE_TEST_THREADS=1` runs the CLI

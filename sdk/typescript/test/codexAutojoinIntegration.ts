@@ -526,7 +526,8 @@ async function main() {
         owner=await connectCodexAutojoin(publicationConfig);
         assert.equal(submitted.length,1,'local publication must never resubmit enrollment');
         if(transient) {
-          assert.equal(owner.status()[0].state,'connected','transient Windows binding replacement must retain the original enrollment');
+          assert.equal(owner.status()[0].state,'connected',
+            'transient Windows binding replacement must retain the original enrollment: '+String(owner.status()[0].error));
           const binding=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
           assert.equal(binding.state,'ready');assert.equal(binding.actor,submitted[0].actor);
           assert.equal(binding.operationId,submitted[0].operationId);

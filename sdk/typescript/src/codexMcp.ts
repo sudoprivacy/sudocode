@@ -8,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { codexMailboxAdmission } from './codexMailboxAdmission';
 import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
 import type { CodexMailboxAdmission } from './codexMailboxOwner';
+import type { CodexMailboxPresentation } from './codexMailboxPresentation';
 import { runEnrollmentCommand } from './enrollmentCommand';
 import { validateCodexConnectionConfig, CodexCleanupUnknownError, type CodexConnectionConfig } from './codexConnection';
 import { ScodeCleanupUnknownError } from './scodeAcp';
@@ -218,7 +219,8 @@ export async function enroll(argv: string[], claim: CodexAgentClaim): Promise<Co
  * precedence. The same provider gates the selected receiver and its inbox
  * calls. It never comes from a stdio client.
  */
-export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmission): Promise<void> {
+export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmission, presentation?: CodexMailboxPresentation): Promise<void> {
+  if (presentation && !mailbox) throw new Error('Presentation measurement requires a mailbox owner');
   const {config,sha256} = readConfig(file);
   const admission = mailbox ?? (config.peerInputVersion===3 ? codexMailboxAdmission() : undefined);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
@@ -280,10 +282,13 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
       }
       const registrationId = hello.registrationId;
       if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
+      const measurement = presentation?.attach(registrationId, mailbox?.existingBinding?.threadId);
+      if (measurement) socket.once('close', measurement.close);
       // This public ID identifies the registration used by this particular
       // stdio client. It confers no mailbox or thread authority.
       const server = new McpServer({name:'nexus-scode',version:'1.0.0',
         ...(registrationId ? { description: 'SCode registration ' + registrationId } : {})});
+      if (measurement) server.server.registerCapabilities(measurement.capabilities);
       registerScodeMcpTools(server,async extra=>{
         if(!network)throw new ScodeA2aError('Native inventory is not ready; no A2A command was submitted','not_submitted');
         // A resumed root may precede the periodic poll. Finish its attachment
@@ -293,7 +298,7 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
           mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
-        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined);
+        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined, measurement?.read);
       socket.write(JSON.stringify({ready:true,registrationId})+'\n');
       await server.connect(new StdioServerTransport(socket,socket));
       socket.resume();

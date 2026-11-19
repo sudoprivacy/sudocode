@@ -43,21 +43,18 @@ pub enum Experiment {
     McpConfigServers,
     /// Independent runtime continuations over a durable session record log.
     SharedSessionHistory,
-    /// Shaded prompt surfaces using the existing native inline history.
-    PromptViewport,
 }
 
 /// Settings keys of experiments that graduated. A settings file that still
 /// sets one keeps loading: the key is accepted and ignored, because an
 /// unknown `experimental` key would fail the whole file.
-pub const RETIRED_KEYS: &[&str] = &["peerDescriptions"];
+pub const RETIRED_KEYS: &[&str] = &["peerDescriptions", "promptViewport"];
 
 impl Experiment {
     pub const ALL: &'static [Experiment] = &[
         Experiment::CoordinatorMode,
         Experiment::McpConfigServers,
         Experiment::SharedSessionHistory,
-        Experiment::PromptViewport,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -68,7 +65,6 @@ impl Experiment {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
             Experiment::SharedSessionHistory => "sharedSessionHistory",
-            Experiment::PromptViewport => "promptViewport",
         }
     }
 
@@ -79,7 +75,6 @@ impl Experiment {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
-            Experiment::PromptViewport => "PROMPT_VIEWPORT",
         }
     }
 
@@ -91,7 +86,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
-            Experiment::SharedSessionHistory | Experiment::PromptViewport => None,
+            Experiment::SharedSessionHistory => None,
         }
     }
 }

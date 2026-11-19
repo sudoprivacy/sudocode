@@ -472,6 +472,15 @@ block; completed results remain visible while the provider is still streaming.
 Captured diagnostics use the same line framing and preserve UTF-8 characters
 split across reads.
 
+For local input/resize diagnosis, set `SCODE_TRACE_INPUT` to a writable file
+path before starting the REPL. It appends JSON lines when the UI observes
+keys and bracketed paste: the PID, a per-process sequence, event category, callback frame
+dimensions, reviewability and the existing frame guard's result. Function-key
+numbers are recorded; typed characters, paste contents, modifiers and model
+traffic are not. This is opt-in local output and does not change admission or
+chrome. A size warning acknowledges a rendered frame, not delivery of input;
+diagnostics can distinguish those two boundaries without adding timing delays.
+
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
 commands can execute concurrently, with a default limit of ten. Each complete
 tool input becomes eligible while the provider is still streaming. Pre/post
@@ -627,6 +636,15 @@ FooterSlot fold into explicit summaries rather than silently disappearing.
 Growing the window restores their full contents. Long drafts scroll within the
 same editor, preserving the complete text and cursor.
 
+In the interactive REPL, the TodoSlot owns the current todo list. Successful
+`TodoWrite` calls leave only `✓ Todos updated` in scrollback, with
+`✓ Todos cleared` for an empty list or `✓ All todos complete` when every item
+is finished. Resuming a session uses the same compact receipts. Hook feedback
+remains visible, and failures or unrecognized results retain their detailed
+tool cards. The saved session and model still receive the complete result.
+Terminal rendering without a live todo panel retains the full checklist card;
+structured output retains the complete tool result.
+
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden
@@ -711,31 +729,21 @@ For the canonical, live command list:
 scode --help
 ```
 
-### Experimental shaded prompts
+### Shaded prompts
 
-Enable `experimental.promptViewport` to try matching shaded surfaces for the
-live editor and submitted prompts:
+The live editor and every submitted prompt sit on a faint shade drawn from the
+terminal's own background, so your turns stand apart from the conversation.
+The shade replaces the separator lines above and below the editor. It uses the
+same inline editor, output writer and native terminal history as everything
+else: new output advances the editor with the conversation, and the mouse
+wheel, scrollbar and selection work on that one history.
 
-```json
-{"experimental":{"promptViewport":true}}
-```
+Where the terminal can't draw a shade (`NO_COLOR`, or a palette too small for
+one), the editor keeps its separator lines and the terminal's own colors.
+Resumed sessions show their prompts with the same shade.
 
-This temporary experiment is off by default. It uses the same inline editor,
-output writer and native terminal history as the ordinary REPL. New output
-advances the editor with the conversation; the mouse wheel and scrollbar browse
-the same terminal history. Selection uses the terminal's ordinary drag gesture.
-The draft survives returning to the latest output and resizing.
-
-The earlier fixed conversation view has been removed because its mouse scrolling
-and the terminal scrollbar controlled separate histories. The editor and prompt
-header are no longer pinned while browsing older native history. A sticky view
-would require support from the terminal host to share its scroll position.
-
-Saved sessions remain the durable record; `--resume` uses the existing replay
-formatter. Colors respect the terminal palette and `NO_COLOR`. The existing
-`promptViewport` setting name remains compatible. This changes presentation only
-and adds no model requests or prompt context. Validation requirements live in the
-[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+This is always on; a leftover `experimental.promptViewport` setting, which
+enabled it while it was experimental, is accepted and ignored.
 
 ## Bash tool results
 

@@ -49,7 +49,7 @@ impl Utf8Stream {
 pub(crate) enum OutputOp<'a> {
     /// `StdoutHandle::println` — iocraft appends the line terminator itself,
     /// choosing `\r\n` in raw mode and `\n` otherwise.
-    Println(&'a str),
+    Println(std::borrow::Cow<'a, str>),
     /// `StdoutHandle::print` — written verbatim, no terminator.
     Print(&'a str),
 }
@@ -83,7 +83,16 @@ pub(crate) enum OutputOp<'a> {
 /// all — the markdown renderer and the tool formatters produce bare `\n`,
 /// and `str::lines()` strips the `\r` from embedded tool output — so the
 /// cost of carrying cross-message state isn't paid.
-pub(crate) fn split_lines(text: &str, terminated: bool, mut issue: impl FnMut(OutputOp<'_>)) {
+///
+/// Complete lines go out with any full-width background padding erased
+/// rather than written (`text_layout::erase_filled_tail`), measured against
+/// `width`, the terminal's current width.
+pub(crate) fn split_lines(
+    text: &str,
+    terminated: bool,
+    width: usize,
+    mut issue: impl FnMut(OutputOp<'_>),
+) {
     let mut segments = text.split('\n').peekable();
     while let Some(segment) = segments.next() {
         let is_last = segments.peek().is_none();
@@ -97,9 +106,10 @@ pub(crate) fn split_lines(text: &str, terminated: bool, mut issue: impl FnMut(Ou
             // existing `\r\n` so iocraft's terminator does not produce `\r\r\n`,
             // while leaving any other carriage returns (e.g. the `\r\x1b[2K`
             // that rewrites the spinner line) intact.
-            issue(OutputOp::Println(
+            issue(OutputOp::Println(super::text_layout::erase_filled_tail(
                 segment.strip_suffix('\r').unwrap_or(segment),
-            ));
+                width,
+            )));
         }
     }
 }
@@ -111,7 +121,7 @@ pub(crate) fn write_stdout(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     if stdout.is_terminal() {
         let mut result = Ok(());
-        split_lines(text, false, |op| {
+        split_lines(text, false, super::query_terminal_width(), |op| {
             if result.is_ok() {
                 result = match op {
                     OutputOp::Print(chunk) => stdout.write_all(chunk.as_bytes()),

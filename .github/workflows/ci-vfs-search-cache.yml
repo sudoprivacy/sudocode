@@ -13,6 +13,9 @@ on:
       - .github/actions/vfs-search-cache/**
       - .github/workflows/ci-vfs-search-cache.yml
       - .github/workflows/rust-ci.yml
+      # The shared daemon tool library selects the co-host queue job, which
+      # exports a fixed-driver archive on an exact-image miss.
+      - e2e/nexus-a2a/lib.sh
 
 concurrency:
   group: fixed-vfs-search-cache-main

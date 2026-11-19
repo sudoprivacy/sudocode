@@ -22,7 +22,15 @@ import threading
 import zipfile
 
 
+def check_shared_daemon_library_push(source_root):
+    workflow = (source_root / ".github/workflows/ci-vfs-search-cache.yml").read_text(encoding="utf-8")
+    triggers = workflow.split("\nconcurrency:", 1)[0]
+    assert "  push:\n    branches: [main]\n    paths:\n" in triggers
+    assert "      - e2e/nexus-a2a/lib.sh\n" in triggers, "A shared daemon library merge must publish its queue archive"
+
+
 def run(source_root, root, output, journey, command, environment):
+    check_shared_daemon_library_push(source_root)
     output.mkdir(parents=True, exist_ok=False)
     sys.path.insert(0, str(source_root / ".github/scripts"))
     import vfs_search_publication as publication

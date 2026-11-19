@@ -924,6 +924,22 @@ def native_compiler_run(name, root, output, base, execute):
         return run(name, root, output, base, command)
 
 
+def hosted_service_journeys(journeys, root, output, execute, env, start):
+    """Run independent hosted journeys concurrently, retaining command order and logs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run_one(numbered):
+        index, command = numbered
+        # The original scripts each create private test users and state
+        # beneath their temporary directory. Do not upload that state.
+        with tempfile.TemporaryDirectory(prefix="scode-service-") as temporary:
+            isolation = {key: temporary for key in ("TMPDIR", "TEMP", "TMP")}
+            return execute(command, root, output / f"{index:03d}.log", {**env, **isolation})
+
+    with ThreadPoolExecutor(max_workers=len(journeys)) as pool:
+        return list(pool.map(run_one, enumerate(journeys, start)))
+
+
 def run(name, root, output, base, execute):
     if name in {"native-workspace", "native-resize", "native-release", "native-services",
                 "native-context", "native-cohost", "native-examples"}:
@@ -1110,10 +1126,17 @@ def run(name, root, output, base, execute):
         cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
-        command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
-                "--artifacts", str(output / "services"))
-        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
-                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
+        journeys = (
+            (sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
+             "--artifacts", str(output / "services")),
+            (sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+             "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box")),
+        )
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            results.extend(hosted_service_journeys(journeys, root, output, execute, env, len(results)))
+        else:
+            for arguments in journeys:
+                command(*arguments)
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -1226,7 +1249,7 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
-        "e2e/local-acceptance/native_lint_acceptance.py": "c8060b47c00fe3d9c2d6ca270e0a1920c50b8bfc566633010e261df01fdfe085",
+        "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
         "e2e/local-acceptance/parallel_acceptance.py": "e790719488538aedb216eea3caa6883b71ef7c608b9c11fd33c9c9ca043ecd60",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
@@ -1293,7 +1316,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': 'cb0c5ee358360bfc092c9e6e1c8b56f14f36e367d2a0c0c4e60125239c769e75'}
+    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': '8efcd5884b48d577d312f705a61f35a780dd7c809ced72b2c7666531f9eadcbc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

@@ -498,6 +498,8 @@ fn exercise_invoice_approval(env: &TestEnv, cli: &mut pty_expect::PtySession, pr
             (s.contains("Approve Bash?") || s.contains("Approve bash?"))
                 && s.contains("invoice.py")
                 && s.contains("Allow this tool call?")
+                && s.contains(" · Approve")
+                && s.contains("waiting on you")
         },
         BUDGET,
         "child Bash approval on the parent terminal",

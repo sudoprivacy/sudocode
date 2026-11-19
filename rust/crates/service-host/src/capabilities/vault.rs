@@ -1,13 +1,8 @@
 use super::required;
+use crate::vault_client::{call, proto, secret_versions};
 use crate::Result;
 use nexus_vfs_client::NexusVfsClient;
-use prost::Message;
 use serde_json::{json, Value};
-
-#[allow(dead_code)]
-mod proto {
-    include!(concat!(env!("OUT_DIR"), "/nexus.secrets.v1.rs"));
-}
 
 fn timestamp(value: Option<prost_types::Timestamp>) -> Option<i64> {
     value.map(|value| value.seconds * 1000 + i64::from(value.nanos) / 1_000_000)
@@ -43,25 +38,12 @@ fn put_request(params: &Value) -> Result<proto::PutSecretRequest> {
     })
 }
 
-fn rpc<I: Message, O: Message + Default>(
-    client: &NexusVfsClient,
-    method: &str,
-    input: &I,
-) -> Result<O> {
-    let bytes = client.call(
-        &format!("password-vault.{method}"),
-        &input.encode_to_vec(),
-        "",
-    )?;
-    Ok(O::decode(bytes.as_slice())?)
-}
-
 pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) -> Result<Value> {
     match method {
         "vault.get" => get_secret(client, params),
         "vault.put" => {
             let response: proto::PutSecretResponse =
-                rpc(client, "secret_put", &put_request(params)?)?;
+                call(client, "secret_put", &put_request(params)?)?;
             Ok(metadata(
                 &response.metadata.ok_or("vault put returned no metadata")?,
             ))
@@ -69,7 +51,7 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
         "vault.list" => list_secrets(client, params),
         "vault.delete" => {
             let request = get_request(params)?;
-            let response: proto::DeleteSecretResponse = rpc(
+            let response: proto::DeleteSecretResponse = call(
                 client,
                 "secret_delete",
                 &proto::DeleteSecretRequest {
@@ -81,7 +63,7 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
         }
         "vault.restore" => {
             let request = get_request(params)?;
-            let response: proto::RestoreSecretResponse = rpc(
+            let response: proto::RestoreSecretResponse = call(
                 client,
                 "secret_restore",
                 &proto::RestoreSecretRequest {
@@ -93,21 +75,14 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
         }
         "vault.versions" => {
             let request = get_request(params)?;
-            let response: proto::ListSecretVersionsResponse = rpc(
-                client,
-                "secret_list_versions",
-                &proto::ListSecretVersionsRequest {
-                    namespace: request.namespace,
-                    key: request.key,
-                },
-            )?;
-            Ok(json!(response.versions.into_iter().map(|value| json!({"version": value.version, "createdAt": timestamp(value.created_at)})).collect::<Vec<_>>()))
+            let versions = secret_versions(client, &request.namespace, &request.key)?;
+            Ok(json!(versions.into_iter().map(|value| json!({"version": value.version, "createdAt": timestamp(value.created_at)})).collect::<Vec<_>>()))
         }
         "vault.batchGet" => batch_get_secrets(client, params),
         "vault.batchPut" => batch_put_secrets(client, params),
         "vault.deleteVersion" => {
             let request = get_request(params)?;
-            let response: proto::DeleteSecretVersionResponse = rpc(
+            let response: proto::DeleteSecretVersionResponse = call(
                 client,
                 "secret_delete_version",
                 &proto::DeleteSecretVersionRequest {
@@ -120,7 +95,7 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
         }
         "vault.updateDescription" => {
             let request = get_request(params)?;
-            let response: proto::UpdateSecretDescriptionResponse = rpc(
+            let response: proto::UpdateSecretDescriptionResponse = call(
                 client,
                 "secret_update_description",
                 &proto::UpdateSecretDescriptionRequest {
@@ -140,11 +115,11 @@ pub(super) fn dispatch(client: &NexusVfsClient, method: &str, params: &Value) ->
 fn get_secret(client: &NexusVfsClient, params: &Value) -> Result<Value> {
     let request = get_request(params)?;
     if request.version.is_some() {
-        let response: proto::GetSecretResponse = rpc(client, "secret_get", &request)?;
+        let response: proto::GetSecretResponse = call(client, "secret_get", &request)?;
         return Ok(json!(response.value));
     }
     let key = format!("{}:{}", request.namespace, request.key);
-    let response: proto::BatchGetSecretsResponse = rpc(
+    let response: proto::BatchGetSecretsResponse = call(
         client,
         "secret_batch_get",
         &proto::BatchGetSecretsRequest {
@@ -155,7 +130,7 @@ fn get_secret(client: &NexusVfsClient, params: &Value) -> Result<Value> {
 }
 
 fn list_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
-    let response: proto::ListSecretsResponse = rpc(
+    let response: proto::ListSecretsResponse = call(
         client,
         "secret_list",
         &proto::ListSecretsRequest {
@@ -186,7 +161,7 @@ fn batch_get_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
         .iter()
         .map(get_request)
         .collect::<Result<Vec<_>>>()?;
-    let response: proto::BatchGetSecretsResponse = rpc(
+    let response: proto::BatchGetSecretsResponse = call(
         client,
         "secret_batch_get",
         &proto::BatchGetSecretsRequest { queries },
@@ -202,7 +177,7 @@ fn batch_put_secrets(client: &NexusVfsClient, params: &Value) -> Result<Value> {
         .iter()
         .map(put_request)
         .collect::<Result<Vec<_>>>()?;
-    let response: proto::BatchPutSecretsResponse = rpc(
+    let response: proto::BatchPutSecretsResponse = call(
         client,
         "secret_batch_put",
         &proto::BatchPutSecretsRequest { secrets },

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use kernel::core::agents::registry::{AgentInstance, AgentRegistry, RuntimeRegistryHost};
 use runtime::runtime_status::{
-    RuntimeDirectory, RuntimeInstanceId, RuntimeObservationHost, RuntimeStatusSource,
-    RuntimeUnavailableScope,
+    online_agent_names, OnlineAgents, RuntimeInstanceId, RuntimeObservationHost,
+    RuntimeStatusSource,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -122,15 +122,16 @@ impl LocalDirectory {
                             .values()
                             .filter_map(|(registry, _)| registry.upgrade())
                             .collect();
-                        let directory = RuntimeDirectory {
+                        let inventories: Vec<_> = registries
+                            .iter()
+                            .map(|registry| registry.runtime_inventory(Some(OWNER), ZONE))
+                            .collect();
+                        let online = OnlineAgents {
                             version: 1,
-                            inventories: registries
-                                .iter()
-                                .map(|registry| registry.runtime_inventory(Some(OWNER), ZONE))
-                                .collect(),
-                            unavailable: Vec::new(),
+                            zone_id: ZONE.into(),
+                            online: online_agent_names(&inventories),
                         };
-                        write_frame(&mut stream, &directory).await
+                        write_frame(&mut stream, &online).await
                     })
                     .await;
                 });
@@ -284,9 +285,9 @@ impl RuntimeObservationHost for LocalRuntimeHost {
     fn instance(&self) -> Option<RuntimeInstanceId> {
         self.host.instance()
     }
-    fn discover(&self) -> Result<RuntimeDirectory, String> {
+    fn online_agents(&self) -> Result<OnlineAgents, String> {
         self.instance().ok_or("local runtime retired")?;
-        discover(&self.root, self.kernel.runtime().handle()).map_err(|error| error.to_string())
+        online_agents(&self.root, self.kernel.runtime().handle()).map_err(|error| error.to_string())
     }
 }
 
@@ -347,33 +348,12 @@ fn read_routing_payload(path: &Path) -> io::Result<IndexEntry> {
     Ok(entry)
 }
 
-fn discover(root: &Path, runtime: &tokio::runtime::Handle) -> io::Result<RuntimeDirectory> {
-    let mut result = RuntimeDirectory {
-        version: 1,
-        inventories: Vec::new(),
-        unavailable: Vec::new(),
-    };
-    let mut entries = Vec::new();
-    let files = std::fs::read_dir(root)?;
+/// The online Agents of every process in this directory. A process that does
+/// not answer contributes no names: its Agents were not seen online.
+fn online_agents(root: &Path, runtime: &tokio::runtime::Handle) -> io::Result<OnlineAgents> {
     let mut routes = BTreeSet::new();
-    for (index, path) in files.enumerate() {
-        if index >= MAX_INDEX {
-            result.unavailable.push(RuntimeUnavailableScope {
-                endpoint: "local-index".into(),
-                reason: "index_limit".into(),
-            });
-            break;
-        }
-        let path = match path {
-            Ok(path) => path.path(),
-            Err(error) => {
-                result.unavailable.push(RuntimeUnavailableScope {
-                    endpoint: "local-index".into(),
-                    reason: error.kind().to_string(),
-                });
-                continue;
-            }
-        };
+    for path in std::fs::read_dir(root)?.take(MAX_INDEX).flatten() {
+        let path = path.path();
         if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
             routes.insert(path);
         } else if let Some(identity) = path
@@ -384,56 +364,35 @@ fn discover(root: &Path, runtime: &tokio::runtime::Handle) -> io::Result<Runtime
             routes.insert(root.join(format!("{identity}.json")));
         }
     }
-    for path in routes {
-        match read_entry(&path) {
-            Ok(Some(entry)) => entries.push(entry),
-            Ok(None) => {}
-            Err(error) => result.unavailable.push(RuntimeUnavailableScope {
-                endpoint: path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                reason: error.kind().to_string(),
-            }),
-        }
-    }
+    let entries: Vec<_> = routes
+        .iter()
+        .filter_map(|path| read_entry(path).ok().flatten())
+        .collect();
+    let mut online = BTreeSet::new();
     lib::rt::block_on_via(runtime, async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         // One deadline bounds the entire directory, including peers not yet polled.
         let mut responses = stream::iter(entries)
             .map(|entry| async move {
-                let response = tokio::time::timeout_at(deadline, async {
+                tokio::time::timeout_at(deadline, async {
                     let mut stream = TcpStream::connect(entry.endpoint).await?;
                     write_frame(&mut stream, &entry).await?;
-                    read_frame::<RuntimeDirectory>(&mut stream).await
+                    read_frame::<OnlineAgents>(&mut stream).await
                 })
-                .await;
-                (entry, response)
+                .await
             })
             .buffer_unordered(4);
-        while let Some((entry, response)) = responses.next().await {
-            match response {
-                Ok(Ok(directory))
-                    if directory.version == 1
-                        && directory.inventories.iter().all(|inventory| {
-                            inventory.scope.owner_id.as_deref() == Some(OWNER)
-                                && inventory.scope.zone_id == ZONE
-                                && inventory.version == 1
-                                && inventory.instances.iter().all(|observation| {
-                                    observation.instance.registry_id == inventory.scope.registry_id
-                                })
-                        }) =>
-                {
-                    result.inventories.extend(directory.inventories);
-                    result.unavailable.extend(directory.unavailable);
+        while let Some(response) = responses.next().await {
+            if let Ok(Ok(answer)) = response {
+                if answer.version == 1 && answer.zone_id == ZONE {
+                    online.extend(answer.online);
                 }
-                _ => result.unavailable.push(RuntimeUnavailableScope {
-                    endpoint: entry.directory_id,
-                    reason: "unavailable".into(),
-                }),
             }
         }
-        Ok(result)
+    });
+    Ok(OnlineAgents {
+        version: 1,
+        zone_id: ZONE.into(),
+        online: online.into_iter().collect(),
     })
 }

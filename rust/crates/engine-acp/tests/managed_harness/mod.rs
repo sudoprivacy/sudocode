@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
+use kernel::core::agents::host_cleanup::ManagedHostCleanup;
 use kernel::kernel::{Kernel, OperationContext};
 use managed_agent::{SpawnHandle, SpawnTask};
 use runtime::spawn_task::{AgentDescriptor, AgentState};
@@ -100,6 +101,9 @@ impl TestAbort {
 pub struct TestHost {
     pub abort_signal: TestAbort,
     pub join: std::thread::JoinHandle<()>,
+    /// The registry's retirement latch for this incarnation, as production
+    /// arms it: the host completes it after its own joins.
+    pub cleanup: ManagedHostCleanup,
 }
 
 pub fn spawn_managed_agent(
@@ -115,11 +119,25 @@ pub fn spawn_managed_agent(
     crate::common::provision_stream_transcript(&kernel, &endpoint.transcript);
     let mut options = crate::common::managed_session::seed_managed_session(&kernel, &desc);
     options.session_endpoint = Some(endpoint.clone());
+    let instance = kernel
+        .agent_registry()
+        .register_instance(desc.clone())
+        .ok_or("register the managed instance")?;
+    let cleanup = kernel
+        .agent_registry()
+        .arm_host_cleanup(&instance)
+        .ok_or("arm the host cleanup latch")?;
     let host: Arc<dyn SpawnHandle> = Arc::from(
         engine_acp::managed_agent::SudoCodeSpawnAdapter {
             authenticated_senders: false,
         }
-        .spawn_with_options(Arc::clone(&kernel), desc, options, Arc::new(observer))?,
+        .spawn_with_cleanup(
+            Arc::clone(&kernel),
+            desc,
+            options,
+            cleanup.clone(),
+            Arc::new(observer),
+        )?,
     );
     let mailbox = match connect(kernel, endpoint, None) {
         Ok(mailbox) => mailbox,
@@ -136,6 +154,7 @@ pub fn spawn_managed_agent(
     Ok(TestHost {
         abort_signal: TestAbort { stop, host },
         join,
+        cleanup,
     })
 }
 pub struct Controller {

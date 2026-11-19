@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 fn footer(session: &PtySession) -> String {
     session.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+        let rows = common::screen_rows(screen);
+        let rows: Vec<_> = rows.lines().collect();
         let separator = rows
             .iter()
             .rposition(|row| row.contains('─') && row.trim().chars().all(|c| c == '─'))
@@ -344,8 +344,14 @@ fn footer_keeps_position_and_state_keys_while_typing_and_switches_with_the_turn(
         common::DEFAULT_TIMEOUT,
         "turn running",
     );
-    let running = "⎇ feat/turn-state · Enter steer · Tab queue · Esc/Ctrl+C cancel";
+    let running = "Esc/Ctrl+C cancel · Enter steer · Tab queue";
     wait_footer(&session, running);
+    wait_footer(&session, "⎇ feat/turn-state");
+    let current = footer(&session);
+    assert!(
+        current.find(running).unwrap() < current.find("⎇ feat/turn-state").unwrap(),
+        "active controls must precede the workspace position"
+    );
     session.send("steer").unwrap();
     common::expect_input_line(
         &session,

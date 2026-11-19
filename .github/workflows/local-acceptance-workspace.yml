@@ -1,0 +1,143 @@
+name: Periodic full native workspace
+
+on:
+  schedule:
+    - cron: '19 3 * * 0'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: [.github/workflows/local-acceptance-workspace.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    name: Full workspace (${{ matrix.os }})
+    if: (github.event_name == 'pull_request' && !github.event.pull_request.draft) || github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: .trusted-acceptance
+          persist-credentials: false
+      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain
+        with:
+          toolchain-file: |
+            candidate/rust-toolchain.toml
+            .trusted-acceptance/rust-toolchain.toml
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve the shared native cache paths
+        id: cache_layout
+        run: python ../.trusted-acceptance/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          save-if: false
+      - name: Install acceptance observer dependencies
+        run: python -m pip install psutil jsonschema
+      - name: Verify real native host-lease inheritance before compilation
+        shell: python
+        env:
+          INHERITED_LEASE_OUTPUT: ${{ runner.temp }}/periodic-workspace/inherited-lease
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable,
+                          '../.trusted-acceptance/e2e/local-acceptance/inherited_lease_acceptance.py',
+                          '--output', os.environ['INHERITED_LEASE_OUTPUT']], check=True)
+      - name: Prepare complementary tools for this policy PR
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_NATIVE_CHECKS: native-examples native-resize native-services native-context native-cohost
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/periodic-workspace/complementary-first
+        run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
+      - name: Qualify the candidate service-tool result with the real native client
+        if: github.event_name == 'pull_request'
+        shell: python
+        env:
+          EXPECTED_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha }}
+          SERVICE_TOOL_OUTPUT: ${{ runner.temp }}/periodic-workspace/candidate-service-tool
+        run: |
+          import hashlib, importlib.util, json, os, subprocess
+          from pathlib import Path
+          if any(name.upper() in {'GH_TOKEN', 'GITHUB_TOKEN'} for name in os.environ):
+              raise RuntimeError('Candidate tool qualification must not receive GitHub credentials')
+          root = Path.cwd()
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if head != os.environ['EXPECTED_CANDIDATE_HEAD']:
+              raise RuntimeError('Tool qualification source differs from the actual candidate head')
+          def load(name, path):
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+          trusted = root.parent / '.trusted-acceptance'
+          helper = load('trusted_tool_commands', trusted / '.github/scripts/local_acceptance.py')
+          helper.ROOT = root
+          source = root / '.github/local-acceptance/checks.py'
+          profiles = load('candidate_tool_result', source)
+          output = Path(os.environ['SERVICE_TOOL_OUTPUT'])
+          result = profiles.native_services_tool(root, output, helper.run_command)
+          receipt = {'candidate_head': head, 'candidate_checks_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                     'tool': result['tool'], 'command': result['command'],
+                     'raw_log_sha256': hashlib.sha256(Path(result['log']).read_bytes()).hexdigest(),
+                     'scope': 'Real native client version/result only; original service journeys run separately'}
+          (output / 'candidate-result.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(receipt))
+      - name: Qualify complementary native profiles without workspace
+        if: github.event_name == 'pull_request'
+        env:
+          ACCEPTANCE_NATIVE_CHECKS: native-examples native-resize native-services native-context native-cohost
+          ACCEPTANCE_BASE: ${{ github.event.pull_request.base.sha }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/periodic-workspace/complementary-first
+        run: python ../.trusted-acceptance/.github/local-acceptance/cross_platform.py
+      - name: Prepare pinned tools through the authenticated GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_NATIVE_CHECKS: native-workspace
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/periodic-workspace/workspace
+        run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
+      - name: Run the original full native workspace profile
+        env:
+          ACCEPTANCE_NATIVE_CHECKS: native-workspace
+          # No changed-source test selection: the full workspace is mandatory.
+          ACCEPTANCE_BASE: ${{ github.event.pull_request.head.sha || github.sha }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/periodic-workspace/workspace
+        run: python ../.trusted-acceptance/.github/local-acceptance/cross_platform.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: periodic-workspace-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/periodic-workspace
+          if-no-files-found: error
+          retention-days: 14

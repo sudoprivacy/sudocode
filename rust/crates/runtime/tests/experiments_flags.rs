@@ -176,6 +176,17 @@ fn settings_experimental_unknown_key_fails_loud() {
 }
 
 #[test]
+fn settings_experimental_graduated_key_still_loads_and_is_ignored() {
+    let _guard = env_mutex();
+    let config = load_config_with_settings(
+        r#"{"experimental": {"peerDescriptions": true, "coordinatorMode": true}}"#,
+    )
+    .expect("a graduated experiment key must not fail the settings file");
+    assert_eq!(config.experiments().get("peerDescriptions"), None);
+    assert_eq!(config.experiments().get("coordinatorMode"), Some(&true));
+}
+
+#[test]
 fn settings_experimental_non_bool_value_fails_loud() {
     let _guard = env_mutex();
     let error = load_config_with_settings(r#"{"experimental": {"coordinatorMode": "yes"}}"#)

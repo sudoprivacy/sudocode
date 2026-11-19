@@ -1,0 +1,1786 @@
+{
+  "schemaVersion": 1,
+  "repository": "sudoprivacy/sudocode",
+  "sourceSnapshotUTC": "2026-11-17T19:17:36.026554+00:00",
+  "purpose": "Bounded observed local policy/bootstrap/repair investment, reported separately from the fixed merged-PR lifecycle cohort.",
+  "selection": "Only top-level ow-prefixed owned workline output directories, original receipt plus four explicitly named managed files. No recursive artifact search.",
+  "receiptCount": 41,
+  "originalReceiptStates": [
+    {
+      "receipt": "D:\\owact17r2\\receipt.json",
+      "sha256": "323f635f11cb593b54037706fa4bb33042f2702b41bc6460240dbc02852717e8",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "9d23d71c651b98b5894450d31a3e9c394f066c23",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T09:36:38.147804+00:00",
+        "finishedAtUTC": "2026-11-17T10:05:40.517050+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owact18r1\\receipt.json",
+      "sha256": "a08d701603cae1b85928a8772a11ab017024a57c3242b888463539c8107b2440",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "4cc3cd46b27210a1641f6082c5057debbd17056e",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T18:06:13.569152+00:00",
+        "finishedAtUTC": "2026-11-17T18:57:18.420327+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owbm17r1\\receipt.json",
+      "sha256": "c022e457f262836785db8b250e37aa6df5e1481e4ec57ccb60149be29b2d9013",
+      "complete": true,
+      "passed": true,
+      "phase": "existing_metadata_controls_passed",
+      "head": "c951d4c6304fe52b66526c5f5118ba784241a5b7",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T04:31:20.270108+00:00",
+        "finishedAtUTC": "2026-11-17T04:41:49.585793+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r1\\receipt.json",
+      "sha256": "b4d31d3a35f3bde5924ecc9855c82c10f3152d6e47b7f55aca12c464fe86f594",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "c818741af58bb067e6a1447eaedc856566850d96",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T04:04:12.510588+00:00",
+        "finishedAtUTC": "2026-11-17T04:04:34.598388+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r2\\receipt.json",
+      "sha256": "6fadc8f7464ef4b8a87e37c24b04c364eeffd88398046544f34cf5359a691712",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "c951d4c6304fe52b66526c5f5118ba784241a5b7",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T04:08:50.412844+00:00",
+        "finishedAtUTC": "2026-11-17T04:24:35.518683+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r3\\receipt.json",
+      "sha256": "01207d6afa7cb5555581f06347ac2d35e960a3dd99b6c98e22266652c475ebf3",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "e037fc60a0f221ae27f7611f0a7af2d5d570f60f",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T04:34:58.752112+00:00",
+        "finishedAtUTC": "2026-11-17T05:09:24.135988+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r4\\receipt.json",
+      "sha256": "e82b034b18602fcd4475ed0e1d0f68fb0787d16306347d948fb21f87a602c696",
+      "complete": true,
+      "passed": false,
+      "phase": "waiting_one_bounded_health_diagnostic",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-17T06:27:07.807578+00:00",
+        "finishedAtUTC": "2026-11-17T06:39:27.929649+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r5\\receipt.json",
+      "sha256": "4348ec9e4c3b08e73ba2f53eda050a125912006fd46e4f6d65fb11336133e6bb",
+      "complete": true,
+      "passed": false,
+      "phase": "original-supported-maintainer-contract-update",
+      "head": "e037fc60a0f221ae27f7611f0a7af2d5d570f60f",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T06:45:22.983439+00:00",
+        "finishedAtUTC": "2026-11-17T07:27:09.541366+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owboot17r6\\receipt.json",
+      "sha256": "aae3302e9e33c7ed99bfde22c242f462070dbf2dccf8c26636fe67012e1038b1",
+      "complete": true,
+      "passed": true,
+      "phase": "bootstrap_normally_merged_original_share_equal",
+      "head": "4333c81cb36aa5fd60474be7914db2a8b48e64c2",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T08:06:17.283655+00:00",
+        "finishedAtUTC": "2026-11-17T08:55:42.137536+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owcache17r1\\receipt.json",
+      "sha256": "adcf1e9ba56f60716b36cc64908dad1468d09c8b28fdd7ff77d680dd2791c309",
+      "complete": true,
+      "passed": false,
+      "phase": "paired-control-completed",
+      "head": "b6255fec1fe9a4a07b8bb42dadb5a2a683f06df0",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T23:27:46.020385+00:00",
+        "finishedAtUTC": "2026-11-16T23:32:05.753372+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owcf17r1\\receipt.json",
+      "sha256": "88d6c64c79ba293ab97a5872884fdf4a2ede0cf264c25b4aba5ab2231a1c0ccd",
+      "complete": false,
+      "passed": false,
+      "phase": "original_host_fifo",
+      "head": "c8772b3887611defdefee9f72a5c69cac7ab09a8",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T07:54:05.401360+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owcf17r2\\receipt.json",
+      "sha256": "fdff20c0abcdbc3e902fcf1122cba6b89f052032a72f8da2624e5f49c6221d9b",
+      "complete": true,
+      "passed": false,
+      "phase": "original_complete_compiler_object_fixture",
+      "head": "c8772b3887611defdefee9f72a5c69cac7ab09a8",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T07:58:02.659216+00:00",
+        "finishedAtUTC": "2026-11-17T07:58:45.784447+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owcf17r3\\receipt.json",
+      "sha256": "f05410c8689317e0f5a6e74ea5d459983331e84f81cafe8cd97b5a746fa52f62",
+      "complete": true,
+      "passed": true,
+      "phase": "original_complete_fixture_passed",
+      "head": "4333c81cb36aa5fd60474be7914db2a8b48e64c2",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T08:04:59.191244+00:00",
+        "finishedAtUTC": "2026-11-17T08:16:19.306303+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owdh17r1\\receipt.json",
+      "sha256": "3bf259105df24a0a80c56a2fd31c0a29807786edaed5c22c894af093d2df01a9",
+      "complete": true,
+      "passed": false,
+      "phase": "one_original_health_fixture",
+      "head": "e037fc60a0f221ae27f7611f0a7af2d5d570f60f",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T06:24:54.322318+00:00",
+        "finishedAtUTC": "2026-11-17T06:39:22.128859+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owdh17r2\\receipt.json",
+      "sha256": "c1e80f449937ba57f24b1a68111abdd8cd3d0df46f5f4475bb58fca1b30986a4",
+      "complete": true,
+      "passed": true,
+      "phase": "one_bounded_original_fixture_passed",
+      "head": "e037fc60a0f221ae27f7611f0a7af2d5d570f60f",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T06:45:12.926349+00:00",
+        "finishedAtUTC": "2026-11-17T06:50:53.895256+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owp16r1\\receipt.json",
+      "sha256": "052104a2a7287c2f8c3e4460d07024f246f2165515fc8534065cc9fde51f4b14",
+      "complete": true,
+      "passed": true,
+      "phase": null,
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T14:52:50.034402+00:00",
+        "finishedAtUTC": "2026-11-16T16:29:08.275396+00:00",
+        "elapsedSeconds": 5778.2405904
+      }
+    },
+    {
+      "receipt": "D:\\owplan17r1\\receipt.json",
+      "sha256": "896b52b42ffde7f35b038fdc944c020d6af73ba425bf5046b2968708005ce1c2",
+      "complete": true,
+      "passed": false,
+      "phase": "actual_git_ssh_entry_controls",
+      "head": "abffe5292f4d6f351e6bfd574978f800292d2385",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T09:26:15.873354+00:00",
+        "finishedAtUTC": "2026-11-17T09:30:04.286651+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owplan17r2\\receipt.json",
+      "sha256": "107448519e00670aa0a949dad65bc3d205cff762e9ccd0e84a99f0f8f6dc7290",
+      "complete": true,
+      "passed": true,
+      "phase": "three_real_entry_cases_passed",
+      "head": "9d23d71c651b98b5894450d31a3e9c394f066c23",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T09:35:44.717626+00:00",
+        "finishedAtUTC": "2026-11-17T09:52:09.176489+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpty17diag1\\receipt.json",
+      "sha256": "c88f9953de998ea0fe3817d291ef47558281b5a6f3d81ff6654df93d66539540",
+      "complete": true,
+      "passed": null,
+      "phase": "bounded-diagnostic-completed-not-acceptance",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T22:19:33.150423+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpty17r1\\receipt.json",
+      "sha256": "9a7735a38c3949d333c8d8c1d2567dd11d16af42ca1a37cbfbc51a4343f1d394",
+      "complete": false,
+      "passed": null,
+      "phase": "canonical-host-fifo",
+      "head": "43152844ef0a465bb4544d086ed700b745d91462",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T21:14:55.516782+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpty17r2\\receipt.json",
+      "sha256": "da82dff5e12b0d9ff7eec5fc7292887c0597551323154b656753d9c6d456aecc",
+      "complete": true,
+      "passed": null,
+      "phase": "original-refusal-and-drain-controls",
+      "head": "43152844ef0a465bb4544d086ed700b745d91462",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T21:46:11.794187+00:00",
+        "finishedAtUTC": "2026-11-16T22:14:20.971419+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpty17r3\\receipt.json",
+      "sha256": "7a0b758d6e362bd45f75f50b8bf765d59e38a000e7171c2a6ff4b03afbcc4ea7",
+      "complete": true,
+      "passed": null,
+      "phase": "private-native-order-counterexample-and-candidate-controls-passed",
+      "head": "43152844ef0a465bb4544d086ed700b745d91462",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T22:27:37.865022+00:00",
+        "finishedAtUTC": "2026-11-16T22:36:03.039012+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub16r1\\receipt.json",
+      "sha256": "868f3759924195978552f3524c7fb845bc2a02777e9a515e8abaedddf94db38c",
+      "complete": false,
+      "passed": false,
+      "phase": "waiting_original_protocol",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T15:06:54.548786+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub16r2\\receipt.json",
+      "sha256": "cd459d2de2b06d099137c9b740fcf41a7d4bfa0a20cba44fb366bb74cedea251",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "0efabf5ca88746ab087ecc68ffff6908df072faf",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T15:29:58.327170+00:00",
+        "finishedAtUTC": "2026-11-16T16:29:37.921332+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r10\\receipt.json",
+      "sha256": "b4e5f7e26809e7c0b2c8d6b3ea14f3de0a72d46bafa7297433dae6ddf8a88187",
+      "complete": true,
+      "passed": false,
+      "phase": "exact-head-checks",
+      "head": "43152844ef0a465bb4544d086ed700b745d91462",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T19:07:11.783233+00:00",
+        "finishedAtUTC": "2026-11-16T20:20:50.810580+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r11\\receipt.json",
+      "sha256": "e9b4c47629a4862ec23af118d85c7a8daf1747490f11b0f805899238ba05da9c",
+      "complete": true,
+      "passed": false,
+      "phase": "waiting_original_fixed_conpty_component",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T21:58:08.254011+00:00",
+        "finishedAtUTC": "2026-11-16T22:14:28.329513+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r12\\receipt.json",
+      "sha256": "40b6fbd229ec4d1e4e3d0550be79339451fe7c7dce1be89f64b89814f1328b38",
+      "complete": true,
+      "passed": false,
+      "phase": "apply-normal-consumer-pin",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T22:27:48.030075+00:00",
+        "finishedAtUTC": "2026-11-16T22:36:10.942828+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r13\\receipt.json",
+      "sha256": "e780b63ca132dcd02df0217b35dd401f376836d65ad347e71abaab118f928b05",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "b6255fec1fe9a4a07b8bb42dadb5a2a683f06df0",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T22:38:31.379276+00:00",
+        "finishedAtUTC": "2026-11-16T23:17:20.163871+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r14\\receipt.json",
+      "sha256": "220650606e60b8e59c2d6d0682a2e2b5b41d0cb9e486ef87ac01f5a5a3ca30b9",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "e8b841b3d5c279335df3b3fbd361d422cd4453b9",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T23:39:13.860618+00:00",
+        "finishedAtUTC": "2026-11-17T00:48:38.851242+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r15\\receipt.json",
+      "sha256": "c42f261c3f095aefb4d05f3ebbf3f722e60ea2744684fab0e06c677a380e1bea",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "26b69f3d2363b39113da8cfa128b50050beff3eb",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T01:41:34.520118+00:00",
+        "finishedAtUTC": "2026-11-17T03:06:06.975032+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r3\\receipt.json",
+      "sha256": "28ae82e1e8c4cbd40a28c45380bfe20c837480202da6356bcf0354b2b76a1c84",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "0efabf5ca88746ab087ecc68ffff6908df072faf",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T16:35:59.541896+00:00",
+        "finishedAtUTC": "2026-11-16T16:36:14.362496+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r4\\receipt.json",
+      "sha256": "3facab4fce1dfdcbdaa932843f3e36726df082b4b4b2de8988a934db4e04eb12",
+      "complete": true,
+      "passed": false,
+      "phase": "no-unstaged-drift",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-16T16:37:45.502266+00:00",
+        "finishedAtUTC": "2026-11-16T16:37:45.755182+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r5\\receipt.json",
+      "sha256": "1a4f01ba95af0e9f3d3e5c5531229abd2953e393cd06222538444801170d111e",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-original-checkpoint-resume",
+      "head": "0efabf5ca88746ab087ecc68ffff6908df072faf",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T16:38:34.943537+00:00",
+        "finishedAtUTC": "2026-11-16T17:02:32.647741+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r6\\receipt.json",
+      "sha256": "e69211a1011c4b06af785031714587da437c66ba59f587a3a3c5c5c3af296eaa",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "4db985bdaccb34df18a1a5924d007cb6cf2d9d82",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T17:17:02.738093+00:00",
+        "finishedAtUTC": "2026-11-16T17:23:50.043940+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r7\\receipt.json",
+      "sha256": "c5bfa5a2c598e3f50f8470e70ca03bafbe6a45ef0124d2844fc4d72bdc5e4ad0",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "793fd547a084ef71e2307791b5e75df1be2cc2e8",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T17:35:15.489814+00:00",
+        "finishedAtUTC": "2026-11-16T17:59:31.721545+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r8\\receipt.json",
+      "sha256": "0b33b04871b4160305b854223ceeedb9ba206164b90ee02b1c3eeed8a071ff0a",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-original-checkpoint-resume",
+      "head": "793fd547a084ef71e2307791b5e75df1be2cc2e8",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T18:08:00.275235+00:00",
+        "finishedAtUTC": "2026-11-16T18:21:57.759918+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owpub17r9\\receipt.json",
+      "sha256": "dfc03f2919afedbfc9fefb612ce2a6f16c07ccc0fe91a958e8389024e8098ac0",
+      "complete": true,
+      "passed": false,
+      "phase": "supported-maintainer-contract-update",
+      "head": "ad45d084fa298b7a478942b89cb03e8a3f6c11a3",
+      "clocks": {
+        "startedAtUTC": "2026-11-16T18:39:27.477150+00:00",
+        "finishedAtUTC": "2026-11-16T19:02:23.078545+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owres18r1\\receipt.json",
+      "sha256": "6963430b4b609970b20ba84c3698ffaa2c134943be11dfcefc9a53c6a07b180d",
+      "complete": true,
+      "passed": true,
+      "phase": "both_complete_resource_fixtures_passed",
+      "head": "4cc3cd46b27210a1641f6082c5057debbd17056e",
+      "clocks": {
+        "startedAtUTC": "2026-11-17T18:05:08.419393+00:00",
+        "finishedAtUTC": "2026-11-17T18:32:42.758214+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owstorage17r1\\receipt.json",
+      "sha256": "6e0f6c4d5f2848414cf7c554945ac608bcfd5614684d143aa16431056aa55d2c",
+      "complete": true,
+      "passed": false,
+      "phase": "old-pressure",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-17T01:11:04.059378+00:00",
+        "finishedAtUTC": "2026-11-17T01:12:54.673190+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owstorage17r2\\receipt.json",
+      "sha256": "f0b675c4ef5cb259288495487f2f5802f0dc5884dd389d688a3f4ecd65342913",
+      "complete": true,
+      "passed": false,
+      "phase": "canonical-host-fifo",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-17T01:18:22.880955+00:00",
+        "finishedAtUTC": "2026-11-17T01:18:23.136252+00:00"
+      }
+    },
+    {
+      "receipt": "D:\\owstorage17r3\\receipt.json",
+      "sha256": "00d7c5c2e1f229a4a63fce10657479309b8176c663e6179dbdf132f4887b6e6b",
+      "complete": true,
+      "passed": true,
+      "phase": "actual-capacity-control-counterexample-and-candidate-passed",
+      "head": null,
+      "clocks": {
+        "startedAtUTC": "2026-11-17T01:19:40.096700+00:00",
+        "finishedAtUTC": "2026-11-17T01:20:27.029491+00:00"
+      }
+    }
+  ],
+  "wrapperClocks": {
+    "closedIntervals": 37,
+    "sumMinutes": 907.4540432691574,
+    "intervalUnionMinutes": 747.187680844466,
+    "intervalUnion": [
+      [
+        1794840770.034402,
+        1794846577.921332
+      ],
+      [
+        1794846959.541896,
+        1794846974.362496
+      ],
+      [
+        1794847065.502266,
+        1794847065.755182
+      ],
+      [
+        1794847114.943537,
+        1794848552.647741
+      ],
+      [
+        1794849422.738093,
+        1794849830.04394
+      ],
+      [
+        1794850515.489814,
+        1794851971.721545
+      ],
+      [
+        1794852480.275235,
+        1794853317.759918
+      ],
+      [
+        1794854367.47715,
+        1794855743.078545
+      ],
+      [
+        1794856031.783233,
+        1794860450.81058
+      ],
+      [
+        1794865571.794187,
+        1794867268.329513
+      ],
+      [
+        1794868057.865022,
+        1794868570.942828
+      ],
+      [
+        1794868711.379276,
+        1794871040.163871
+      ],
+      [
+        1794871666.020385,
+        1794871925.753372
+      ],
+      [
+        1794872353.860618,
+        1794876518.851242
+      ],
+      [
+        1794877864.059378,
+        1794877974.67319
+      ],
+      [
+        1794878302.880955,
+        1794878303.136252
+      ],
+      [
+        1794878380.0967,
+        1794878427.029491
+      ],
+      [
+        1794879694.520118,
+        1794884766.975032
+      ],
+      [
+        1794888252.510588,
+        1794888274.598388
+      ],
+      [
+        1794888530.412844,
+        1794889475.518683
+      ],
+      [
+        1794889880.270108,
+        1794892164.135988
+      ],
+      [
+        1794896694.322318,
+        1794897567.929649
+      ],
+      [
+        1794897912.926349,
+        1794900429.541366
+      ],
+      [
+        1794902282.659216,
+        1794902325.784447
+      ],
+      [
+        1794902699.191244,
+        1794905742.137536
+      ],
+      [
+        1794907575.873354,
+        1794907804.286651
+      ],
+      [
+        1794908144.717626,
+        1794909940.51705
+      ],
+      [
+        1794938708.419393,
+        1794941838.420327
+      ]
+    ],
+    "originals": [
+      {
+        "receipt": "D:\\owact17r2\\receipt.json",
+        "sha256": "323f635f11cb593b54037706fa4bb33042f2702b41bc6460240dbc02852717e8",
+        "start": 1794908198.147804,
+        "end": 1794909940.51705,
+        "seconds": 1742.369246006012,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owact18r1\\receipt.json",
+        "sha256": "a08d701603cae1b85928a8772a11ab017024a57c3242b888463539c8107b2440",
+        "start": 1794938773.569152,
+        "end": 1794941838.420327,
+        "seconds": 3064.8511748313904,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owbm17r1\\receipt.json",
+        "sha256": "c022e457f262836785db8b250e37aa6df5e1481e4ec57ccb60149be29b2d9013",
+        "start": 1794889880.270108,
+        "end": 1794890509.585793,
+        "seconds": 629.3156850337982,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owboot17r1\\receipt.json",
+        "sha256": "b4d31d3a35f3bde5924ecc9855c82c10f3152d6e47b7f55aca12c464fe86f594",
+        "start": 1794888252.510588,
+        "end": 1794888274.598388,
+        "seconds": 22.08780002593994,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owboot17r2\\receipt.json",
+        "sha256": "6fadc8f7464ef4b8a87e37c24b04c364eeffd88398046544f34cf5359a691712",
+        "start": 1794888530.412844,
+        "end": 1794889475.518683,
+        "seconds": 945.1058390140533,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owboot17r3\\receipt.json",
+        "sha256": "01207d6afa7cb5555581f06347ac2d35e960a3dd99b6c98e22266652c475ebf3",
+        "start": 1794890098.752112,
+        "end": 1794892164.135988,
+        "seconds": 2065.3838760852814,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owboot17r4\\receipt.json",
+        "sha256": "e82b034b18602fcd4475ed0e1d0f68fb0787d16306347d948fb21f87a602c696",
+        "start": 1794896827.807578,
+        "end": 1794897567.929649,
+        "seconds": 740.1220710277557,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owboot17r5\\receipt.json",
+        "sha256": "4348ec9e4c3b08e73ba2f53eda050a125912006fd46e4f6d65fb11336133e6bb",
+        "start": 1794897922.983439,
+        "end": 1794900429.541366,
+        "seconds": 2506.557927131653,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owboot17r6\\receipt.json",
+        "sha256": "aae3302e9e33c7ed99bfde22c242f462070dbf2dccf8c26636fe67012e1038b1",
+        "start": 1794902777.283655,
+        "end": 1794905742.137536,
+        "seconds": 2964.8538811206818,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owcache17r1\\receipt.json",
+        "sha256": "adcf1e9ba56f60716b36cc64908dad1468d09c8b28fdd7ff77d680dd2791c309",
+        "start": 1794871666.020385,
+        "end": 1794871925.753372,
+        "seconds": 259.73298692703247,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owcf17r2\\receipt.json",
+        "sha256": "fdff20c0abcdbc3e902fcf1122cba6b89f052032a72f8da2624e5f49c6221d9b",
+        "start": 1794902282.659216,
+        "end": 1794902325.784447,
+        "seconds": 43.12523102760315,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owcf17r3\\receipt.json",
+        "sha256": "f05410c8689317e0f5a6e74ea5d459983331e84f81cafe8cd97b5a746fa52f62",
+        "start": 1794902699.191244,
+        "end": 1794903379.306303,
+        "seconds": 680.1150591373444,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owdh17r1\\receipt.json",
+        "sha256": "3bf259105df24a0a80c56a2fd31c0a29807786edaed5c22c894af093d2df01a9",
+        "start": 1794896694.322318,
+        "end": 1794897562.128859,
+        "seconds": 867.8065409660339,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owdh17r2\\receipt.json",
+        "sha256": "c1e80f449937ba57f24b1a68111abdd8cd3d0df46f5f4475bb58fca1b30986a4",
+        "start": 1794897912.926349,
+        "end": 1794898253.895256,
+        "seconds": 340.9689071178436,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owp16r1\\receipt.json",
+        "sha256": "052104a2a7287c2f8c3e4460d07024f246f2165515fc8534065cc9fde51f4b14",
+        "start": 1794840770.034402,
+        "end": 1794846548.275396,
+        "seconds": 5778.240994215012,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owplan17r1\\receipt.json",
+        "sha256": "896b52b42ffde7f35b038fdc944c020d6af73ba425bf5046b2968708005ce1c2",
+        "start": 1794907575.873354,
+        "end": 1794907804.286651,
+        "seconds": 228.4132969379425,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owplan17r2\\receipt.json",
+        "sha256": "107448519e00670aa0a949dad65bc3d205cff762e9ccd0e84a99f0f8f6dc7290",
+        "start": 1794908144.717626,
+        "end": 1794909129.176489,
+        "seconds": 984.4588630199432,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owpty17r2\\receipt.json",
+        "sha256": "da82dff5e12b0d9ff7eec5fc7292887c0597551323154b656753d9c6d456aecc",
+        "start": 1794865571.794187,
+        "end": 1794867260.971419,
+        "seconds": 1689.1772320270538,
+        "storedComplete": true,
+        "storedPassed": null
+      },
+      {
+        "receipt": "D:\\owpty17r3\\receipt.json",
+        "sha256": "7a0b758d6e362bd45f75f50b8bf765d59e38a000e7171c2a6ff4b03afbcc4ea7",
+        "start": 1794868057.865022,
+        "end": 1794868563.039012,
+        "seconds": 505.1739900112152,
+        "storedComplete": true,
+        "storedPassed": null
+      },
+      {
+        "receipt": "D:\\owpub16r2\\receipt.json",
+        "sha256": "cd459d2de2b06d099137c9b740fcf41a7d4bfa0a20cba44fb366bb74cedea251",
+        "start": 1794842998.32717,
+        "end": 1794846577.921332,
+        "seconds": 3579.5941619873047,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r10\\receipt.json",
+        "sha256": "b4e5f7e26809e7c0b2c8d6b3ea14f3de0a72d46bafa7297433dae6ddf8a88187",
+        "start": 1794856031.783233,
+        "end": 1794860450.81058,
+        "seconds": 4419.02734708786,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r11\\receipt.json",
+        "sha256": "e9b4c47629a4862ec23af118d85c7a8daf1747490f11b0f805899238ba05da9c",
+        "start": 1794866288.254011,
+        "end": 1794867268.329513,
+        "seconds": 980.0755021572113,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r12\\receipt.json",
+        "sha256": "40b6fbd229ec4d1e4e3d0550be79339451fe7c7dce1be89f64b89814f1328b38",
+        "start": 1794868068.030075,
+        "end": 1794868570.942828,
+        "seconds": 502.912752866745,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r13\\receipt.json",
+        "sha256": "e780b63ca132dcd02df0217b35dd401f376836d65ad347e71abaab118f928b05",
+        "start": 1794868711.379276,
+        "end": 1794871040.163871,
+        "seconds": 2328.784595012665,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r14\\receipt.json",
+        "sha256": "220650606e60b8e59c2d6d0682a2e2b5b41d0cb9e486ef87ac01f5a5a3ca30b9",
+        "start": 1794872353.860618,
+        "end": 1794876518.851242,
+        "seconds": 4164.990623950958,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r15\\receipt.json",
+        "sha256": "c42f261c3f095aefb4d05f3ebbf3f722e60ea2744684fab0e06c677a380e1bea",
+        "start": 1794879694.520118,
+        "end": 1794884766.975032,
+        "seconds": 5072.454914093018,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r3\\receipt.json",
+        "sha256": "28ae82e1e8c4cbd40a28c45380bfe20c837480202da6356bcf0354b2b76a1c84",
+        "start": 1794846959.541896,
+        "end": 1794846974.362496,
+        "seconds": 14.820599794387817,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r4\\receipt.json",
+        "sha256": "3facab4fce1dfdcbdaa932843f3e36726df082b4b4b2de8988a934db4e04eb12",
+        "start": 1794847065.502266,
+        "end": 1794847065.755182,
+        "seconds": 0.2529160976409912,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r5\\receipt.json",
+        "sha256": "1a4f01ba95af0e9f3d3e5c5531229abd2953e393cd06222538444801170d111e",
+        "start": 1794847114.943537,
+        "end": 1794848552.647741,
+        "seconds": 1437.704204082489,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r6\\receipt.json",
+        "sha256": "e69211a1011c4b06af785031714587da437c66ba59f587a3a3c5c5c3af296eaa",
+        "start": 1794849422.738093,
+        "end": 1794849830.04394,
+        "seconds": 407.30584716796875,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r7\\receipt.json",
+        "sha256": "c5bfa5a2c598e3f50f8470e70ca03bafbe6a45ef0124d2844fc4d72bdc5e4ad0",
+        "start": 1794850515.489814,
+        "end": 1794851971.721545,
+        "seconds": 1456.2317309379578,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r8\\receipt.json",
+        "sha256": "0b33b04871b4160305b854223ceeedb9ba206164b90ee02b1c3eeed8a071ff0a",
+        "start": 1794852480.275235,
+        "end": 1794853317.759918,
+        "seconds": 837.4846830368042,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owpub17r9\\receipt.json",
+        "sha256": "dfc03f2919afedbfc9fefb612ce2a6f16c07ccc0fe91a958e8389024e8098ac0",
+        "start": 1794854367.47715,
+        "end": 1794855743.078545,
+        "seconds": 1375.6013951301575,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owres18r1\\receipt.json",
+        "sha256": "6963430b4b609970b20ba84c3698ffaa2c134943be11dfcefc9a53c6a07b180d",
+        "start": 1794938708.419393,
+        "end": 1794940362.758214,
+        "seconds": 1654.3388209342957,
+        "storedComplete": true,
+        "storedPassed": true
+      },
+      {
+        "receipt": "D:\\owstorage17r1\\receipt.json",
+        "sha256": "6e0f6c4d5f2848414cf7c554945ac608bcfd5614684d143aa16431056aa55d2c",
+        "start": 1794877864.059378,
+        "end": 1794877974.67319,
+        "seconds": 110.61381220817566,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owstorage17r2\\receipt.json",
+        "sha256": "f0b675c4ef5cb259288495487f2f5802f0dc5884dd389d688a3f4ecd65342913",
+        "start": 1794878302.880955,
+        "end": 1794878303.136252,
+        "seconds": 0.2552969455718994,
+        "storedComplete": true,
+        "storedPassed": false
+      },
+      {
+        "receipt": "D:\\owstorage17r3\\receipt.json",
+        "sha256": "00d7c5c2e1f229a4a63fce10657479309b8176c663e6179dbdf132f4887b6e6b",
+        "start": 1794878380.0967,
+        "end": 1794878427.029491,
+        "seconds": 46.932790994644165,
+        "storedComplete": true,
+        "storedPassed": true
+      }
+    ],
+    "missingClosedIntervals": [
+      {
+        "receipt": "D:\\owcf17r1\\receipt.json",
+        "start": 1794902045.40136,
+        "end": null,
+        "confirmedLive": false,
+        "reason": "Original closed interval unavailable; no mtime or current-time substitution."
+      },
+      {
+        "receipt": "D:\\owpty17diag1\\receipt.json",
+        "start": 1794867573.150423,
+        "end": null,
+        "confirmedLive": false,
+        "reason": "Original closed interval unavailable; no mtime or current-time substitution."
+      },
+      {
+        "receipt": "D:\\owpty17r1\\receipt.json",
+        "start": 1794863695.516782,
+        "end": null,
+        "confirmedLive": false,
+        "reason": "Original closed interval unavailable; no mtime or current-time substitution."
+      },
+      {
+        "receipt": "D:\\owpub16r1\\receipt.json",
+        "start": 1794841614.548786,
+        "end": null,
+        "confirmedLive": false,
+        "reason": "Original closed interval unavailable; no mtime or current-time substitution."
+      }
+    ],
+    "scope": "Observed outer command/publisher wall clocks, including protocol, tooling, wait and publication. Union removes overlap only; not CPU time, billable time or a complete engineering clock."
+  },
+  "actualManagedClocks": {
+    "closedIntervals": 17,
+    "openOrMissingEnd": 0,
+    "sumMinutes": 471.82670685847603,
+    "intervalUnionMinutes": 471.82670685847603,
+    "intervalUnion": [
+      [
+        1794846568.8649347,
+        1794846577.8823986
+      ],
+      [
+        1794847115.5797057,
+        1794848552.614813
+      ],
+      [
+        1794849430.7151341,
+        1794849829.9987316
+      ],
+      [
+        1794850522.8677886,
+        1794851971.6776881
+      ],
+      [
+        1794852480.7605934,
+        1794853317.73293
+      ],
+      [
+        1794854376.6327057,
+        1794855743.0403025
+      ],
+      [
+        1794856039.04007,
+        1794859077.1246378
+      ],
+      [
+        1794868725.691996,
+        1794871040.1194754
+      ],
+      [
+        1794872787.3328772,
+        1794876518.7814937
+      ],
+      [
+        1794879710.0857208,
+        1794884761.5103526
+      ],
+      [
+        1794888262.161967,
+        1794888274.541418
+      ],
+      [
+        1794888540.122206,
+        1794889475.4392314
+      ],
+      [
+        1794890528.0616431,
+        1794892164.0811632
+      ],
+      [
+        1794898272.5896804,
+        1794900429.4874322
+      ],
+      [
+        1794903395.6032467,
+        1794905080.2567935
+      ],
+      [
+        1794909152.4103467,
+        1794909940.4678993
+      ],
+      [
+        1794940375.0132911,
+        1794941838.3795578
+      ]
+    ],
+    "originals": [
+      {
+        "path": "D:\\owact17r2\\acceptance\\attempt.json",
+        "sha256": "b9724eba1b332fb5f8735a9986cb368de1f9c09f06554dc4d4bcfa745e96229a",
+        "start": 1794909152.4103467,
+        "end": 1794909940.4678993,
+        "seconds": 788.0575525760651,
+        "hostLeaseWaitSeconds": 290.225
+      },
+      {
+        "path": "D:\\owact18r1\\acceptance\\attempt.json",
+        "sha256": "8d9d9a4bd9b802ac494f95ee44734f19878a864344580a7ffa75bb5e53d47b24",
+        "start": 1794940375.0132911,
+        "end": 1794941838.3795578,
+        "seconds": 1463.3662667274475,
+        "hostLeaseWaitSeconds": 802.619
+      },
+      {
+        "path": "D:\\owboot17r1\\acceptance\\attempt.json",
+        "sha256": "b1f2d69cd1d20c82f271506c257b6269f93baf87d783aa7a4cf87c486acafb88",
+        "start": 1794888262.161967,
+        "end": 1794888274.541418,
+        "seconds": 12.379451036453247,
+        "hostLeaseWaitSeconds": 0.0
+      },
+      {
+        "path": "D:\\owboot17r2\\acceptance\\attempt.json",
+        "sha256": "8cb65a4214e61e3ec178d0fbf4f79f12c42044f82ed45dc69ec224b8fcc028d4",
+        "start": 1794888540.122206,
+        "end": 1794889475.4392314,
+        "seconds": 935.3170254230499,
+        "hostLeaseWaitSeconds": 0.007
+      },
+      {
+        "path": "D:\\owboot17r3\\acceptance\\attempt.json",
+        "sha256": "25bcc5b03951046a0c6f42f6300873f9088d5cc8cad3d5c4a14d4547f4991305",
+        "start": 1794890528.0616431,
+        "end": 1794892164.0811632,
+        "seconds": 1636.0195200443268,
+        "hostLeaseWaitSeconds": 327.262
+      },
+      {
+        "path": "D:\\owboot17r5\\acceptance\\attempt.json",
+        "sha256": "5ae23d231f80908ce0005addf4cf482d10672dd34a3f93378eeda24c3e28181d",
+        "start": 1794898272.5896804,
+        "end": 1794900429.4874322,
+        "seconds": 2156.8977518081665,
+        "hostLeaseWaitSeconds": 904.776
+      },
+      {
+        "path": "D:\\owboot17r6\\acceptance\\attempt.json",
+        "sha256": "a1106eaabf082d6b6b9ca582a9605885604863bca262cfd16a4af4309c8ed491",
+        "start": 1794903395.6032467,
+        "end": 1794905080.2567935,
+        "seconds": 1684.6535468101501,
+        "hostLeaseWaitSeconds": 626.511
+      },
+      {
+        "path": "D:\\owpub16r2\\acceptance\\attempt.json",
+        "sha256": "b03ee73ed9c96424e7415e0ece3d3970768c8b121f6087e76b2bb8a5b3cde5e3",
+        "start": 1794846568.8649347,
+        "end": 1794846577.8823986,
+        "seconds": 9.01746392250061,
+        "hostLeaseWaitSeconds": 0.0
+      },
+      {
+        "path": "D:\\owpub17r10\\acceptance\\attempt.json",
+        "sha256": "c405d1f5d1accc02cd76bc4a46ab855e98216b7734546bec9761bb214b7a6ca2",
+        "start": 1794856039.04007,
+        "end": 1794859077.1246378,
+        "seconds": 3038.084567785263,
+        "hostLeaseWaitSeconds": 2056.741
+      },
+      {
+        "path": "D:\\owpub17r13\\acceptance\\attempt.json",
+        "sha256": "1c081e9ccf130a241871372b166881b33a444d11a8f739bcc577ebe3bcd1965d",
+        "start": 1794868725.691996,
+        "end": 1794871040.1194754,
+        "seconds": 2314.4274792671204,
+        "hostLeaseWaitSeconds": 477.404
+      },
+      {
+        "path": "D:\\owpub17r14\\acceptance\\attempt.json",
+        "sha256": "b1b8ffd5af41f8af7b7054f097b37bb316d0c6f8dd5bbea2b5ed2c6bee2263f4",
+        "start": 1794872787.3328772,
+        "end": 1794876518.7814937,
+        "seconds": 3731.448616504669,
+        "hostLeaseWaitSeconds": 1178.999
+      },
+      {
+        "path": "D:\\owpub17r15\\acceptance\\attempt.json",
+        "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+        "start": 1794879710.0857208,
+        "end": 1794884761.5103526,
+        "seconds": 5051.42463183403,
+        "hostLeaseWaitSeconds": 2014.566
+      },
+      {
+        "path": "D:\\owpub17r5\\acceptance\\attempt.json",
+        "sha256": "557019ed0453004e5b18418b7bad4db794302fb2f778407dc51919e361a285a4",
+        "start": 1794847115.5797057,
+        "end": 1794848552.614813,
+        "seconds": 1437.0351073741913,
+        "hostLeaseWaitSeconds": 1218.241
+      },
+      {
+        "path": "D:\\owpub17r6\\acceptance\\attempt.json",
+        "sha256": "879ad3fce51ccd416360ae8aa0311979b43d4bfdb6a1002c017add4e99c137f6",
+        "start": 1794849430.7151341,
+        "end": 1794849829.9987316,
+        "seconds": 399.28359746932983,
+        "hostLeaseWaitSeconds": 143.702
+      },
+      {
+        "path": "D:\\owpub17r7\\acceptance\\attempt.json",
+        "sha256": "c91b1cbbd66137a974213d96b540d897c608f8750a283d52a801119e2562d139",
+        "start": 1794850522.8677886,
+        "end": 1794851971.6776881,
+        "seconds": 1448.8098995685577,
+        "hostLeaseWaitSeconds": 733.693
+      },
+      {
+        "path": "D:\\owpub17r8\\acceptance\\attempt.json",
+        "sha256": "77e4c797b89b90ba47bb76be9b68f213517a5645afcb2403a9d8d9fc491f77fb",
+        "start": 1794852480.7605934,
+        "end": 1794853317.73293,
+        "seconds": 836.9723365306854,
+        "hostLeaseWaitSeconds": 503.328
+      },
+      {
+        "path": "D:\\owpub17r9\\acceptance\\attempt.json",
+        "sha256": "d52d0d1b6c2330ace3ce745db82fb0add8cb24ffb89d1f6da58a7535b4e9c362",
+        "start": 1794854376.6327057,
+        "end": 1794855743.0403025,
+        "seconds": 1366.4075968265533,
+        "hostLeaseWaitSeconds": 913.666
+      }
+    ],
+    "scope": "Original managed attempt invocation clocks. Separate overlapping lane inside wrappers; never add this to wrapper totals."
+  },
+  "explicitlyRecordedQueueWaits": {
+    "uniqueAcquisitions": 42,
+    "sumMinutes": 326.94078333333334,
+    "events": [
+      {
+        "acquiredAt": 1794909377.524406,
+        "profile": "native-workspace-lint-preparation",
+        "profiles": null,
+        "waitSeconds": 205.158,
+        "evidence": [
+          {
+            "source": "D:\\owact17r2\\acceptance\\attempt.json",
+            "sha256": "b9724eba1b332fb5f8735a9986cb368de1f9c09f06554dc4d4bcfa745e96229a",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794909683.091546,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 85.067,
+        "evidence": [
+          {
+            "source": "D:\\owact17r2\\acceptance\\attempt.json",
+            "sha256": "b9724eba1b332fb5f8735a9986cb368de1f9c09f06554dc4d4bcfa745e96229a",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794941200.5830483,
+        "profile": "native-workspace-lint-preparation",
+        "profiles": null,
+        "waitSeconds": 802.61,
+        "evidence": [
+          {
+            "source": "D:\\owact18r1\\acceptance\\attempt.json",
+            "sha256": "8d9d9a4bd9b802ac494f95ee44734f19878a864344580a7ffa75bb5e53d47b24",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794941253.4049587,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 0.009,
+        "evidence": [
+          {
+            "source": "D:\\owact18r1\\acceptance\\attempt.json",
+            "sha256": "8d9d9a4bd9b802ac494f95ee44734f19878a864344580a7ffa75bb5e53d47b24",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794890421.916722,
+        "profile": "private-existing-metadata-scope-controls",
+        "profiles": null,
+        "waitSeconds": 541.389,
+        "evidence": [
+          {
+            "source": "D:\\owbm17r1\\receipt.json",
+            "sha256": "c022e457f262836785db8b250e37aa6df5e1481e4ec57ccb60149be29b2d9013",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794888553.7588573,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 0.007,
+        "evidence": [
+          {
+            "source": "D:\\owboot17r2\\acceptance\\attempt.json",
+            "sha256": "8cb65a4214e61e3ec178d0fbf4f79f12c42044f82ed45dc69ec224b8fcc028d4",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794890868.1867836,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 327.262,
+        "evidence": [
+          {
+            "source": "D:\\owboot17r3\\acceptance\\attempt.json",
+            "sha256": "25bcc5b03951046a0c6f42f6300873f9088d5cc8cad3d5c4a14d4547f4991305",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794899192.5008066,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 904.776,
+        "evidence": [
+          {
+            "source": "D:\\owboot17r5\\acceptance\\attempt.json",
+            "sha256": "5ae23d231f80908ce0005addf4cf482d10672dd34a3f93378eeda24c3e28181d",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794904033.1770997,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 626.511,
+        "evidence": [
+          {
+            "source": "D:\\owboot17r6\\acceptance\\attempt.json",
+            "sha256": "a1106eaabf082d6b6b9ca582a9605885604863bca262cfd16a4af4309c8ed491",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794871917.506048,
+        "profile": "owner2-private-compiler-query-boundary",
+        "profiles": null,
+        "waitSeconds": 251.191,
+        "evidence": [
+          {
+            "source": "D:\\owcache17r1\\receipt.json",
+            "sha256": "adcf1e9ba56f60716b36cc64908dad1468d09c8b28fdd7ff77d680dd2791c309",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794902295.8775458,
+        "profile": "compiler-cache-prerequisite-order-focus",
+        "profiles": null,
+        "waitSeconds": 10.015,
+        "evidence": [
+          {
+            "source": "D:\\owcf17r2\\receipt.json",
+            "sha256": "fdff20c0abcdbc3e902fcf1122cba6b89f052032a72f8da2624e5f49c6221d9b",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794903220.8597214,
+        "profile": "compiler-cache-prerequisite-order-focus",
+        "profiles": null,
+        "waitSeconds": 518.607,
+        "evidence": [
+          {
+            "source": "D:\\owcf17r3\\receipt.json",
+            "sha256": "f05410c8689317e0f5a6e74ea5d459983331e84f81cafe8cd97b5a746fa52f62",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794897560.9695313,
+        "profile": "original-docker-health-diagnostic",
+        "profiles": null,
+        "waitSeconds": 866.466,
+        "evidence": [
+          {
+            "source": "D:\\owdh17r1\\receipt.json",
+            "sha256": "3bf259105df24a0a80c56a2fd31c0a29807786edaed5c22c894af093d2df01a9",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794898239.4364882,
+        "profile": "original-docker-health-diagnostic",
+        "profiles": null,
+        "waitSeconds": 326.33,
+        "evidence": [
+          {
+            "source": "D:\\owdh17r2\\receipt.json",
+            "sha256": "c1e80f449937ba57f24b1a68111abdd8cd3d0df46f5f4475bb58fca1b30986a4",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794907799.5998116,
+        "profile": "private-plan-entry-refusal-controls",
+        "profiles": null,
+        "waitSeconds": 223.399,
+        "evidence": [
+          {
+            "source": "D:\\owplan17r1\\receipt.json",
+            "sha256": "896b52b42ffde7f35b038fdc944c020d6af73ba425bf5046b2968708005ce1c2",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794909108.8526337,
+        "profile": "private-plan-entry-refusal-controls",
+        "profiles": null,
+        "waitSeconds": 963.793,
+        "evidence": [
+          {
+            "source": "D:\\owplan17r2\\receipt.json",
+            "sha256": "107448519e00670aa0a949dad65bc3d205cff762e9ccd0e84a99f0f8f6dc7290",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794867626.3101833,
+        "profile": "owner2-private-pty-flood-diagnostic",
+        "profiles": null,
+        "waitSeconds": 53.04,
+        "evidence": [
+          {
+            "source": "D:\\owpty17diag1\\receipt.json",
+            "sha256": "c88f9953de998ea0fe3817d291ef47558281b5a6f3d81ff6654df93d66539540",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794867220.5549724,
+        "profile": "owner2-private-pty-resize-order-controls",
+        "profiles": null,
+        "waitSeconds": 1648.378,
+        "evidence": [
+          {
+            "source": "D:\\owpty17r2\\receipt.json",
+            "sha256": "da82dff5e12b0d9ff7eec5fc7292887c0597551323154b656753d9c6d456aecc",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794868554.5760741,
+        "profile": "owner2-private-pty-resize-order-controls",
+        "profiles": null,
+        "waitSeconds": 496.316,
+        "evidence": [
+          {
+            "source": "D:\\owpty17r3\\receipt.json",
+            "sha256": "7a0b758d6e362bd45f75f50b8bf765d59e38a000e7171c2a6ff4b03afbcc4ea7",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794858106.3862855,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 2056.741,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r10\\acceptance\\attempt.json",
+            "sha256": "c405d1f5d1accc02cd76bc4a46ab855e98216b7734546bec9761bb214b7a6ca2",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794868798.2541149,
+        "profile": "native-workspace-lint-preparation",
+        "profiles": null,
+        "waitSeconds": 60.047,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r13\\acceptance\\attempt.json",
+            "sha256": "1c081e9ccf130a241871372b166881b33a444d11a8f739bcc577ebe3bcd1965d",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794869455.7524645,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 281.218,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r13\\acceptance\\attempt.json",
+            "sha256": "1c081e9ccf130a241871372b166881b33a444d11a8f739bcc577ebe3bcd1965d",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794870421.4185605,
+        "profile": "native-workspace",
+        "profiles": [
+          "native-workspace",
+          "native-examples"
+        ],
+        "waitSeconds": 136.139,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r13\\acceptance\\attempt.json",
+            "sha256": "1c081e9ccf130a241871372b166881b33a444d11a8f739bcc577ebe3bcd1965d",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794872802.4191797,
+        "profile": "native-workspace-lint-preparation",
+        "profiles": null,
+        "waitSeconds": 0.007,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r14\\acceptance\\attempt.json",
+            "sha256": "b1b8ffd5af41f8af7b7054f097b37bb316d0c6f8dd5bbea2b5ed2c6bee2263f4",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794872853.4233854,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 0.007,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r14\\acceptance\\attempt.json",
+            "sha256": "b1b8ffd5af41f8af7b7054f097b37bb316d0c6f8dd5bbea2b5ed2c6bee2263f4",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794875902.7702425,
+        "profile": "native-workspace",
+        "profiles": [
+          "native-workspace",
+          "native-examples"
+        ],
+        "waitSeconds": 1178.985,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r14\\acceptance\\attempt.json",
+            "sha256": "b1b8ffd5af41f8af7b7054f097b37bb316d0c6f8dd5bbea2b5ed2c6bee2263f4",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794879724.5764828,
+        "profile": "native-workspace-lint-preparation",
+        "profiles": null,
+        "waitSeconds": 0.006,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794879767.6728635,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 0.008,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794881188.2853274,
+        "profile": "native-workspace",
+        "profiles": [
+          "native-workspace",
+          "native-examples"
+        ],
+        "waitSeconds": 296.228,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794882749.201817,
+        "profile": "native-resize",
+        "profiles": null,
+        "waitSeconds": 370.411,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794882976.8751867,
+        "profile": "native-context",
+        "profiles": null,
+        "waitSeconds": 114.085,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794883178.5099576,
+        "profile": "native-services",
+        "profiles": null,
+        "waitSeconds": 165.136,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794884402.2211604,
+        "profile": "native-cohost",
+        "profiles": null,
+        "waitSeconds": 1068.692,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r15\\acceptance\\attempt.json",
+            "sha256": "6eeae07957ab35bc6a161b71eec7042df0c97ac365b01bc1d9eebbcbe5cffff6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794848348.5134053,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 1218.241,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r5\\acceptance\\attempt.json",
+            "sha256": "557019ed0453004e5b18418b7bad4db794302fb2f778407dc51919e361a285a4",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794849585.822874,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 143.702,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r6\\acceptance\\attempt.json",
+            "sha256": "879ad3fce51ccd416360ae8aa0311979b43d4bfdb6a1002c017add4e99c137f6",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794851267.1244361,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 733.693,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r7\\acceptance\\attempt.json",
+            "sha256": "c91b1cbbd66137a974213d96b540d897c608f8750a283d52a801119e2562d139",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794852997.7455332,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 503.328,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r8\\acceptance\\attempt.json",
+            "sha256": "77e4c797b89b90ba47bb76be9b68f213517a5645afcb2403a9d8d9fc491f77fb",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794855301.5694392,
+        "profile": "guard-contract",
+        "profiles": null,
+        "waitSeconds": 913.666,
+        "evidence": [
+          {
+            "source": "D:\\owpub17r9\\acceptance\\attempt.json",
+            "sha256": "d52d0d1b6c2330ace3ce745db82fb0add8cb24ffb89d1f6da58a7535b4e9c362",
+            "kind": "managed attempt"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794940132.7580523,
+        "profile": "private-resource-admission-windows-linux",
+        "profiles": null,
+        "waitSeconds": 1422.7,
+        "evidence": [
+          {
+            "source": "D:\\owres18r1\\receipt.json",
+            "sha256": "6963430b4b609970b20ba84c3698ffaa2c134943be11dfcefc9a53c6a07b180d",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794877967.393807,
+        "profile": "owner2-private-compiler-storage-capacity-controls",
+        "profiles": null,
+        "waitSeconds": 103.069,
+        "evidence": [
+          {
+            "source": "D:\\owstorage17r1\\receipt.json",
+            "sha256": "6e0f6c4d5f2848414cf7c554945ac608bcfd5614684d143aa16431056aa55d2c",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794878303.1323922,
+        "profile": "owner2-private-compiler-storage-capacity-controls",
+        "profiles": null,
+        "waitSeconds": 0.001,
+        "evidence": [
+          {
+            "source": "D:\\owstorage17r2\\receipt.json",
+            "sha256": "f0b675c4ef5cb259288495487f2f5802f0dc5884dd389d688a3f4ecd65342913",
+            "kind": "outer focused lease"
+          }
+        ]
+      },
+      {
+        "acquiredAt": 1794878380.4568388,
+        "profile": "owner2-private-compiler-storage-capacity-controls",
+        "profiles": null,
+        "waitSeconds": 0.013,
+        "evidence": [
+          {
+            "source": "D:\\owstorage17r3\\receipt.json",
+            "sha256": "00d7c5c2e1f229a4a63fce10657479309b8176c663e6179dbdf132f4887b6e6b",
+            "kind": "outer focused lease"
+          }
+        ]
+      }
+    ],
+    "missingAcquisitionLists": [
+      "D:\\owcf17r1\\receipt.json",
+      "D:\\owpty17r1\\receipt.json"
+    ],
+    "scope": "Only original explicit acquisition waits; deduplicated by acquired-at/profile. A subset of these waits lies inside the managed and wrapper clocks. Excludes currently unacquired waits and absent records; never add to their elapsed totals."
+  },
+  "units": "Original wall-clock seconds and minutes; not CPU time, billing or a causal speedup.",
+  "method": "Closed interval sum plus sorted interval union; original managed attempts and acquisition events retain their own evidence hashes. Queue events deduplicate on acquired-at/profile. These lanes overlap and are not additive.",
+  "limits": [
+    "Bounded current workline outputs only; not all past goal work or every repair cost.",
+    "Complete/pass flags are preserved as reported; a preparation, focus or publication receipt is not automatically a full CI attempt.",
+    "Original missing endings and queue observations stay missing, not0.",
+    "No before/after causal effect, comparable-source improvement or amount saved is inferred.",
+    "Keep this engineering ledger separate from the fixed40-PR cohort and from later accepted policy measurements.",
+    "The earlier inventory stdout-rendering error and original snapshot remain preserved; this later snapshot includes the actual natural field failure and its original clocks."
+  ],
+  "wholeLifecycleTenthProven": false,
+  "rawEvidence": {
+    "inventory": {
+      "path": "C:\\Users\\songym\\.nexus\\diagnostics\\sudocode-ci-audit-20261029\\owned-policy-attempt-inventory-20261118-r2\\receipt.json",
+      "sha256": "0dd123f06e5fa89a1b8329a8fa3de02736b8c433f7179078874d2c0d59a7081c"
+    },
+    "analysis": {
+      "path": "C:\\Users\\songym\\.nexus\\diagnostics\\sudocode-ci-audit-20261029\\owned-policy-observed-clock-cost-20261118-r2\\receipt.json",
+      "sha256": "43c0e8d80a82485de5317dc10d8379e1f2871aaef8c034b9231a36958ada16a4"
+    }
+  }
+}

@@ -1,0 +1,1876 @@
+{
+  "schemaVersion": 1,
+  "auditedAtUTC": "2026-11-18T15:35:47.995359+00:00",
+  "repository": "sudoprivacy/sudocode",
+  "historicalJobRecordInventory": {
+    "commit": "c561e29be8d4602432345d02d1b8c059228048e5",
+    "path": "docs/ci-lifecycle-measurement-20261117.json",
+    "sha256": "4a3d423c86ac133fc37382c2efcfe2c19b6f93e960ccacfdc428c1ec7ebe782a"
+  },
+  "fixedPRSelectionsUnchanged": true,
+  "lookupEndpoint": "https://api.github.com/repos/sudoprivacy/sudocode/actions/jobs/{job_id}",
+  "executionFingerprintFields": [
+    "run_id",
+    "head_sha",
+    "workflow_name",
+    "name",
+    "labels",
+    "runner_id",
+    "runner_name",
+    "status",
+    "conclusion",
+    "started_at",
+    "completed_at",
+    "steps"
+  ],
+  "confirmedCarriedGroups": [
+    {
+      "originalJobId": 122816283947,
+      "aliasJobIds": [
+        122962749730
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "release mirror recovery",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 14.0,
+      "startedAt": "2026-10-28T14:43:16Z",
+      "completedAt": "2026-10-28T14:43:30Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "de49ed466e214d6f17551e1556f3b648d53d181b6676311a40306e74aeb9d2fb"
+    },
+    {
+      "originalJobId": 122816284200,
+      "aliasJobIds": [
+        122962679335
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo fmt",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 70.0,
+      "startedAt": "2026-10-28T14:31:04Z",
+      "completedAt": "2026-10-28T14:32:14Z",
+      "conclusion": "success",
+      "nonemptySteps": 9,
+      "executionSHA256": "27f0222c75dbb5735c8bcb5a8fec5f2f7bd7d64dab45dab22e34c04c75557b6b"
+    },
+    {
+      "originalJobId": 122816284214,
+      "aliasJobIds": [
+        122962753026
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "one nexus-vfs pin",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 7.0,
+      "startedAt": "2026-10-28T14:19:51Z",
+      "completedAt": "2026-10-28T14:19:58Z",
+      "conclusion": "success",
+      "nonemptySteps": 6,
+      "executionSHA256": "a8393e5afa6dbf331131a2036b9f611ec81783dc0bba997f9fd6cb3c46486ea3"
+    },
+    {
+      "originalJobId": 122816284227,
+      "aliasJobIds": [
+        122962747553
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo bench --no-run (ubuntu-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 1156.0,
+      "startedAt": "2026-10-28T14:01:01Z",
+      "completedAt": "2026-10-28T14:20:17Z",
+      "conclusion": "success",
+      "nonemptySteps": 25,
+      "executionSHA256": "c5f6a41ccfe17e4e428affc985d1755f3aee69b31fbf39396c634c562c43768e"
+    },
+    {
+      "originalJobId": 122816284249,
+      "aliasJobIds": [
+        122962749720
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo bench --no-run (windows-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 1355.0,
+      "startedAt": "2026-10-28T14:33:46Z",
+      "completedAt": "2026-10-28T14:56:21Z",
+      "conclusion": "success",
+      "nonemptySteps": 24,
+      "executionSHA256": "e4b9daeccc7b8ca445adbe2ff226d3012f8f5eda92cea8861c4b1bd20d206d07"
+    },
+    {
+      "originalJobId": 122816284253,
+      "aliasJobIds": [
+        122962679837
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "Real terminal resize (ubuntu-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 242.0,
+      "startedAt": "2026-10-28T13:45:43Z",
+      "completedAt": "2026-10-28T13:49:45Z",
+      "conclusion": "success",
+      "nonemptySteps": 21,
+      "executionSHA256": "f1f81f903d47775971e8310b4cf205783d3b403c796e2b75429220f852a160a8"
+    },
+    {
+      "originalJobId": 122816284312,
+      "aliasJobIds": [
+        122962734127
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "Real terminal resize (windows-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 581.0,
+      "startedAt": "2026-10-28T13:18:13Z",
+      "completedAt": "2026-10-28T13:27:54Z",
+      "conclusion": "success",
+      "nonemptySteps": 22,
+      "executionSHA256": "76945b218b6e56d115aeb04b03c11c15dab6d7bc8b930058dea8d54ef7b6d33c"
+    },
+    {
+      "originalJobId": 122816284382,
+      "aliasJobIds": [
+        122962742654
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "engine/renderer boundary gate",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 9.0,
+      "startedAt": "2026-10-28T14:58:03Z",
+      "completedAt": "2026-10-28T14:58:12Z",
+      "conclusion": "success",
+      "nonemptySteps": 11,
+      "executionSHA256": "d6645ea666f41b553e40da824cfa9fae78060e0b254aa29d837a50c0eb7c50fb"
+    },
+    {
+      "originalJobId": 122816284408,
+      "aliasJobIds": [
+        122962679452
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo clippy --workspace (windows-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 368.0,
+      "startedAt": "2026-10-28T13:58:38Z",
+      "completedAt": "2026-10-28T14:04:46Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "b1838ada788fae68957844a2702d7e6fa241fa31069b32fb345f6fb1dfcf3a5f"
+    },
+    {
+      "originalJobId": 122816284428,
+      "aliasJobIds": [
+        122962746081
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "Live provider probe contract",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 9.0,
+      "startedAt": "2026-10-28T15:07:02Z",
+      "completedAt": "2026-10-28T15:07:11Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "2eba5b057985465141b650dd8588eb20117678297a1b7738f9173e364fbdd0b2"
+    },
+    {
+      "originalJobId": 122816284454,
+      "aliasJobIds": [
+        122962743331
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo clippy --workspace (ubuntu-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 188.0,
+      "startedAt": "2026-10-28T15:24:34Z",
+      "completedAt": "2026-10-28T15:27:42Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "25b4d63d3f8a95666df934563ad5e54f2db4c670ae0d4f72a6e8090c30bfdfc4"
+    },
+    {
+      "originalJobId": 122816284465,
+      "aliasJobIds": [
+        122962763724
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "docs source-of-truth",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 14.0,
+      "startedAt": "2026-10-28T14:58:35Z",
+      "completedAt": "2026-10-28T14:58:49Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "1c155dd4f60d10cff44701373e979ee2380b9a187e5aea1d1af371e05593c50e"
+    },
+    {
+      "originalJobId": 122816284495,
+      "aliasJobIds": [
+        122962738979
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "cargo test --workspace (ubuntu-latest)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 1645.0,
+      "startedAt": "2026-10-28T15:48:35Z",
+      "completedAt": "2026-10-28T16:16:00Z",
+      "conclusion": "success",
+      "nonemptySteps": 23,
+      "executionSHA256": "6c502fed4049de607287f87eef2f8c37a545d6cb7d52401a352aec535e548d03"
+    },
+    {
+      "originalJobId": 122874159563,
+      "aliasJobIds": [
+        122962681553
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40688293968,
+      "name": "nexus-A2A live (real daemon)",
+      "head": "61544e74f0b256c73412bde537e137dfd9b0804d",
+      "seconds": 1839.0,
+      "startedAt": "2026-10-28T16:03:37Z",
+      "completedAt": "2026-10-28T16:34:16Z",
+      "conclusion": "success",
+      "nonemptySteps": 17,
+      "executionSHA256": "ef500a815cf37775c448c9ed2b1d6e665bc73c7be1db8a0fa6cc7338a3aa6330"
+    },
+    {
+      "originalJobId": 123053133596,
+      "aliasJobIds": [
+        123124158233
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "docs source-of-truth",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 7.0,
+      "startedAt": "2026-10-28T19:38:22Z",
+      "completedAt": "2026-10-28T19:38:29Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "be619fbb7b87944791dabda15a11ab8afc6f8ee244a47e4367740f59681d4714"
+    },
+    {
+      "originalJobId": 123053133988,
+      "aliasJobIds": [
+        123124151021
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "release mirror recovery",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 11.0,
+      "startedAt": "2026-10-28T19:39:42Z",
+      "completedAt": "2026-10-28T19:39:53Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "3f6f14a663c854296a4802b31f8117843f6cbf78878e2694b0150f29d4ef4a53"
+    },
+    {
+      "originalJobId": 123053134089,
+      "aliasJobIds": [
+        123124143969
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "engine/renderer boundary gate",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 8.0,
+      "startedAt": "2026-10-28T20:37:10Z",
+      "completedAt": "2026-10-28T20:37:18Z",
+      "conclusion": "success",
+      "nonemptySteps": 11,
+      "executionSHA256": "d5fad5f0b65a0b2ade005d86c964f9dc58eab2b3a8fbc11621d72b9d297c9e85"
+    },
+    {
+      "originalJobId": 123053134092,
+      "aliasJobIds": [
+        123124089135
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "Real terminal resize (windows-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 567.0,
+      "startedAt": "2026-10-28T19:35:05Z",
+      "completedAt": "2026-10-28T19:44:32Z",
+      "conclusion": "success",
+      "nonemptySteps": 22,
+      "executionSHA256": "a5b48ff7648264bd1ea22d69805b3094e3c01822553f09d86968a5fc94e89080"
+    },
+    {
+      "originalJobId": 123053134110,
+      "aliasJobIds": [
+        123124126979
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "one nexus-vfs pin",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 12.0,
+      "startedAt": "2026-10-28T20:05:37Z",
+      "completedAt": "2026-10-28T20:05:49Z",
+      "conclusion": "success",
+      "nonemptySteps": 6,
+      "executionSHA256": "d756ac0e169f77ff32b2cd99808a16d1741271b1f0951680842458b07479c1c7"
+    },
+    {
+      "originalJobId": 123053134217,
+      "aliasJobIds": [
+        123124158582
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo bench --no-run (ubuntu-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 1129.0,
+      "startedAt": "2026-10-28T19:59:15Z",
+      "completedAt": "2026-10-28T20:18:04Z",
+      "conclusion": "success",
+      "nonemptySteps": 25,
+      "executionSHA256": "cf5a61b86bd260aea8821a0250d70156e075dbf706d58a046b4d43ed697b188c"
+    },
+    {
+      "originalJobId": 123053134234,
+      "aliasJobIds": [
+        123124158009
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo test --workspace (ubuntu-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 1786.0,
+      "startedAt": "2026-10-28T20:31:14Z",
+      "completedAt": "2026-10-28T21:01:00Z",
+      "conclusion": "success",
+      "nonemptySteps": 23,
+      "executionSHA256": "4714822652dfcc5224dffc72f834dfabbefd6708365437db746e516fff9faf8a"
+    },
+    {
+      "originalJobId": 123053134265,
+      "aliasJobIds": [
+        123124088790
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo test --workspace (windows-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 2858.0,
+      "startedAt": "2026-10-28T20:12:43Z",
+      "completedAt": "2026-10-28T21:00:21Z",
+      "conclusion": "success",
+      "nonemptySteps": 23,
+      "executionSHA256": "0b9073fc91dd00f01e96c34a9c5ce920c5782f7acb457c73e59c946b12c3463c"
+    },
+    {
+      "originalJobId": 123053134284,
+      "aliasJobIds": [
+        123124136795
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo fmt",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 247.0,
+      "startedAt": "2026-10-28T20:49:00Z",
+      "completedAt": "2026-10-28T20:53:07Z",
+      "conclusion": "success",
+      "nonemptySteps": 12,
+      "executionSHA256": "229c9a28b65a8d837c46db12495362bc27e9057d8d428e965dd9b5c75fe57b80"
+    },
+    {
+      "originalJobId": 123053134299,
+      "aliasJobIds": [
+        123124134570
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo clippy --workspace (ubuntu-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 147.0,
+      "startedAt": "2026-10-28T21:23:09Z",
+      "completedAt": "2026-10-28T21:25:36Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "427de3686a7f74f1c4546e807a09b85ec9c4d5057084b43160894bd771cc172c"
+    },
+    {
+      "originalJobId": 123053134328,
+      "aliasJobIds": [
+        123124088007
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "Real terminal resize (ubuntu-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 232.0,
+      "startedAt": "2026-10-28T20:07:01Z",
+      "completedAt": "2026-10-28T20:10:53Z",
+      "conclusion": "success",
+      "nonemptySteps": 21,
+      "executionSHA256": "17d7e3b049fcdc207cd715a24c20775a07f08548a8b4338715404784701d4847"
+    },
+    {
+      "originalJobId": 123053134334,
+      "aliasJobIds": [
+        123124088853
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "Live provider probe contract",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 19.0,
+      "startedAt": "2026-10-28T20:59:26Z",
+      "completedAt": "2026-10-28T20:59:45Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "66dea640383c8dfe281e592f8d2cbef851b10e4452a8d78d766dc9b31a9744a5"
+    },
+    {
+      "originalJobId": 123053134366,
+      "aliasJobIds": [
+        123124131177
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo clippy --workspace (windows-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 301.0,
+      "startedAt": "2026-10-28T21:06:35Z",
+      "completedAt": "2026-10-28T21:11:36Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "d14583580187e78160a997d6ea17d26209dd38ab999acb713b2d4625f399326e"
+    },
+    {
+      "originalJobId": 123053134453,
+      "aliasJobIds": [
+        123124089114
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40755482608,
+      "name": "cargo bench --no-run (windows-latest)",
+      "head": "f1f0ca78108df65223eb1bc711b790042cd8951e",
+      "seconds": 1454.0,
+      "startedAt": "2026-10-28T21:28:14Z",
+      "completedAt": "2026-10-28T21:52:28Z",
+      "conclusion": "success",
+      "nonemptySteps": 24,
+      "executionSHA256": "cb338f24370535dae515d1e4c7c57bb46fca13d8b391251a948bc9f0a76fdcbb"
+    },
+    {
+      "originalJobId": 123159771395,
+      "aliasJobIds": [
+        123200220155
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "engine/renderer boundary gate",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 6.0,
+      "startedAt": "2026-10-28T23:19:38Z",
+      "completedAt": "2026-10-28T23:19:44Z",
+      "conclusion": "success",
+      "nonemptySteps": 11,
+      "executionSHA256": "9a204661feaf019216be75cd09b93a62d9ea83a246f1c717b711e8af87c7238a"
+    },
+    {
+      "originalJobId": 123159771690,
+      "aliasJobIds": [
+        123200267235
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "Real terminal resize (ubuntu-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 264.0,
+      "startedAt": "2026-10-28T23:26:23Z",
+      "completedAt": "2026-10-28T23:30:47Z",
+      "conclusion": "success",
+      "nonemptySteps": 21,
+      "executionSHA256": "913e598b2fba2c44756b71034ac3c52fa865e1ea75371cd11668cb511c1e67a7"
+    },
+    {
+      "originalJobId": 123159771695,
+      "aliasJobIds": [
+        123200220701
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo test --workspace (windows-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 2493.0,
+      "startedAt": "2026-10-28T23:46:05Z",
+      "completedAt": "2026-10-29T00:27:38Z",
+      "conclusion": "success",
+      "nonemptySteps": 23,
+      "executionSHA256": "3be081ea1b35bde0a911cf3f31ec1cfdd94ee740474d44b50fb6bba5286d442c"
+    },
+    {
+      "originalJobId": 123159771773,
+      "aliasJobIds": [
+        123200220446
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "Live provider probe contract",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 9.0,
+      "startedAt": "2026-10-29T00:07:20Z",
+      "completedAt": "2026-10-29T00:07:29Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "ea993714c136a9d1d63bf9f8e2ac9e561fbf90e97f619f9ffb92128a551fb273"
+    },
+    {
+      "originalJobId": 123159771775,
+      "aliasJobIds": [
+        123200221049
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo clippy --workspace (ubuntu-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 132.0,
+      "startedAt": "2026-10-28T23:43:32Z",
+      "completedAt": "2026-10-28T23:45:44Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "bca0b39b15c2d48b32ca405361be638c6c02ff48acf0b7b2a6887af2cb9a4863"
+    },
+    {
+      "originalJobId": 123159771812,
+      "aliasJobIds": [
+        123200266192
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "release mirror recovery",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 10.0,
+      "startedAt": "2026-10-29T00:33:49Z",
+      "completedAt": "2026-10-29T00:33:59Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "39a528dca8fb06cb186908858db8b575f05c652cad51370e57f1d9fa2e008b45"
+    },
+    {
+      "originalJobId": 123159771840,
+      "aliasJobIds": [
+        123200220845
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo test --workspace (ubuntu-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 1679.0,
+      "startedAt": "2026-10-29T00:24:24Z",
+      "completedAt": "2026-10-29T00:52:23Z",
+      "conclusion": "success",
+      "nonemptySteps": 23,
+      "executionSHA256": "b09b5f5742e7216ce91f10895e8f68cd51c0f9406b6957cb614191ee1ba7cb5b"
+    },
+    {
+      "originalJobId": 123159771884,
+      "aliasJobIds": [
+        123200220828
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo bench --no-run (windows-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 1172.0,
+      "startedAt": "2026-10-29T00:14:20Z",
+      "completedAt": "2026-10-29T00:33:52Z",
+      "conclusion": "success",
+      "nonemptySteps": 24,
+      "executionSHA256": "a6fcf1264cdd76bfadac8bdf73bd542ec97eaef5dda170810887f81ef9cec640"
+    },
+    {
+      "originalJobId": 123159771895,
+      "aliasJobIds": [
+        123200268015
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "docs source-of-truth",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 7.0,
+      "startedAt": "2026-10-29T00:32:18Z",
+      "completedAt": "2026-10-29T00:32:25Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "cc9d3a739c317cdf6a47fe4976687bb60e859f5f26dbd015880c4a16a7bc477f"
+    },
+    {
+      "originalJobId": 123159771902,
+      "aliasJobIds": [
+        123200249559
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo clippy --workspace (windows-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 387.0,
+      "startedAt": "2026-10-29T00:28:23Z",
+      "completedAt": "2026-10-29T00:34:50Z",
+      "conclusion": "success",
+      "nonemptySteps": 8,
+      "executionSHA256": "ed5cb31476733f4f7852583d872cc87fcc9ad96accd78badd8928a8c6e3666a1"
+    },
+    {
+      "originalJobId": 123159771926,
+      "aliasJobIds": [
+        123200261538
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "Real terminal resize (windows-latest)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 447.0,
+      "startedAt": "2026-10-29T00:34:52Z",
+      "completedAt": "2026-10-29T00:42:19Z",
+      "conclusion": "success",
+      "nonemptySteps": 22,
+      "executionSHA256": "e798b36b382eb58a5914855f3b6fd9ce0696f977a5440ee802e060fd4789ae2e"
+    },
+    {
+      "originalJobId": 123159771944,
+      "aliasJobIds": [
+        123200220721
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "one nexus-vfs pin",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 5.0,
+      "startedAt": "2026-10-29T00:16:02Z",
+      "completedAt": "2026-10-29T00:16:07Z",
+      "conclusion": "success",
+      "nonemptySteps": 6,
+      "executionSHA256": "459b2dce6c48816ceb35f5b2b57ef5a90466d0247f64f6f4153b065770bb9da7"
+    },
+    {
+      "originalJobId": 123159771949,
+      "aliasJobIds": [
+        123200220749
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "cargo fmt",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 72.0,
+      "startedAt": "2026-10-29T00:33:40Z",
+      "completedAt": "2026-10-29T00:34:52Z",
+      "conclusion": "success",
+      "nonemptySteps": 12,
+      "executionSHA256": "8d2b15bc0f089c7f7412c3ff4daed25a730708900653914d5245601299bd87d5"
+    },
+    {
+      "originalJobId": 123182305618,
+      "aliasJobIds": [
+        123200221822
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 40786166171,
+      "name": "nexus-A2A live (real daemon)",
+      "head": "af0484b60bceb320687831cf9eb295fb6c9c374a",
+      "seconds": 1836.0,
+      "startedAt": "2026-10-29T00:35:46Z",
+      "completedAt": "2026-10-29T01:06:22Z",
+      "conclusion": "success",
+      "nonemptySteps": 17,
+      "executionSHA256": "75953c2c6a86e9325187faf252f5acc87a70e2934d2916896ebc21ea30382907"
+    },
+    {
+      "originalJobId": 128716052466,
+      "aliasJobIds": [
+        128721231836
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 42475572667,
+      "name": "Verify local acceptance",
+      "head": "c342d772738d07a9b66eaa94fc3a0f79b5ccdcc1",
+      "seconds": 22.0,
+      "startedAt": "2026-11-08T11:24:00Z",
+      "completedAt": "2026-11-08T11:24:22Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "229877e0292a5339a4d5b60823529c98ac4fd83833361bb2ef3b62d106ca2983"
+    },
+    {
+      "originalJobId": 128716148742,
+      "aliasJobIds": [
+        128721266385
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 42475572667,
+      "name": "Complement local host (sdk, windows-latest)",
+      "head": "c342d772738d07a9b66eaa94fc3a0f79b5ccdcc1",
+      "seconds": 160.0,
+      "startedAt": "2026-11-08T11:24:24Z",
+      "completedAt": "2026-11-08T11:27:04Z",
+      "conclusion": "success",
+      "nonemptySteps": 17,
+      "executionSHA256": "b428bc98725a7195f1d3520d9a318e07a1c609248dfa6a8b7677b404ec6ac813"
+    },
+    {
+      "originalJobId": 128716148759,
+      "aliasJobIds": [
+        128721267316
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 42475572667,
+      "name": "Complement local host (sdk, ubuntu-24.04-arm)",
+      "head": "c342d772738d07a9b66eaa94fc3a0f79b5ccdcc1",
+      "seconds": 100.0,
+      "startedAt": "2026-11-08T11:24:26Z",
+      "completedAt": "2026-11-08T11:26:06Z",
+      "conclusion": "success",
+      "nonemptySteps": 17,
+      "executionSHA256": "5609fca56266cfbdba36bb6ae240c05ce7b2457653ce223720a4cb0873785c65"
+    },
+    {
+      "originalJobId": 128716148840,
+      "aliasJobIds": [
+        128721260129
+      ],
+      "attempts": [
+        1,
+        2
+      ],
+      "run": 42475572667,
+      "name": "Complement local host (sdk, ubuntu-latest)",
+      "head": "c342d772738d07a9b66eaa94fc3a0f79b5ccdcc1",
+      "seconds": 104.0,
+      "startedAt": "2026-11-08T11:24:24Z",
+      "completedAt": "2026-11-08T11:26:08Z",
+      "conclusion": "success",
+      "nonemptySteps": 17,
+      "executionSHA256": "7ef871ab1658401be61c859ac97c1bcfc826747ef4c24a9d348ccfd0b2372405"
+    },
+    {
+      "originalJobId": 128997729538,
+      "aliasJobIds": [
+        129000147054,
+        129003576350,
+        129079216230,
+        129087470052,
+        129101532805
+      ],
+      "attempts": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "run": 42567693508,
+      "name": "Verify local acceptance",
+      "head": "d25b2e40d257b47dc1b1d44458d72dfc13b0ed02",
+      "seconds": 25.0,
+      "startedAt": "2026-11-09T05:30:26Z",
+      "completedAt": "2026-11-09T05:30:51Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "b460e2adad65459474f08e7c1bc4566102161ed67445c573c6b6366d42df611b"
+    },
+    {
+      "originalJobId": 129003575733,
+      "aliasJobIds": [
+        129079165954,
+        129087515244,
+        129101532515
+      ],
+      "attempts": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "run": 42567693508,
+      "name": "Complement local host (ubuntu-latest)",
+      "head": "d25b2e40d257b47dc1b1d44458d72dfc13b0ed02",
+      "seconds": 585.0,
+      "startedAt": "2026-11-09T05:50:26Z",
+      "completedAt": "2026-11-09T06:00:11Z",
+      "conclusion": "success",
+      "nonemptySteps": 19,
+      "executionSHA256": "e9d1013b0f5518f403e36ea8800ff67f467df4bcef2726b5c19fd3407e9eb9e4"
+    },
+    {
+      "originalJobId": 129035076656,
+      "aliasJobIds": [
+        129036676805,
+        129049373889
+      ],
+      "attempts": [
+        1,
+        2,
+        3
+      ],
+      "run": 42579639426,
+      "name": "Verify local acceptance",
+      "head": "86bf91f01613c8ddb4db9249447059aef20e2574",
+      "seconds": 26.0,
+      "startedAt": "2026-11-09T07:29:17Z",
+      "completedAt": "2026-11-09T07:29:43Z",
+      "conclusion": "success",
+      "nonemptySteps": 7,
+      "executionSHA256": "0b7622367e5deb2ba26b7564e326af2d005c1beff220d1c6a4ae8e91a796a1df"
+    },
+    {
+      "originalJobId": 129035224332,
+      "aliasJobIds": [
+        129036633183,
+        129049373505
+      ],
+      "attempts": [
+        1,
+        2,
+        3
+      ],
+      "run": 42579639426,
+      "name": "Complement local host (sdk, ubuntu-latest)",
+      "head": "86bf91f01613c8ddb4db9249447059aef20e2574",
+      "seconds": 127.0,
+      "startedAt": "2026-11-09T07:29:46Z",
+      "completedAt": "2026-11-09T07:31:53Z",
+      "conclusion": "success",
+      "nonemptySteps": 18,
+      "executionSHA256": "33e96dba19407d235f355e408069e72825680af35507cb60c88b5a985a633a7e"
+    }
+  ],
+  "originalJobResponseSHA256": {
+    "122816283947": "8072c873fe563ead68ccaefe36ed95ead62a424ff34298644ca99583d1f684f5",
+    "122816284200": "362532b8f6700831ebd8469ee41bb8cbee67c94ecb45c549465ec4385c305e50",
+    "122816284214": "601cf7c07c6cb1b87e9df43e717ecaec2dbfabee00ba95e420c40ff86de7cade",
+    "122816284227": "0f1548c15c183697ed7a2296745ff93f914c3079bf799853943989f64b51b85b",
+    "122816284249": "aba506975d0e70392c9d613fcb0a12f003d0cd10f5bcd61079325f615a6fee04",
+    "122816284253": "5b1520bf245b84c9da9d82280c8e0bbb2e3d78fb5087e981ab9721fa157b9694",
+    "122816284312": "1fb55eec8b549196115e3ef3cb6d3e4914b6f11d70c27bf4ebc0e2863e835a28",
+    "122816284382": "9d291a0f67106f5ce18e7adc26abe6ad82c794091d5c3dc7119c26f4e5350aca",
+    "122816284408": "01561e535e48d9f3d8ff22141a81b5147184dd7d2b2d9f3f29fd7301e3b1df3c",
+    "122816284428": "74cc8d7e07a2c15e7cfe6808405b32cd56c378d36debfe3a03ccb38cf96f49eb",
+    "122816284454": "38c205b759148eb6826ac1107c1c6b3c66169bab18fafeb9c1bd8beca3b937e9",
+    "122816284465": "ba6510570be3dfcf95b942ae2ab3c2c28333c541efb98682a98f3eac134f0010",
+    "122816284495": "2dffab314f5472db9f8e3dc7804be9d86c074f6629051672e63dab27fd72d748",
+    "122874159563": "788c281c48951baf7e81f0dbac9c9a628eb909e3ce42eec23bd5c75a11d7d4cd",
+    "122962679335": "3ab76db5398cde45890b7cc3e54dd19e65b6cb5167f5fd1380a95c8faa900593",
+    "122962679452": "d34eef820cec8b4e10ebc7733c4208bb23d2fb15433995fcf6afcb03944a1a58",
+    "122962679837": "f1dc464aa10a5cf7e39613277d5314a6c2a381dd703baff6d2512c7488dbc752",
+    "122962681553": "9b3960960e125a65d9782e64ab3c2afed5ee2c9e2dd7d8db043af0d9508da5e5",
+    "122962734127": "cfe439a9f24bb41b3d1405ab804ca9f20261affee669f97336533ab1a194eed6",
+    "122962738979": "7b912634c09831bce01b332e54a9b8dd705a91c98c005c840cf4933ccb31d6ca",
+    "122962742654": "fc791a9578b427b1cc56aa8815aa3311934d7f4628e830d99e8552ac928d5662",
+    "122962743331": "b00bd4330bb056e0ff3e56a740c2a3d94777aeda73e079418411f39a8f277c79",
+    "122962746081": "da9e2cf0887864baad9a76dd0b6a52e5dfe5459969ea9d31bcbdb19e5f448c5f",
+    "122962747553": "fcdb5bffc008a2084c1744d419f3b4543b27e4a7a701070e1b23a0d77e0867a8",
+    "122962749720": "1f1938adee40f470454d3687dd55a0526024b609b3bdd81886b00073defbf4a4",
+    "122962749730": "7ddd61b5d06462e60887c242a6fffb143e4509ab2a98b8f0710e3e8c45827a4d",
+    "122962753026": "a2f0c9ff4ed10f30483a6896455eb210180e4a07164651b559f1cd4f65880237",
+    "122962763724": "55aa1d26c37f57a8d6e55a60d3a15c7989702e86199757f38f7647a78f193d74",
+    "123053133596": "69ee6154f18ae2d060d731889752b1a1585df6b699bca767c3e5904769938000",
+    "123053133988": "f6c5299f5109079a9c22b9b0209b60ac0fd974d83f995672ef232632c64851d0",
+    "123053134089": "9485829926b994e2c4add0be943b4f010cf58e9da7ff2c3b096c7fb36f574fb8",
+    "123053134092": "1e18fc5b66d7955c0de2235b8ab210da899116fad810225aaf1d30cd9d7db983",
+    "123053134110": "884c1134b2659d828c490c7c851b8991f3eb810c8a6745f2712469aad8a7e908",
+    "123053134217": "2852552d96398683039e71f836d4c17de1408d472607c10a67b3e70abf04ccbb",
+    "123053134234": "639131867f9855a9563d51c09e4429aa09a42e71e5379e1e37fd1acdba98c47f",
+    "123053134265": "8bdf21d336696689ab37bad2c8860d41a3dacc0fe13bb1e19588d836e66bf852",
+    "123053134284": "16f16482280948da1b72075de45853f81c4b2ef93a4058ddf9dde3779cb7aa20",
+    "123053134299": "a968da437faa36cdba0bcd556825fd2cbf3ec4fd029fb99d3e03e2e1efe5f0c1",
+    "123053134328": "4e8dd92cae6e3dc96e462c69b95e67b1573f5831112d1c5a575579bd4d627752",
+    "123053134334": "a6a3335b4cf5d11a81dd55ace23156ba51719a93e2b970111629950073286e16",
+    "123053134366": "8aaccc27f2974ed85ae9124eb8adb43c45c0235daae627a8fb02aa9e3dbbf75b",
+    "123053134453": "74dd176d9e2d5ec2037497ac33818c4e512a751ef9ffa91364baff19949645e2",
+    "123124088007": "9ecff9540a0db3f49aa17d1e4c8d1ae60d2da369b2d8d18df4aff78fc4791fac",
+    "123124088790": "3e1297362b5628d1d86f25d20e81dfbab8ba49f48a23e5abc4e28e3b822c3564",
+    "123124088853": "9266edc567cef54ff4d76a365d4a9e4dc2b77aff221b26da73f033b40ceea657",
+    "123124089114": "6dc43862b814f78528e46adfd966af28eb32c87e8dcc9909c9047b158ae575f2",
+    "123124089135": "d06960da4ab97f3a34083dc3af06fd8c623d018cd3bc0b4feb3e4ff9d4d610c7",
+    "123124126979": "34f5842bab8c9bf3245a6a0bf0097d42d66a154aafdad5cfcf7f5634e546860a",
+    "123124131177": "70e600cfc03e3e8a4aa60e49da42656119476bf1e07b18c47aa5862f7aa343c4",
+    "123124134570": "5dfc3779772ae68d1c7d040d1a8b4a7c4aad8a92967a46e79447851135c55a1d",
+    "123124136795": "979c70aecc3ea1bc64510ce99d3920b8736077885a92d9675d6d699af4769957",
+    "123124143969": "a353e2846cd924d0570503c619fa6ef0751627b226b59c9c2cb1cf1e4189817b",
+    "123124151021": "3ebe3c07c95c31dfbe7bba270ab409d02ab8a3e8681557333d1a43269438257d",
+    "123124158009": "74662e06bd0552313ae39bafd2e5d73e245ea48b44645b214e5ea521be548aca",
+    "123124158233": "129cdb15b7332783e58906f695d19091d4ba7ab251001580fb69b4b2c4c9eec3",
+    "123124158582": "53abeb8d52f888a18f76434e0b1a5fa00524df4ba232b5aa98c5c93a09123b3a",
+    "123159771395": "2d89a109446d699d42195cd42298057533613e7faa68b231bd16cbf867443fdb",
+    "123159771690": "fea08488043625bba13d5999857ab58589e3fb54c92938da70f95bf38232ed1e",
+    "123159771695": "7b7f6abd1b811cc0fd0a0e6f589f923006ce908ce29c624cd9deafe6f19d97dc",
+    "123159771773": "675e870dbad11b2e227b0130095725488fe721c7a715ad9df3279e61da16540d",
+    "123159771775": "d8866af150f9dd81607ea45af00e2ea6f15115c97324b5a52679cca3cf44d784",
+    "123159771812": "729367f278be1f5739db742b1ad63a097e1d38d83970a4b3ec436bee7986d467",
+    "123159771840": "0517c773f3486a36298591a6cde999f8e88d783976e4065d843172c35143a899",
+    "123159771884": "e203f99e6ea9d215d414c33fe8d3d974248dcd4f2e33d6e91e367ab94bfc63ef",
+    "123159771895": "de8454c11ba852addd9c8b1a3782800d45d38dd91c6062e9176879d5021a0ab9",
+    "123159771902": "20a1bbd82bd024d2c051bb4dbb563a8a297569de305bb8b73277681aadb2deb7",
+    "123159771926": "c38cf6d57aecb2e45c3a686de854fcd584820a07e9b29fbdeca67e2441d73975",
+    "123159771944": "f0d91021ecf62da9711140de5d1318375ec1b73dc346efc238476cca4f7e4098",
+    "123159771949": "ad2d6ac909097cebf4303017527384e456cd714b0a5952025f6f31397259e006",
+    "123182305618": "1f681f7f52dae94aefb2418449384b4fdc830ece633274a709266cc0cdd771d3",
+    "123200220155": "a7cd9865a03d7986e76844328acf415091e4e0409f9f71b0d98543c8d4d22c85",
+    "123200220446": "6400b6b463aa601aa504b86606ae456f21dfb8ed24bd290b9c273ee2faa44a7c",
+    "123200220701": "68183c52bfeca19bf732f41acb04ac7024a7ec471573014a9971c0559fbf6475",
+    "123200220721": "db8850181fa6b66f2db9092712569545a9047bf3e32e6b00ac56e4ca2d4cb337",
+    "123200220749": "75c54d267d4f1f8f89ada0b92f156026a4c8d3e1e5abd8e7d8405dad9c755f38",
+    "123200220828": "a2340efd5fef438389feb9587f1e08144290a1518b0f4265defdfeeeae228d16",
+    "123200220845": "a2128acd4f148159fe4cc3e1a308af82bb52f6bc049f3852e0fb9ad9249b77e4",
+    "123200221049": "413d5c2ef65ae6722d3e8fee166fdcde99e9878d70348cd9c7c7bec71df3fc92",
+    "123200221822": "8b94998ddcb403232d12ebf9154adc4e522605e3e91c03102ee62cd4907f87d1",
+    "123200249559": "e4919a99c7cb98986131667f41f40077129c3b1e0350a23ad247d805ccfbb680",
+    "123200261538": "cc5dd308aa2c0c4278b9af97282c8e6d8e00ccd3e02e33dd5b19720eac9e5a13",
+    "123200266192": "00844fc9e89c03035be86f4889a8f3f0075879d975525fb45af36de97f4ce0a0",
+    "123200267235": "2c4075e0db0314c1fce40689766cadd0815aeb37b6467dd676748a9cedbbe915",
+    "123200268015": "fe77a74588d24d96382bcbd716b15a0665f870802d9767430e17a0a2f68356bf",
+    "128716052466": "734c1e35830dd8836e997b3db2048f6aee81016193a4fb075f84f7e85a2a26f5",
+    "128716148742": "70cd69a87871696c936897da7fbd80cb3c647f88746cc6a901a55f3b99017ff5",
+    "128716148759": "7b95ada40b65781a6499ee251eea35a242ac09be65d92a5d0ad8cc656158e725",
+    "128716148840": "44dfbb43abb9a650f13734d8f32650e3c5a46518d2c1e15c0b27ee4e7a0dbee7",
+    "128721231836": "b29c82f3abf8ef49986eacefa7c5200600279dc808453bef2bbd604bfa4a8dd2",
+    "128721260129": "bc37e8326ac57c65e91589932840a96326466a369c1f4f7bf78032089f5f8d83",
+    "128721266385": "1680b7d6d5c21f42dcdc1e5fbca132f2d8fffc4b37a822347ff7f865178ef3df",
+    "128721267316": "8e2609596def74598665dab913247d4eb43b5033bbbbdaea5c6bdd1be2386ed2",
+    "128997729538": "514632cc3e4d1c071b1c803768193d17db5c8458e0b51ff9eb0a9a92d7f7c1e7",
+    "129000147054": "6774f63c9787d0712359197f806a368d82908cac75007a89609b4a63aae0fa4a",
+    "129003575733": "b80f0ad83c9013f598626209e58130bc4f61dd559b2015853ee63a5a87b48d23",
+    "129003576350": "c397bf76caaa0f7b56f45772d4fd90b8f1e26eb5d5584ecf0ff9d223d56b0c42",
+    "129035076656": "9aeb566b12f3c4f0e61586880e45c944dd9882f4b209dd3dec6c45c2b3497957",
+    "129035224332": "384e2f132a10cabca031b4e9722cd7374f16b4762e90603108d4e4bdca51812c",
+    "129036633183": "e4d5a97dd435dc96a0a774f073d49851f7df73779d8e9375b8156ce66d407912",
+    "129036676805": "0a65efd754961371d691dd68df5d56efd2893e32d496fff7572d2ae9ba0cb853",
+    "129049373505": "044120d111df6b0b4415cc0887d9ac6339e35429bf857d6d868173f5795054a6",
+    "129049373889": "ed9ec2481f666754631a40be81ea3098c9efe093284ab8a624dadc69c7a89bb8",
+    "129079165954": "89797ee2c1422ad0e57ac362091e2fba6dba63c3666d6ff47bfb3216e9b2a6cb",
+    "129079216230": "8cecf9d2cc17c1a033fb78693e86b977fdbda1cab2bf59a74d286ba36a915c80",
+    "129087470052": "5fcf73571ebcb4fcc3d45686a7801cde245ae7120d7e0785a381b8d26e6bb2b6",
+    "129087515244": "3aa55cd5cb1564c4b77d8f4cc5abd82ada99f8687d512fc1d3d378a199cbc292",
+    "129101532515": "7f496757c8fc0733db02152ef811722b6e304a80b514cd24adddd99e3ba37de1",
+    "129101532805": "d3b2a64f1a90bb4ddd8828bd46730b654c0e115a95ec7398e58c655475f57024"
+  },
+  "aliasesToFirstObservedJobId": {
+    "122962749730": 122816283947,
+    "122962679335": 122816284200,
+    "122962753026": 122816284214,
+    "122962747553": 122816284227,
+    "122962749720": 122816284249,
+    "122962679837": 122816284253,
+    "122962734127": 122816284312,
+    "122962742654": 122816284382,
+    "122962679452": 122816284408,
+    "122962746081": 122816284428,
+    "122962743331": 122816284454,
+    "122962763724": 122816284465,
+    "122962738979": 122816284495,
+    "122962681553": 122874159563,
+    "123124158233": 123053133596,
+    "123124151021": 123053133988,
+    "123124143969": 123053134089,
+    "123124089135": 123053134092,
+    "123124126979": 123053134110,
+    "123124158582": 123053134217,
+    "123124158009": 123053134234,
+    "123124088790": 123053134265,
+    "123124136795": 123053134284,
+    "123124134570": 123053134299,
+    "123124088007": 123053134328,
+    "123124088853": 123053134334,
+    "123124131177": 123053134366,
+    "123124089114": 123053134453,
+    "123200220155": 123159771395,
+    "123200267235": 123159771690,
+    "123200220701": 123159771695,
+    "123200220446": 123159771773,
+    "123200221049": 123159771775,
+    "123200266192": 123159771812,
+    "123200220845": 123159771840,
+    "123200220828": 123159771884,
+    "123200268015": 123159771895,
+    "123200249559": 123159771902,
+    "123200261538": 123159771926,
+    "123200220721": 123159771944,
+    "123200220749": 123159771949,
+    "123200221822": 123182305618,
+    "128721231836": 128716052466,
+    "128721266385": 128716148742,
+    "128721267316": 128716148759,
+    "128721260129": 128716148840,
+    "129000147054": 128997729538,
+    "129003576350": 128997729538,
+    "129079216230": 128997729538,
+    "129087470052": 128997729538,
+    "129101532805": 128997729538,
+    "129079165954": 129003575733,
+    "129087515244": 129003575733,
+    "129101532515": 129003575733,
+    "129036676805": 129035076656,
+    "129049373889": 129035076656,
+    "129036633183": 129035224332,
+    "129049373505": 129035224332
+  },
+  "candidateTimestampGroups": 50,
+  "confirmedAliasRecords": 58,
+  "rule": "Within one workflow run, carrier records across attempts are mapped to the earliest observed job ID only when the same completed state, source, named assigned runner, job and complete nonempty per-step records including timestamps also match.",
+  "reportedKnownUnweightedRatio": 0.09072142768634146,
+  "knownMixStandardization": [
+    {
+      "weightsFrom": "historical",
+      "weights": {
+        "rust-build-or-manifest": 0.2,
+        "shared-rust-production": 0.65,
+        "rust-tests-or-fixtures-only": 0.1,
+        "cli-production": 0.05
+      },
+      "historicalKnownMean": 1223.9850000000001,
+      "currentKnownMean": 127.12201388888889,
+      "knownRatio": 0.10385912726780873,
+      "gapToTenPercentRunnerMinutesPerWeightedPR": 4.723513888888874
+    },
+    {
+      "weightsFrom": "current",
+      "weights": {
+        "rust-build-or-manifest": 0.1,
+        "shared-rust-production": 0.6,
+        "rust-tests-or-fixtures-only": 0.15,
+        "cli-production": 0.15
+      },
+      "historicalKnownMean": 1218.4111217948716,
+      "currentKnownMean": 111.04166666666666,
+      "knownRatio": 0.09113645195809475,
+      "gapToTenPercentRunnerMinutesPerWeightedPR": -10.799445512820512
+    }
+  ],
+  "perSourceStratum": {
+    "rust-build-or-manifest": {
+      "historical": {
+        "prs": 4,
+        "mean": 772.2833333333333,
+        "median": 653.875
+      },
+      "current": {
+        "prs": 2,
+        "mean": 168.30833333333334,
+        "median": 168.30833333333334
+      }
+    },
+    "shared-rust-production": {
+      "historical": {
+        "prs": 13,
+        "mean": 1353.0692307692307,
+        "median": 924.55
+      },
+      "current": {
+        "prs": 12,
+        "mean": 134.37916666666666,
+        "median": 79.80833333333334
+      }
+    },
+    "rust-tests-or-fixtures-only": {
+      "historical": {
+        "prs": 2,
+        "mean": 1605.0583333333334,
+        "median": 1605.0583333333334
+      },
+      "current": {
+        "prs": 3,
+        "mean": 31.72222222222222,
+        "median": 22.716666666666665
+      }
+    },
+    "cli-production": {
+      "historical": {
+        "prs": 1,
+        "mean": 590.55,
+        "median": 590.55
+      },
+      "current": {
+        "prs": 3,
+        "mean": 58.83333333333333,
+        "median": 51.166666666666664
+      }
+    }
+  },
+  "summary": {
+    "historical": {
+      "prs": 20,
+      "rawGitHubJobRecords": 3535,
+      "originalRunnerMinutes": 24892.933333333334,
+      "knownRunnerMinutes": 24479.7,
+      "knownMeanRunnerMinutes": 1223.9850000000001,
+      "knownMedianRunnerMinutes": 876.8333333333333,
+      "representationOvercountRunnerMinutes": 413.2333333333336,
+      "unknownRunnerIntervals": 355,
+      "accountingRowsAfterCoalescing": 3493
+    },
+    "current": {
+      "prs": 20,
+      "rawGitHubJobRecords": 1859,
+      "originalRunnerMinutes": 2263.7,
+      "knownRunnerMinutes": 2220.8333333333335,
+      "knownMeanRunnerMinutes": 111.04166666666667,
+      "knownMedianRunnerMinutes": 72.99166666666667,
+      "representationOvercountRunnerMinutes": 42.86666666666633,
+      "unknownRunnerIntervals": 2,
+      "accountingRowsAfterCoalescing": 1843
+    }
+  },
+  "all40": [
+    {
+      "cohort": "historical",
+      "pr": 1117,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 82.46666666666667,
+      "knownRunnerMinutes": 82.46666666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1099,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 1634.2333333333333,
+      "knownRunnerMinutes": 1487.9333333333334,
+      "carriedJobRecordIds": [
+        123124088007,
+        123124088790,
+        123124088853,
+        123124089114,
+        123124089135,
+        123124126979,
+        123124131177,
+        123124134570,
+        123124136795,
+        123124143969,
+        123124151021,
+        123124158009,
+        123124158233,
+        123124158582
+      ]
+    },
+    {
+      "cohort": "historical",
+      "pr": 1110,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 1183.15,
+      "knownRunnerMinutes": 1041.1666666666667,
+      "carriedJobRecordIds": [
+        123200220155,
+        123200220446,
+        123200220701,
+        123200220721,
+        123200220749,
+        123200220828,
+        123200220845,
+        123200221049,
+        123200221822,
+        123200249559,
+        123200261538,
+        123200266192,
+        123200267235,
+        123200268015
+      ]
+    },
+    {
+      "cohort": "historical",
+      "pr": 1105,
+      "stratum": "rust-tests-or-fixtures-only",
+      "originalJobRecordMinutes": 2211.3,
+      "knownRunnerMinutes": 2086.35,
+      "carriedJobRecordIds": [
+        122962679335,
+        122962679452,
+        122962679837,
+        122962681553,
+        122962734127,
+        122962738979,
+        122962742654,
+        122962743331,
+        122962746081,
+        122962747553,
+        122962749720,
+        122962749730,
+        122962753026,
+        122962763724
+      ]
+    },
+    {
+      "cohort": "historical",
+      "pr": 1109,
+      "stratum": "rust-tests-or-fixtures-only",
+      "originalJobRecordMinutes": 1123.7666666666667,
+      "knownRunnerMinutes": 1123.7666666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1107,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 1698.9166666666667,
+      "knownRunnerMinutes": 1698.9166666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1102,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 716.1666666666666,
+      "knownRunnerMinutes": 716.1666666666666,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1100,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 1263.25,
+      "knownRunnerMinutes": 1263.25,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1103,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 924.55,
+      "knownRunnerMinutes": 924.55,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1098,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 761.3166666666667,
+      "knownRunnerMinutes": 761.3166666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1092,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 813.5,
+      "knownRunnerMinutes": 813.5,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1094,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 523.6833333333333,
+      "knownRunnerMinutes": 523.6833333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1093,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 727.9833333333333,
+      "knownRunnerMinutes": 727.9833333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1082,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 1579.0833333333333,
+      "knownRunnerMinutes": 1579.0833333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1090,
+      "stratum": "cli-production",
+      "originalJobRecordMinutes": 590.55,
+      "knownRunnerMinutes": 590.55,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 973,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 6181.866666666667,
+      "knownRunnerMinutes": 6181.866666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1091,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 445.3333333333333,
+      "knownRunnerMinutes": 445.3333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1085,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 829.1166666666667,
+      "knownRunnerMinutes": 829.1166666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1086,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 1022.9333333333333,
+      "knownRunnerMinutes": 1022.9333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "historical",
+      "pr": 1034,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 579.7666666666667,
+      "knownRunnerMinutes": 579.7666666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1457,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 59.18333333333333,
+      "knownRunnerMinutes": 59.18333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1448,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 77.61666666666666,
+      "knownRunnerMinutes": 77.61666666666666,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1450,
+      "stratum": "cli-production",
+      "originalJobRecordMinutes": 51.166666666666664,
+      "knownRunnerMinutes": 51.166666666666664,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1433,
+      "stratum": "rust-tests-or-fixtures-only",
+      "originalJobRecordMinutes": 22.716666666666665,
+      "knownRunnerMinutes": 22.716666666666665,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1338,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 344.28333333333336,
+      "knownRunnerMinutes": 332.75,
+      "carriedJobRecordIds": [
+        128721231836,
+        128721260129,
+        128721266385,
+        128721267316,
+        129036633183,
+        129036676805,
+        129049373505,
+        129049373889
+      ]
+    },
+    {
+      "cohort": "current",
+      "pr": 1418,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 70.45,
+      "knownRunnerMinutes": 70.45,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1411,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 135.35,
+      "knownRunnerMinutes": 135.35,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1394,
+      "stratum": "rust-tests-or-fixtures-only",
+      "originalJobRecordMinutes": 54.46666666666667,
+      "knownRunnerMinutes": 54.46666666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1393,
+      "stratum": "cli-production",
+      "originalJobRecordMinutes": 49.8,
+      "knownRunnerMinutes": 49.8,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1392,
+      "stratum": "cli-production",
+      "originalJobRecordMinutes": 75.53333333333333,
+      "knownRunnerMinutes": 75.53333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1390,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 56.766666666666666,
+      "knownRunnerMinutes": 56.766666666666666,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1378,
+      "stratum": "rust-build-or-manifest",
+      "originalJobRecordMinutes": 259.0,
+      "knownRunnerMinutes": 259.0,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1344,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 377.98333333333335,
+      "knownRunnerMinutes": 377.98333333333335,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1375,
+      "stratum": "rust-tests-or-fixtures-only",
+      "originalJobRecordMinutes": 17.983333333333334,
+      "knownRunnerMinutes": 17.983333333333334,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1373,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 68.08333333333333,
+      "knownRunnerMinutes": 68.08333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1371,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 56.18333333333333,
+      "knownRunnerMinutes": 56.18333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1359,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 148.63333333333333,
+      "knownRunnerMinutes": 148.63333333333333,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1362,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 78.76666666666667,
+      "knownRunnerMinutes": 78.76666666666667,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1365,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 80.85,
+      "knownRunnerMinutes": 80.85,
+      "carriedJobRecordIds": []
+    },
+    {
+      "cohort": "current",
+      "pr": 1343,
+      "stratum": "shared-rust-production",
+      "originalJobRecordMinutes": 178.88333333333333,
+      "knownRunnerMinutes": 147.55,
+      "carriedJobRecordIds": [
+        129000147054,
+        129003576350,
+        129079165954,
+        129079216230,
+        129087470052,
+        129087515244,
+        129101532515,
+        129101532805
+      ]
+    }
+  ],
+  "leaveOneOut": {
+    "all40Omissions": [
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1117,
+        "knownRatioOfMeans": 0.08647667700026096
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1099,
+        "knownRatioOfMeans": 0.09176292092966613
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1110,
+        "knownRatioOfMeans": 0.09001380916894687
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1105,
+        "knownRatioOfMeans": 0.094215098083434
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1109,
+        "knownRatioOfMeans": 0.09033214971784471
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1107,
+        "knownRatioOfMeans": 0.09261277963078532
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1102,
+        "knownRatioOfMeans": 0.08878274274588796
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1100,
+        "knownRatioOfMeans": 0.09087486100013856
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1103,
+        "knownRatioOfMeans": 0.08956816945197406
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1098,
+        "knownRatioOfMeans": 0.08895174839769153
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1092,
+        "knownRatioOfMeans": 0.08914788460617533
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1094,
+        "knownRatioOfMeans": 0.08806938549188409
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1093,
+        "knownRatioOfMeans": 0.08882691286173701
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1082,
+        "knownRatioOfMeans": 0.09212815957648884
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1090,
+        "knownRatioOfMeans": 0.08831589515184368
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 973,
+        "knownRatioOfMeans": 0.11530281363002906
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1091,
+        "knownRatioOfMeans": 0.08778228675327414
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1085,
+        "knownRatioOfMeans": 0.08920674965733756
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1086,
+        "knownRatioOfMeans": 0.08994383994383995
+      },
+      {
+        "omittedCohort": "historical",
+        "omittedPR": 1034,
+        "knownRatioOfMeans": 0.08827604818981365
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1457,
+        "knownRatioOfMeans": 0.09295134550797515
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1448,
+        "knownRatioOfMeans": 0.09215870880197262
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1450,
+        "knownRatioOfMeans": 0.09329606364141747
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1433,
+        "knownRatioOfMeans": 0.09451941884679387
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1338,
+        "knownRatioOfMeans": 0.08118792878797033
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1418,
+        "knownRatioOfMeans": 0.09246687677989404
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1411,
+        "knownRatioOfMeans": 0.08967616490541502
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1394,
+        "knownRatioOfMeans": 0.0931541630376304
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1393,
+        "knownRatioOfMeans": 0.09335483055813737
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1392,
+        "knownRatioOfMeans": 0.09224829251648466
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1390,
+        "knownRatioOfMeans": 0.09305526261680912
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1378,
+        "knownRatioOfMeans": 0.0843591922816965
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1344,
+        "knownRatioOfMeans": 0.07924288717848495
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1375,
+        "knownRatioOfMeans": 0.09472295304616522
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1373,
+        "knownRatioOfMeans": 0.09256864387957972
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1371,
+        "knownRatioOfMeans": 0.09308034605687247
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1359,
+        "knownRatioOfMeans": 0.08910497914168626
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1362,
+        "knownRatioOfMeans": 0.09210925859156198
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1365,
+        "knownRatioOfMeans": 0.09201967487704994
+      },
+      {
+        "omittedCohort": "current",
+        "omittedPR": 1343,
+        "knownRatioOfMeans": 0.08915156267323252
+      }
+    ],
+    "min": {
+      "omittedCohort": "current",
+      "omittedPR": 1344,
+      "knownRatioOfMeans": 0.07924288717848495
+    },
+    "max": {
+      "omittedCohort": "historical",
+      "omittedPR": 973,
+      "knownRatioOfMeans": 0.11530281363002906
+    }
+  },
+  "limits": [
+    "The preserved original inventory holds all 5,394 distinct GitHub job IDs, including carried, skipped and unknown records.",
+    "Each confirmed group has one counted occupied interval. Untested matches, failed jobs and unknown intervals retain their original handling.",
+    "Fixed source, queue and lifecycle event rows are unchanged. Runner occupancy is distinct from billing, PR elapsed time and local author clocks.",
+    "Source classes, policy epochs and unknown intervals preclude a proven lifecycle tenth. Periodic, manual and open work retain their original scope."
+  ],
+  "wholeLifecycleTenthProven": false
+}

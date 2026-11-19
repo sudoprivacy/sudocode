@@ -12,7 +12,8 @@
 //! filesystem. A co-hosted agent never calls this: its daemon injects the
 //! mailbox it lives in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
@@ -43,9 +44,100 @@ enum NodeState {
 struct NodeBinding {
     agent: String,
     state: Mutex<NodeState>,
+    /// Serializes this process's one automatic join for the Agent.
+    join_gate: Mutex<()>,
+    join_attempted: AtomicBool,
+    /// Why the automatic join did not complete, kept beside the binding error.
+    join_error: Mutex<Option<String>>,
 }
 
 impl NodeBinding {
+    fn new(agent: &str, endpoint: Option<String>, error: Option<String>) -> Self {
+        Self {
+            agent: agent.to_string(),
+            state: Mutex::new(NodeState::Pending { endpoint, error }),
+            join_gate: Mutex::new(()),
+            join_attempted: AtomicBool::new(false),
+            join_error: Mutex::new(None),
+        }
+    }
+
+    fn with_join_error(&self, error: String) -> String {
+        let join = self
+            .join_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match join.as_deref() {
+            Some(reason) => format!("{error}. Automatic join did not complete: {reason}"),
+            None => error,
+        }
+    }
+
+    fn may_join(&self) -> bool {
+        ENROLLER.get().is_some()
+            && joinable(&self.agent)
+            && !self.join_attempted.load(Ordering::Acquire)
+    }
+
+    /// Issue this Agent's credential once per process, when the host enrolls,
+    /// the Agent is a session's own workspace-derived identity, and the node
+    /// has no confirmed bundle for it: none, or one an interrupted issuance
+    /// left behind its marker. Runs outside every process-wide lock.
+    fn join_if_needed(&self) {
+        let Some(enroll) = ENROLLER.get() else {
+            return;
+        };
+        if !joinable(&self.agent) || self.join_attempted.load(Ordering::Acquire) {
+            return;
+        }
+        let _gate = self
+            .join_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // One attempt per process, whether or not it turns out to be needed,
+        // so status polling never starts another.
+        if self.join_attempted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // A missing bundle, or one an interrupted issuance left unconfirmed.
+        let needed = runtime::nexus_mailbox::NodeRecord::load()
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                let agents = record.agents_dir();
+                !runtime::nexus_mailbox::credential_present(agents, &self.agent)
+                    || runtime::nexus_mailbox::joining_marker(agents, &self.agent).exists()
+            });
+        if !needed {
+            return;
+        }
+        if let Err(reason) = enroll(&self.agent) {
+            *self
+                .join_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+        }
+        // Report the outcome now rather than at the next receiver poll.
+        let (resolved, refreshed) = match Config::from_node_record(&self.agent) {
+            Ok(Some(config)) => (Some(config.endpoint), None),
+            Ok(None) => (
+                None,
+                Some("the selected node record is unavailable".to_string()),
+            ),
+            Err(error) => (None, Some(self.with_join_error(error))),
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let NodeState::Pending { endpoint, error } = &mut *state {
+            if resolved.is_some() {
+                *endpoint = resolved;
+            }
+            *error = refreshed;
+        }
+    }
+
     fn backend(&self) -> Result<Arc<dyn FsBackend>, String> {
         let mut state = self
             .state
@@ -81,6 +173,7 @@ impl NodeBinding {
                 Ok(backend)
             }
             Err(error) => {
+                let error = self.with_join_error(error);
                 *state = NodeState::Pending {
                     endpoint,
                     error: Some(error.clone()),
@@ -180,6 +273,39 @@ impl Peer {
 /// that selected disk stays there until an explicit handoff/restart.
 static NODES: OnceLock<Mutex<HashMap<String, Option<Arc<Node>>>>> = OnceLock::new();
 
+/// Issues a session's own Agent credential on the machine's node. The host
+/// registers one only when its user has chosen to join the node; an error
+/// explains why the Agent could not be issued.
+pub type Enroller = fn(&str) -> Result<(), String>;
+
+static ENROLLER: OnceLock<Enroller> = OnceLock::new();
+static JOINABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Register the host's enroller. The first registration wins.
+pub fn set_enroller(enroller: Enroller) {
+    let _ = ENROLLER.set(enroller);
+}
+
+/// Mark `agent` as a session's own workspace-derived identity, which the
+/// registered enroller may issue when it attaches. scode never claims a
+/// configured `agentName`; the node owner mints those.
+pub fn allow_join(agent: &str) {
+    JOINABLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(agent.to_string());
+}
+
+fn joinable(agent: &str) -> bool {
+    JOINABLE.get().is_some_and(|names| {
+        names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(agent)
+    })
+}
+
 /// The node `agent` is attached to, from this machine's node record.
 ///
 /// `None` only when the machine has no node record. A present but unusable
@@ -210,10 +336,7 @@ pub fn node(agent: &str) -> Option<Arc<Node>> {
             ),
             Err(error) => (None, Some(error)),
         };
-        let binding = Arc::new(NodeBinding {
-            agent: agent.to_string(),
-            state: Mutex::new(NodeState::Pending { endpoint, error }),
-        });
+        let binding = Arc::new(NodeBinding::new(agent, endpoint, error));
         let resolving = Arc::clone(&binding);
         // The binding is a certificate-only mTLS connection: the node
         // authenticated every writer and stamped each `from`.
@@ -255,7 +378,18 @@ impl Node {
 #[must_use]
 pub fn attach(agent_name: &str) -> Peer {
     match node(agent_name) {
-        Some(node) => Peer::Node(node),
+        Some(node) => {
+            if node.binding.may_join() {
+                // Issuance can take seconds and session builds can hold
+                // process-wide leases. The session starts pending; its tools
+                // and receiver use the credential once it lands.
+                let binding = Arc::clone(&node.binding);
+                let _ = std::thread::Builder::new()
+                    .name("a2a-join".into())
+                    .spawn(move || binding.join_if_needed());
+            }
+            Peer::Node(node)
+        }
         None => Peer::Disk(agent_name.to_string()),
     }
 }

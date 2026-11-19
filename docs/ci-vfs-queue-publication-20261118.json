@@ -1,0 +1,1310 @@
+{
+  "schemaVersion": 1,
+  "preparedAtUTC": "2026-11-18T11:42:38.017739+00:00",
+  "repository": "sudoprivacy/sudocode",
+  "wholeLifecycleTenthProven": false,
+  "scope": "Normally delivered original-key queue-to-main compiler publication, not a controlled warm comparison or complete recurring Rust lifecycle.",
+  "source": {
+    "pr": 1497,
+    "head": "1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+    "merge": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+    "mergedAt": "2026-11-18T11:23:08Z",
+    "qualifiedAndAcceptedTree": "80e0d60acc59a1eaa434caef45af54d78051b4ff",
+    "all11OwnedGitBlobsEqual": true,
+    "blobs": {
+      ".github/actions/vfs-search-cache/action.yml": {
+        "head": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
+        "merge": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
+        "equal": true
+      },
+      ".github/local-acceptance/checks.py": {
+        "head": "8f5fb8b01f6e5fbe7edca90220e23775828432e33489f91b62449dcd2e7ccc2d",
+        "merge": "8f5fb8b01f6e5fbe7edca90220e23775828432e33489f91b62449dcd2e7ccc2d",
+        "equal": true
+      },
+      ".github/scripts/ci_input_scope.py": {
+        "head": "21d3155fe3d52a056c161a720bc25010d3c41585451affae2010bbac732d3a7d",
+        "merge": "21d3155fe3d52a056c161a720bc25010d3c41585451affae2010bbac732d3a7d",
+        "equal": true
+      },
+      ".github/scripts/vfs_search_publication.py": {
+        "head": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
+        "merge": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
+        "equal": true
+      },
+      ".github/workflows/ci-vfs-search-cache.yml": {
+        "head": "6d5590f96f245a85bd841e301cdef9c4dd3d14e7a1dc7645e00f45739eb44139",
+        "merge": "6d5590f96f245a85bd841e301cdef9c4dd3d14e7a1dc7645e00f45739eb44139",
+        "equal": true
+      },
+      ".github/workflows/rust-ci.yml": {
+        "head": "3480291d6bee260074e5187080119b36745bd72cdd40bbd39ac45b1fdf3a5545",
+        "merge": "3480291d6bee260074e5187080119b36745bd72cdd40bbd39ac45b1fdf3a5545",
+        "equal": true
+      },
+      "e2e/local-acceptance/run.py": {
+        "head": "761454a71f645f71567af35b8982e0e6df1a11708ba69ab3d15e4ab597080fc3",
+        "merge": "761454a71f645f71567af35b8982e0e6df1a11708ba69ab3d15e4ab597080fc3",
+        "equal": true
+      },
+      "e2e/local-acceptance/vfs_search_cache_acceptance.py": {
+        "head": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",
+        "merge": "7fb14b1ff24af6ac74aea6b138b4f06675d501179ee1c7b2e6b9345ebf0ff89f",
+        "equal": true
+      },
+      "e2e/local-acceptance/vfs_search_publication_acceptance.py": {
+        "head": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
+        "merge": "2839920dd954dc620ab01f9cf9ce3f85d975a91af0471bb25b21ff0d18871dfb",
+        "equal": true
+      },
+      "CONTRIBUTING.md": {
+        "head": "873f35a120aec571ed82e861ed5488a2bf56402bd90dc27244de1b010b3fdff4",
+        "merge": "873f35a120aec571ed82e861ed5488a2bf56402bd90dc27244de1b010b3fdff4",
+        "equal": true
+      },
+      "sudo-code-roadmap.html": {
+        "head": "11b87b26fc72ee969fa1053c977674321a1d6cb03245c58e8e4d315241638062",
+        "merge": "11b87b26fc72ee969fa1053c977674321a1d6cb03245c58e8e4d315241638062",
+        "equal": true
+      }
+    }
+  },
+  "normalAcceptance": {
+    "fullAuthorNativeAndDockerContractPassed": true,
+    "sourcePreflightRun": 44292072432,
+    "sourcePreflightJob": 134759531034,
+    "queueRun": 44292488421,
+    "queueAttempt": 1,
+    "queueHead": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+    "currentCohostJob": 134761301811,
+    "currentA2AJob": 134761301901,
+    "bothOriginalRealJobsPassed": true,
+    "queueLocalProofRun": 44292488299,
+    "originalVfsAssertionASTsRetained": 54,
+    "originalRustWorkflowRunEntriesRetained": 67,
+    "originalLocalAttempts": [
+      {
+        "receiptSHA256": "0474cfbcd6129cd47e318077919201cb49458d4f4bdfd027e68f6a04375976cb",
+        "startedAtUTC": "2026-11-18T10:02:48.542634+00:00",
+        "finishedAtUTC": "2026-11-18T10:11:32.925308+00:00",
+        "exitCode": 1,
+        "phase": "original_contract_update_exited_failure",
+        "passed": false
+      },
+      {
+        "receiptSHA256": "ab35c47b6265d5442a68fe3fe3fbd979325fbdbfc64bb643e8f675c5062a63a5",
+        "startedAtUTC": "2026-11-18T10:15:32.650830+00:00",
+        "finishedAtUTC": "2026-11-18T10:26:57.772410+00:00",
+        "exitCode": 1,
+        "phase": "original_contract_update_exited_failure",
+        "passed": false
+      },
+      {
+        "receiptSHA256": "4a40e26e42d675802081e9a0336eb59e99127f6e3be8f0505fb1b5785c0aaf44",
+        "startedAtUTC": "2026-11-18T10:35:22.754209+00:00",
+        "finishedAtUTC": "2026-11-18T10:39:28.344608+00:00",
+        "exitCode": 15,
+        "phase": "owned_bulk_foreground_interruption",
+        "passed": false
+      },
+      {
+        "receiptSHA256": "13ca4f3e54df5a16b5b6448d75a3dbc06fb725ff2247bc85ffe5ef211b2525f1",
+        "startedAtUTC": "2026-11-18T10:52:00.993292+00:00",
+        "finishedAtUTC": "2026-11-18T11:09:06.204576+00:00",
+        "exitCode": 0,
+        "phase": "original_contract_update_exited_success",
+        "passed": true
+      }
+    ],
+    "limits": [
+      "Original source-pin and malformed-fixture failures remain; the next source revisions received full normal qualification.",
+      "Foreground-interrupted original field and independently verified owned-container cleanup remain separate; no failed result is promoted.",
+      "Infrastructure Git/Cargo/TLS/tar/process controls add no product-journey coverage."
+    ]
+  },
+  "actualQueueSearch": {
+    "run": 44292488421,
+    "artifact": 14422826942,
+    "artifactZIP_SHA256": "9abb9bb17283af836d114072a981279b38ee6a1b5671b58f703276e9d02b336b",
+    "context": {
+      "source_revision": "b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+      "recipe_sha256": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
+      "current_runtime_sha256": "ac598ef7c637130cfd628318bdadd43731d11cb1968d111c7d28dfab87209a55",
+      "test_required_now": true,
+      "functional_profile": {
+        "source_files": {
+          ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
+          ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415"
+        },
+        "configuration_sha256": "c8d97ea772b2cbd0d5bd0525d19164115bdd9f8255b6f40fac111918a69d1cc1"
+      }
+    },
+    "command": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/home/runner/work/sudocode/sudocode/.native-vfs/Cargo.toml",
+        "-p",
+        "nexus-cluster",
+        "--all-features",
+        "--test",
+        "user_runtime",
+        "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "seconds": 193.735,
+      "log_sha256": "28bc91476eb96831b1ca373a87ddb2c570e7627892e076dc8b4c511b3ab6b724",
+      "compiler_artifacts": []
+    },
+    "originalSummary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 44.73s"
+    ],
+    "limits": [
+      "This original one-case command was cold and preceded publication of this exact main key.",
+      "Its193.735s is not a warm hit, causal speedup or whole-job saving;21filtered cases were not executed."
+    ]
+  },
+  "actualMainPublication": {
+    "run": 44294211426,
+    "job": 134766880482,
+    "originalSuccessfulJobSeconds": 73,
+    "runnerImageVersion": "20261111.196.1",
+    "producerImageVersion": "20261111.196.1",
+    "originalKey": "vfs-search-v2-47f30bee9dc9441f45ab418fa9a4b042194983adb4fa8eba91138e0f58e4d4f4-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "sourceFilesVerified": 883,
+    "archive": {
+      "bytes": 3202610260,
+      "members": 33198,
+      "name": "compiler.tar.gz",
+      "sha256": "26e81b6262b0cacd0ec77a4804c2ead396999713586d07476ab03797c8100a6c",
+      "size": 956046468
+    },
+    "importedProgramsExecuted": false,
+    "testResultsReused": false,
+    "prewarmFallbackSkipped": true,
+    "publicationArtifact": {
+      "id": 14421609647,
+      "size": 10791,
+      "sha256": "67a88c28d13f660ee6eaf8a6c377764870b3e1c03c3e2db49f4c91b233aa966c"
+    },
+    "persistentExactMainCache": {
+      "id": 10720544088,
+      "ref": "refs/heads/main",
+      "key": "vfs-search-v2-47f30bee9dc9441f45ab418fa9a4b042194983adb4fa8eba91138e0f58e4d4f4-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+      "version": "0e924dac4074ca5f59016c8ca23840d71ef66e411f0b33b7edaa44932d294550",
+      "last_accessed_at": "2026-11-18T11:24:20.808698Z",
+      "created_at": "2026-11-18T11:24:20.808698Z",
+      "size_in_bytes": 773897615
+    },
+    "persistentCacheObservedAt": "2026-11-18T11:37:03.899526+00:00",
+    "sameKeySubsequentWarmConsumerQualified": false,
+    "limits": [
+      "Current producer and publisher happened to use the same image; this run does not establish actual cross-image transfer behavior.",
+      "Archive compressed size, extracted byte count and cache service compressed size are different measures, not footprint reduction.",
+      "Cache contents never replace a current test or authorize executing imported code during publication.",
+      "A genuine later matching-image consumer and recurring transfer/storage costs still need measurement."
+    ]
+  },
+  "hostedCostSnapshot": {
+    "window": {
+      "start": "2026-11-18T09:35:23Z",
+      "finish": "2026-11-18T11:39:20Z",
+      "allOriginalRuns": 25
+    },
+    "distinctPhysicalJobRecordsIncludingUnallocatedSkips": 39,
+    "allocatedJobs": 14,
+    "knownRunnerMinutes": 33.6,
+    "unknownRecordedIntervals": [],
+    "byWorkflow": {
+      "Draft local acceptance": {
+        "physicalJobs": 2,
+        "knownRunnerSeconds": 0,
+        "unknownJobs": []
+      },
+      "Rust CI": {
+        "physicalJobs": 28,
+        "knownRunnerSeconds": 1827.0,
+        "unknownJobs": []
+      },
+      "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5": {
+        "physicalJobs": 2,
+        "knownRunnerSeconds": 26.0,
+        "unknownJobs": []
+      },
+      "Local acceptance": {
+        "physicalJobs": 4,
+        "knownRunnerSeconds": 42.0,
+        "unknownJobs": []
+      },
+      "Local acceptance publish ef550200e55edc72afc4241a0644d4e31bc2c85f": {
+        "physicalJobs": 1,
+        "knownRunnerSeconds": 29.0,
+        "unknownJobs": []
+      },
+      "CI queue maintenance": {
+        "physicalJobs": 1,
+        "knownRunnerSeconds": 19.0,
+        "unknownJobs": []
+      },
+      "Fixed VFS search compiler cache": {
+        "physicalJobs": 1,
+        "knownRunnerSeconds": 73.0,
+        "unknownJobs": []
+      }
+    },
+    "jobs": [
+      {
+        "id": 134759534874,
+        "name": "Verify local acceptance",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:25Z",
+        "started_at": "2026-11-18T11:09:25Z",
+        "completed_at": "2026-11-18T11:09:24Z",
+        "runner_name": null,
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292072298,
+        "attempt": 1,
+        "workflow": "Draft local acceptance",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759615668,
+        "name": "matrix.name",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:34Z",
+        "started_at": "2026-11-18T11:09:34Z",
+        "completed_at": "2026-11-18T11:09:24Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072298,
+        "attempt": 1,
+        "workflow": "Draft local acceptance",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759531034,
+        "name": "CI preflight",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:24Z",
+        "started_at": "2026-11-18T11:09:26Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": "GitHub Actions 1000144786",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 116.0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": 3.0
+      },
+      {
+        "id": 134759533321,
+        "name": "Release optimized build (${{ matrix.os }})",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:24Z",
+        "started_at": "2026-11-18T11:09:24Z",
+        "completed_at": "2026-11-18T11:09:24Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759533782,
+        "name": "dependency-cache",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:24Z",
+        "started_at": "2026-11-18T11:09:24Z",
+        "completed_at": "2026-11-18T11:09:24Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759585089,
+        "name": "Release rendering stress matrix",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:30Z",
+        "started_at": "2026-11-18T11:09:30Z",
+        "completed_at": "2026-11-18T11:09:24Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760578995,
+        "name": "nexus-A2A journeys (real daemon)",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760579116,
+        "name": "Live API smoke test",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760579133,
+        "name": "nexus co-host journeys (real daemon)",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760580189,
+        "name": "cargo clippy --workspace (${{ matrix.os }})",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760580282,
+        "name": "Live model PTY (${{ matrix.os }})",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:22Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760580819,
+        "name": "stop-after-clippy-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:23Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760580945,
+        "name": "nexus-A2A live (real daemon)",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:23Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760581304,
+        "name": "stop-after-cohost-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:23Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760581922,
+        "name": "stop-after-daemon-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:11:23Z",
+        "started_at": "2026-11-18T11:11:23Z",
+        "completed_at": "2026-11-18T11:11:23Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292072432,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:23Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759569563,
+        "name": "Publish verified local and cross-platform acceptance",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:28Z",
+        "started_at": "2026-11-18T11:09:28Z",
+        "completed_at": "2026-11-18T11:09:28Z",
+        "runner_name": null,
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292083376,
+        "attempt": 1,
+        "workflow": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "event": "workflow_run",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:27Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759575989,
+        "name": "Verify local acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:29Z",
+        "started_at": "2026-11-18T11:09:31Z",
+        "completed_at": "2026-11-18T11:09:48Z",
+        "runner_name": "GitHub Actions 1000144787",
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292086126,
+        "attempt": 1,
+        "workflow": "Local acceptance",
+        "event": "pull_request",
+        "runnerSeconds": 17.0,
+        "runCreatedAt": "2026-11-18T11:09:28Z",
+        "queueUntilJobStartSeconds": 3.0
+      },
+      {
+        "id": 134759750631,
+        "name": "matrix.name",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:49Z",
+        "started_at": "2026-11-18T11:09:49Z",
+        "completed_at": "2026-11-18T11:09:49Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292086126,
+        "attempt": 1,
+        "workflow": "Local acceptance",
+        "event": "pull_request",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:09:28Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134759782890,
+        "name": "Publish verified local and cross-platform acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:53Z",
+        "started_at": "2026-11-18T11:09:54Z",
+        "completed_at": "2026-11-18T11:10:20Z",
+        "runner_name": "GitHub Actions 1000144788",
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292146399,
+        "attempt": 1,
+        "workflow": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "event": "workflow_run",
+        "runnerSeconds": 26.0,
+        "runCreatedAt": "2026-11-18T11:09:52Z",
+        "queueUntilJobStartSeconds": 2.0
+      },
+      {
+        "id": 134760942102,
+        "name": "Verify local acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:03Z",
+        "started_at": "2026-11-18T11:12:04Z",
+        "completed_at": "2026-11-18T11:12:29Z",
+        "runner_name": "GitHub Actions 1000144790",
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292488299,
+        "attempt": 1,
+        "workflow": "Local acceptance",
+        "event": "merge_group",
+        "runnerSeconds": 25.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 2.0
+      },
+      {
+        "id": 134761189909,
+        "name": "matrix.name",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:30Z",
+        "started_at": "2026-11-18T11:12:30Z",
+        "completed_at": "2026-11-18T11:12:29Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488299,
+        "attempt": 1,
+        "workflow": "Local acceptance",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760941851,
+        "name": "CI preflight",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:03Z",
+        "started_at": "2026-11-18T11:12:04Z",
+        "completed_at": "2026-11-18T11:12:43Z",
+        "runner_name": "GitHub Actions 1000144791",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 39.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 2.0
+      },
+      {
+        "id": 134760943804,
+        "name": "dependency-cache",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:03Z",
+        "started_at": "2026-11-18T11:12:03Z",
+        "completed_at": "2026-11-18T11:12:02Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134760944203,
+        "name": "Release optimized build (${{ matrix.os }})",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:03Z",
+        "started_at": "2026-11-18T11:12:03Z",
+        "completed_at": "2026-11-18T11:12:02Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134761005336,
+        "name": "Release rendering stress matrix",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:10Z",
+        "started_at": "2026-11-18T11:12:10Z",
+        "completed_at": "2026-11-18T11:12:02Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134761301811,
+        "name": "nexus co-host journeys (real daemon)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:45Z",
+        "completed_at": "2026-11-18T11:22:35Z",
+        "runner_name": "GitHub Actions 1000144794",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 590.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 43.0
+      },
+      {
+        "id": 134761301901,
+        "name": "nexus-A2A journeys (real daemon)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:45Z",
+        "completed_at": "2026-11-18T11:21:21Z",
+        "runner_name": "GitHub Actions 1000144795",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 516.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 43.0
+      },
+      {
+        "id": 134761301932,
+        "name": "cargo clippy --workspace (windows-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:45Z",
+        "completed_at": "2026-11-18T11:16:46Z",
+        "runner_name": "GitHub Actions 1000144796",
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 241.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 43.0
+      },
+      {
+        "id": 134761301965,
+        "name": "cargo clippy --workspace (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:45Z",
+        "completed_at": "2026-11-18T11:14:30Z",
+        "runner_name": "GitHub Actions 1000144798",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 105.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 43.0
+      },
+      {
+        "id": 134761302089,
+        "name": "cargo clippy --workspace (macos-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:13:22Z",
+        "completed_at": "2026-11-18T11:16:59Z",
+        "runner_name": "GitHub Actions 1000144797",
+        "labels": [
+          "macos-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 217.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 80.0
+      },
+      {
+        "id": 134761305295,
+        "name": "Live API smoke test",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:43Z",
+        "completed_at": "2026-11-18T11:12:43Z",
+        "runner_name": null,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134761305350,
+        "name": "Live model PTY (${{ matrix.os }})",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:12:43Z",
+        "started_at": "2026-11-18T11:12:43Z",
+        "completed_at": "2026-11-18T11:12:43Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134763585337,
+        "name": "stop-after-clippy-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:16:59Z",
+        "started_at": "2026-11-18T11:16:59Z",
+        "completed_at": "2026-11-18T11:16:59Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134765936601,
+        "name": "stop-after-daemon-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:21:22Z",
+        "started_at": "2026-11-18T11:21:22Z",
+        "completed_at": "2026-11-18T11:21:21Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134766578857,
+        "name": "nexus-A2A live (real daemon)",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:22:35Z",
+        "started_at": "2026-11-18T11:22:37Z",
+        "completed_at": "2026-11-18T11:22:40Z",
+        "runner_name": "GitHub Actions 1000144799",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 3.0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": 635.0
+      },
+      {
+        "id": 134766581473,
+        "name": "stop-after-cohost-failure",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:22:36Z",
+        "started_at": "2026-11-18T11:22:36Z",
+        "completed_at": "2026-11-18T11:22:35Z",
+        "runner_name": null,
+        "labels": [],
+        "run": 44292488421,
+        "attempt": 1,
+        "workflow": "Rust CI",
+        "event": "merge_group",
+        "runnerSeconds": 0,
+        "runCreatedAt": "2026-11-18T11:12:02Z",
+        "queueUntilJobStartSeconds": null
+      },
+      {
+        "id": 134761230064,
+        "name": "Publish verified local and cross-platform acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:35Z",
+        "started_at": "2026-11-18T11:12:36Z",
+        "completed_at": "2026-11-18T11:13:05Z",
+        "runner_name": "GitHub Actions 1000144793",
+        "labels": [
+          "windows-latest"
+        ],
+        "run": 44292573179,
+        "attempt": 1,
+        "workflow": "Local acceptance publish ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "event": "workflow_run",
+        "runnerSeconds": 29.0,
+        "runCreatedAt": "2026-11-18T11:12:34Z",
+        "queueUntilJobStartSeconds": 2.0
+      },
+      {
+        "id": 134766879941,
+        "name": "removed-queue-refs",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:23:10Z",
+        "started_at": "2026-11-18T11:23:12Z",
+        "completed_at": "2026-11-18T11:23:31Z",
+        "runner_name": "GitHub Actions 1000144800",
+        "labels": [
+          "ubuntu-24.04"
+        ],
+        "run": 44294211403,
+        "attempt": 1,
+        "workflow": "CI queue maintenance",
+        "event": "push",
+        "runnerSeconds": 19.0,
+        "runCreatedAt": "2026-11-18T11:23:09Z",
+        "queueUntilJobStartSeconds": 3.0
+      },
+      {
+        "id": 134766880482,
+        "name": "fixed-drivers",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:23:10Z",
+        "started_at": "2026-11-18T11:23:11Z",
+        "completed_at": "2026-11-18T11:24:24Z",
+        "runner_name": "GitHub Actions 1000144801",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "run": 44294211426,
+        "attempt": 1,
+        "workflow": "Fixed VFS search compiler cache",
+        "event": "push",
+        "runnerSeconds": 73.0,
+        "runCreatedAt": "2026-11-18T11:23:09Z",
+        "queueUntilJobStartSeconds": 2.0
+      }
+    ],
+    "runs": [
+      {
+        "id": 44292072298,
+        "name": "Draft local acceptance",
+        "path": ".github/workflows/local-acceptance.yml",
+        "event": "pull_request",
+        "head_sha": "1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "head_branch": "perf/vfs-validated-queue-cache-publication-20261118",
+        "display_title": "Draft local acceptance",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:23Z",
+        "updated_at": "2026-11-18T11:09:24Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head"
+        ]
+      },
+      {
+        "id": 44292072432,
+        "name": "Rust CI",
+        "path": ".github/workflows/rust-ci.yml",
+        "event": "pull_request",
+        "head_sha": "1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "head_branch": "perf/vfs-validated-queue-cache-publication-20261118",
+        "display_title": "perf(ci): retain accepted VFS compiler inputs under their original image keys",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:23Z",
+        "updated_at": "2026-11-18T11:11:23Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head"
+        ]
+      },
+      {
+        "id": 44292083376,
+        "name": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "path": ".github/workflows/local-acceptance-publish.yml",
+        "event": "workflow_run",
+        "head_sha": "9a13a4639f3b4c1ca50d2a2954ed630fb6439e5f",
+        "head_branch": "main",
+        "display_title": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "status": "completed",
+        "conclusion": "skipped",
+        "created_at": "2026-11-18T11:09:27Z",
+        "updated_at": "2026-11-18T11:09:29Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-title-in-complete-window"
+        ]
+      },
+      {
+        "id": 44292086126,
+        "name": "Local acceptance",
+        "path": ".github/workflows/local-acceptance.yml",
+        "event": "pull_request",
+        "head_sha": "1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "head_branch": "perf/vfs-validated-queue-cache-publication-20261118",
+        "display_title": "Local acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:28Z",
+        "updated_at": "2026-11-18T11:09:49Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head"
+        ]
+      },
+      {
+        "id": 44292146399,
+        "name": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "path": ".github/workflows/local-acceptance-publish.yml",
+        "event": "workflow_run",
+        "head_sha": "9a13a4639f3b4c1ca50d2a2954ed630fb6439e5f",
+        "head_branch": "main",
+        "display_title": "Local acceptance publish 1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:09:52Z",
+        "updated_at": "2026-11-18T11:10:21Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-title-in-complete-window",
+          "exact-trusted-bot-status-target"
+        ]
+      },
+      {
+        "id": 44292488299,
+        "name": "Local acceptance",
+        "path": ".github/workflows/local-acceptance.yml",
+        "event": "merge_group",
+        "head_sha": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "head_branch": "gh-readonly-queue/main/pr-1497-9a13a4639f3b4c1ca50d2a2954ed630fb6439e5f",
+        "display_title": "Local acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:02Z",
+        "updated_at": "2026-11-18T11:12:30Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head",
+          "original-pr1497-queue-branch"
+        ]
+      },
+      {
+        "id": 44292488421,
+        "name": "Rust CI",
+        "path": ".github/workflows/rust-ci.yml",
+        "event": "merge_group",
+        "head_sha": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "head_branch": "gh-readonly-queue/main/pr-1497-9a13a4639f3b4c1ca50d2a2954ed630fb6439e5f",
+        "display_title": "Rust CI",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:02Z",
+        "updated_at": "2026-11-18T11:22:41Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head",
+          "original-pr1497-queue-branch"
+        ]
+      },
+      {
+        "id": 44292573179,
+        "name": "Local acceptance publish ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "path": ".github/workflows/local-acceptance-publish.yml",
+        "event": "workflow_run",
+        "head_sha": "9a13a4639f3b4c1ca50d2a2954ed630fb6439e5f",
+        "head_branch": "main",
+        "display_title": "Local acceptance publish ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:12:34Z",
+        "updated_at": "2026-11-18T11:13:06Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-title-in-complete-window",
+          "exact-trusted-bot-status-target"
+        ]
+      },
+      {
+        "id": 44294211403,
+        "name": "CI queue maintenance",
+        "path": ".github/workflows/ci-queue-maintenance.yml",
+        "event": "push",
+        "head_sha": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "head_branch": "main",
+        "display_title": "Merge pull request #1497 from sudoprivacy/perf/vfs-validated-queue-ca\u2026",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:23:09Z",
+        "updated_at": "2026-11-18T11:23:32Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head"
+        ]
+      },
+      {
+        "id": 44294211426,
+        "name": "Fixed VFS search compiler cache",
+        "path": ".github/workflows/ci-vfs-search-cache.yml",
+        "event": "push",
+        "head_sha": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "head_branch": "main",
+        "display_title": "Merge pull request #1497 from sudoprivacy/perf/vfs-validated-queue-ca\u2026",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-11-18T11:23:09Z",
+        "updated_at": "2026-11-18T11:24:24Z",
+        "run_attempt": 1,
+        "associations": [
+          "exact-source-or-accepted-main-head"
+        ]
+      }
+    ],
+    "statusAssociations": [
+      {
+        "id": 59243440016,
+        "context": "Local acceptance",
+        "state": "success",
+        "created_at": "2026-11-18T11:10:16Z",
+        "target_url": "https://github.com/sudoprivacy/sudocode/actions/runs/44292146399",
+        "sourceHead": "1403dbcc8004ae4b019dfaeb0f1d54f2454276a5",
+        "trustedBot": true
+      },
+      {
+        "id": 59243661554,
+        "context": "Local acceptance",
+        "state": "success",
+        "created_at": "2026-11-18T11:13:01Z",
+        "target_url": "https://github.com/sudoprivacy/sudocode/actions/runs/44292573179",
+        "sourceHead": "ef550200e55edc72afc4241a0644d4e31bc2c85f",
+        "trustedBot": true
+      }
+    ],
+    "prCreatedAt": "2026-11-18T11:09:19Z",
+    "prMergedAt": "2026-11-18T11:23:08Z",
+    "prCreatedToMergeSeconds": 829.0,
+    "limits": [
+      "Physical job IDs are counted once; every retained original workflow attempt is included.",
+      "Skipped unallocated jobs are zero; missing live/terminal intervals stay unknown.",
+      "Full bounded window plus exact bot statuses includes protected-head publisher jobs.",
+      "This is PR1497 source/queue/main and source-associated publication cost, not the fixed Rust cohort.",
+      "Author/FIFO/engineering intervals are retained separately; overlapping controller wall time is not additive runner time.",
+      "Unbound maintenance, periodic and future work are not asserted zero; no generic net saving or one-tenth proof.",
+      "Read-only GitHub GETs; no validation rerun, cache/source/lease/queue/runner/settings mutation."
+    ]
+  },
+  "comparisonBoundary": {
+    "frozenOriginal20Plus20DatasetChanged": false,
+    "postPolicySourceFirstRustPopulation": 1,
+    "requiredPopulation": 20,
+    "newInfrastructurePrAddedToRustPopulation": false,
+    "sameShareUrl": "https://s.shareone.vip/s/sudo-code-roadmap",
+    "limits": [
+      "All original failures, unknown historical/current job intervals, source-mix and disclosed coverage reductions remain.",
+      "The frozen current20 already includes138source-linked status-publisher jobs and57.45known runner-minutes; do not add them twice.",
+      "The source-defined population is incomplete and source-mix-weighted original ratio exceeds10percent; total comparable lifecycle tenth is unproved."
+    ]
+  },
+  "warmConsumerObservedAfterInitialPublication": {
+    "observedAtUTC": "2026-11-18T12:48:22.989711+00:00",
+    "releasePR": 1496,
+    "acceptedMerge": "3240715b7e36f9b83022089fc5e9a5cfcd058cce",
+    "queueRun": 44300701626,
+    "queueJob": {
+      "id": 134789845637,
+      "startedAt": "2026-11-18T12:07:00Z",
+      "completedAt": "2026-11-18T12:12:25Z",
+      "elapsedSeconds": 325.0,
+      "conclusion": "success"
+    },
+    "runnerImageVersion": "20261111.196.1",
+    "restoredExactOriginalCacheId": 10720544088,
+    "restoredOriginalKey": "vfs-search-v2-47f30bee9dc9441f45ab418fa9a4b042194983adb4fa8eba91138e0f58e4d4f4-b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+    "sourceContext": {
+      "source_revision": "b391a643cc54ff1d49ffaf63544f8091193a3f4e",
+      "recipe_sha256": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
+      "current_runtime_sha256": "e4c5c0ded328d8058b9636f299d660065fc27073617851360582d690febb1833",
+      "test_required_now": true,
+      "functional_profile": {
+        "source_files": {
+          ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
+          ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415"
+        },
+        "configuration_sha256": "c8d97ea772b2cbd0d5bd0525d19164115bdd9f8255b6f40fac111918a69d1cc1"
+      }
+    },
+    "originalCargoCommand": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/home/runner/work/sudocode/sudocode/.native-vfs/Cargo.toml",
+        "-p",
+        "nexus-cluster",
+        "--all-features",
+        "--test",
+        "user_runtime",
+        "signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "seconds": 17.598,
+      "log_sha256": "57f480e2fec57b53abccee720e444de75bdb6ee51ad8a82c74e622a31cb710aa",
+      "compiler_artifacts": []
+    },
+    "actualTestSummary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 8.70s"
+    ],
+    "coldCommandSeconds": 193.735,
+    "warmCommandSeconds": 17.598,
+    "warmFractionOfObservedColdCommand": 0.09083541951634964,
+    "warmQueueIdentityOnly": true,
+    "searchArtifact": 14426166621,
+    "identityArtifact": 14426141381,
+    "followingMainLookupRun": 44302230923,
+    "followingMainLookupJob": {
+      "id": 134794604299,
+      "startedAt": "2026-11-18T12:15:46Z",
+      "completedAt": "2026-11-18T12:16:23Z",
+      "elapsedSeconds": 37.0,
+      "conclusion": "success"
+    },
+    "followingMainExactHitAndArchiveTransferImportSaveSkipped": true,
+    "originalEvidenceSHA256": {
+      "queue-log": "bfafd3a07564d9f884764a3fdcd14a43e80b6f2242729ce013d36bce184c9368",
+      "search": "1180488f8c98bbdcb08a25c20c78fa8bc45a49022ec34a5db8f6912ef22b6022",
+      "identity": "4f16ef32c25aa79bdff74d2c7bc5283428f58c3e9e24d935788c904f591bb3a2",
+      "publisher": "ec538f2aa3cc026fca5b6d403f06707a8e3d6e87307c6d88145a8a36f919a8f7",
+      "publisher-log": "62ce04b9d80c1863cfcce916cacd1b33e281ea16c98260aca83575885800f4cb"
+    },
+    "limits": [
+      "The command and Nexus VFS source/profile stayed the same. Physical runner instances and current co-host binary hashes differ.",
+      "Job and PR elapsed times include other work. Cross-image behavior and a whole-lifecycle speedup require separate proof.",
+      "This real release-only merge stays outside the fixed Rust-source cohort, since the accepted change contains no .rs file."
+    ]
+  }
+}

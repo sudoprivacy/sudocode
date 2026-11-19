@@ -8892,7 +8892,7 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         .await;
     assert_eq!(
         init["result"]["_meta"]["sudocode"]["directA2a"],
-        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1 }),
+        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1, "delivery": 1 }),
         "initialize advertises the direct A2A requests and their typed outcomes: {init}"
     );
     assert_eq!(
@@ -8982,6 +8982,56 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
     workspace.cleanup();
 }
 
+#[tokio::test]
+async fn direct_a2a_preserves_explicit_delivery_without_model_inference() {
+    use runtime::turn_input::InputDelivery;
+    const AGENT: &str = "direct-intent-sender";
+    const PEER: &str = "direct-intent-peer";
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("direct-a2a-intent");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    set_session_mode(&mut client, &sid, "workspace-write").await;
+    let before = server.captured_requests().await.len();
+    for delivery in [None, Some("steer"), Some("queue")] {
+        let mut params = json!({
+            "sessionId": sid, "to": PEER,
+            "message": "Keep the current task; this is supporting information.",
+            "summary": "delivery intent"
+        });
+        if let Some(delivery) = delivery {
+            params["delivery"] = json!(delivery);
+        }
+        let (_, response) = client.send_request("_sudocode/a2a/send", params).await;
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert_direct_host_audit(&response, &sid, AGENT, &pair_root, "send");
+    }
+    let mailbox = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
+    let batch = mailbox.read_unread(AGENT).unwrap().unwrap();
+    assert_eq!(batch.messages().len(), 3);
+    for (message, expected) in batch.messages().iter().zip([
+        InputDelivery::Steer,
+        InputDelivery::Steer,
+        InputDelivery::Queue,
+    ]) {
+        assert_eq!(message.delivery, expected);
+        assert_eq!(message.from, AGENT);
+        assert_eq!(
+            message.body,
+            "Keep the current task; this is supporting information."
+        );
+    }
+    drop(batch);
+    assert_eq!(server.captured_requests().await.len(), before);
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// Every refusal is definite and leaves the peer untouched: an unknown
 /// session, a `sender` or structured message, a mode that forbids sending,
 /// paused tools, a session busy with a turn, and a denied permission prompt.
@@ -9026,6 +9076,11 @@ async fn direct_a2a_refusals_send_nothing() {
         (
             "a structured message",
             send(&sid, json!({ "message": { "type": "shutdown_request" } })),
+            "invalid_params",
+        ),
+        (
+            "an interrupt delivery intent",
+            send(&sid, json!({ "delivery": "interrupt" })),
             "invalid_params",
         ),
         (

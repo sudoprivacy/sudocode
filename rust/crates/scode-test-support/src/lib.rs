@@ -24,16 +24,66 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Keep both `Screen` lifetimes late-bound for `PtySession::render` callbacks.
 #[must_use]
 pub fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
-    screen.contents()
+    let contents = screen.contents();
+    let shaded = shaded_boundary_rows(screen);
+    if !shaded.contains(&true) {
+        return contents;
+    }
+    let raw = screen.raw();
+    let rule = "─".repeat(usize::from(raw.size().1));
+    let mut lines: Vec<String> = contents.split('\n').map(str::to_owned).collect();
+    let mut line = 0;
+    for (row, is_shaded) in (0..raw.size().0).zip(shaded) {
+        // `contents()` starts a new line after every row that did not wrap.
+        let continues = row > 0 && raw.row_wrapped(row - 1);
+        if row > 0 && !continues {
+            line += 1;
+        }
+        let stands_alone = !continues && !raw.row_wrapped(row);
+        if is_shaded && stands_alone {
+            if let Some(text) = lines.get_mut(line).filter(|text| text.trim().is_empty()) {
+                text.clone_from(&rule);
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// Rows that read as the editor's separator lines. The editor's shade
+/// replaces those lines with rows painted in the surface colour, so a row
+/// painted edge to edge in one non-default background and holding no text
+/// projects as the full-width rule tests have always located the editor by.
+/// Colour assertions read raw cells and are unaffected.
+fn shaded_boundary_rows(screen: &pty_expect::Screen<'_>) -> Vec<bool> {
+    let raw = screen.raw();
+    let (rows, cols) = raw.size();
+    (0..rows)
+        .map(|row| {
+            let mut background = None;
+            (0..cols).all(|col| {
+                raw.cell(row, col).is_some_and(|cell| {
+                    let color = format!("{:?}", cell.bgcolor());
+                    cell.contents().trim().is_empty()
+                        && color != "Default"
+                        && *background.get_or_insert_with(|| color.clone()) == color
+                })
+            })
+        })
+        .collect()
 }
 
 /// Preserve physical row boundaries for assertions about inline UI layout.
 /// `contents()` joins soft-wrapped rows, including a full-width rule followed
 /// by a question header in `ConPTY`. Transcript assertions still use that view.
-fn screen_rows(screen: &pty_expect::Screen<'_>) -> String {
+/// Shaded editor boundaries read as rules, as in [`screen_contents`].
+#[must_use]
+pub fn screen_rows(screen: &pty_expect::Screen<'_>) -> String {
+    let rule = "─".repeat(usize::from(screen.raw().size().1));
     screen
         .raw()
         .rows(0, screen.raw().size().1)
+        .zip(shaded_boundary_rows(screen))
+        .map(|(text, is_shaded)| if is_shaded { rule.clone() } else { text })
         .collect::<Vec<_>>()
         .join("\n")
 }

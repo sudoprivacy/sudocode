@@ -245,7 +245,7 @@ fn send_summary_and_body_keep_independent_preview_limits() {
 }
 
 #[test]
-fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() {
+fn agent_list_replay_distinguishes_unknown_liveness_descriptions_empty_and_truncated_lists() {
     let env = TestEnv::new_mock("agent-list-card-history");
     let mut source = Session::new().with_workspace_root(env.workspace_root());
     add(
@@ -253,8 +253,10 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
         "directory",
         "agent_list",
         &json!({}),
-        &json!({"count":3,"agents":[
+        &json!({"count":4,"agents":[
             {"kind":"peer","name":"peer-未知状态","send_to":"peer-未知状态"},
+            {"kind":"peer","name":"described-peer","send_to":"described-peer",
+                "description":"Coordinating Mac fixtures","description_updated_at":"2026-01-02T03:04:05Z"},
             {"kind":"subagent","name":"reviewer","send_to":"worker-exact-address-42",
                 "active":true,"role":"review","task_id":"task-42"},
             {"kind":"subagent","name":"writer","send_to":"worker-43","active":false},
@@ -294,8 +296,9 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
     let widths = &[52, 120];
     replay(&env, &source, "Recorded list-error.", widths, |screen| {
         for expected in [
-            "AgentList · 3 agents",
+            "AgentList · 4 agents",
             "peer  peer-未知状态",
+            "peer  described-peer · Coordinating Mac fixtures · updated",
             "subagent  reviewer",
             "send_to=worker-exact-address-42 · active",
             "role=review · task_id=task-42",
@@ -312,6 +315,10 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
                 "missing {expected}: {screen}"
             );
         }
+        assert!(
+            common::screen_contains(screen, "d ago"),
+            "description age is visible: {screen}"
+        );
         assert!(!screen.contains("listed-15"));
         assert!(!screen.contains("peer-未知状态 · active"));
         assert!(!screen.contains("peer-未知状态 · inactive"));
@@ -320,60 +327,32 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
 }
 
 #[test]
-fn runtime_directory_cards_preserve_instance_activity_and_unknown_coverage() {
-    let env = TestEnv::new_mock("runtime-directory-card-history");
+fn agent_list_cards_mark_online_peers() {
+    let env = TestEnv::new_mock("agent-list-online-card-history");
     let mut source = Session::new().with_workspace_root(env.workspace_root());
-    let instance =
-        |nonce: &str| json!({"registry_id":"registry-scope", "pid":"1234", "incarnation":nonce});
     add(
         &mut source,
-        "runtime-instances",
+        "presence",
         "agent_list",
         &json!({}),
-        &json!({"count":2,"agents":[
-        {"kind":"peer","name":"same-agent","send_to":"same-agent","active":true,"runtime":{
-            "instance":instance("question-instance"),"agent_id":"same-agent","presence":"online","last_seen_age_ms":0,
-            "availability":"fresh","age_ms":0,"update":{"revision":1,"identity":{"session_id":"same-sid","os_pid":1234},
-                "status":{"foreground":{"state":"awaiting_input","waiting_for":"question"},
-                    "background":{"terminals":2,"agents":0,"execution_unconfirmed":0,"tool_operations":1}}}}},
-        {"kind":"peer","name":"same-agent","send_to":"same-agent","active":true,"runtime":{
-            "instance":instance("stale-instance"),"agent_id":"same-agent","presence":"online","last_seen_age_ms":0,
-            "availability":"stale","age_ms":4000,"update":null}},
-    ],"runtime_discovery":{"scopes":[],"unavailable":[]}}),
+        &json!({"count":3,"agents":[
+            {"kind":"peer","name":"online-peer","send_to":"online-peer","active":true},
+            {"kind":"peer","name":"quiet-peer","send_to":"quiet-peer","active":false},
+            {"kind":"subagent","name":"helper","send_to":"task-7","active":false,"task_id":"task-7"},
+        ]}),
         false,
     );
-    add(
-        &mut source,
-        "partial-directory",
-        "agent_list",
-        &json!({}),
-        &json!({"count":0,"agents":[],"runtime_discovery":{"scopes":[],"unavailable":[{"endpoint":"unreachable-node","reason":"unavailable"}]}}),
-        false,
-    );
-    replay(
-        &env,
-        &source,
-        "Recorded partial-directory.",
-        &[52, 120],
-        |screen| {
-            for expected in [
-                "instance registry/question",
-                "waiting for answer",
-                "background shells=2 agents=0",
-                "operations=1",
-                "instance registry/stale-in",
-                "online · activity unknown",
-                "observations incomplete",
-                "Runtime observations unavailable",
-            ] {
-                assert!(
-                    common::screen_contains(screen, expected),
-                    "missing {expected}: {screen}"
-                );
-            }
-            assert!(!screen.contains("No agents found"));
-            assert!(!screen.contains("\"registry_id\""));
-            assert!(!screen.contains("\"runtime_discovery\""));
-        },
-    );
+    replay(&env, &source, "Recorded presence.", &[52, 120], |screen| {
+        for expected in [
+            "AgentList · 3 agents",
+            "peer  online-peer · online",
+            "subagent  helper · send_to=task-7 · inactive",
+        ] {
+            assert!(
+                common::screen_contains(screen, expected),
+                "missing {expected}: {screen}"
+            );
+        }
+        assert!(!screen.contains("quiet-peer · "));
+    });
 }

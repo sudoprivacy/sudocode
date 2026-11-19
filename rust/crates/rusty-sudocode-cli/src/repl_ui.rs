@@ -42,10 +42,12 @@ use crate::render::activity::{ActivityState, ToolActivity};
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
+mod agents;
 mod ansi_text;
 mod choice_text;
 mod footer;
 mod input_history;
+mod input_trace;
 mod layout;
 mod prompt_text;
 mod queued_message;
@@ -326,6 +328,8 @@ impl ToolCard {
 
 #[derive(Clone, Debug)]
 pub enum UiCommand {
+    AgentDirectory(Result<serde_json::Value, String>),
+    Attention(Arc<engine_events::AttentionState>),
     BackgroundTask(engine_events::BackgroundTaskEvent),
     BackgroundTaskError(String),
     OpenTasks,
@@ -391,6 +395,13 @@ pub enum QuestionOwner {
 }
 
 impl UiCommandSender {
+    pub fn agent_directory(&self, result: Result<serde_json::Value, String>) {
+        let _ = self.tx.send(UiCommand::AgentDirectory(result));
+    }
+
+    pub fn attention(&self, state: Arc<engine_events::AttentionState>) {
+        let _ = self.tx.send(UiCommand::Attention(state));
+    }
     pub fn open_tasks(&self) {
         let _ = self.tx.send(UiCommand::OpenTasks);
     }
@@ -933,6 +944,7 @@ pub(crate) struct CacheTip {
 /// Events from the iocraft UI to the coordinator thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
+    RefreshAgents,
     /// A submitted line. `text` is the full content (paste placeholders
     /// expanded) sent to the model; `display` is the compact echo form (paste
     /// collapsed). The coordinator — not the UI — writes the `❯ display` echo to
@@ -975,9 +987,9 @@ pub enum InputEvent {
 #[inline]
 pub(crate) const fn running_input_controls(has_pending_input: bool) -> &'static str {
     if has_pending_input {
-        "Enter steer · Tab queue · Esc flush · Ctrl+C cancel"
+        "Esc flush · Ctrl+C cancel · Enter steer · Tab queue"
     } else {
-        "Enter steer · Tab queue · Esc/Ctrl+C cancel"
+        "Esc/Ctrl+C cancel · Enter steer · Tab queue"
     }
 }
 
@@ -1234,6 +1246,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // to maintain consistent hook ordering.
     let (term_width, term_height) = hooks.use_terminal_size();
     let input_frame = hooks.use_input_frame();
+    let input_trace = hooks.use_memo(
+        || input_trace::InputTrace::open().map(|trace| Arc::new(Mutex::new(trace))),
+        (),
+    );
 
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -1280,6 +1296,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_terminal_events({
         let _pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
+        let record_input = move |input, frame_current| {
+            if let Some(trace) = &input_trace {
+                trace.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(
+                    input,
+                    (term_width, term_height),
+                    input_reviewable.get(),
+                    frame_current,
+                );
+            }
+        };
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
                 code,
@@ -1287,6 +1313,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 modifiers,
                 ..
             }) if kind != KeyEventKind::Release => {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Key(code), frame_current);
                 let current_slot = input_slot.read().clone();
                 if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
                     let question = match &current_slot {
@@ -1307,7 +1335,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
                 if !(code == KeyCode::Esc
-                    || input_reviewable.get() && input_frame.is_current()
+                    || input_reviewable.get() && frame_current
                     || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
@@ -1325,11 +1353,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // Navigation is local; cancellation always reaches the
                     // same handler below, including double Ctrl+C to exit.
                     if focus != TaskFocus::Input && !is_cancel {
+                        let previous_tab = browser.tab;
                         match (focus, code) {
+                            (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Peers => {
+                                if browser.peer_key(code) {
+                                    let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
+                                }
+                            }
                             (TaskFocus::List | TaskFocus::Detail, _) if browser.tab == tasks::TaskTab::Scheduled => {
                                 browser.scheduled_key(code);
                             }
-                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(),
+                            (TaskFocus::List, KeyCode::Left | KeyCode::Right) => browser.switch_tab(code == KeyCode::Right),
                             (TaskFocus::Footer, KeyCode::Enter | KeyCode::Down) => browser.open(),
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
                             (TaskFocus::List, KeyCode::Down) => browser.move_selection(true),
@@ -1369,6 +1403,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             _ => {}
                         }
+                        if browser.tab == tasks::TaskTab::Peers && previous_tab != browser.tab {
+                            let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
+                        }
+                        frame.set(frame.get().wrapping_add(1));
+                        return;
+                    }
+                    if code == KeyCode::Left && modifiers.is_empty() && input_value.read().is_empty() {
+                        browser.open_agents();
+                        let _ = input_tx_for_events.send(InputEvent::RefreshAgents);
                         frame.set(frame.get().wrapping_add(1));
                         return;
                     }
@@ -1677,7 +1720,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // not mounted, so route the paste into the active buffer here using
             // the SAME normalize/placeholder logic (DRY).
             TerminalEvent::Paste(pasted) => {
-                if !input_reviewable.get() || !input_frame.is_current() {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Paste, frame_current);
+                if !input_reviewable.get() || !frame_current {
                     return;
                 }
                 let current_slot = input_slot.read().clone();
@@ -1788,8 +1833,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = ui_rx_for_future.lock() {
                 loop {
                     match rx.try_recv() {
+                        Ok(UiCommand::AgentDirectory(result)) => {
+                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).peers(result);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
+                        Ok(UiCommand::Attention(state)) => {
+                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).attention(state);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::OpenTasks) => {
-                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).open();
+                            let mut browser = tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            browser.open();
+                            if browser.tab == tasks::TaskTab::Peers {
+                                let _ = input_tx_for_future.send(InputEvent::RefreshAgents);
+                            }
                             frame.set(frame.get().wrapping_add(1));
                         }
                         Ok(UiCommand::BackgroundTask(event)) => {
@@ -2148,14 +2205,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|item| matches!(item, PendingItem::Input { .. }));
-    // The keys for the current state follow the workspace position. Only turn
-    // and queue state choose them — never typing — so the footer changes when
+    // Only turn and queue state choose the keys — never typing — so the footer changes when
     // a turn starts or ends, as the rest of the screen does, and keystrokes
     // never redraw it. While queued input exists, Esc flushes it.
     let keys = if turn_active {
         running_input_controls(pending_input)
     } else if pending_input {
-        "Enter send · Esc flush · ↑ edit queued"
+        "Esc flush · Enter send · ↑ edit queued"
     } else if submitted {
         "/help"
     } else {
@@ -2170,6 +2226,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let hints = FooterHints {
             transient: native_hint,
             keys,
+            has_pending_input: pending_input,
         };
         hooks.use_memo(
             || {
@@ -2225,19 +2282,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .foreground_color
         .and_then(ansi_text::ui_color);
     let question_style = chrome_theme.style(TextRole::Brand);
+    // Rows without a marker start their text right of the gutter. The brand
+    // spinner is the active status's marker; background status places its own.
+    let gutter =
+        |text: &Arc<StyledText>| Arc::new(crate::render::text_layout::wrap_in_gutter(text, w));
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::Background { full, .. } => full.clone(),
-        StatusSlot::TurnResult(s) => s.clone(),
+        StatusSlot::TurnResult(s) => gutter(s),
         StatusSlot::Empty => Arc::default(),
     };
     let status_summary = match &status_slot {
-        StatusSlot::Active(_) => ansi("Status: turn active"),
+        StatusSlot::Active(_) => gutter(&ansi("Status: turn active")),
         StatusSlot::Background { summary, .. } => summary.clone(),
-        StatusSlot::TurnResult(_) => ansi("Status: last turn (collapsed)"),
+        StatusSlot::TurnResult(_) => gutter(&ansi("Status: last turn (collapsed)")),
         StatusSlot::Empty => Arc::default(),
     };
-    let heading = ansi_with_style(
+    let heading = gutter(&ansi_with_style(
         question.map_or_default(|q| {
             let title = q.title.as_ref().map(|title| format!("[{title}]"));
             if q.description.is_some() {
@@ -2250,7 +2311,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }),
         question_style,
-    );
+    ));
     let mut controls = if let Some(panel) = task_panel.clone() {
         ansi(panel)
     } else {
@@ -2299,7 +2360,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     w,
                     activity_state == EngineState::Running && is_pulse_low_now(),
                 )),
-                summary: ansi(pending_summary),
+                summary: gutter(&ansi(pending_summary)),
             },
             Slot {
                 // Retain main's stable spinner/result height while the
@@ -2314,8 +2375,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
             Slot {
                 minimum_full_rows: 0,
-                full: ansi(crate::cli::format::todo::panel(&todos, 10, w)),
-                summary: ansi(crate::cli::format::todo::panel(&todos, 0, w)),
+                full: gutter(&ansi(crate::cli::format::todo::panel(
+                    &todos,
+                    10,
+                    w.saturating_sub(crate::render::GUTTER_COLS),
+                ))),
+                summary: gutter(&ansi(crate::cli::format::todo::panel(
+                    &todos,
+                    0,
+                    w.saturating_sub(crate::render::GUTTER_COLS),
+                ))),
             },
             Slot {
                 minimum_full_rows: 0,
@@ -2406,12 +2475,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .map_or(0, |text| text.text.lines().count());
     let slot_width = Size::Length(u32::from(term_width));
     // Styling changes the existing editor, never the owner of terminal history.
-    let shaded_prompts =
-        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
-    let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
     // The shade replaces the separator lines only where it is drawn. Without
-    // color (NO_COLOR, or a palette too small for a shade) the experiment
-    // has no surface, and the lines are the editor's only boundary.
+    // color (NO_COLOR, or a palette too small for a shade) there is no
+    // surface: the lines are the editor's boundary and its text keeps the
+    // terminal's own colors.
+    let prompt_style = Some(crate::render::theme().prompt_style())
+        .filter(|style| style.background_color.is_some());
     let input_background = prompt_style
         .and_then(|style| style.background_color)
         .and_then(ansi_text::ui_color);

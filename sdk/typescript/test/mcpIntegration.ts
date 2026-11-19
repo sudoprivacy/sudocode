@@ -99,6 +99,28 @@ async function checkMcp(scenario: string): Promise<void> {
       assert.equal(journal(log).filter(row => row.method === 'session/new').length, 0);
       return;
     }
+    if (scenario === 'delivery' || scenario === 'legacy-delivery') {
+      for (const delivery of ['steer', 'queue']) {
+        const output = await client.callTool({ name: 'scode_send', arguments: {
+          to: 'fixture-peer', message: text, summary: 'explicit delivery', delivery,
+        } });
+        if (scenario === 'legacy-delivery') {
+          assert.match(JSON.stringify(output), /not_submitted/);
+        } else {
+          assert.equal(output.isError, false, JSON.stringify(output));
+        }
+      }
+      const invalid = await client.callTool({ name: 'scode_send', arguments: {
+        to: 'fixture-peer', message: text, summary: 'invalid delivery', delivery: 'interrupt',
+      } });
+      assert.equal(invalid.isError, true, 'ordinary peer send cannot acquire cancellation authority');
+      const sends = journal(log).filter(row => row.method === '_sudocode/a2a/send');
+      assert.deepEqual(sends.map(row => (row.input as {delivery: string}).delivery),
+        scenario === 'legacy-delivery' ? [] : ['steer', 'queue']);
+      assert.equal(journal(log).filter(row => row.method === 'session/prompt').length, 0);
+      assert.equal(journal(auditLog).filter(row => row.phase === 'returned').length, sends.length);
+      return;
+    }
     const output = await client.callTool({ name: 'scode_send', arguments: { to: 'fixture-peer', message: text, summary: 'exact controller text' } });
     if (scenario === 'normal' || scenario === 'packaged') {
       assert.equal(output.isError, false);
@@ -202,6 +224,8 @@ function claudeInstallation(name: string) {
     acp: () => journal(path.join(issuer, 'acp.jsonl')) as Array<{ method: string; params?: any; response?: any }>,
     /** scode reports the unread count again, as on a new peer frame. */
     unread: () => fs.appendFileSync(unread, '.'),
+    /** scode's polled count reads zero for a moment while the frame stays unread. */
+    flicker: () => fs.appendFileSync(unread, '0'),
     advance: (ms: number) => fs.writeFileSync(clock, String(Number(fs.readFileSync(clock, 'utf8')) + ms)),
     async bridge(sessionId: string, entrypoint = 'cli') {
       const transport = new StdioClientTransport({ command: process.execPath,
@@ -313,6 +337,8 @@ async function checkClaudeDelivery(): Promise<void> {
       file_path: claude.spool(sessionId), event: 'change' }), { code: 2, stdout: '', stderr: first.text + '\n' });
     claude.advance(9 * 60_000); claude.unread();
     await quiet(1, 'no redelivery within ten minutes');
+    claude.flicker(); await pause(200); claude.unread();
+    await quiet(1, 'a momentary unread count of zero keeps the ten-minute spacing');
     for (const n of [2, 3]) {
       claude.advance(n === 2 ? 60_000 : 10 * 60_000); claude.unread();
       await until(() => entries().length === n, 5000, `delivery ${n} follows ten minutes after the previous one`);
@@ -450,7 +476,7 @@ async function main(): Promise<void> {
   await checkClaudeDelivery();
   await checkClaudeOwners();
   await checkClaudeAutojoin();
-  for (const scenario of ['normal', 'packaged', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
+  for (const scenario of ['normal', 'packaged', 'delivery', 'legacy-delivery', 'task', 'legacy', 'missing-method', 'remote-invalid-params',
     'typed-refusal', 'typed-unknown', 'unadvertised-refusal', 'bad-refusal', 'old-refusal-code', 'bad-audit', 'flipped-is-error', 'loss', 'cold-recovery', 'delayed-initialize', 'closing-initialize', 'malformed']) await checkMcp(scenario);
   // The same public helper rejects injected fields even outside the MCP schema.
   const log = path.join(directory, 'helper-fixture.jsonl');

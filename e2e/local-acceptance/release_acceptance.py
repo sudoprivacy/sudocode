@@ -107,20 +107,54 @@ a.artifacts.mkdir(parents=True)
     bash.mkdir(parents=True)
     # A real native version probe is required even at this controlled RPC
     # boundary. Actual gRPC remains covered by both original service journeys.
-    (bash / "lib.sh").write_text('grpcurl_bin() { printf "%s" ' + shlex.quote(rpc.as_posix()) + '; }\n'
-                                'native_path() { printf "%s" "$1"; }\n', encoding="utf-8")
+    library = bash / "lib.sh"
+    warning = 'printf "%s\\n" "controlled native service-tool startup warning" >&2\n'
+    library_source = (warning + 'grpcurl_bin() { printf "%s" ' + shlex.quote(rpc.as_posix()) + '; }\n'
+                      'native_path() { printf "%s" "$1"; }\n')
+    library.write_text(library_source, encoding="utf-8")
     binary = target / "debug" / ("scode.exe" if os.name == "nt" else "scode")
     before = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     records = profiles.run("native-services", root, output / "services", "fixture-base", execute)
     assert len(records) == 4, "Native client probe, Cargo verification and both service processes remain required"
-    tool = json.loads((output / "services/service-tool/000.log").read_text(encoding="utf-8"))
+    tool_log = output / "services/service-tool/000.log"
+    tool = profiles.native_service_tool_result(tool_log)
     assert tool["executable"] == str(rpc.resolve()) and tool["version"] == "rpc-client-fixture 0.0.1", tool
     assert tool["sha256"] == hashlib.sha256(rpc.read_bytes()).hexdigest(), tool
+    assert b"controlled native service-tool startup warning" in tool_log.read_bytes(), "Keep raw shell diagnostics"
     assert "Compiling " not in (output / "services/001.log").read_text(encoding="utf-8")
     assert before == [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in [binary, driver]]
     for name in ["services", "existing-box"]:
         assert json.loads((output / "services" / name / "native-child.json").read_text())["actual"] == (
             "debug=true,flavor=dev,mailbox=true")
+    # Real shell processes exercise successful exits with unusable metadata.
+    # Restore the same controlled resolver before the original Cargo journeys.
+    prefix = "NATIVE_SERVICE_TOOL="
+
+    def emit(value):
+        return 'printf "%s\\n" ' + shlex.quote(prefix + value) + '\n'
+
+    controls = []
+    for label, contents in [
+        ("missing", warning + "exit 0\n"),
+        ("malformed", warning + emit("{") + "exit 0\n"),
+        ("duplicate", emit(json.dumps(tool)) + library_source),
+        ("wrong-shape", warning + emit("[]") + "exit 0\n"),
+    ]:
+        directory = output / "tool-results" / label
+        try:
+            library.write_text(contents, encoding="utf-8")
+            try:
+                profiles.native_services_tool(root, directory, execute)
+                raise AssertionError(f"Successful shell exit hid unusable tool metadata: {label}")
+            except RuntimeError as error:
+                assert "NATIVE_SERVICE_TOOL_RESULT_REFUSED" in str(error), str(error)
+                command = json.loads((directory / "000.command.json").read_text(encoding="utf-8"))
+                assert command["exit_code"] == 0, command
+                controls.append({"case": label, "shell_exit_code": 0, "result_refused": True,
+                                 "raw_log_sha256": hashlib.sha256((directory / "000.log").read_bytes()).hexdigest()})
+        finally:
+            library.write_text(library_source, encoding="utf-8")
+    print("NATIVE_SERVICE_TOOL_CONTROLS=" + json.dumps(controls), flush=True)
     previous = os.environ["CARGO_TARGET_DIR"]
     try:
         os.environ["CARGO_TARGET_DIR"] = str(output / "standalone-target")
@@ -144,7 +178,8 @@ a.artifacts.mkdir(parents=True)
     finally:
         source.write_bytes(original)
     return {"warm_commands": records, "standalone_commands": standalone,
-            "same_binary_and_driver": before, "stale_source_exit": failure["exit_code"]}
+            "same_binary_and_driver": before, "stale_source_exit": failure["exit_code"],
+            "structured_tool_controls": controls}
 
 
 def resize_graph(profiles, root, output, target, execute):

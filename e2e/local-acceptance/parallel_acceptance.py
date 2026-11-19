@@ -5,6 +5,7 @@ author OS; this grants no Linux/macOS/Windows product journey coverage.
 """
 import argparse
 import base64
+import copy
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -61,6 +62,7 @@ def run_case(output, order):
     for relative in [".github/scripts/local_acceptance.py", ".github/local-acceptance/gate.py",
                      ".github/local-acceptance/publish.py", ".github/local-acceptance/cross_platform.py",
                      ".github/workflows/local-acceptance.yml",
+                     ".github/workflows/local-acceptance-workspace.yml",
                      ".github/workflows/local-acceptance-publish.yml"]:
         destination = work / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +441,89 @@ def run_case(output, order):
             assert len(started_workers) == 2
             metadata_controls.append({"case": label, "policy": metadata, "accepted": True,
                                       "original_notes_and_processes_reused": True})
+
+        # A maintained responsibility change keeps the author's complete local
+        # work. Only the exact older, fuller CI split may survive unchanged.
+        responsibility_controls = []
+        mixed = {"checks": {"native-workspace": {}, "native-context": {},
+                            "native-sdk": {"targets": ["linux-x64", "linux-arm64", "macos", "windows"]}}}
+        names = list(mixed["checks"])
+        periodic = copy.deepcopy(mixed)
+        periodic["checks"]["native-workspace"]["complementary"] = "periodic"
+        for system in ["windows", "linux", "macos"]:
+            owner = {**platform, "system": system, "architecture": "x64"}
+            full = helper.acceptance_plan(mixed, names, owner)
+            current = helper.acceptance_plan(periodic, names, owner)
+            expected = copy.deepcopy(full)
+            for job in expected["ci"]:
+                job["checks"] = [name for name in job["checks"] if name != "native-workspace"]
+            assert current == expected
+            assert current["local_checks"] == full["local_checks"] == names
+            assert current["local_targets"] == full["local_targets"]
+            assert helper.compatible_acceptance_plan(periodic, names, owner, full)
+            assert not helper.compatible_acceptance_plan(mixed, names, owner, current)
+            for label, mutate in [
+                ("missing complementary host", lambda plan: plan["ci"].pop()),
+                ("missing complementary context", lambda plan: plan["ci"][0]["checks"].remove("native-context")),
+                ("changed complementary timeout", lambda plan: plan["ci"][0].update(timeout=1)),
+                ("missing original author workspace", lambda plan: plan["local_checks"].remove("native-workspace")),
+                ("changed original author", lambda plan: plan["author"].update(system="unknown")),
+                ("claimed deployment", lambda plan: plan.update(deployment_verified=True)),
+            ]:
+                invalid = copy.deepcopy(full)
+                mutate(invalid)
+                assert not helper.compatible_acceptance_plan(periodic, names, owner, invalid), label
+            responsibility_controls.append({"author": system, "full_author_and_other_profiles_retained": True,
+                                            "only_exact_former_full_plan_accepted": True})
+        for name, mode in [("native-workspace", value) for value in [None, False, [], "skip"]] + [
+                ("native-context", "periodic"), ("native-sdk", "periodic")]:
+            invalid = copy.deepcopy(mixed)
+            invalid["checks"][name]["complementary"] = mode
+            try:
+                helper.acceptance_plan(invalid, names, platform)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("Unknown/foreign periodic responsibility was accepted")
+
+        periodic_policy = copy.deepcopy(json.loads(git("show", metadata + ":" + policy_path)))
+        periodic_policy["checks"]["native-workspace"]["complementary"] = "periodic"
+        metadata = protected_commit(policy_path, json.dumps(periodic_policy),
+                                    "Keep full author workspace; make complementary workspace periodic", metadata)
+        assert helper.acceptance_plan(periodic_policy, ["native-workspace"], platform)["ci"] == []
+        assert helper.verify_execution_plan(envelope, head, metadata, metadata) == pending
+        original_completion = helper.verify_envelope(completed, head, metadata, metadata)
+        assert original_completion["plan"] == pending["plan"]
+        publisher_run["head_sha"] = metadata
+        publish({"workflow_run": source_run}, 930)
+        assert statuses[-1]["state"] == "success"
+        helper.start_pr(argparse.Namespace(remote="origin", output=str(output / "periodic-retry"),
+                        title="Parallel fixture", body_file=None), api=http_api)
+        assert not (output / "periodic-retry/execution-plan").exists()
+        assert not (output / "periodic-retry/author").exists()
+        # Original signatures, note objects, logs and executed children stay
+        # identical. A verified scheduling plan still proves no completed work.
+        assert notes_before == (helper.canonical(helper.read_note(head)), helper.canonical(helper.read_note(head, helper.PLAN_NOTE_REF)))
+        assert before == (helper.sha(author_log.read_bytes()), author_log.stat().st_mtime_ns)
+        assert len(started_workers) == 2
+        for label, mutate in [
+            ("drop original author workspace", lambda plan: plan["local_checks"].clear()),
+            ("incomplete former host split", lambda plan: plan["ci"].pop()),
+            ("changed former host metadata", lambda plan: plan["ci"][0].update(node="18")),
+        ]:
+            invalid = copy.deepcopy(pending)
+            mutate(invalid["plan"])
+            signed = helper.sign_receipt(invalid, output / "periodic-negative" / label.replace(" ", "-"),
+                                         "fixture", key, namespace=helper.NAMESPACE + "-plan")
+            try:
+                helper.verify_execution_plan(signed, head, metadata, metadata)
+            except RuntimeError:
+                refused.append(label)
+            else:
+                raise AssertionError("A signed partial legacy plan was accepted: " + label)
+        metadata_controls.append({"case": "original full signed workspace plan and completion retained",
+                                  "policy": metadata, "accepted": True,
+                                  "original_notes_logs_and_processes_reused": True})
         # The completion verifier already honors protected exact recipe pairs.
         # Scheduling must share that decision without accepting a plan as a
         # test result or changing its original signatures/source responsibility.
@@ -562,6 +647,7 @@ def run_case(output, order):
             "historical_verification_excludes_current_environment": True,
             "outer_setup_included_in_signed_timing": True, "commands": commands, "requests": requests,
             "metadata_controls": metadata_controls,
+            "workspace_responsibility_controls": responsibility_controls,
             "stale_installed_runner_refreshed_from_protected_main": True,
             "protected_new_code_actually_executed": True,
             "original_start_and_output_preserved": True,
@@ -586,6 +672,158 @@ def run_case(output, order):
             "states": statuses, "failures": failures, "observed": observed}, indent=2) + "\n")
 
 
+def plan_admission_controls(output):
+    """Exercise the real check entry before and after compatible schema support."""
+    output.mkdir(parents=True, exist_ok=False)
+    parent = load("admission_environment", SOURCE / "e2e/local-acceptance/run.py")
+    environment = {**parent.FIXTURE_ENV, "PYTHONDONTWRITEBYTECODE": "1"}
+    environment.pop("SCODE_SYNTHETIC_PLAN_PARSER_STATE", None)
+    current = (SOURCE / ".github/scripts/local_acceptance.py").read_text(encoding="utf-8")
+    anchor = '        complementary = policy["checks"][name].get("complementary")\n'
+    start = current.index(anchor)
+    end = current.index('        if not name.startswith("native-"):\n', start)
+    # Reproduce the observed former parser: the new responsibility field is
+    # ignored. All other verification/signing/process functions stay intact.
+    legacy = current[:start] + "        complementary = None\n" + current[end:]
+    admission = "    preflight_plan_compatibility(plan, needed, host(), policy_ref, signers_ref)\n"
+    assert current.count(admission) == 1
+    old_entry = current.replace(admission, "", 1)
+    parser = '    current = acceptance_plan(policy, names, author)\n'
+    assert current.count(parser) == 1
+    isolated = current.replace(parser,
+        '    os.environ["SCODE_SYNTHETIC_PLAN_PARSER_STATE"] = "parser-child"\n'
+        '    print("PLAN_PARSER_NAMESPACE=" + ("calling-executor" if '
+        'hasattr(sys.modules["__main__"], "preflight_plan_compatibility") else "isolated-metadata"))\n' + parser, 1)
+    invalid = current.replace(parser, '    return {"supported": False}\n' + parser, 1)
+    start = current.index('    # The accepted parser receives metadata, never this executor\'s namespace,\n')
+    end = current.index('    if not supported:\n', start)
+    # Restore the actual former in-process parser, not a fake native result.
+    inprocess = current[:start] + '''    path = ".github/scripts/local_acceptance.py"
+    protected = {"__file__": str(ROOT / path), "__name__": "protected_acceptance_planner"}
+    exec(compile(tracked(signers_ref, path), f"{signers_ref}:{path}", "exec"), protected)
+    protected["ROOT"] = ROOT
+    policy = load_policy(policy_ref)
+    compatible = protected.get("compatible_acceptance_plan")
+    supported = (compatible(policy, names, author, plan) if callable(compatible)
+                 else protected["acceptance_plan"](policy, names, author) == plan)
+''' + current[end:]
+    platform = load("admission_platform", SOURCE / ".github/scripts/local_acceptance.py").host()
+    records = []
+    for case, protected_source, candidate_source in [
+        ("old-entry-late-refusal", legacy, old_entry),
+        ("early-refusal", legacy, current),
+        ("compatible-parser", current, current),
+        ("isolated-parser", isolated, current),
+        ("old-inprocess-parser", isolated, inprocess),
+        ("invalid-parser-result", invalid, current),
+    ]:
+        directory = output / case
+        work = directory / "work"
+        work.mkdir(parents=True)
+        commands = []
+
+        def execute(arguments, *, expected=0):
+            result = subprocess.run(arguments, cwd=work, env=environment, capture_output=True, timeout=60)
+            stem = directory / f"command-{len(commands):03d}"
+            stem.with_suffix(".stdout").write_bytes(result.stdout)
+            stem.with_suffix(".stderr").write_bytes(result.stderr)
+            commands.append({"command": arguments, "exit_code": result.returncode, "log": str(stem)})
+            assert (result.returncode == 0) == (expected == 0), result.stderr.decode(errors="replace")
+            return result
+
+        def git(*arguments):
+            return execute(["git", *arguments]).stdout.decode().strip()
+
+        git("init", "--initial-branch=main")
+        git("config", "user.name", "Plan admission fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "core.autocrlf", "false")
+        key = directory / "key"
+        execute(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
+        for relative in [".github/local-acceptance/gate.py",
+                         ".github/local-acceptance/publish.py",
+                         ".github/local-acceptance/cross_platform.py",
+                         ".github/workflows/local-acceptance.yml",
+                         ".github/workflows/local-acceptance-workspace.yml",
+                         ".github/workflows/local-acceptance-publish.yml"]:
+            target = work / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SOURCE / relative, target)
+        entry = work / ".github/scripts/local_acceptance.py"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(protected_source, encoding="utf-8")
+        (work / "spec").mkdir()
+        policy = {"version": 1, "repository": "fixture/plan-admission", "checks": {
+            "native-workspace": {"include": ["input.txt"]}}}
+        policy_path = work / "spec/local_acceptance.json"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        (work / "spec/local_acceptance_signers.json").write_text(json.dumps({"version": 1, "signers": {
+            "fixture": {"platform": platform["system"], "public_key": key.with_suffix(".pub").read_text().strip()}}}), encoding="utf-8")
+        checks = work / ".github/local-acceptance/checks.py"
+        checks.parent.mkdir(parents=True, exist_ok=True)
+        (checks.parent / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        native = "from pathlib import Path;Path('native-started').write_text('executed')"
+        if case in {"isolated-parser", "old-inprocess-parser"}:
+            native += (';import os;assert os.environ.get("SCODE_SYNTHETIC_PLAN_PARSER_STATE") is None,'
+                       '"Protected plan parser leaked parent environment"')
+        checks.write_text('import sys\ndef run(name,root,output,base,execute):\n'
+            ' output.mkdir(parents=True,exist_ok=True)\n'
+            ' return [execute([sys.executable,"-c",' + repr(native) + '],output,output/"000.log")]\n', encoding="utf-8")
+        (work / "input.txt").write_text("before", encoding="utf-8")
+        (work / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        git("add", ".")
+        git("-c", "commit.gpgsign=false", "commit", "-m", "Protected plan fixture")
+        base = git("rev-parse", "HEAD")
+        entry.write_text(candidate_source, encoding="utf-8")
+        policy["checks"]["native-workspace"]["complementary"] = "periodic"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        (work / "input.txt").write_text("pass", encoding="utf-8")
+        git("add", ".")
+        git("-c", "commit.gpgsign=false", "commit", "-m", "Candidate plan fixture")
+        head = git("rev-parse", "HEAD")
+        git("config", "localAcceptance.signer", "fixture")
+        git("config", "localAcceptance.key", str(key))
+        acceptance = directory / "acceptance"
+        result = execute([sys.executable, "-B", str(entry), "check", "--head", head,
+            "--base", base, "--policy-ref", head, "--signers-ref", base,
+            "--output", str(acceptance)], expected=1 if case in {
+                "early-refusal", "old-inprocess-parser", "invalid-parser-result"} else 0)
+        marker = acceptance / "native-workspace/native-started"
+        if case == "old-inprocess-parser":
+            assert marker.read_text() == "executed"
+            assert b"Protected plan parser leaked parent environment" in result.stderr
+            assert b"PLAN_PARSER_NAMESPACE=calling-executor" in result.stdout
+            assert not (acceptance / "envelope.json").exists()
+        elif case == "invalid-parser-result":
+            assert b"Protected acceptance planner returned a non-boolean result" in result.stderr
+            assert not marker.exists() and not (acceptance / "protected_profiles.py").exists()
+            assert not (acceptance / "envelope.json").exists()
+        elif case == "early-refusal":
+            assert b"protected verifier cannot validate this candidate acceptance plan" in result.stderr
+            assert not marker.exists() and not (acceptance / "protected_profiles.py").exists()
+            assert not (acceptance / "envelope.json").exists()
+        else:
+            assert marker.read_text() == "executed" and (acceptance / "envelope.json").is_file()
+            if case == "isolated-parser":
+                assert b"PLAN_PARSER_NAMESPACE=isolated-metadata" in result.stdout
+            verifier = directory / "protected-verifier.py"
+            verifier.write_text(protected_source, encoding="utf-8")
+            code = ('import importlib.util,json,sys;from pathlib import Path;'
+                    's=importlib.util.spec_from_file_location("protected",sys.argv[1]);'
+                    'h=importlib.util.module_from_spec(s);s.loader.exec_module(h);h.ROOT=Path.cwd();'
+                    'h.verify_envelope(json.loads(Path(sys.argv[2]).read_bytes()),sys.argv[3],sys.argv[4],sys.argv[3],signers_ref=sys.argv[4])')
+            verified = execute([sys.executable, "-B", "-c", code, str(verifier),
+                str(acceptance / "envelope.json"), head, base], expected=1 if case == "old-entry-late-refusal" else 0)
+            if case == "old-entry-late-refusal":
+                assert b"Signed acceptance plan does not match the protected policy/author host" in verified.stderr
+            else:
+                assert b"LOCAL_ACCEPTANCE_PLAN_ADMISSION" in result.stdout
+        assert not git("status", "--porcelain")
+        records.append({"case": case, "native_child_executed": marker.exists(), "commands": commands})
+    (output / "result.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+    return records
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     helper = load("parallel_control_lease", SOURCE / ".github/scripts/local_acceptance.py")
@@ -599,6 +837,7 @@ def run(output):
         source_identity = (revision.stdout.decode().strip() if revision.returncode == 0
                            else "private-tool-fixture-without-source-commit")
         with helper.host_acceptance_lease(attempt, source_identity):
+            summary["plan_admission"] = plan_admission_controls(output / "plan-admission")
             results = [run_case(output / order, order) for order in ["ci-first", "author-first"]]
         summary.update(status="PASS", cases=[{"order": row["order"], "states": row["states"]} for row in results])
     except BaseException as error:

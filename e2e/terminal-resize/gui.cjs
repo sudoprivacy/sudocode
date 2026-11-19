@@ -32,6 +32,7 @@ async function run(config) {
     '/xterm.js': ['text/javascript', require.resolve('@xterm/xterm')],
     '/xterm.css': ['text/css', path.join(path.dirname(require.resolve('@xterm/xterm')), '../css/xterm.css')],
     '/unicode.js': ['text/javascript', require.resolve('@xterm/addon-unicode11')],
+    '/shade-rows.js': ['text/javascript', path.join(__dirname, 'shade-rows.js')],
   };
   const server = http.createServer((req, res) => {
     const route = routes[new URL(req.url, 'http://localhost').pathname];
@@ -125,7 +126,16 @@ async function run(config) {
       report.clicks.push({ label, target, position, location, ...await page.evaluate(() => ({
         cols: fixture.terminal.cols, viewportY: fixture.terminal.buffer.active.viewportY, frames: fixture.frames,
       })) });
+      // xterm's linkifier asks for a link only when the pointer reaches a
+      // different cell; leaving the terminal does not forget the last one.
+      // After a resize the same link can sit on that very cell, so pass
+      // through the first cell of the screen on the way to the target.
       await page.mouse.move(0, 0);
+      const corner = await page.evaluate(() => {
+        const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
+        return { x: rect.x + 1, y: rect.y + 1 };
+      });
+      await page.mouse.move(corner.x, corner.y);
       const before = await page.evaluate(() => { fixture.hovered.length = 0; return fixture.activated.length; });
       await page.mouse.move(location.x + 2, location.y);
       await page.evaluate(() => fixture.frame());

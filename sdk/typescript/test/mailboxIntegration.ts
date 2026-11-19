@@ -31,8 +31,8 @@ async function mcpChild(directory: string): Promise<void> {
   const native = await connectCodex(JSON.parse(fs.readFileSync(path.join(directory, 'native.json'), 'utf8')));
   const snapshot = await readCodexMailboxSnapshot(native, 'root-thread');
   assert.ok(snapshot.loaded, 'migration requires a complete loaded native inventory');
-  const migration = openCodexMailboxMigration(path.join(directory, 'v2'), path.join(directory, 'migration.jsonl'),
-    { threadId: 'root-thread', sessionId: 'acp-session' }, new Set([...snapshot.queued, ...snapshot.running, ...snapshot.finished]));
+  const migration = await openCodexMailboxMigration(path.join(directory, 'v2'), path.join(directory, 'migration.jsonl'),
+    { threadId: 'root-thread', sessionId: 'acp-session' }, async () => new Set([...snapshot.queued, ...snapshot.running, ...snapshot.finished]));
   const mailbox = openScodeMailbox(wire, 'root-thread', 8192, migration);
   const server = new McpServer({ name: 'mailbox-process-fixture', version: '1' });
   registerScodeMcpTools(server, extra => {
@@ -92,6 +92,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(path.join(directory, 'native.json'), JSON.stringify(config), { mode: 0o600 });
   const calls: Array<{ method: string; params?: any }> = [];
   let loaded = true, status = 'idle', repeatCursor = false, loseReply = false, loseRequest = false;
+  let paginated = false, invalidItemPage = false;
   let queue: Array<{ id: string; clientUserMessageId: string }> = [];
   let turns: Array<{ id: string; status: string; items: object[] }> = [];
   const legacyCustody = '11111111-1111-1111-1111-111111111111';
@@ -114,10 +115,20 @@ async function main(): Promise<void> {
       else if (call.method === 'thread/queue/list') result = call.params.cursor ? { data: queue, nextCursor: repeatCursor ? 'queue-two' : null }
         : { data: [], nextCursor: 'queue-two' };
       else if (call.method === 'thread/turns/list') {
-        assert.equal(call.params.itemsView, 'full'); assert.equal(call.params.sortDirection, 'desc');
-        result = call.params.cursor ? { data: turns.slice(1), nextCursor: null }
-          : { data: turns.slice(0, 1), nextCursor: 'turns-two' };
-      } else if (call.method === 'thread/read') result = { thread: { id: 'root-thread', status: { type: status }, turns: turns.filter(row => row.status === 'inProgress') } };
+        assert.equal(call.params.itemsView, paginated ? 'notLoaded' : 'full'); assert.equal(call.params.sortDirection, 'desc');
+        const view = paginated ? turns.map(row => ({ ...row, items: [], itemsView: 'notLoaded' })) : turns;
+        result = call.params.cursor ? { data: view.slice(1), nextCursor: null }
+          : { data: view.slice(0, 1), nextCursor: 'turns-two' };
+      } else if (call.method === 'thread/items/list') {
+        assert.ok(paginated);
+        const current = turns.find(row => row.id === call.params.turnId)!;
+        const data = current.items.map(item => ({ turnId: invalidItemPage && call.params.cursor ? 'wrong-turn' : current.id, item }));
+        result = call.params.cursor ? { data: data.slice(1), nextCursor: null } : { data: data.slice(0, 1), nextCursor: 'item-two' };
+      } else if (call.method === 'thread/read') {
+        if (paginated) assert.equal(call.params.includeTurns, false);
+        result = { thread: { id: 'root-thread', historyMode: paginated ? 'paginated' : 'legacy', status: { type: status },
+          turns: call.params.includeTurns ? turns.filter(row => row.status === 'inProgress') : [] } };
+      }
       else if (call.method === 'thread/queue/add') {
         // The cross-process observer must see the slot before native accepts it.
         const slots = rows(path.join(directory, 'wake.jsonl'));
@@ -186,6 +197,18 @@ async function main(): Promise<void> {
         messageHash: journalHash(message), message, receivedAt: 1, sequence: index + 1, state: 'pending', attempts: index === 1 ? 0 : 1 }), { mode: 0o600 });
     }
     const originalHashes = oldFiles.map(bytesHash);
+    const changedInbox = path.join(directory, 'changed-inbox'), changedLedger = path.join(directory, 'changed-ledger.jsonl');
+    fs.mkdirSync(changedInbox, { mode: 0o700 });
+    const changedRecord = path.join(changedInbox, path.basename(oldFiles[0]));
+    const pendingReceipt = fs.readFileSync(oldFiles[0], 'utf8');
+    fs.writeFileSync(changedRecord, JSON.stringify({ ...JSON.parse(pendingReceipt), state: 'done' }), { mode: 0o600 });
+    await assert.rejects(openCodexMailboxMigration(changedInbox, changedLedger,
+      { threadId: 'root-thread', sessionId: 'acp-session' }, async pendingIds => {
+        assert.deepEqual(pendingIds, []);
+        fs.writeFileSync(changedRecord, pendingReceipt);
+        return new Set();
+      }), /Legacy inbox changed/);
+    assert.equal(fs.existsSync(changedLedger), false, 'a receipt changed during the native check cannot transfer custody');
     turns = [makeTurn('irrelevant', 'other-id'), makeTurn('custodied', legacyCustody)];
     const session = async (check: (client: Client) => Promise<void>) => {
       const transport = new StdioClientTransport({ command: process.execPath, args: [__filename, '--mcp-child', directory], stderr: 'pipe' });
@@ -251,6 +274,43 @@ async function main(): Promise<void> {
       } finally { await mailbox.close(); await wire.close(); }
     }
 
+    // A completed goal continuation can contain only tool calls. A later user
+    // input within another turn can be absent from that turn's first item.
+    paginated = true;
+    turns = [{ id: 'continued', status: 'completed', items: [{ type: 'commandExecution' }] },
+      { id: 'mixed', status: 'completed', items: [makeTurn('unused', 'scode-wake:fixture').items[0], makeTurn('unused', null).items[0]] },
+      makeTurn('terminal', legacyCustody), makeTurn('orphan', 'scode-wake:running', 'inProgress'), makeTurn('older', 'old-id')];
+    const reader = await connectCodex(config);
+    try {
+      const start = calls.length;
+      const selected = await readCodexMailboxSnapshot(reader, 'root-thread', () => new Set([legacyCustody]));
+      assert.equal(selected.epoch, 'mixed');
+      assert.deepEqual([...selected.running], ['scode-wake:running']);
+      assert.equal(selected.recoveryIdle, false, 'an older unfinished wake still blocks recovery');
+      assert.deepEqual([...selected.finished], [legacyCustody]);
+      assert.ok(!calls.slice(start).some(row => row.params?.turnId === 'older'));
+      const absent = await readCodexMailboxSnapshot(reader, 'root-thread', () => new Set(['absent']));
+      assert.equal(absent.finished.size, 0);
+      assert.ok(calls.slice(start).some(row => row.params?.turnId === 'older' && row.params.cursor === 'item-two'));
+      invalidItemPage = true;
+      await assert.rejects(readCodexMailboxSnapshot(reader, 'root-thread', () => new Set()), /requested turn/);
+      invalidItemPage = false;
+      const ordinary = makeTurn('ordinary', legacyCustody, 'inProgress');
+      const completed = makeTurn('human', null);
+      const snapshot = () => readCodexMailboxSnapshot(reader, 'root-thread', () => new Set());
+      status = 'idle'; queue = []; turns = [ordinary];
+      assert.equal((await snapshot()).recoveryIdle, false, 'no completed human epoch');
+      turns = [ordinary, completed];
+      assert.equal((await snapshot()).recoveryIdle, false, 'newer unfinished input');
+      turns = [completed, ordinary];
+      const historical = await snapshot();
+      assert.ok(historical.running.has(legacyCustody) && !historical.finished.has(legacyCustody));
+      assert.equal(historical.recoveryIdle, true, 'older ordinary input is retained while the thread is idle');
+      queue = [{ id: 'item', clientUserMessageId: legacyClean }];
+      assert.equal((await snapshot()).recoveryIdle, false, 'nonempty queue');
+      queue = []; status = 'active';
+      assert.equal((await snapshot()).recoveryIdle, false, 'active native thread');
+    } finally { await reader.close(); invalidItemPage = false; paginated = false; }
     queue = []; turns = []; const head = { conversation: 'c1', start: 10, deliveryId: 'head-one' };
     let owner = await startWake();
     await owner.request('set', { qualified: false, heads: [head] });
@@ -295,6 +355,10 @@ async function main(): Promise<void> {
     const fourthId = nativeCalls()[3].params.clientUserMessageId;
     assert.notEqual(fourthId, firstId); assert.ok(fourthId.endsWith(':1'), 'a new native non-wake epoch opens one new key');
     queue = []; turns.unshift(makeTurn('wake-four', fourthId));
+    // Official paginated history can retain an ordinary inProgress input even
+    // after a newer human turn completed and the thread returned to idle.
+    paginated = true;
+    turns.push(makeTurn('historical-input', legacyCustody, 'inProgress'));
     await owner.request('set', { qualified: true, heads: [{ ...head, start: 100, deliveryId: 'head-two' }] });
     loseRequest = true;
     assert.equal((await owner.request('evaluate')).state, 'submitted'); assert.equal(nativeCalls().length, 5);

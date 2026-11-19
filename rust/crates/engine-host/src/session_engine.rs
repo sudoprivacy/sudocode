@@ -146,6 +146,7 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    agent_directory: std::sync::RwLock<runtime::attention::AgentDirectoryReader>,
     /// Observation metadata stays readable while a turn owns the model mutex.
     /// The session handle remains its writer, through `rebuild_locked` below.
     runtime_identity: std::sync::Arc<std::sync::RwLock<runtime::runtime_status::RuntimeIdentity>>,
@@ -229,6 +230,7 @@ impl SessionEngine {
             os_pid: Some(std::process::id()),
         };
         Ok(Self {
+            agent_directory: std::sync::RwLock::new(session.runtime.agent_directory.clone()),
             runtime_observation: session.host.runtime_observation.clone(),
             runtime_identity: std::sync::Arc::new(std::sync::RwLock::new(runtime_identity)),
             host_context_required: std::sync::atomic::AtomicBool::new(false),
@@ -586,6 +588,10 @@ impl SessionEngine {
             Some(known) => runtime.with_session_known_date(known),
             None => runtime,
         };
+        *self
+            .agent_directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime.agent_directory.clone();
         session.runtime = runtime;
         session.handle = handle;
         self.runtime_identity
@@ -712,9 +718,10 @@ impl SessionEngine {
         }
     }
 
-    /// Run an explicit `/compact` that a `session/cancel` can abort mid-flight
-    /// (the ACP path; the REPL's [`SessionLifecycle::run_compaction`] is not
-    /// cancellable, since the REPL has no concurrent cancel channel). Compacts
+    /// Run an explicit `/compact` that concurrent cancellation can abort.
+    /// Admitted native REPL and ACP management commands use `compact_admitted`
+    /// after the engine pump resets cancellation. Synchronous lifecycle callers
+    /// use [`SessionLifecycle::run_compaction`] and a signal guard. Compacts
     /// through the strict LLM path, installs + persists
     /// a validated compacted transcript, and records the same
     /// telemetry the ACP `/compact` always did. A cancel during the model
@@ -1106,6 +1113,15 @@ fn require_fit_without_compaction(
 }
 
 impl engine_core::EngineDelegate for SessionEngine {
+    fn agent_directory(&self) -> Result<serde_json::Value, String> {
+        let read = self
+            .agent_directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        read()
+    }
+
     fn observe_runtime_status(
         &self,
         read: runtime::runtime_status::RuntimeStatusReader,

@@ -5,18 +5,16 @@ use common::TestEnv;
 use pty_expect::PtySession;
 use serde_json::json;
 
-fn start(env: &TestEnv, enabled: bool, light: bool) -> PtySession {
+/// `shaded`: a colour terminal, where the editor is drawn on its shade;
+/// otherwise `NO_COLOR`, where it keeps its separator lines.
+fn start(env: &TestEnv, shaded: bool, light: bool) -> PtySession {
     let session = env.spawn_with_env_at_size(
         &["--permission-mode", "read-only"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            (
-                "SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT",
-                if enabled { "1" } else { "0" },
-            ),
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
-            ("NO_COLOR", ""),
+            ("NO_COLOR", if shaded { "" } else { "1" }),
             ("COLORFGBG", if light { "0;15" } else { "15;0" }),
         ],
         32,
@@ -62,9 +60,9 @@ fn begin_history(env: &TestEnv, session: &mut PtySession) {
 
 #[test]
 fn streaming_and_resume_share_the_inline_editor() {
-    for enabled in [false, true] {
+    for shaded in [false, true] {
         let env = TestEnv::new_mock("prompt-native-stream");
-        let mut session = start(&env, enabled, false);
+        let mut session = start(&env, shaded, false);
         let marker = common::turn_status_marker(&session);
         begin_history(&env, &mut session);
         session.send("draft界").unwrap();
@@ -87,10 +85,7 @@ fn streaming_and_resume_share_the_inline_editor() {
             &["--resume", "latest", "--permission-mode", "read-only"],
             &[
                 ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-                (
-                    "SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT",
-                    if enabled { "1" } else { "0" },
-                ),
+                ("NO_COLOR", if shaded { "" } else { "1" }),
             ],
             32,
             96,
@@ -134,7 +129,6 @@ fn live_and_resumed_prompts_share_the_editor_surface() {
             &["--resume", "latest", "--permission-mode", "read-only"],
             &[
                 ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-                ("SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT", "1"),
                 ("TERM", "xterm-256color"),
                 ("COLORTERM", "truecolor"),
                 ("NO_COLOR", ""),
@@ -161,12 +155,12 @@ fn live_and_resumed_prompts_share_the_editor_surface() {
 
 /// A committed paste stands apart from what was typed. The shaded surface sets
 /// the prompt's foreground explicitly and faint over it barely shows, so there
-/// a paste takes a muted foreground; without the surface it stays faint.
+/// a paste takes a muted foreground; without a surface (`NO_COLOR`) it is faint.
 #[test]
 fn a_committed_paste_stands_apart_from_typed_text() {
-    for (enabled, light) in [(true, false), (true, true), (false, false)] {
+    for (shaded, light) in [(true, false), (true, true), (false, false)] {
         let env = TestEnv::new_mock("prompt-paste-mark");
-        let mut session = start(&env, enabled, light);
+        let mut session = start(&env, shaded, light);
         common::expect_input_line_cleared(&session, env.timeout(), "editor ready");
         let typed = env.prompt("TypedPart", "single_turn_text");
         session.send(&format!("{typed} ")).unwrap();
@@ -187,7 +181,7 @@ fn a_committed_paste_stands_apart_from_typed_text() {
         for needle in ["PastedPart", "PastedLine two"] {
             let pasted = cell_style(&session, needle);
             assert_eq!(pasted.1, typed.1, "{needle} keeps the prompt background");
-            if enabled {
+            if shaded {
                 assert_ne!(pasted.0, typed.0, "{needle} takes a muted foreground");
                 assert!(!pasted.2, "{needle} is not faint on top of it");
             } else {
@@ -253,36 +247,12 @@ fn prompt_surface(session: &PtySession, text: &str, light: bool) -> (String, Str
 }
 
 #[test]
-fn disabled_experiment_retains_inline_input() {
-    let env = TestEnv::new_mock("prompt-viewport-off");
-    let mut session = start(&env, false, false);
-    session.send("plain-draft").unwrap();
-    common::expect_input_line(&session, "plain-draft", env.timeout(), "normal editor");
-    session.render(|screen| {
-        let raw = screen.raw();
-        let row = raw
-            .rows(0, raw.size().1)
-            .position(|row| row.contains("plain-draft"))
-            .unwrap();
-        assert_eq!(
-            format!(
-                "{:?}",
-                raw.cell(row.try_into().unwrap(), 1).unwrap().bgcolor()
-            ),
-            "Default"
-        );
-    });
-    finish(&mut session, &env);
-}
-
-#[test]
 fn no_color_keeps_the_editor_plain() {
     let env = TestEnv::new_mock("prompt-viewport-no-color");
     let mut session = env.spawn_with_env_at_size(
         &["--permission-mode", "read-only"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT", "1"),
             ("NO_COLOR", "1"),
         ],
         32,
@@ -324,29 +294,27 @@ fn no_color_keeps_the_editor_plain() {
 #[test]
 #[ignore = "explicit release-mode viewport measurements; requires the pinned terminal host"]
 fn viewport_terminal_measurements() {
-    let enabled = std::env::var("SCODE_VIEWPORT_MEASURE_ENABLED").as_deref() == Ok("1");
-    run_viewport_observer("prompt_viewport.cjs", enabled);
+    run_viewport_observer("prompt_viewport.cjs");
 }
 
 #[test]
 #[ignore = "real browser painting, wheel and native selection; requires Playwright Chromium"]
 fn viewport_browser_interaction() {
-    let enabled = std::env::var("SCODE_VIEWPORT_MEASURE_ENABLED").as_deref() != Ok("0");
-    run_viewport_observer("prompt_viewport_browser.cjs", enabled);
+    run_viewport_observer("prompt_viewport_browser.cjs");
 }
 
 #[cfg(not(windows))]
 #[test]
 #[ignore = "real browser lifecycle and process accounting; requires Playwright Chromium"]
 fn viewport_browser_resource_exit() {
-    run_viewport_observer_with_exit("prompt_viewport_browser.cjs", true, true);
+    run_viewport_observer_with_exit("prompt_viewport_browser.cjs", true);
 }
 
-fn run_viewport_observer(observer: &str, enabled: bool) {
-    run_viewport_observer_with_exit(observer, enabled, false);
+fn run_viewport_observer(observer: &str) {
+    run_viewport_observer_with_exit(observer, false);
 }
 
-fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process_exit: bool) {
+fn run_viewport_observer_with_exit(observer: &str, verify_process_exit: bool) {
     let env = TestEnv::new_mock("prompt-viewport-measurements");
     let root = env.workspace_root();
     let document = (0..90).fold(String::new(), |mut fixture_text, row| {
@@ -377,9 +345,8 @@ fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process
         "binary": common::scode_bin(), "args": ["--auth", "api-key", "--model", "sonnet", "--permission-mode", "read-only"],
         "root": root, "configHome": env.config_home(), "todos": root.join("todos.json"),
         "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
-        "cols": 96, "rows": 40, "enabled": enabled, "prompt": prompt, "logRoot": logs, "report": report,
+        "cols": 96, "rows": 40, "prompt": prompt, "logRoot": logs, "report": report,
         "verifyProcessExit": verify_process_exit,
-        "env": { "SUDOCODE_EXPERIMENT_PROMPT_VIEWPORT": if enabled { "1" } else { "0" } },
     });
     std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();
     let output = std::process::Command::new(
@@ -397,5 +364,4 @@ fn run_viewport_observer_with_exit(observer: &str, enabled: bool, verify_process
     common::terminal_host::assert_success(&output);
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert_eq!(value["status"], "complete", "{value}");
-    assert_eq!(value["enabled"], enabled);
 }

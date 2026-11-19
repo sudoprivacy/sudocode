@@ -1,7 +1,7 @@
-//! The todo list as the user sees it, in one place: the live todo panel and
-//! the `TodoWrite` card both draw it here, with the same layout and colors.
-//! The panel is a glance, so it cuts a long item to a few rows; the card in
-//! scrollback is the record and keeps every item whole. Presentation only: the
+//! The todo panel and standalone `TodoWrite` card share the list layout.
+//! With a live panel, successful writes leave only a receipt in scrollback.
+//! The panel is a glance, so it cuts a long item to a few rows; standalone
+//! cards keep every item whole. Presentation only: the
 //! result sent to the model, including any verification nudge addressed to it,
 //! is untouched.
 
@@ -16,6 +16,51 @@ use crate::render::{theme, StyledLine, TextRole, BOLD, DIM, RESET};
 /// Columns before an item's label (`  ■ `). A label that wraps continues under
 /// itself, as a Markdown list item does, not under the icon.
 const LABEL_COLUMN: usize = 4;
+
+/// The successful result that drives both the live panel and its receipt.
+pub(crate) struct TodoResult<'a> {
+    pub todos: Vec<runtime::Todo>,
+    hook_feedback: Option<&'a str>,
+}
+
+/// Decode the canonical saved list, including results followed by hook feedback.
+/// Errors and unrecognized payloads retain the normal detailed tool card.
+pub(crate) fn from_tool_result<'a>(
+    name: &str,
+    output: &'a str,
+    is_error: bool,
+) -> Option<TodoResult<'a>> {
+    if is_error || tools::canonicalize_tool_name(name) != "TodoWrite" {
+        return None;
+    }
+    let (payload, hook_feedback) = super::split_hook_feedback(output);
+    Some(TodoResult {
+        todos: tools::todos_from_tool_result(payload)?,
+        hook_feedback,
+    })
+}
+
+impl TodoResult<'_> {
+    pub(crate) fn receipt(&self) -> String {
+        let summary = if self.todos.is_empty() {
+            "Todos cleared"
+        } else if self
+            .todos
+            .iter()
+            .all(|todo| todo.status == runtime::TodoStatus::Completed)
+        {
+            "All todos complete"
+        } else {
+            "Todos updated"
+        };
+        let mut text = format!("{}✓ {summary}{RESET}", theme().fg_seq(TextRole::Info));
+        if let Some(feedback) = self.hook_feedback {
+            text.push('\n');
+            text.push_str(&super::format_hook_feedback(feedback));
+        }
+        text
+    }
+}
 
 /// `TodoWrite`, then the list it saved, drawn like the todo panel. The result
 /// also carries model-facing fields (the verification nudge is a

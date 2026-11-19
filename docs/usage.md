@@ -52,12 +52,9 @@ when there is no room for a frame and its padding, information appears unboxed.
 
 ## Persistent peer descriptions
 
-Enable `experimental.peerDescriptions` in settings to let model-backed
-compaction publish a short description of each peer's ongoing work:
-
-```json
-{"experimental":{"peerDescriptions":true}}
-```
+Model-backed compaction publishes a short description of each peer's ongoing
+work. This is always on; a leftover `experimental.peerDescriptions` setting is
+accepted and ignored.
 
 The existing compaction call produces optional description metadata alongside
 its checkpoint. It adds no separate summarizer or repair request. New agents
@@ -81,14 +78,14 @@ age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.
 
-Runtime discovery is separate from these stored descriptions. `agent_list`
-adds one `runtime` row per observed instance, including foreground
-state, a permission/question waiting reason and independent background task
-counts. Several instances can share an Agent name or session ID. Unsupported,
-stale or unreachable observations remain unknown; an empty list is conclusive
-only within its reported discovery coverage. `active_only` retains positively
-online instances and running subagent tasks. See the shared
-[runtime observation contract](acp.md#runtime-status-extension-v1) for host scope and freshness.
+An agent's name is its identity: the `agentName` setting, or by default the
+workspace folder name plus a short hash of its path. For a long-lived role, set
+a readable `agentName` when the agent is first created. Renaming an existing
+agent gives it a new identity and leaves its conversations under the old name.
+
+Liveness is separate from these stored descriptions. Each `agent_list` row
+carries one `active` bit: a peer seen online in the zone, or a running subagent
+task. `active_only` keeps those rows. `active: false` means not seen online.
 
 Stored descriptions are not injected into ordinary system prompts or compacted
 continuations. Description instructions and a bounded hint of the latest
@@ -210,7 +207,16 @@ The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
 receiving recovers. `failing` means the node binding itself cannot be used.
 `SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
 
-The connection record alone does not start Nexus or mint an agent credential.
+The connection record alone does not start Nexus. In shared mode, an
+interactive or ACP session whose workspace-derived Agent has no credential yet
+is issued one by this OS user's registered local Box in the background, without
+a prompt or restart. `scode setup --mode shared` does the same for the current
+workspace and reports the outcome; `scode setup --check` shows the Agent's
+actual credential state. Configured `agentName` values are never claimed: ask
+the node owner to mint them. A node this user does not own is never asked to
+issue: the footer says A2A is not joined, and `/status` and setup say whether
+`scode setup --mode shared` or the node owner can fix it. Shared mode
+covers every workspace, so a verified peer is any session of the node owner.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still
 selects the same-machine disk namespace for that process. When a node was
@@ -344,10 +350,42 @@ remain live. Final turn statistics retain their precise duration.
 Foreground tools use the same row and show available progress first. Quiet
 tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
 before the time/token details.
+Manual and automatic context compaction use this same foreground row:
+`Compacting context…` and elapsed time, without a guessed percentage or ETA.
+Queued messages remain visible above it. With no pending input the footer
+shows `Esc/Ctrl+C cancel`; with pending input it shows `Esc flush` and
+`Ctrl+C cancel` separately. Flushing requests delivery of pending input;
+compaction finishes before that input can reach a model request. Cancellation
+keeps unapplied queued input available for explicit continuation.
+While working or holding pending input, flush/cancel controls lead the other keys and workspace
+position so a long branch name does not hide them on an 80-column terminal.
 Questions and approvals stop the animation and use the existing input panel;
 there is no additional waiting row. After the turn ends, the normal result and
 footer return. Remaining background work uses the same status row as described
 under [Background tasks](#background-tasks-in-the-repl).
+
+### Agent navigation and attention
+
+Press **Left** with an empty input to open **Subagents**. **Left/Right** cycles
+between background terminals, subagents, peers and scheduled jobs in the existing
+inline task browser. With text in the editor, Left still moves the cursor.
+Questions and approvals keep keyboard ownership; navigation never submits input
+or cancels the current turn.
+
+Subagent rows and the footer show **Waiting on you** from outstanding engine
+requests. Details identify the requesting child and include a bounded preview;
+the actual approval/question panel retains the complete request. Queued requests
+wait behind the currently presented request. A background child can still ask
+after its parent's turn ends, and answering or cancelling removes the request
+from every view.
+
+**Peers** is an on-demand directory snapshot. Open the tab or press **r** to
+refresh it; Enter opens details. Discovery uses the same directory and zone
+presence as `agent_list`, with one row per addressable peer. **Online** means
+the zone has seen that peer online; it does not establish whether its model is
+running or waiting for input. Discovery grants no authority to answer or
+interrupt that peer.
+The browser does not introduce a periodic discovery poll or a new rendering engine.
 
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
@@ -433,6 +471,15 @@ results, notices and interactive prompts do not terminate an unfinished Markdown
 block; completed results remain visible while the provider is still streaming.
 Captured diagnostics use the same line framing and preserve UTF-8 characters
 split across reads.
+
+For local input/resize diagnosis, set `SCODE_TRACE_INPUT` to a writable file
+path before starting the REPL. It appends JSON lines when the UI observes
+keys and bracketed paste: the PID, a per-process sequence, event category, callback frame
+dimensions, reviewability and the existing frame guard's result. Function-key
+numbers are recorded; typed characters, paste contents, modifiers and model
+traffic are not. This is opt-in local output and does not change admission or
+chrome. A size warning acknowledges a rendered frame, not delivery of input;
+diagnostics can distinguish those two boundaries without adding timing delays.
 
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
 commands can execute concurrently, with a default limit of ten. Each complete
@@ -589,6 +636,15 @@ FooterSlot fold into explicit summaries rather than silently disappearing.
 Growing the window restores their full contents. Long drafts scroll within the
 same editor, preserving the complete text and cursor.
 
+In the interactive REPL, the TodoSlot owns the current todo list. Successful
+`TodoWrite` calls leave only `✓ Todos updated` in scrollback, with
+`✓ Todos cleared` for an empty list or `✓ All todos complete` when every item
+is finished. Resuming a session uses the same compact receipts. Hook feedback
+remains visible, and failures or unrecognized results retain their detailed
+tool cards. The saved session and model still receive the complete result.
+Terminal rendering without a live todo panel retains the full checklist card;
+structured output retains the complete tool result.
+
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden
@@ -634,6 +690,18 @@ text, and further arrow presses use normal cursor navigation. Enter steers with
 the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
 
+Slash commands typed while a turn runs never reach the model:
+
+- `/help` and `/tasks` run at once.
+- `/model` and `/effort` (with or without an argument) choose the setting now.
+  The running turn keeps its model and effort; the choice applies when it
+  ends, before any queued message is sent.
+- Every other command waits in the staging area as `queued: /compact` and runs
+  as a command when the turn ends, in order with queued messages. Esc steers
+  queued messages into the turn but leaves queued commands for its end; ↑
+  brings a queued command back for editing like a queued message.
+- An unknown command is reported at once.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 
@@ -661,31 +729,21 @@ For the canonical, live command list:
 scode --help
 ```
 
-### Experimental shaded prompts
+### Shaded prompts
 
-Enable `experimental.promptViewport` to try matching shaded surfaces for the
-live editor and submitted prompts:
+The live editor and every submitted prompt sit on a faint shade drawn from the
+terminal's own background, so your turns stand apart from the conversation.
+The shade replaces the separator lines above and below the editor. It uses the
+same inline editor, output writer and native terminal history as everything
+else: new output advances the editor with the conversation, and the mouse
+wheel, scrollbar and selection work on that one history.
 
-```json
-{"experimental":{"promptViewport":true}}
-```
+Where the terminal can't draw a shade (`NO_COLOR`, or a palette too small for
+one), the editor keeps its separator lines and the terminal's own colors.
+Resumed sessions show their prompts with the same shade.
 
-This temporary experiment is off by default. It uses the same inline editor,
-output writer and native terminal history as the ordinary REPL. New output
-advances the editor with the conversation; the mouse wheel and scrollbar browse
-the same terminal history. Selection uses the terminal's ordinary drag gesture.
-The draft survives returning to the latest output and resizing.
-
-The earlier fixed conversation view has been removed because its mouse scrolling
-and the terminal scrollbar controlled separate histories. The editor and prompt
-header are no longer pinned while browsing older native history. A sticky view
-would require support from the terminal host to share its scroll position.
-
-Saved sessions remain the durable record; `--resume` uses the existing replay
-formatter. Colors respect the terminal palette and `NO_COLOR`. The existing
-`promptViewport` setting name remains compatible. This changes presentation only
-and adds no model requests or prompt context. Validation requirements live in the
-[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+This is always on; a leftover `experimental.promptViewport` setting, which
+enabled it while it was experimental, is accepted and ignored.
 
 ## Bash tool results
 
@@ -718,11 +776,12 @@ tips ordered `urgent` > `important` > `normal`, with local cache advice at
 `important` priority. At equal priority an explicit model tip takes precedence
 over cache advice. While a turn runs, only urgent tips are shown.
 
-Below the tips, the slot shows where the workspace is, then the keys for the
-current turn and queue state: `sudocode ⎇ main · /help` when idle, `· Enter
-steer · Tab queue · Esc/Ctrl+C cancel` while a turn runs, `· Esc flush · Ctrl+C
-cancel` in place of the cancel keys when input is queued, and `· Enter send ·
-Esc flush · ↑ edit queued` for queued input when idle. Typing never changes it,
+Below the tips, the slot shows the workspace and the keys for the current turn
+and queue state. Idle without a queue shows `sudocode ⎇ main · /help`.
+With pending input it shows `Esc flush · Enter send · ↑ edit queued` before
+the workspace position. During work, controls also lead the
+workspace: `Esc/Ctrl+C cancel · Enter steer · Tab queue`, or `Esc flush ·
+Ctrl+C cancel · Enter steer · Tab queue` when input is pending. Typing never changes it,
 so keystrokes never redraw the footer; it changes when a turn starts or ends,
 as the rest of the screen does. The repository is named by its shared git
 directory, so every worktree of one repository shows the same name; a detached
@@ -845,9 +904,9 @@ firing late. `scode cron tick` fires due jobs once, unless another process is
 already scheduling.
 
 The task browser has a **Scheduled** tab: open it from the footer as above,
-then press **→**. **↑/↓** selects a job, **Enter** shows its details, **e**
+then use **←/→** to select Scheduled. **↑/↓** selects a job, **Enter** shows its details, **e**
 enables or disables it, **r** runs it now, and **d** deletes it after you
-confirm with **y**. **←** returns to background tasks. The footer shows how
+confirm with **y**. **←/→** switches browser tabs. The footer shows how
 many jobs are enabled. Desktop hosts manage the same jobs through the ACP
 `_sudocode/cron/*` methods.
 

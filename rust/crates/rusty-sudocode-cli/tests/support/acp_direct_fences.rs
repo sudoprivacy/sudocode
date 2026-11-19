@@ -175,6 +175,8 @@ elif case == 'override-sender':
     p['sender'] = 'forged-actor'
 elif case == 'structured-control':
     p['message'] = {'type': 'shutdown_request'}
+elif case == 'interrupt-delivery':
+    p['delivery'] = 'interrupt'
 print(json.dumps({'hookSpecificOutput': {'updatedInput': p}}))
 ",
     )
@@ -199,6 +201,7 @@ print(json.dumps({'hookSpecificOutput': {'updatedInput': p}}))
         ("rewrite-text", true),
         ("override-sender", false),
         ("structured-control", false),
+        ("interrupt-delivery", false),
     ] {
         let (_, reply) = client
             .send_request(
@@ -226,6 +229,7 @@ print(json.dumps({'hookSpecificOutput': {'updatedInput': p}}))
         "forged-actor",
         "structured-control",
         "shutdown_request",
+        "interrupt-delivery",
     ] {
         assert!(
             !log.contains(forbidden),

@@ -23,7 +23,8 @@ const frame = (hash, value) => {
 };
 const inputDigest = (tool, params) => {
   const input = tool === 'send' ? { to: params.to, message: params.message,
-    ...(params.summary === undefined ? {} : { summary: params.summary }) }
+    ...(params.summary === undefined ? {} : { summary: params.summary }),
+    ...(params.delivery === undefined ? {} : { delivery: params.delivery }) }
     : params.activeOnly === undefined ? {} : { active_only: params.activeOnly };
   const hash = createHash('sha256').update('sudocode.direct-a2a.input.v1\0');
   frame(hash, tool);
@@ -60,7 +61,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     log({ method: 'initialize', peerOwned });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
-        version: 1, hostAudit: 1, ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
+        version: 1, hostAudit: 1, ...(scenario === 'legacy-delivery' ? {} : { delivery: 1 }), ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),
       }, ...(peerOwned ? { peerInput: { version: peerOwned } } : {}) } } }),
     };
   })
@@ -115,7 +116,8 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
   .onRequest(acp.methods.agent.session.load, ctx => {
     sessionId = ctx.params.sessionId; log({ method: 'session/load', sessionId });
     // Opt-in: report the unread count after loading and on each append to this
-    // file, as scode does when a peer frame arrives.
+    // file, as scode does when a peer frame arrives. An appended `0` reports a
+    // momentary zero while the frame stays unread, as scode's polled count can.
     const unreadTrigger = process.env.SCODE_DIRECT_FIXTURE_UNREAD;
     if (scenario === 'mailbox' && peerOwned === 3 && unreadTrigger) {
       let seen;
@@ -123,7 +125,8 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
         const size = existsSync(unreadTrigger) ? statSync(unreadTrigger).size : 0;
         if (size === seen) return;
         seen = size;
-        void ctx.client.notify('_sudocode/session/peer_unread', { sessionId, unread: mailboxRetired ? 0 : 1 }).catch(() => {});
+        const flicker = size > 0 && readFileSync(unreadTrigger, 'utf8').endsWith('0');
+        void ctx.client.notify('_sudocode/session/peer_unread', { sessionId, unread: mailboxRetired || flicker ? 0 : 1 }).catch(() => {});
       }, 20).unref();
     }
     return {};

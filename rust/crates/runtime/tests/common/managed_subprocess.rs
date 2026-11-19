@@ -166,15 +166,17 @@ fn start(
     env: &HashMap<String, String>,
     agent: &str,
     model: &str,
+    resume: Option<&str>,
 ) -> (Value, i32) {
-    let started = cohost_rpc(
-        operator,
-        "managed_agent.start_session_v1",
-        &json!({"agent_id":agent,"model":model,"spawn_spec":{
-            "cmd":binary,"args":["--auth","api-key","--model",model,"acp"],
-            "env":env,"cwd":workspace.cwd()}}),
-    )
-    .unwrap();
+    let mut request = json!({"agent_id":agent,"model":model,"spawn_spec":{
+        "cmd":binary,"args":["--auth","api-key","--model",model,"acp"],
+        "env":env,"cwd":workspace.cwd()}});
+    // The host fixes its recovery mode at start: it forwards session/load only
+    // for the exact durable ID selected here.
+    if let Some(sid) = resume {
+        request["resume_session_id"] = json!(sid);
+    }
+    let started = cohost_rpc(operator, "managed_agent.start_session_v1", &request).unwrap();
     let pid = i32::try_from(started["os_pid"].as_u64().expect("real child OS PID")).unwrap();
     assert_ne!(pid, i32::try_from(std::process::id()).unwrap());
     assert!(running(pid), "reported child PID is not running: {started}");
@@ -254,7 +256,7 @@ fn managed_scode_reads_cancels_exits_and_resumes_in_a_new_process() {
     let agent = format!("managed-process-{}", fresh());
     let nonce = format!("MANAGED_FILE_{}", fresh());
     std::fs::write(cwd.join("fixture.txt"), &nonce).unwrap();
-    let (first, pid) = start(&operator, &binary, &workspace, &env, &agent, &model);
+    let (first, pid) = start(&operator, &binary, &workspace, &env, &agent, &model, None);
     let controller = Controller::attach_session(&operator, &first, "", cwd.to_str().unwrap(), None);
     let sid = controller.session_id().to_string();
     assert_ne!(first["session_id"], sid);
@@ -300,7 +302,15 @@ fn managed_scode_reads_cancels_exits_and_resumes_in_a_new_process() {
     assert!(running(pid), "turn cancellation killed the managed process");
     stop(&operator, &first, controller, pid);
 
-    let (second, new_pid) = start(&operator, &binary, &workspace, &env, &agent, &model);
+    let (second, new_pid) = start(
+        &operator,
+        &binary,
+        &workspace,
+        &env,
+        &agent,
+        &model,
+        Some(&sid),
+    );
     assert_ne!(new_pid, pid);
     let controller =
         Controller::attach_session(&operator, &second, "", cwd.to_str().unwrap(), Some(&sid));

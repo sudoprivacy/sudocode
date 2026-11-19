@@ -486,7 +486,12 @@ impl SystemPromptBuilder {
         }
         static_sections.push(get_simple_system_section());
         static_sections.push(get_working_section());
-        static_sections.push(include_str!("terminal_diagrams.md").trim().to_string());
+        // `include_str!` keeps the line endings of a CRLF checkout.
+        static_sections.push(
+            include_str!("terminal_diagrams.md")
+                .trim()
+                .replace("\r\n", "\n"),
+        );
         static_sections.push(get_actions_section());
         static_sections.push(get_using_tools_section());
 

@@ -268,7 +268,8 @@ Save immediately when asked to remember. When asked to forget, delete that entry
 /// operational rules change.
 fn build_full_memory_instructions(memory_dir: &Path) -> String {
     let dir_display = memory_dir.display();
-    format!(include_str!("instructions.md"), dir_display = dir_display)
+    // `include_str!` keeps the line endings of a CRLF checkout.
+    format!(include_str!("instructions.md"), dir_display = dir_display).replace("\r\n", "\n")
 }
 
 /// Bound index bytes as well as entries, preserving UTF-8 boundaries.

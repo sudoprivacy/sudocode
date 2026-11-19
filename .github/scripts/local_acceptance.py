@@ -602,6 +602,37 @@ def execute(command, cwd, log, env=None):
         return False
 
 
+def reviewed_native_dependency_cache_transition(before, after, protected):
+    """Allow the one reviewed cache-only workflow transition for signed plans."""
+    toolchain_step = (b"      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain\n"
+                      b"        if: matrix.family == 'native'\n")
+    cache_step = (b"      - uses: Swatinem/rust-cache@v2\n"
+                  b"        if: matrix.family == 'native'\n"
+                  b"        with:\n"
+                  b"          workspaces: ${{ steps.cache_layout.outputs.workspaces }}\n"
+                  b"          shared-key: ci-dependencies\n"
+                  b"          env-vars: ImageOS\n"
+                  b"          save-if: false\n")
+    if before.count(toolchain_step) != 1 or before.count(cache_step) != 1:
+        return False
+    expected = before.replace(toolchain_step, toolchain_step + b"        id: rust_toolchain\n").replace(
+        cache_step, cache_step.replace(
+            b"          save-if:", b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+            b"          save-if:"))
+    if after != expected:
+        return False
+    # The new outputs must come from the reviewed regular-file action and
+    # adapter. Their blobs are outside the native workflow's own byte hash.
+    action = ".github/actions/rust-toolchain/"
+    for filename, identity in (
+            ("action.yml", "ce7b8ad4ca80cc495808d0862d91bdbade600f70"),
+            ("cache-command.mjs", "973592bd8bdc233854295869e87dc24ae00fd6d7")):
+        path = action + filename
+        if value("ls-tree", protected, "--", path) != f"100644 blob {identity}\t{path}":
+            return False
+    return True
+
+
 def approved_equivalent_profiles(before, current, policy_ref, names, head):
     """Share protected exact recipe approvals between scheduling and completion."""
     policy = load_policy(policy_ref)
@@ -1548,8 +1579,11 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
-    if (tracked(head, workflow) != tracked(planned_policy, workflow)
-            or tracked(protected, workflow) != tracked(planned_policy, workflow)):
+    planned_workflow = tracked(planned_policy, workflow)
+    current_workflow = tracked(protected, workflow)
+    cache_only_workflow_change = planned_workflow != current_workflow
+    if (tracked(head, workflow) != planned_workflow or (cache_only_workflow_change
+            and not reviewed_native_dependency_cache_transition(planned_workflow, current_workflow, protected))):
         raise RuntimeError("Early native scheduling requires the current protected native workflow definition; integrate that workflow before starting")
     if receipt.get("checks") != {}:
         raise RuntimeError("An execution plan must contain no completed checks")
@@ -1597,6 +1631,9 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
               "author/native responsibility, selected command effects and native workflow verified; "
               "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
+    if cache_only_workflow_change:
+        print("LOCAL_ACCEPTANCE_PLAN_DEPENDENCY_CACHE_ONLY: a reviewed cache-key change; "
+              "the original signature, checks and complementary jobs remain required.", flush=True)
     return receipt
 
 

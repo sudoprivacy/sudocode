@@ -1507,6 +1507,14 @@ required profiles or revoked signers still reject the old plan. Real Git/SSH/HTT
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
 
+A reviewed change to the native dependency-cache command can retain an older
+signed plan. The verifier accepts only the addition of the trusted toolchain
+step ID and its cache command input to the original native workflow. It binds
+the committed toolchain action and adapter and compares every other workflow
+byte. The original tests, signers, complementary jobs and deadlines remain
+required. Both an unrelated workflow edit and a changed adapter refuse this
+transition. A plan still cannot satisfy completed acceptance.
+
 Compiler-budget or command-completion waiting changes can preserve an older signed execution plan and its
 completed native profiles. The verifier derives this proof from both committed
 sources: only the known serial/adaptive compiler-budget calculations and matching

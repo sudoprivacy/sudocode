@@ -391,14 +391,24 @@ fn grapheme_clusters_follow_the_terminal_rule_measured_at_startup() {
     // The cluster has two parts: the graphemes addon on Node 22 counts longer
     // ones such as 👩🏽‍💻 as 3 cells, which is neither rule.
     // A terminal that never reports its cursor gets the rule its kind is
-    // known for: VS Code's per code point, any other clustered.
+    // known for: VS Code's per code point, any other clustered. Where scode
+    // measures, the environment names the other kind, so only the measured
+    // rule passes. Windows never measures (ConPTY reports the console host's
+    // cursor), so there the environment names the terminal's own kind.
     let cluster = "\u{1F468}\u{200D}\u{1F4BB}";
-    for (unicode, silent, program) in [
-        ("11", false, ""),
-        ("graphemes", false, ""),
-        ("11", true, "vscode"),
-        ("graphemes", true, ""),
+    for (unicode, silent) in [
+        ("11", false),
+        ("graphemes", false),
+        ("11", true),
+        ("graphemes", true),
     ] {
+        let own_kind = if unicode == "11" { "vscode" } else { "" };
+        let other_kind = if unicode == "11" { "" } else { "vscode" };
+        let program = if silent || cfg!(windows) {
+            own_kind
+        } else {
+            other_kind
+        };
         let env = TestEnv::new(&format!("grapheme-width-{unicode}-{silent}"));
         let mut saved = Session::new().with_workspace_root(env.workspace_root());
         saved

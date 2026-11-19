@@ -37,8 +37,14 @@ pub(crate) fn assume_from_environment() {
 /// Measures the terminal before the REPL's first frame. Called beside the
 /// palette probe, through iocraft's input reader, so keys typed meanwhile
 /// stay queued for the editor. Without an answer, the assumed rule stays.
+///
+/// Not on Windows: the cursor position there comes from the console host
+/// behind ConPTY, not from the terminal that draws the text. The host clusters
+/// while VS Code, behind the same ConPTY, lays out each code point, so the
+/// environment's rule is the better answer.
 pub(crate) fn measure() {
-    if !io::stdin().is_terminal()
+    if cfg!(windows)
+        || !io::stdin().is_terminal()
         || !io::stdout().is_terminal()
         || env::var_os("TERM").is_some_and(|term| term == "dumb")
     {

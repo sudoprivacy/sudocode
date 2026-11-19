@@ -166,10 +166,12 @@ async function graphemeWidth() {
   const width = config.unicode === 'graphemes' ? 2 : 4;
   const prompt = 2;
   await settle(text => text.includes('GraphemeHistoryEnd') && text.includes('❯'));
-  // The probe is drawn, then erased, before anything else; a terminal that
-  // never reports its cursor never sees it and gets the assumed rule.
+  // The probe is drawn, then erased, before anything else. A terminal that
+  // never reports its cursor never sees it and gets the assumed rule, as
+  // does every terminal on Windows, where ConPTY reports the console host's.
+  const measured = !config.silent && process.platform !== 'win32';
   const banner = output().indexOf('Cluster echo');
-  assert.equal(output().slice(0, banner).includes(cluster), !config.silent,
+  assert.equal(output().slice(0, banner).includes(cluster), measured,
     `probe drawn before the history (silent: ${config.silent})`);
   const overflowed = () => {
     const buffer = terminal.buffer.active;

@@ -81,6 +81,8 @@ jobs:
         run: cargo test --workspace --lib --bins --locked --features engine-acp/mailbox --no-run
 
       - name: Compile production release dependencies into the same cache
-        if: steps.lookup.outputs.cache-hit != 'true'
-        # Keep one Cargo registry/Git copy per host, rather than one per profile.
+        if: github.event_name == 'workflow_dispatch' && steps.lookup.outputs.cache-hit != 'true'
+        # Cache-only dispatch retains both profiles on a miss. Automatic main
+        # publication warms dev/test on the standard CI images. Tagged builds
+        # keep their own runner, target and original release build commands.
         run: cargo build --release --locked -p rusty-sudocode-cli --bin scode

@@ -31,11 +31,19 @@ def load(name, path):
     return module
 
 
+def private_protocol_environment():
+    fixture = load("protocol_fixture_environment", SOURCE / "e2e/local-acceptance/fixture_environment.py")
+    # These cases launch only the synthetic Python profiles, Git and SSH.
+    # Keep their private home and lease isolation without copying build tools.
+    _, environment = fixture.create_fixture_environment(SOURCE, seed_prepared_tools=False)
+    return environment
+
+
 def run_case(output, order):
     output.mkdir(parents=True, exist_ok=False)
-    parent = load("parallel_environment", SOURCE / "e2e/local-acceptance/run.py")
+    environment = private_protocol_environment()
     os.environ.clear()
-    os.environ.update(parent.FIXTURE_ENV)
+    os.environ.update(environment)
     work, origin, trusted = output / "author", output / "origin.git", output / "trusted"
     work.mkdir()
     commands, requests, processes, failures = [], [], [], []
@@ -675,8 +683,7 @@ def run_case(output, order):
 def plan_admission_controls(output):
     """Exercise the real check entry before and after compatible schema support."""
     output.mkdir(parents=True, exist_ok=False)
-    parent = load("admission_environment", SOURCE / "e2e/local-acceptance/run.py")
-    environment = {**parent.FIXTURE_ENV, "PYTHONDONTWRITEBYTECODE": "1"}
+    environment = {**private_protocol_environment(), "PYTHONDONTWRITEBYTECODE": "1"}
     environment.pop("SCODE_SYNTHETIC_PLAN_PARSER_STATE", None)
     current = (SOURCE / ".github/scripts/local_acceptance.py").read_text(encoding="utf-8")
     anchor = '        complementary = policy["checks"][name].get("complementary")\n'

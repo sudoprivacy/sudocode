@@ -215,6 +215,8 @@ jobs:
     needs: one-nexus-vfs-pin
     name: nexus-A2A journeys (real daemon)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       SCODE_TEST_BACKEND: mock
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -224,6 +226,41 @@ jobs:
       run:
         working-directory: .
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          path: .trusted-a2a-tools
+          sparse-checkout: .github/local-acceptance
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned nextest before daemon tests
+        working-directory: .trusted-a2a-tools
+        shell: python -I {0}
+        env:
+          TRUSTED_TOOL_REF: ${{ github.event.merge_group.base_sha }}
+          GH_TOKEN: ${{ github.token }}
+          NEXTEST_PREPARATION_OUTPUT: ${{ runner.temp }}/a2a-native-tools
+        run: |
+          import importlib.util, os, re, subprocess
+          from pathlib import Path
+
+          reference = os.environ['TRUSTED_TOOL_REF']
+          if not re.fullmatch(r'[0-9a-f]{40}', reference):
+              raise RuntimeError('Pinned A2A tools require an immutable protected base')
+          git_env = {key: value for key, value in os.environ.items()
+                     if not key.upper().startswith('GIT_') and key.upper() not in {'GH_TOKEN', 'GITHUB_TOKEN'}}
+          actual = subprocess.check_output(['git', '--no-replace-objects', 'rev-parse', 'HEAD'], env=git_env, text=True).strip()
+          if actual != reference:
+              raise RuntimeError('The tool preparation checkout differs from the protected base')
+          path = Path.cwd() / '.github/local-acceptance/checks.py'
+          spec = importlib.util.spec_from_file_location('trusted_a2a_tools', path)
+          checks = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(checks)
+          output = Path(os.environ['NEXTEST_PREPARATION_OUTPUT'])
+          output.mkdir(parents=True, exist_ok=False)
+          checks.nextest_binary(output)
       - uses: actions/checkout@v4
       - name: Explain selected daemon acceptance
         env:
@@ -252,9 +289,6 @@ jobs:
           env-vars: ImageOS
           cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Install the shared CLI and mailbox process supervisor
         run: python3 -m pip install psutil==7.2.2
       # The one thing unit tests structurally cannot reach: an envelope moving

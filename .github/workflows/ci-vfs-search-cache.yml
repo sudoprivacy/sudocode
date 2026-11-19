@@ -12,6 +12,7 @@ on:
       - .github/ci/cohost-plugin-crypto.toml
       - .github/actions/vfs-search-cache/**
       - .github/workflows/ci-vfs-search-cache.yml
+      - .github/workflows/rust-ci.yml
 
 concurrency:
   group: fixed-vfs-search-cache-main

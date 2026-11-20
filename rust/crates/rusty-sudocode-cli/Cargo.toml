@@ -27,7 +27,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "669f1fe94ba7c76d05538fb3fccd78a7127caa0a" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "e7377bf6e4921d4ce70955c772f8a70031c1a090" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 # v19 fixes buffered-input stalls when the external printer is enabled (#977).

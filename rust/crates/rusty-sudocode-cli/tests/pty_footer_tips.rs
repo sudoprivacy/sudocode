@@ -8,10 +8,14 @@ fn footer(session: &PtySession) -> String {
     session.render(|screen| {
         let rows = common::screen_rows(screen);
         let rows: Vec<_> = rows.lines().collect();
-        let separator = rows
+        // A frame between a resize and its repaint can lack the separator;
+        // callers wait for the footer rather than fail on that frame.
+        let Some(separator) = rows
             .iter()
             .rposition(|row| row.contains('─') && row.trim().chars().all(|c| c == '─'))
-            .expect("input separator");
+        else {
+            return String::new();
+        };
         rows[separator + 1..].join("\n").trim_end().to_owned()
     })
 }

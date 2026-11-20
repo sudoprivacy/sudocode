@@ -44,6 +44,8 @@ def execute_stage(arguments):
             # One CLI case may create multiple actual scode processes. Preserve
             # the original serial case execution and join before the extra build.
             command = [bash, str(arguments.cli_script)]
+            if arguments.managed_prepare_script:
+                command.append('--prepare-tests')
             environment = {**os.environ, 'RUST_TEST_THREADS': '1'}
         result = subprocess.run(command, cwd=ROOT, env=environment)
         if result.returncode:
@@ -78,9 +80,10 @@ def run(arguments):
     if arguments.managed_prepare_script:
         # The fault branch executes only the previously prepared test binaries.
         # Keep managed and CLI Cargo writes serial in the existing native branch.
+        preparation = ['--managed-prepare-script', str(arguments.managed_prepare_script)]
+        data['branches'][1]['commands'][0]['command'].extend(preparation)
         data['branches'][1]['commands'].append({
-            'command': [*common, '--stage', 'managed-build', '--managed-prepare-script',
-                        str(arguments.managed_prepare_script)],
+            'command': [*common, '--stage', 'managed-build', *preparation],
             'log': str(output / 'managed-build.log'),
         })
         print('A2A_MANAGED_BUILD: original bin build follows CLI in the native lane. '

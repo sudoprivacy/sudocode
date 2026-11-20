@@ -924,6 +924,22 @@ def native_compiler_run(name, root, output, base, execute):
         return run(name, root, output, base, command)
 
 
+def hosted_service_journeys(journeys, root, output, execute, env, start):
+    """Run independent hosted journeys concurrently, retaining command order and logs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run_one(numbered):
+        index, command = numbered
+        # The original scripts each create private test users and state
+        # beneath their temporary directory. Do not upload that state.
+        with tempfile.TemporaryDirectory(prefix="scode-service-") as temporary:
+            isolation = {key: temporary for key in ("TMPDIR", "TEMP", "TMP")}
+            return execute(command, root, output / f"{index:03d}.log", {**env, **isolation})
+
+    with ThreadPoolExecutor(max_workers=len(journeys)) as pool:
+        return list(pool.map(run_one, enumerate(journeys, start)))
+
+
 def run(name, root, output, base, execute):
     if name in {"native-workspace", "native-resize", "native-release", "native-services",
                 "native-context", "native-cohost", "native-examples"}:
@@ -1110,10 +1126,17 @@ def run(name, root, output, base, execute):
         cargo("test", "--no-run", "--locked", *native_cli_test_package_args(root, base),
               "--features", "engine-acp/mailbox", "--test", "pty_model_stream_close")
         binary = target / "debug" / ("scode" + suffix)
-        command(sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
-                "--artifacts", str(output / "services"))
-        command(sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
-                "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box"))
+        journeys = (
+            (sys.executable, "e2e/shared-services/run.py", "--scode", str(binary),
+             "--artifacts", str(output / "services")),
+            (sys.executable, "e2e/shared-services/existing_box.py", "--scode", str(binary),
+             "--grpcurl", str(grpcurl), "--artifacts", str(output / "existing-box")),
+        )
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            results.extend(hosted_service_journeys(journeys, root, output, execute, env, len(results)))
+        else:
+            for arguments in journeys:
+                command(*arguments)
     elif name == "native-cohost":
         # raft-proto rejects protoc >=4. Pin the same tool on macOS/Windows as
         # the release workflow, and leave the developer's global PATH intact.
@@ -1132,6 +1155,11 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Co-host build version stamp was lost")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
+            if name == "rendering":
+                with rendering_source_inputs(root.parent) as inputs:
+                    if inputs != root.parent:
+                        # Build commands use the frozen candidate as their working directory.
+                        return run(name, inputs / "candidate", output, base, execute)
             benchmark(name, root, output, base, command, target)
         else:
             try:
@@ -1191,7 +1219,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "52d02c1627b38f16b0060c34153ac986277ec1c9bc1ee94f7343278a95174a4b",
+        ".github/scripts/ci_input_scope.py": "44b10cc1adc694f3c8a6971421cdc5ba9d5ba78f01b1d2caee481ffdc2d19aaf",
         ".github/workflows/rust-ci.yml": "9ae262f1e15e4824e6308f021b37f827ce270fc7a19a0bb4bf9a3af02c377299",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1206,13 +1234,13 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "e95577c795151a36030a577766df74410c710b903df7193a7727efc7e787dbc8",
+        ".github/scripts/local_acceptance.py": "35e6fe4c35920194525e0ccd160fc26d3ccf4d8e5636d91004c28a26a9b268fd",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "4c68140aae586b40ce0cb61217e77359f3c273f92eebbc4974bcacb67c8a4808",
-        ".github/workflows/local-acceptance-workspace.yml": "c501c66c31ba758329fbf2424e85834b741d2cb5c15807fa900c98171e4a9418",
+        ".github/workflows/local-acceptance-workspace.yml": "ef46222e71c38e472b6ca53a86792efb50dd4ba40b96369ded9afba19b1d3a1b",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
@@ -1226,8 +1254,8 @@ def native_guard_files():
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
-        "e2e/local-acceptance/native_lint_acceptance.py": "c8060b47c00fe3d9c2d6ca270e0a1920c50b8bfc566633010e261df01fdfe085",
-        "e2e/local-acceptance/parallel_acceptance.py": "98d67519cbbf03692b82cc6fb18817d8a967bd7eb930ffa1f0083e48b6952a55",
+        "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
+        "e2e/local-acceptance/parallel_acceptance.py": "e790719488538aedb216eea3caa6883b71ef7c608b9c11fd33c9c9ca043ecd60",
         "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
@@ -1293,7 +1321,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': 'cb0c5ee358360bfc092c9e6e1c8b56f14f36e367d2a0c0c4e60125239c769e75'}
+    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': '8efcd5884b48d577d312f705a61f35a780dd7c809ced72b2c7666531f9eadcbc'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -1577,6 +1605,88 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
+def pack_rendering_sources(root, snapshots, directory):
+    """Transport ordinary Git trees as sequential reads across the Windows bind mount."""
+    for ref in dict.fromkeys(snapshots.values()):
+        tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref], cwd=root)
+        if any(entry.split(b" ", 1)[0] not in {b"100644", b"100755"}
+               for entry in tree.split(b"\0") if entry):
+            # The existing archive extractor remains responsible for links and submodules.
+            return {}
+    directory.mkdir()
+    digests = {}
+    for label, ref in snapshots.items():
+        with (directory / f"{label}.tar").open("xb+") as archive:
+            subprocess.run(["git", "archive", "--format=tar", ref], cwd=root, stdout=archive, check=True)
+            archive.seek(0)
+            digests[label] = hashlib.file_digest(archive, "sha256").hexdigest()
+    return digests
+
+
+def extract_rendering_source(path, destination, ref, expected_hash):
+    """Read a regular-file Git archive safely on the pinned container Python."""
+    from pathlib import PurePosixPath
+
+    if checkout_link(path) or not path.is_file():
+        raise RuntimeError(f"Rendering archive is missing or is not a regular file: {path}")
+    destination.mkdir()
+    # Git's ordinary files all reach the legacy Linux checkout with the mode
+    # supplied by the Windows bind mount. Keep those modes across the transport
+    # change so identical cached inputs do not need to be rewritten by Cargo.
+    directory_mode = stat.S_IMODE(path.parent.stat().st_mode) & 0o777
+    with path.open("rb") as payload:
+        file_mode = stat.S_IMODE(os.fstat(payload.fileno()).st_mode) & 0o777
+        if hashlib.file_digest(payload, "sha256").hexdigest() != expected_hash:
+            raise RuntimeError(f"Rendering archive digest mismatch: {path}")
+        payload.seek(0)
+        with tarfile.open(fileobj=payload, mode="r:") as archive:
+            if archive.pax_headers.get("comment") != ref:
+                raise RuntimeError(f"Rendering archive revision mismatch: {path}")
+            seen = set()
+            for member in archive:
+                relative = PurePosixPath(member.name)
+                if (not relative.parts or relative.is_absolute() or ".." in relative.parts
+                        or relative in seen or not (member.isdir() or member.isfile())):
+                    raise RuntimeError(f"Unexpected entry in rendering Git archive: {member.name}")
+                seen.add(relative)
+                target = destination.joinpath(*relative.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    target.chmod(directory_mode)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.extractfile(member) as contents, target.open("xb") as copy:
+                        shutil.copyfileobj(contents, copy)
+                    target.chmod(file_mode)
+
+
+def rendering_source_inputs(inputs):
+    """Expand packed inputs on the container disk before syncing the leased checkout."""
+    from contextlib import nullcontext
+
+    packed = inputs / "archives"
+    if checkout_link(packed):
+        raise RuntimeError("Rendering archive directory must not be a link")
+    if not packed.exists():
+        return nullcontext(inputs)
+    identity = json.loads((inputs / "identity.json").read_bytes())
+    digests = identity.get("rendering_archive_sha256")
+    labels = ("candidate", "baseline", "trusted")
+    if not isinstance(digests, dict) or set(digests) != set(labels):
+        raise RuntimeError("Rendering archive inventory is incomplete")
+
+    @contextmanager
+    def unpacked():
+        # Do not occupy the tmpfs reserved for measured fixtures.
+        with tempfile.TemporaryDirectory(prefix="scode-rendering-inputs-", dir="/tmp") as folder:
+            staged = Path(folder)
+            for label in labels:
+                extract_rendering_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
+            yield staged
+
+    return unpacked()
+
+
 def container_storage():
     return Path.home() / ".cache/sudocode-local-acceptance/linux", "sudocode-acceptance-benchmark-lease"
 
@@ -1607,8 +1717,12 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         snapshots.update(baseline=revision(policy["baseline_commit"]), trusted=protected)
     sources = output / "inputs"
     sources.mkdir()
-    for label, ref in snapshots.items():
-        snapshot(root, ref, sources / label)
+    archives = {}
+    if name == "rendering" and os.name == "nt":
+        archives = pack_rendering_sources(root, snapshots, sources / "archives")
+    if not archives:
+        for label, ref in snapshots.items():
+            snapshot(root, ref, sources / label)
     context = output / "image-context"
     context_hash = hashlib.sha256()
     for source, destination in [
@@ -1646,6 +1760,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         "image_id": image_id, "image_tag": image, "context_sha256": context_hash.hexdigest(),
         "rendering_release_reused": previous is not None,
     }
+    if archives:
+        identity["rendering_archive_sha256"] = archives
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
     if previous is not None:

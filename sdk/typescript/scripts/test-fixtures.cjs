@@ -3,6 +3,7 @@ const { spawn } = require('node:child_process');
 const setupAndOwner = [
   ['dist/testing/acpIntegration.cjs'],
   ['dist/testing/codexConnectionIntegration.cjs'],
+  ['test/codexMcpReconnect.cjs'],
   ['dist/testing/codexLaunchIntegration.cjs'],
   ['dist/testing/codexSetupIntegration.cjs'],
   ['dist/testing/mailboxAdmission.cjs'],

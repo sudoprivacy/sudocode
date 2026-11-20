@@ -27,6 +27,7 @@ let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
 let mcpOwnerPid: number | undefined;
+let firstMcpOwner: ChildProcess | undefined;
 let auditFailureOwner: ChildProcess | undefined;
 let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
@@ -219,9 +220,19 @@ async function main() {
     execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),{timeout:10000,windowsHide:true});
     windowsOwnerTask=prepared;
   }
+  const entry=path.join(root,'dist/server.cjs');
+  firstMcpOwner=spawn(process.execPath,[entry,'--codex-owner','--config',mcpConfig],{stdio:'ignore'});
+  const firstExit=once(firstMcpOwner,'exit');
+  const auditPath=path.join(directory,'mcp-audit.jsonl');
+  const listenDeadline=Date.now()+10000;
+  while(!fs.existsSync(auditPath)||!fs.readFileSync(auditPath,'utf8').includes('"phase":"listening"')) {
+    assert.equal(firstMcpOwner.exitCode,null);
+    assert.ok(Date.now()<listenDeadline,'isolated owner did not listen');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
   mcp=new Client({name:'autojoin-process-acceptance',version:'1'},{capabilities:{}});
-  await mcp.connect(new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/server.cjs'),
-    '--codex','--config',mcpConfig],stderr:'pipe'}));
+  const transport=new StdioClientTransport({command:process.execPath,args:[entry,'--codex','--config',mcpConfig],stderr:'pipe'});
+  await mcp.connect(transport);
   const readyDeadline=Date.now()+10000;
   for(;;){
     const status=await mcp.callTool({name:'scode_status',arguments:{}});
@@ -284,8 +295,43 @@ async function main() {
   assert.throws(prepare,/owner is already running/,'preparation shares the running owner exclusion');
   assert.equal(rows().length,beforeImport,'refused preparation cannot start another receiver');
   const status=await mcp.callTool({name:'scode_status',arguments:{}});
-  mcpOwnerPid=JSON.parse((status.content as Array<{text:string}>)[0].text).ownerPid;
-  assert.ok(mcpOwnerPid);
+  const snapshot=JSON.parse((status.content as Array<{text:string}>)[0].text);
+  assert.equal(snapshot.ownerPid,firstMcpOwner.pid);
+  const frontendPid=transport.pid;
+  const firstAgent=snapshot.agents.find((row:{threadId:string})=>row.threadId===ids[0]);
+  assert.ok(firstAgent?.actor && firstAgent.receiver?.sessionId);
+  // Only the handle of this test's own foreground owner is signalled. Retire
+  // the fixture receiver first, then reload its original binding on recovery.
+  loaded=[];
+  const unloadDeadline=Date.now()+10000;
+  for(;;){
+    const current=await mcp.callTool({name:'scode_status',arguments:{}});
+    if(!JSON.parse((current.content as Array<{text:string}>)[0].text).agents.length)break;
+    assert.ok(Date.now()<unloadDeadline);
+    await new Promise(resolve=>setTimeout(resolve,40));
+  }
+  firstMcpOwner.kill('SIGTERM');await firstExit;firstMcpOwner=undefined;
+  assert.ok((await mcp.listTools()).tools.some(tool=>tool.name==='scode_send'));
+  assert.equal(transport.pid,frontendPid);
+  loaded=[ids[0]];
+  const attachDeadline=Date.now()+15000;
+  for(;;){
+    const current=await mcp.callTool({name:'scode_status',arguments:{}});
+    const recovered=JSON.parse((current.content as Array<{text:string}>)[0].text);
+    const agent=recovered.agents.find((row:{threadId:string})=>row.threadId===ids[0]);
+    if(agent?.state==='connected'){
+      assert.equal(agent.actor,firstAgent.actor);
+      assert.equal(agent.receiver?.sessionId,firstAgent.receiver?.sessionId);
+      mcpOwnerPid=recovered.ownerPid;
+      assert.notEqual(mcpOwnerPid,snapshot.ownerPid);
+      break;
+    }
+    assert.ok(Date.now()<attachDeadline,'same stdio client did not recover the original agent');
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  const lookup=await mcp.callTool({name:'scode_agent_list',arguments:{},_meta:{threadId:ids[0]}});
+  assert.equal(lookup.isError,false);
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,3,'owner restart never replays the previous send');
   await mcp.close();mcp=undefined;
   await new Promise(resolve=>setTimeout(resolve,6000));
   assert.doesNotThrow(()=>process.kill(mcpOwnerPid!,0),'loaded native roots keep their owner after MCP clients disconnect');
@@ -299,17 +345,18 @@ async function main() {
   }
   const retiredOwnerPid=mcpOwnerPid;
   mcpOwnerPid=undefined;
-  const lifecycle=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
+  const allEvents=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
     .map(line=>JSON.parse(line));
+  assert.ok(allEvents.filter(row=>row.provenance==='codex-autojoin-owner')
+    .every(row=>row.pid===snapshot.ownerPid||row.pid===retiredOwnerPid));
+  const lifecycle=allEvents.filter(row=>row.pid===retiredOwnerPid);
   const observed=lifecycle.filter(row=>row.phase==='native_inventory');
   assert.ok(observed.some(row=>row.roots.some((thread:{threadId:string;qualified:boolean})=>thread.threadId===ids[0]&&thread.qualified)),
     'the actual owner must record its qualifying native root');
   assert.deepEqual(observed.at(-1).loaded,[]);
   assert.equal(lifecycle.find(row=>row.phase==='stopping')?.reason,'no_qualified_native_roots');
   assert.equal(lifecycle.find(row=>row.phase==='stopped')?.reason,'no_qualified_native_roots');
-  assert.ok(!lifecycle.some(row=>row.phase==='owner_crash'));
-  assert.ok(lifecycle.filter(row=>row.provenance==='codex-autojoin-owner').every(row=>row.pid===retiredOwnerPid),
-    'every owner event is bound to its actual process');
+  assert.ok(!allEvents.some(row=>row.phase==='owner_crash'));
   const afterRetirement=rows().length;
   const configBytes=fs.readFileSync(mcpConfig);
   const imported=JSON.parse(prepare());
@@ -588,6 +635,9 @@ void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(asy
   holdReads=false;for(const reply of pendingReads.splice(0))reply();
   await owner?.close();
   await mcp?.close();
+  if(firstMcpOwner?.exitCode===null && firstMcpOwner.signalCode===null){
+    const exited=once(firstMcpOwner,'exit');firstMcpOwner.kill('SIGTERM');await exited;
+  }
   if(auditFailureOwner?.exitCode===null){auditFailureOwner.kill('SIGKILL');await once(auditFailureOwner,'exit');}
   for(const client of server.clients)client.terminate();
   await new Promise<void>(resolve=>server.close(()=>resolve()));

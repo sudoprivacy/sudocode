@@ -489,6 +489,11 @@ state/revision/count, and retained last error. An unobserved queue is `unknown`.
 Foreign-session, stale and malformed updates cannot clear a failure. These
 observations never flush a queue, resume a user interruption, or replay input.
 
+If the shared owner restarts, the existing stdio client reconnects and repeats
+its MCP handshake. Submitted calls with a lost reply return `unknown`. New
+requests can use the recovered connection when it negotiates the same settings.
+An incompatible owner or private configuration requires a fresh client.
+
 During native proxy cleanup, the bridge reports `state: waiting_for_proxy_exit`
 and `waitingForProxyExitPid` if the original process or its pipes outlive the
 termination grace period. Requests refused during that wait have outcome

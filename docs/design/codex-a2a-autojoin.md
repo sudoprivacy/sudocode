@@ -66,6 +66,14 @@ only when no qualified root remains. Unavailable inventory keeps the owner
 alive and tools unavailable; it does not establish that roots have exited.
 It never stops the native server or the Nexus Node.
 
+Each native frontend keeps its stdio MCP client across an owner restart. The
+client authenticates a replacement against the original configuration and
+registration, repeats MCP initialization, and checks the negotiated response
+before forwarding new calls. A call that lost its response reports `unknown`.
+Requests refused before forwarding report `not_submitted`. A changed handshake
+(including a connection-specific presentation capability) requires fresh
+frontend initialization. Closing the frontend cancels a pending reconnection.
+
 On Windows, the owner is launched by a prepared current-user on-demand Task
 Scheduler action. Actual native 0.163.0 field evidence showed the old detached
 owner inside the first MCP's non-breakaway, kill-on-close Job; closing that

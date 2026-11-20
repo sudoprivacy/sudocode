@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
@@ -15,6 +16,7 @@ import { ScodeCleanupUnknownError } from './scodeAcp';
 import { registerCommandShutdown } from './lifecycle';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
+import { relayCodexMcp } from './codexMcpRelay';
 import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
 import { ScodeA2aError } from './scodeA2a';
 import { runCodexUserEntry } from './codexLaunch';
@@ -186,7 +188,7 @@ function equal(a: unknown, b: string): boolean {
 function readHeader(socket: Socket): Promise<unknown> {
   return new Promise((resolve,reject) => {
     let buffer = Buffer.alloc(0);
-    const cleanup = () => {socket.removeListener('data',data);socket.removeListener('error',error);socket.removeListener('end',end);};
+    const cleanup = () => {socket.removeListener('data',data);socket.removeListener('error',error);socket.removeListener('end',end);socket.removeListener('close',end);};
     const error = (error: Error) => {cleanup();reject(error);};
     const end = () => error(new Error('Local bridge closed before authentication'));
     const data = (bytes: Buffer) => {
@@ -201,7 +203,7 @@ function readHeader(socket: Socket): Promise<unknown> {
         socket.unshift(buffer.subarray(newline+1));resolve(result);
       } catch(e) {reject(e);}
     };
-    socket.on('data',data);socket.once('error',error);socket.once('end',end);socket.resume();
+    socket.on('data',data);socket.once('error',error);socket.once('end',end);socket.once('close',end);socket.resume();
   });
 }
 
@@ -337,24 +339,21 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
   }
 }
 
-async function dial(port: number): Promise<Socket> {
+async function dial(port: number, signal?: AbortSignal): Promise<Socket> {
   return new Promise((resolve,reject)=>{
-    const socket=connect(port,'127.0.0.1');
+    const socket=connect({port,host:'127.0.0.1',signal});
     socket.once('connect',()=>{socket.removeListener('error',reject);resolve(socket);});
     socket.once('error',reject);
   });
 }
 
-/** A global Codex MCP entry. Startup performs no inference and never infers a
- * thread from cwd/env. Host tool-call _meta is passed through byte for byte.
- */
-export async function runCodexMcp(file: string, entry: string, registrationId?: string): Promise<void> {
-  if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
-  const {config,sha256} = readConfig(file);
+async function connectMcpOwner(config: CodexMcpConfig, sha256: string, file: string, entry: string,
+  registrationId?: string, signal?: AbortSignal): Promise<Socket> {
   let socket: Socket;
-  try {socket=await dial(config.endpoint.port);}
+  try {socket=await dial(config.endpoint.port,signal);}
   catch(error) {
     if((error as NodeJS.ErrnoException).code!=='ECONNREFUSED')throw error;
+    signal?.throwIfAborted();
     const end=Date.now()+5000;
     let launchError: unknown;
     if(process.platform==='win32'){
@@ -368,10 +367,10 @@ export async function runCodexMcp(file: string, entry: string, registrationId?: 
       child.on('error',()=>{});child.unref();
     }
     for(;;){
-      try {socket=await dial(config.endpoint.port);break;}
+      try {socket=await dial(config.endpoint.port,signal);break;}
       catch(e){
         if((e as NodeJS.ErrnoException).code!=='ECONNREFUSED' || Date.now()>end)throw launchError??e;
-        await new Promise(resolve=>setTimeout(resolve,50));
+        await delay(50, undefined, {signal});
       }
     }
   }
@@ -381,10 +380,31 @@ export async function runCodexMcp(file: string, entry: string, registrationId?: 
     socket.write(JSON.stringify({token:config.endpoint.token,configSha256:sha256,registrationId})+'\n');
     const reply = await timeout(welcome,3000,'Local MCP owner handshake') as {ready?:unknown;registrationId?:unknown};
     if(reply?.ready!==true || reply.registrationId!==registrationId)throw new Error('Invalid local MCP owner or registration');
-    process.stdin.pipe(socket);socket.pipe(process.stdout);socket.resume();
-    await new Promise<void>((resolve,reject)=>{
-      socket.once('close',()=>resolve());socket.once('error',reject);
-      process.stdin.once('end',()=>socket.end());
-    });
-  } finally {socket.destroy();}
+    return socket;
+  } catch (error) { socket.destroy(); throw error; }
+}
+
+/** A global Codex MCP entry. Startup performs no inference and never infers a
+ * thread from cwd/env. Host tool-call _meta is passed through byte for byte.
+ */
+export async function runCodexMcp(file: string, entry: string, registrationId?: string): Promise<void> {
+  if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
+  const {config,sha256} = readConfig(file);
+  const connectOwner = (signal?: AbortSignal) => connectMcpOwner(config, sha256, file, entry, registrationId, signal);
+  const first = await connectOwner();
+  await relayCodexMcp(first, async signal => {
+    // A stopping owner can still hold the port while draining its receivers.
+    // Its early EOF precedes the next owner's election.
+    const deadline = performance.now() + 5000;
+    for (;;) {
+      signal.throwIfAborted();
+      try { return await connectOwner(signal); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (performance.now() >= deadline || !(code === 'ECONNRESET' || code === 'EPIPE'
+            || (error instanceof Error && error.message === 'Local bridge closed before authentication'))) throw error;
+        await delay(100, undefined, {signal});
+      }
+    }
+  });
 }

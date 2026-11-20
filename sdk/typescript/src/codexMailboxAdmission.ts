@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { requestCodexMailboxPage } from './codexMailboxWake';
 import type { CodexConnection } from './codexConnection';
 import type { CodexMailboxAdmission } from './codexMailboxOwner';
 
@@ -29,7 +30,7 @@ export function codexMailboxAdmission(): CodexMailboxAdmission {
       if (admitted.get(server)?.has(threadId)) return true;
       try {
         page.parse(await native.request('thread/queue/list', { threadId, limit: 1 }));
-        page.parse(await native.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' }));
+        page.parse(await requestCodexMailboxPage(native, 'thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' }));
         z.object({ thread: z.object({ id: z.literal(threadId) }) })
           .parse(await native.request('thread/read', { threadId, includeTurns: false }));
       } catch {

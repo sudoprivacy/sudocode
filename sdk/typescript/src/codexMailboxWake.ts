@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
-import type { CodexConnection, CodexNotification } from './codexConnection';
+import { CodexRequestError, type CodexConnection, type CodexNotification } from './codexConnection';
 import { journalHash, openCodexJournal } from './codexJournal';
 
 const nonempty = z.string().min(1);
@@ -58,6 +58,24 @@ export async function readCodexMailboxThread(native: CodexConnection, threadId: 
   if (thread.id !== threadId) throw new Error('Native mailbox thread identity differs');
   if (thread.status.type === 'systemError') throw new Error('Native mailbox thread has a system error; state unknown');
   return thread;
+}
+
+// Stock Codex keeps a new TUI thread in memory until its first user input.
+// The list RPC identifies that state explicitly. Missing threads, unsupported
+// methods, failed later pages and lost replies still leave history unknown.
+export async function requestCodexMailboxPage(
+  native: CodexConnection, method: string, params: { threadId?: string; cursor?: string; limit: number; itemsView?: string; sortDirection?: string },
+): Promise<unknown> {
+  try {
+    return await native.request(method, params);
+  } catch (error) {
+    if (method === 'thread/turns/list' && params.threadId && params.cursor === undefined && error instanceof CodexRequestError) {
+      const rpc = z.object({ code: z.literal(-32600), message: z.string() }).safeParse(error.rpcError);
+      const expected = `thread ${params.threadId} is not materialized yet; thread/turns/list is unavailable before first user message`;
+      if (rpc.success && rpc.data.message === expected) return { data: [], nextCursor: null };
+    }
+    throw error;
+  }
 }
 
 type PageReader = <T>(method: string, params: object,
@@ -124,7 +142,7 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
     let next: string | undefined;
     const seen = new Set<string>(), values: T[] = [];
     for (let page = 0; page < 10000; page++) {
-      const result = parse(await native.request(method, { limit: 100, ...params, ...(next ? { cursor: next } : {}) }));
+      const result = parse(await requestCodexMailboxPage(native, method, { limit: 100, ...params, ...(next ? { cursor: next } : {}) }));
       values.push(...result.data);
       if (result.nextCursor == null) return values;
       if (seen.has(result.nextCursor)) throw new Error('Native mailbox inventory repeated a cursor');

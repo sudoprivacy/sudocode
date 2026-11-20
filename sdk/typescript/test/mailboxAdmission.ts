@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { codexMailboxAdmission, CODEX_MAILBOX_PRESENTATION_BYTES } from '../src/codexMailboxAdmission';
-import type { CodexConnection } from '../src/codexConnection';
+import { requestCodexMailboxPage } from '../src/codexMailboxWake';
+import { CodexRequestError, type CodexConnection } from '../src/codexConnection';
 
 type Reply = (method: string, params: any) => unknown;
 
@@ -62,6 +63,18 @@ async function main(): Promise<void> {
 
   const malformed = server((method, params) => method === 'thread/turns/list' ? { turns: [] } : stock(method, params));
   assert.equal(await admission.qualified(malformed.native, 'root'), false);
+
+  // Actual 0.171 response to listing a new, still-unmaterialized TUI.
+  const rpc = { code: -32600, message: 'thread root is not materialized yet; thread/turns/list is unavailable before first user message' };
+  const newThread = server((method, params) => {
+    if (method === 'thread/turns/list') throw new CodexRequestError('unknown', 'native refused history', rpc);
+    return stock(method, params);
+  });
+  assert.equal(await admission.qualified(newThread.native, 'root'), true);
+  assert.equal(await admission.qualified(newThread.native, 'other'), false);
+  await assert.rejects(requestCodexMailboxPage(newThread.native, 'thread/turns/list', { threadId: 'root', limit: 1, cursor: 'next' }));
+  rpc.code = -32601;
+  assert.equal(await codexMailboxAdmission().qualified(newThread.native, 'root'), false);
 
   // A probe that straddles a reconnect proves nothing about the new server.
   let reconnects = 1;

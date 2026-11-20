@@ -124,10 +124,14 @@ function createHost(config) {
 
 
 function launch(config, initial, load = name => require(name)) {
+  // Declare the terminal this host models, as that terminal does: Unicode 11
+  // is VS Code's terminal, which sets TERM_PROGRAM. scode takes its grapheme
+  // rule from this where it cannot measure the terminal (Windows).
   const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
     HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
     COLORFGBG: '15;0', SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue',
     SUDOCODE_TODO_STORE: config.todos, SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10',
+    TERM_PROGRAM: config.unicode === 'graphemes' ? '' : 'vscode',
     ...config.env };
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
     delete env[key];

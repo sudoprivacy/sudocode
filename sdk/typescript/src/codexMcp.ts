@@ -5,6 +5,7 @@ import { connect, createServer, type Server, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { codexMailboxAdmission } from './codexMailboxAdmission';
 import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
 import type { CodexMailboxAdmission } from './codexMailboxOwner';
 import type { CodexMailboxPresentation } from './codexMailboxPresentation';
@@ -28,6 +29,10 @@ export interface CodexMcpConfig {
   auditLog: string;
   peers: string[];
   peerPolicy?: 'allowlist' | 'node-namespace';
+  /** 3 reads peer frames through `scode_inbox` and wakes an idle root with one
+   * queued turn (requires `node-namespace`); 2, the default, keeps the durable
+   * callback, which requires the native durableQueueAddOnce capability. */
+  peerInputVersion?: 2 | 3;
   /** Explicit operator-owned adapter to the existing authorized enrollment path. */
   enrollmentArgv: string[];
   endpoint: {port: number; token: string};
@@ -35,11 +40,11 @@ export interface CodexMcpConfig {
 
 /** The initializer and one-time installation consume the same native commands. */
 export function codexMcpInstallationCommands(file: string, entry: string): {
-  native: CodexConnectionConfig; registrationArgv: string[]; nativePreparationArgv: string[];
+  native: CodexConnectionConfig; peerInputVersion: 2 | 3; registrationArgv: string[]; nativePreparationArgv: string[];
 } {
   const {config} = readConfig(file);
   if (!path.isAbsolute(entry) || !statSync(entry).isFile()) throw new Error('An existing absolute bridge entry is required');
-  return {native:config.native,...nativeCommands(file,config.native.codexArgv,entry)};
+  return {native:config.native,peerInputVersion:config.peerInputVersion??2,...nativeCommands(file,config.native.codexArgv,entry)};
 }
 
 function nativeCommands(file:string,codexArgv:string[],entry:string):{
@@ -55,7 +60,8 @@ function nativeCommands(file:string,codexArgv:string[],entry:string):{
  * Deliberately do not change a running controller, node or global configuration.
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[] | CodexConnectionConfig, enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist', commandEntry?:string): {
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist', commandEntry?:string,
+  peerInputVersion?: CodexMcpConfig['peerInputVersion']): {
     configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[];
     ownerPreparationArgv?: string[]; userEntryArgv: string[]; installationArgv?:string[]; installed: false;
   } {
@@ -70,7 +76,8 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[] |
   mkdirSync(parent,{recursive:true,mode:0o700});
   const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native,
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
-    peers,peerPolicy,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
+    peers,peerPolicy,...(peerInputVersion===undefined?{}:{peerInputVersion}),enrollmentArgv,
+    endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
   // command nor copies its authority into the runtime package.
   validateConfig(config);
@@ -155,6 +162,8 @@ function validateConfig(config: CodexMcpConfig): void {
       || !path.isAbsolute(config.enrollmentArgv[0])
       || !Array.isArray(config.peers) || config.peers.some(peer=>typeof peer!=='string'||!peer)
       || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
+      || (config.peerInputVersion!==undefined && ![2,3].includes(config.peerInputVersion))
+      || (config.peerInputVersion===3 && config.peerPolicy!=='node-namespace')
       || !Number.isInteger(config.endpoint?.port) || config.endpoint.port < 1024 || config.endpoint.port > 65535
       || !/^[0-9a-f]{64}$/.test(config.endpoint.token)) throw new Error('Invalid Codex autojoin MCP configuration');
   validateCodexConnectionConfig(config.native);
@@ -205,12 +214,15 @@ export async function enroll(argv: string[], claim: CodexAgentClaim): Promise<Co
 
 /** One per-user owner, elected by an exclusive loopback bind. It owns the native
  * observer and all Agent receivers; stdio clients only forward the MCP stream.
- * An embedding operator can supply v3 admission here. The same provider gates
- * the selected receiver and its inbox calls. It never comes from a stdio client.
+ * Runtime JSON `peerInputVersion: 3` selects `codexMailboxAdmission`; an
+ * embedding operator can supply another v3 provider here, which takes
+ * precedence. The same provider gates the selected receiver and its inbox
+ * calls. It never comes from a stdio client.
  */
 export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmission, presentation?: CodexMailboxPresentation): Promise<void> {
   if (presentation && !mailbox) throw new Error('Presentation measurement requires a mailbox owner');
   const {config,sha256} = readConfig(file);
+  const admission = mailbox ?? (config.peerInputVersion===3 ? codexMailboxAdmission() : undefined);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
     ...entry as object,at:new Date().toISOString(),provenance:'codex-autojoin-owner',pid:process.pid,
   })+'\n',{mode:0o600});
@@ -286,7 +298,7 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
           mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
-        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), mailbox !== undefined, measurement?.read);
+        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined, measurement?.read);
       socket.write(JSON.stringify({ready:true,registrationId})+'\n');
       await server.connect(new StdioServerTransport(socket,socket));
       socket.resume();
@@ -301,7 +313,7 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
     process.on('uncaughtExceptionMonitor',onCrash);
     scheduleExit();
     networkTask = connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
-      peerPolicy:config.peerPolicy,mailbox,
+      peerPolicy:config.peerPolicy,mailbox:admission,
       onClosed:()=>{void stop('native_connection_closed').catch(error=>observe({phase:'cleanup_unknown',error:String(error)}));},
       onInventory:observation=>{
         const value=JSON.stringify(observation);

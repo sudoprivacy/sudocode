@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     'init-codex': {type:'boolean'}, 'native-codex': {type:'string'}, 'native-argv': {type:'string'},
     'native-env-file': {type:'string'},
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
-    'peer-policy': {type:'string'},
+    'peer-policy': {type:'string'}, 'peer-input-version': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
     'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
     'claude-watch': {type:'boolean'}, 'claude-deliver': {type:'boolean'}, claude: {type:'boolean'},
@@ -75,6 +75,7 @@ async function main(): Promise<void> {
       + '  Use --native-argv JSON_ARGV instead of --native-codex to preserve an official wrapper command.\n'
       + '  --native-env-file PRIVATE_JSON pins the complete native environment, including CODEX_HOME.\n'
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
+      + '  --peer-input-version 3 reads peer frames through scode_inbox and wakes an idle root (requires node-namespace); default: 2.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
@@ -155,7 +156,7 @@ async function main(): Promise<void> {
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace
-      ||values['session-id']||values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Select one preparation mode');
+      ||values['session-id']||values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy']||values['peer-input-version'])throw new Error('Select one preparation mode');
     if(!values.binding||!path.isAbsolute(values.binding))throw new Error('--binding must be an absolute private mapping file');
     console.log(JSON.stringify(await prepareExistingCodexBinding(values.config,JSON.parse(fs.readFileSync(values.binding,'utf8')))));
     return;
@@ -169,10 +170,11 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(prepareCodexMcp(values.config,values['native-env-file']
       ? {codexArgv:nativeArgv,env:JSON.parse(fs.readFileSync(values['native-env-file'],'utf8'))} : nativeArgv,JSON.parse(values.enrollment??'null'),
       JSON.parse(values.peers??'null'),__filename,values.port===undefined?undefined:Number(values.port),
-      values['peer-policy'] as 'allowlist'|'node-namespace'|undefined,values['command-entry'])));
+      values['peer-policy'] as 'allowlist'|'node-namespace'|undefined,values['command-entry'],
+      values['peer-input-version']===undefined?undefined:Number(values['peer-input-version']) as 2|3)));
     return;
   }
-  if(values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy'])throw new Error('Codex initializer fields require --init-codex');
+  if(values['native-codex']||values['native-argv']||values['native-env-file']||values.enrollment||values.peers||values.port||values['peer-policy']||values['peer-input-version'])throw new Error('Codex initializer fields require --init-codex');
   if (values.init) {
     const executable = values.scode;
     const workspace = values.workspace;

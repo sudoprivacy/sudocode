@@ -226,6 +226,7 @@ async function main() {
     assert.ok(Date.now()<readyDeadline,'MCP owner did not attach its native observer');
     await new Promise(resolve=>setTimeout(resolve,25));
   }
+  assert.ok(!(await mcp.listTools()).tools.some(tool=>tool.name==='scode_inbox'),'the v2 callback presents no mailbox tool');
   holdReads=true;loaded=[ids[0]];
   const sending=mcp.callTool({name:'scode_send',arguments:{to:'fixture-peer',message:'first resumed send',summary:'one append'},
     _meta:{threadId:ids[0]}});
@@ -525,7 +526,8 @@ async function main() {
         owner=await connectCodexAutojoin(publicationConfig);
         assert.equal(submitted.length,1,'local publication must never resubmit enrollment');
         if(transient) {
-          assert.equal(owner.status()[0].state,'connected','transient Windows binding replacement must retain the original enrollment');
+          assert.equal(owner.status()[0].state,'connected',
+            'transient Windows binding replacement must retain the original enrollment: '+String(owner.status()[0].error));
           const binding=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
           assert.equal(binding.state,'ready');assert.equal(binding.actor,submitted[0].actor);
           assert.equal(binding.operationId,submitted[0].operationId);

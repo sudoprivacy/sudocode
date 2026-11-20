@@ -318,6 +318,13 @@ workspaces. Preparation refuses a running global owner or an existing mapping.
 It does not start a receiver; the previous owner must exit in the coordinated
 window before the normal global entry loads that same actor/session.
 
+For an enrollment marked `recovery_required`, first complete the original
+operator operation. Once the shared owner exits, run
+`scode-acp-bridge --recover-codex-binding THREAD_ID --config GLOBAL_FILE`
+with its installed runtime configuration. The command verifies the completed
+operator records and saves the original actor, operation and ACP session as
+`ready`. Repeating it verifies the same binding.
+
 To qualify ordinary native startup after its one-time machine preparation, run
 the existing lifecycle test with `--autojoin --managed-package-root
 /absolute/path/to/@openai/codex` as well as `--codex`, `--output` and the selected

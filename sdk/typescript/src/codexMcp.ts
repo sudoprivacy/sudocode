@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
@@ -11,6 +12,7 @@ import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, typ
 import type { CodexMailboxAdmission } from './codexMailboxOwner';
 import type { CodexMailboxPresentation } from './codexMailboxPresentation';
 import { runEnrollmentCommand } from './enrollmentCommand';
+import { readCompletedCodexEnrollment } from './codexEnrollment';
 import { validateCodexConnectionConfig, CodexCleanupUnknownError, type CodexConnectionConfig } from './codexConnection';
 import { ScodeCleanupUnknownError } from './scodeAcp';
 import { registerCommandShutdown } from './lifecycle';
@@ -20,7 +22,7 @@ import { relayCodexMcp } from './codexMcpRelay';
 import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
 import { ScodeA2aError } from './scodeA2a';
 import { runCodexUserEntry } from './codexLaunch';
-import { bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
+import { assertWorkspace, bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
   type CodexBinding } from './codexBindings';
 
 export interface CodexMcpConfig {
@@ -124,9 +126,7 @@ export async function prepareExistingCodexBinding(file: string, existing: Existi
       || typeof existing.acpSessionId !== 'string' || !existing.acpSessionId.trim()) {
     throw new Error('An explicit existing thread, actor, native workspace, ACP profile and session are required');
   }
-  const listener = createServer(socket=>socket.destroy());
-  await claimOwner(listener, config.endpoint.port);
-  try {
+  return withStoppedOwner(config, async () => {
     const bindings = readBindings(config.stateDirectory);
     if (bindings.has(existing.threadId) || [...bindings.values()].some(binding=>binding.actor===existing.actor)) {
       throw new Error('An existing thread or actor binding cannot be overwritten or assigned twice');
@@ -139,7 +139,44 @@ export async function prepareExistingCodexBinding(file: string, existing: Existi
     bindProfile(binding, profile);
     await writeBinding(config.stateDirectory, binding, true);
     return {prepared:true,startedAgent:false,threadId:existing.threadId,actor:existing.actor,acpSessionId:existing.acpSessionId};
-  } finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
+  });
+}
+
+/** Settle one original binding from the configured operator's completed records. */
+export async function recoverCompletedCodexBinding(file: string, threadId: string) {
+  if (!identifier(threadId)) throw new Error('An original Codex thread ID is required');
+  const {config} = readConfig(file);
+  const argv = config.enrollmentArgv;
+  if (argv.length !== 5 || !path.isAbsolute(argv[1]) || argv[2] !== '--enroll-codex'
+      || argv[3] !== '--config' || !path.isAbsolute(argv[4])) {
+    throw new Error('Binding recovery requires the configured SDK enrollment operator');
+  }
+  return withStoppedOwner(config, async () => {
+    const binding = readBindings(config.stateDirectory).get(threadId);
+    if (!binding || binding.origin !== 'enrollment' || !['recovery_required','ready'].includes(binding.state)) {
+      throw new Error('An original enrollment awaiting recovery or already ready is required');
+    }
+    const {actor,operationId,workspace} = binding;
+    assertWorkspace(binding, workspace);
+    const {result,profile} = readCompletedCodexEnrollment(argv[4], {version:1,actor,operationId,threadId,workspace});
+    const restored: CodexBinding = {...binding, state:'ready', configFile:result.configFile};
+    bindProfile(restored, profile, result.workspaceBinding);
+    if ((binding.configFile !== undefined && binding.configFile !== restored.configFile)
+        || (binding.acp !== undefined && !isDeepStrictEqual(binding.acp, restored.acp))
+        || (binding.workspaceBinding !== undefined && !isDeepStrictEqual(binding.workspaceBinding, restored.workspaceBinding))
+        || (binding.state === 'ready' && !isDeepStrictEqual(binding, restored))) {
+      throw new Error('Completed enrollment differs from a previously frozen binding');
+    }
+    if (binding.state !== 'ready') await writeBinding(config.stateDirectory, restored);
+    return {state:'ready',threadId,actor,operationId,acpSessionId:profile.acpSessionId};
+  });
+}
+
+async function withStoppedOwner<T>(config: CodexMcpConfig, action: () => Promise<T>): Promise<T> {
+  const listener = createServer(socket=>socket.destroy());
+  await claimOwner(listener, config.endpoint.port);
+  try {return await action();}
+  finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
 }
 
 async function claimOwner(listener: Server, port: number): Promise<void> {

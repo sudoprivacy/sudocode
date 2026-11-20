@@ -296,6 +296,14 @@ status distinguish attachment from directory visibility; an unavailable native
 inventory prevents tool admission. Callback errors remain pending/Unknown and
 are not automatically replayed.
 
+After the configured enrollment operator completes the original claim, run
+`--recover-codex-binding THREAD_ID --config GLOBAL_FILE` with the shared
+owner stopped. Recovery holds the owner's exclusive endpoint while it checks
+the saved claim, workspace mapping, actor settings, profile and ACP session
+and publishes the ready binding. Missing records or conflicting frozen
+fields leave the binding in its prior state. Running it again verifies the
+ready binding without issuing credentials or starting ACP.
+
 For an existing fixed-session Agent, prepare a private mapping document with
 exactly `threadId`, `workspace` (native cwd), `actor`, `configFile` (existing ACP
 profile), and `acpSessionId` (original SID). Run the common package's

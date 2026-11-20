@@ -2112,6 +2112,23 @@ or failures. The remaining cross-node and authenticated-node journeys also
 passed. The full daemon job occupied 466 assigned runner seconds in that run.
 <a href="https://github.com/sudoprivacy/sudocode/pull/1538">PR #1538</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44639320338/job/135966339247">original hosted job</a>.</p>
+<p><strong>Build the hosted CLI integration targets together.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1541">PR #1541</a> prepares
+the four existing CLI targets in one Cargo invocation, then runs all seven
+original test commands in order. The original managed build still starts
+after the CLI tests finish. A private Windows Cargo fixture confirmed that
+a concurrent build can replace the binary a running integration test
+will launch next when the jobs share one output path.</p>
+<p>In the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44644476076/job/135983735758">first accepted hosted run</a>,
+the CLI lane took 129.617s, the joined stage took 183.444s, and the complete
+A2A job took 399 assigned runner seconds. The latest pre-change run measured
+150.368s, 218.995s and 466 runner seconds. Four earlier observations with
+the same Rust tree and five identical harness scripts put the original CLI
+lane at 123.509s to 150.368s. Runner and cache conditions can differ. This
+observed run passed all seven original mailbox fault cases, as well as the
+daemon round-trip, cross-node and authenticated journeys. The comparison
+does not measure an isolated causal speedup or establish the one-tenth goal.</p>
 <p><strong>Stronger signed author progress.</strong> Automatic exact-source
 resume now prefers an older signed record that proves a strict superset of
 currently required, compatible profiles. In a replay of original #1510

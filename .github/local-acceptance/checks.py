@@ -1920,7 +1920,7 @@ def exclusive_benchmark_state(directory=Path("/locks")):
         yield
 
 
-def benchmark(name, root, output, base, command, target, *, source_mount=None):
+def benchmark(name, root, output, base, command, target, *, source_mount):
     with exclusive_benchmark_state():
         migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
         benchmark_locked(name, root, output, base, command, target, source_mount=source_mount)
@@ -2106,9 +2106,9 @@ def benchmark_driver_package(source):
     return "rusty-sudocode-cli"
 
 
-def benchmark_locked(name, root, output, base, command, target, *, source_mount=None):
+def benchmark_locked(name, root, output, base, command, target, *, source_mount):
     if name == "browser":
-        reused = verified_candidate_release(source_mount or root.parent)
+        reused = verified_candidate_release(source_mount)
         browser_smoke(root, output, command, reused)
         return
     # Run the declared workload and paired sampling policy. Moving execution

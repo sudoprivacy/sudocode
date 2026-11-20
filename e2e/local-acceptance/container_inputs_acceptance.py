@@ -73,7 +73,7 @@ inputs=Path('/inputs')
 packed=(inputs/'archives').is_dir()
 assert packed==expected['packed_sources'], 'unexpected source transport'
 observed={'image_policy':image,'packed_sources':packed}
-def workload(name,root,output,base,command,target,*,source_mount=None):
+def workload(name,root,output,base,command,target,*,source_mount):
     # Keep the real main(), run(), output creation and command executor. Only
     # replace the expensive product workload; it must use the supplied output.
     frozen=root.parent
@@ -91,7 +91,7 @@ def workload(name,root,output,base,command,target,*,source_mount=None):
         observed['trusted_gui_harness']=True
     assert (root/'marker.txt').read_text()==actual['candidate'],'command cwd lost the frozen candidate'
     binary=output/'scode-candidate'
-    reused=checks.verified_candidate_release(source_mount or frozen) if name=='browser' else None
+    reused=checks.verified_candidate_release(source_mount) if name=='browser' else None
     shutil.copy2(reused or sys.executable,binary)
     # This private probe is later deliberately corrupted by the non-root host.
     # Docker owns the output on Linux; retain execution while allowing that edit.

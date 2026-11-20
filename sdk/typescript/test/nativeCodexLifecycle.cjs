@@ -432,6 +432,13 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         const installed=JSON.parse(result.stdout);
         assert.equal(installed.installed,true);assert.equal(installed.commandEntry,commandEntry);
         assert.equal(installed.a2aJourneyVerified,false,'setup alone must not claim an A2A journey');
+        if(mailboxV3){
+          // Grant just the fixture's mailbox tool. Every other tool retains
+          // the installed entry's ordinary human-review policy.
+          fs.appendFileSync(path.join(isolatedHome,'config.toml'),
+            '\n[mcp_servers.nexus_scode.tools.scode_inbox]\napproval_mode = "approve"\n');
+          receipt.machineInstallation.fixtureInboxApproval='approve';
+        }
         const journal=JSON.parse(fs.readFileSync(installed.journal,'utf8'));
         assert.equal(journal.phase,'installed');assert.ok(journal.completed.includes('finalReadback'));
         receipt.machineInstallation.journal={phase:journal.phase,completed:journal.completed,

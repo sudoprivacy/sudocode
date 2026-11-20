@@ -186,6 +186,31 @@ function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; 
   return {grant,grantSha256:createHash('sha256').update(bytes).digest('hex')};
 }
 
+/** Read the operator's completed operation without submitting enrollment or starting ACP. */
+export function readCompletedCodexEnrollment(file: string, claim: CodexAgentClaim) {
+  const {grant,grantSha256}=grantFor(file,claim);
+  const dir=path.join(grant.stateDirectory,claim.actor);
+  const workspace=path.join(dir,'workspace');
+  const intent: OperationRecord={version:2,claim,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace),
+    nexusArgv:grant.nexusArgv};
+  const previous=readJson(path.join(dir,'operation.json')) as OperationRecord|LegacyOperationRecord;
+  const refusal=resumeRefusal(previous,intent,grantSha256,true);
+  if(refusal)throw new Error(refusal);
+  const result=readJson(path.join(dir,'result.json')) as CodexAgentProfile;
+  const configFile=path.join(dir,'profile.json');
+  if(result.actor!==claim.actor || result.configFile!==configFile || !result.workspaceBinding){
+    throw new Error('Completed enrollment lacks its original actor, profile or workspace binding');
+  }
+  const saved=readJson(path.join(dir,'session.json')) as {workspace:string;sessionId:string};
+  const profile=readJson(configFile) as ScodeAcpConfig;
+  const settings=readJson(path.join(workspace,'.nexus','sudocode','settings.json')) as {agentName:string};
+  if(settings.agentName!==claim.actor || saved.workspace!==workspace || profile.workspace!==workspace
+      || !saved.sessionId || saved.sessionId!==profile.acpSessionId){
+    throw new Error('Completed enrollment differs from the saved actor workspace or ACP session');
+  }
+  return {result,profile};
+}
+
 /** Operator implementation of enrollmentArgv. Called only after an owner has
  * installed explicit policy and the native Node enrollment capability. It is
  * source/test preparation until installed; it never starts or installs a Node.

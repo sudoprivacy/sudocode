@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { runScodeMcp } from './mcp';
-import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig } from './codexMcp';
+import { runCodexMcp, runCodexMcpOwner, prepareCodexMcp, prepareExistingCodexBinding, prepareWindowsCodexOwner, launchCodexFromConfig, recoverCompletedCodexBinding } from './codexMcp';
 import { installCommandShutdownSignals } from './lifecycle';
 import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from './codexEnrollment';
 import { installCodexMcp, checkCodexNative } from './codexSetup';
@@ -56,6 +56,7 @@ async function main(): Promise<void> {
     enrollment: {type:'string'}, peers: {type:'string'}, port: {type:'string'},
     'peer-policy': {type:'string'}, 'peer-input-version': {type:'string'},
     'bind-codex': {type:'boolean'}, binding: {type:'string'},
+    'recover-codex-binding': {type:'string'},
     'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
     'claude-watch': {type:'boolean'}, 'claude-deliver': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
       + '  --peer-policy node-namespace explicitly accepts peer DATA from the verified Node namespace; default: allowlist.\n'
       + '  --peer-input-version 3 reads peer frames through scode_inbox and wakes an idle root (requires node-namespace); default: 2.\n'
       + 'scode-acp-bridge --bind-codex --config FILE --binding EXISTING_MAPPING_FILE  (prepare only, while bridge is stopped)\n'
+      + 'scode-acp-bridge --recover-codex-binding THREAD_ID --config FILE  (settle a completed enrollment while the owner is stopped)\n'
       + 'scode-acp-bridge --codex --config FILE  (global Codex MCP entry)\n'
       + 'scode-acp-bridge --claude --config FILE  (Claude Code MCP entry: one Agent per session, no launch flag)\n'
       + 'scode-acp-bridge --claude-watch --config FILE  (Claude Code SessionStart and CwdChanged hook: watch the session\'s delivery spool)\n'
@@ -153,6 +155,11 @@ async function main(): Promise<void> {
     if(Object.entries(values).some(([key,value])=>value!==undefined&&!['config','claude'].includes(key)))throw new Error('--claude takes only --config');
     installCommandShutdownSignals();
     await runClaudeMcp(values.config);return;
+  }
+  if(values['recover-codex-binding'] !== undefined){
+    if(Object.keys(values).some(key=>!['config','recover-codex-binding'].includes(key)))throw new Error('Select one binding recovery mode');
+    console.log(JSON.stringify(await recoverCompletedCodexBinding(values.config,values['recover-codex-binding'])));
+    return;
   }
   if(values['bind-codex']){
     if(values.init||values['init-codex']||values.codex||values['codex-owner']||values.scode||values.workspace

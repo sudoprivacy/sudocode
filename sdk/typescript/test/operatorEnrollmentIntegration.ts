@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { WebSocketServer } from 'ws';
 import type { CodexAgentClaim } from '../src/codexAutojoin';
 const sdk=path.resolve(__dirname,'../..');
@@ -213,6 +214,42 @@ async function main(){
         bytes:fs.readFileSync(path.join(grant.stateDirectory,binding.actor,name))}))};
     });
     const currentJournal=path.join(root,'current-acp.jsonl');
+    // The offline CLI fences the owner, then settles only the original completed claim.
+    const selected=readyBindings[0].binding;
+    const recoveryDirectory=path.join(root,'recovery-bindings');
+    fs.mkdirSync(recoveryDirectory);
+    const recoveryFile=path.join(recoveryDirectory,selected.threadId+'.json');
+    const {acp,configFile,workspaceBinding,...identity}=selected;
+    const heldBytes=JSON.stringify({...identity,state:'recovery_required'});
+    fs.writeFileSync(recoveryFile,heldBytes);
+    const runtime=path.join(root,'recovery-runtime.json');
+    const entry=path.join(sdk,'dist/server.cjs');
+    const listener=createServer();
+    await new Promise<void>(resolve=>listener.listen(0,'127.0.0.1',resolve));
+    const port=listener.address(); assert.ok(port && typeof port!=='string');
+    fs.writeFileSync(runtime,JSON.stringify({version:1,mode:'codex-autojoin',native:config.native,
+      stateDirectory:recoveryDirectory,peers:[],auditLog:path.join(root,'recovery.jsonl'),
+      endpoint:{port:port.port,token:'0'.repeat(64)},enrollmentArgv:[process.execPath,entry,'--enroll-codex','--config',grantFile]}));
+    const recover=()=>JSON.parse(execFileSync(process.execPath,[entry,'--recover-codex-binding',selected.threadId,'--config',runtime],
+      {encoding:'utf8',stdio:['ignore','pipe','pipe']}));
+    try {assert.throws(recover,/owner is already running/);}
+    finally {await new Promise<void>(resolve=>listener.close(()=>resolve()));}
+    const saved=readyBindings[0].records.find(row=>path.basename(row.file)==='session.json')!;
+    fs.writeFileSync(saved.file,JSON.stringify({...JSON.parse(saved.bytes.toString()),sessionId:randomUUID()}));
+    try {
+      assert.throws(recover,/saved actor workspace or ACP session/);
+      assert.equal(fs.readFileSync(recoveryFile,'utf8'),heldBytes);
+    } finally {fs.writeFileSync(saved.file,saved.bytes);}
+    const mintCount=mintRows().length,sessionCount=sessionsCreated();
+    const settled=recover();
+    assert.deepEqual(settled,{state:'ready',threadId:selected.threadId,actor:selected.actor,
+      operationId:selected.operationId,acpSessionId:acp.sessionId});
+    const settledBytes=fs.readFileSync(recoveryFile);
+    assert.deepEqual(JSON.parse(settledBytes.toString()),selected);
+    assert.deepEqual(recover(),settled);
+    assert.deepEqual(fs.readFileSync(recoveryFile),settledBytes);
+    assert.equal(mintRows().length,mintCount);
+    assert.equal(sessionsCreated(),sessionCount);
     fs.writeFileSync(policyGrant,JSON.stringify({...grant,scode:{...currentPolicy,
       env:{HYDRA_DIRECT_FIXTURE_JOURNAL:currentJournal}}}));
     const mintsBeforeRefresh=mintRows().length;

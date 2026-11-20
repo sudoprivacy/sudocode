@@ -489,6 +489,13 @@ state/revision/count, and retained last error. An unobserved queue is `unknown`.
 Foreign-session, stale and malformed updates cannot clear a failure. These
 observations never flush a queue, resume a user interruption, or replay input.
 
+During native proxy cleanup, the bridge reports `state: waiting_for_proxy_exit`
+and `waitingForProxyExitPid` if the original process or its pipes outlive the
+termination grace period. Requests refused during that wait have outcome
+`not_sent`. Reconnection waits for the old transport to drain. On Windows
+the bridge places each proxy in its own Job at launch and waits for all its
+descendants to exit. A missing Job drain receipt stops reconnection.
+
 `delivery` reports the durable callback inbox separately: pending count, current
 failure/cleanup state, and the last actual downstream queue acceptance. A closed
 ACP child does not clear `cleanup_unknown`. A client-owned peer callback can

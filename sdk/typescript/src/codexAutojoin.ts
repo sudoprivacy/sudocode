@@ -58,6 +58,7 @@ export interface CodexAutojoinConfig {
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
   onClosed?: () => void;
+  onProxyExitWait?: (pid: number | undefined) => void;
   /** Diagnostic observation of the validated snapshot; never controls admission. */
   onInventory?: (observation: CodexRootInventory) => void | Promise<void>;
 }
@@ -305,7 +306,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   native = await connectRecoveringCodex({...config.native, requireDurableQueue:!config.mailbox}, notification => {
     for (const owner of owners.values()) owner.mailbox?.notify(notification);
     if (['thread/started', 'thread/closed'].includes(notification.method)) void refresh();
-  });
+  }, config.onProxyExitWait);
   const timer = setInterval(() => { void refresh(); }, config.pollIntervalMs ?? 1000);
   timer.unref();
   await refresh();

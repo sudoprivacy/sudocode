@@ -198,7 +198,11 @@ async function main() {
   const reserved=reservation.address();assert.ok(reserved&&typeof reserved!=='string');
   await new Promise<void>(resolve=>reservation.close(()=>resolve()));
   const mcpConfig=path.join(directory,'mcp.json');
-  fs.writeFileSync(mcpConfig,JSON.stringify({version:1,mode:'codex-autojoin',native:config.native,
+  const mcpJournal=path.join(directory,'mcp-native.jsonl');
+  const mcpNative=process.platform==='win32' ? config.native : {...config.native,
+    codexArgv:[...config.native.codexArgv.slice(0,-1),'fail-reconnect-close'],
+    env:{...config.native.env,SCODE_FIXTURE_RECONNECT_JOURNAL:mcpJournal}};
+  fs.writeFileSync(mcpConfig,JSON.stringify({version:1,mode:'codex-autojoin',native:mcpNative,
     stateDirectory:path.join(directory,'mcp-bindings'),auditLog:path.join(directory,'mcp-audit.jsonl'),peers:[],
     enrollmentArgv:[process.execPath,path.join(root,'test/fixtures/codexAgentEnrollment.cjs'),directory],
     endpoint:{port:reserved.port,token:'01'.repeat(32)},
@@ -227,6 +231,28 @@ async function main() {
     await new Promise(resolve=>setTimeout(resolve,25));
   }
   assert.ok(!(await mcp.listTools()).tools.some(tool=>tool.name==='scode_inbox'),'the v2 callback presents no mailbox tool');
+  if(process.platform!=='win32') {
+    for(const client of server.clients)client.terminate();
+    const deadline=Date.now()+15000;
+    let waitingPid:number|undefined;
+    for(;;) {
+      const status=await mcp.callTool({name:'scode_status',arguments:{}});
+      const snapshot=JSON.parse((status.content as Array<{text:string}>)[0].text);
+      const proxies=fs.readFileSync(mcpJournal,'utf8').trim().split('\n').map(line=>JSON.parse(line))
+        .filter(row=>row.phase==='proxy');
+      if(snapshot.state==='waiting_for_proxy_exit') {
+        assert.equal(proxies.length,2);
+        assert.equal(snapshot.waitingForProxyExitPid,proxies[1].pid);
+        waitingPid=snapshot.waitingForProxyExitPid;
+      } else if(proxies.length===3 && snapshot.state==='observing') {
+        assert.ok(waitingPid);
+        assert.equal(snapshot.waitingForProxyExitPid,undefined);
+        break;
+      }
+      assert.ok(Date.now()<deadline,'MCP did not expose the stalled PID and recover');
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
+  }
   holdReads=true;loaded=[ids[0]];
   const sending=mcp.callTool({name:'scode_send',arguments:{to:'fixture-peer',message:'first resumed send',summary:'one append'},
     _meta:{threadId:ids[0]}});
@@ -415,8 +441,7 @@ async function main() {
   }
 
   if(process.platform!=='win32') {
-    // Real POSIX proxy stderr keeps a failed reconnect's close unconfirmed.
-    // Even when its callback refuses cleanup, the sibling ACP must be closed.
+    // A delayed replacement preserves the sibling receiver and pending durable delivery.
     loaded=[ids[0]];
     const failureDirectory=path.join(directory,'cleanup-bindings');
     const reconnectJournal=path.join(directory,'autojoin-reconnect.jsonl');
@@ -427,26 +452,23 @@ async function main() {
     dropQueueOnce=true;
     await sibling.request('_fixture/peer',{from:'fixture-peer',text:'cleanup propagation regression'});
     const callbackLog=path.join(failureDirectory,`${ids[0]}.callback.jsonl`);
-    const cleanupDeadline=Date.now()+5000;
-    while(!fs.readFileSync(callbackLog,'utf8').includes('cleanup unconfirmed')) {
-      assert.ok(Date.now()<cleanupDeadline,'callback did not retain failed-reconnect cleanup');
-      await new Promise(resolve=>setTimeout(resolve,20));
-    }
-    let originalCleanup: unknown;
-    assert.equal(owner.status()[0].state,'cleanup_unknown','a connected receiver must expose unjoined downstream cleanup');
+    const deadline=Date.now()+15000;
+    const waitForLog=async (needle:string) => {
+      while(!fs.readFileSync(callbackLog,'utf8').includes(needle)) {
+        assert.ok(Date.now()<deadline,`callback did not record ${needle}`);
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+    };
+    await waitForLog('Waiting for exit of Codex proxy pid');
     assert.equal(owner.status()[0].delivery?.pendingCount,1);
-    await assert.rejects(owner.close(),error=>{
-      originalCleanup=error;return /cleanup unconfirmed/.test(String(error));
-    });
-    assert.equal(sibling.closed,true,'callback failure must not skip sibling ACP cleanup');
-    assert.equal(owner.status()[0].state,'cleanup_unknown','closed ACP does not erase unjoined downstream custody');
+    assert.equal(sibling.closed,false);
+    await waitForLog('"phase":"queued"');
+    assert.equal(owner.status()[0].delivery?.pendingCount,0);
+    assert.equal(owner.connectionFor(ids[0]),sibling);
+    assert.ok(fs.existsSync(reconnectJournal+'.drained'));
+    await owner.close();
     assert.equal((await sibling.exited).code,0);
-    await assert.rejects(owner.close(),error=>error===originalCleanup);
     owner=undefined;
-    while(!fs.existsSync(reconnectJournal+'.drained')) {
-      assert.ok(Date.now()<cleanupDeadline,'bounded fixture pipe holder did not finish');
-      await new Promise(resolve=>setTimeout(resolve,20));
-    }
     loaded=[legacyId];
   }
 

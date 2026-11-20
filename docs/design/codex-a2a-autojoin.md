@@ -53,8 +53,15 @@ real output, policy, approvals, actor audit and conservative Unknown semantics.
 Ownership follows **loaded native root runtimes**, including work that outlives
 a frontend. This does not establish whether a TUI window is currently visible.
 An unloaded root closes its owned scode; loading it again uses the saved profile.
-When the native proxy exits, all of this owner's scode connections close. After
-the last MCP connection closes, the shared owner refreshes inventory and exits
+After a native transport loss the owner retains each receiver and its ACP SID.
+It reconnects to the configured server after the old proxy and its stdio have
+closed. If cleanup exceeds the termination grace period, `scode_status`
+reports `waiting_for_proxy_exit` with the old PID. Calls refused while waiting
+are `not_sent`; an RPC already in flight retains its unknown outcome.
+On Windows each proxy starts in a private Job. Recovery requires confirmation
+that the Job has no live processes. Owner shutdown joins the same cleanup.
+
+After the last MCP connection closes, the shared owner refreshes inventory and exits
 only when no qualified root remains. Unavailable inventory keeps the owner
 alive and tools unavailable; it does not establish that roots have exited.
 It never stops the native server or the Nexus Node.

@@ -232,6 +232,7 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
     try {audit(entry);} catch { /* Diagnostics cannot prevent runtime cleanup. */ }
   };
   let network: CodexAutojoin | undefined;
+  let waitingForProxyExitPid: number | undefined;
   let networkTask: Promise<CodexAutojoin> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
@@ -298,7 +299,8 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
           mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
-        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined, measurement?.read);
+        state:waitingForProxyExitPid!==undefined?'waiting_for_proxy_exit':network?'observing':'connecting',
+        waitingForProxyExitPid,frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined, measurement?.read);
       socket.write(JSON.stringify({ready:true,registrationId})+'\n');
       await server.connect(new StdioServerTransport(socket,socket));
       socket.resume();
@@ -315,6 +317,7 @@ export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmis
     networkTask = connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
       peerPolicy:config.peerPolicy,mailbox:admission,
       onClosed:()=>{void stop('native_connection_closed').catch(error=>observe({phase:'cleanup_unknown',error:String(error)}));},
+      onProxyExitWait:pid=>{waitingForProxyExitPid=pid;},
       onInventory:observation=>{
         const value=JSON.stringify(observation);
         if(value!==lastInventory){observe({phase:'native_inventory',...observation});lastInventory=value;}

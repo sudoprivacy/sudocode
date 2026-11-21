@@ -1,12 +1,11 @@
-//! In-process host for the same session mailbox used by subprocess hosting.
+//! In-process host for negotiated managed sessions.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
-use a2a::session_io::SessionMailbox;
+use a2a::session::{SessionEndpoint, SessionPayload};
 use engine_host::managed_agent::{prepare_managed_agent, PreparedManagedAgent};
 use engine_host::managed_context::ManagedRuntimeContext;
 use engine_host::SessionEngine;
@@ -99,7 +98,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
         _desc: AgentDescriptor,
         _observer: StateObserver,
     ) -> Result<Box<dyn SpawnHandle>, String> {
-        Err("managed sessions require a session mailbox endpoint".into())
+        Err("managed sessions require an admitted session transport".into())
     }
 
     /// The registry's only entry for an in-process host. `cleanup` is this
@@ -150,10 +149,11 @@ fn start_host<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static>(
     cleanup: ManagedHostCleanup,
     observer: StateObserver,
 ) -> Result<Box<dyn SpawnHandle>, String> {
-    let endpoint = options
-        .session_endpoint
-        .clone()
-        .ok_or("managed session has no mailbox endpoint")?;
+    let transport = options
+        .session_transport
+        .as_ref()
+        .ok_or("managed session has no transport")?;
+    let endpoint = transport.endpoint().clone();
     let prepared = prepare_managed_agent(context, options.resume_session_id.as_deref())
         .map_err(|error| error.to_string())?;
     let lease_release_failure = context.lease_release_failure();
@@ -164,12 +164,7 @@ fn start_host<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static>(
     let stopped = prepared.abort_signal();
     let config = managed_session_config(prepared.model());
     let ctx = agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
-    let mailbox = Arc::new(SessionMailbox::open(
-        kernel,
-        ctx,
-        endpoint.clone(),
-        SessionSide::Agent,
-    )?);
+    let mailbox = Arc::new(transport.open(kernel, ctx)?);
     let registry = Arc::new(SessionRegistry::with_hosted_factory(Arc::new(Factory {
         prepared: Mutex::new(Some(prepared)),
         mailbox: peer_mailbox,
@@ -269,8 +264,8 @@ impl SpawnHandle for Handle {
         self.stopped.abort();
         self.registry.cancel_all();
     }
-    fn durable_session_id(&self) -> Option<&str> {
-        Some(&self.session_id)
+    fn durable_session_id(&self) -> Option<String> {
+        Some(self.session_id.clone())
     }
     fn session_endpoint(&self) -> Option<&SessionEndpoint> {
         Some(&self.endpoint)

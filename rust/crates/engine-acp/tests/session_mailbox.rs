@@ -351,7 +351,7 @@ fn exercise_live_cohost_attachment(kernel: &Arc<Kernel>) {
     let endpoint: SessionEndpoint =
         serde_json::from_value(started["session_endpoint"].clone()).unwrap();
     assert_eq!(endpoint.protocol, protocol);
-    assert!(endpoint.transcript.is_empty());
+    assert_eq!(endpoint.transcript, "");
     let session = &started["session_id"];
     let channel = &endpoint.channel_id;
     let accepted = call(

@@ -1,0 +1,10 @@
+@@@ user message carrying the notice
+<task-notification>
+<task-id>agent-<ID></task-id>
+<status>completed</status>
+<summary>Agent &quot;Prompt surface probe&quot; completed</summary>
+<result>Concurrency batch done.</result>
+<color><COLOR></color>
+<usage><total_tokens>37</total_tokens><tool_uses>1</tool_uses><duration_ms><N></duration_ms></usage>
+</task-notification>
+

@@ -79,8 +79,7 @@ inherits = "release"
 opt-level = 3
 strip = "symbols"
 
-# ThinLTO with full speed optimization increases the Windows PE image. Size
-# optimization keeps that artifact within the same cap as the Unix builds.
-[profile.cohost-release-windows]
+# Intel Mac and Windows cohosts use size optimization within their release budgets.
+[profile.cohost-release-compact]
 inherits = "cohost-release"
 opt-level = "s"

@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use nexus_raft::transport::{
-    generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
+    generate_crl, generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
     user_runtime_server_name, AgentCredential,
 };
 use nexus_vfs_client::NexusVfsClient;
@@ -54,9 +54,12 @@ impl Live {
     pub fn from_env() -> Option<Self> {
         let artifacts = PathBuf::from(std::env::var_os("SUDOCODE_VAULT_LIVE")?);
         let (ca, ca_key) = generate_zone_ca("vault-live").expect("zone CA");
+        let root = tempfile::tempdir().expect("scratch root");
+        let crl = generate_crl(&[], 1, &ca, &ca_key).expect("sign fixture revocation list");
+        fs::write(root.path().join("crl.pem"), crl).expect("write fixture revocation list");
         Some(Self {
             artifacts,
-            root: tempfile::tempdir().expect("scratch root"),
+            root,
             ca,
             ca_key,
         })
@@ -100,6 +103,8 @@ impl Live {
             ])
             .arg("--credential")
             .arg(&credential)
+            .arg("--crl-file")
+            .arg(self.path("crl.pem"))
             .env("RUST_LOG", LOG_FILTER)
             .env("NEXUS_DATA_DIR", self.path("unrelated-data"))
             .stdin(Stdio::null())

@@ -118,7 +118,9 @@ pub fn spawn_managed_agent(
     );
     crate::common::provision_stream_transcript(&kernel, &endpoint.transcript);
     let mut options = crate::common::managed_session::seed_managed_session(&kernel, &desc);
-    options.session_endpoint = Some(endpoint.clone());
+    options.session_transport = Some(managed_agent::session_transport::SessionTransport::mailbox(
+        endpoint.clone(),
+    )?);
     let instance = kernel
         .agent_registry()
         .register_instance(desc.clone())

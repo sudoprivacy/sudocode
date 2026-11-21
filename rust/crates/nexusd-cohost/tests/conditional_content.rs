@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use lib::transport_primitives::{user_runtime_server_name, AgentCredential, LoadedCredential};
 use nexus_raft::transport::{
-    generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
+    generate_crl, generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
 };
 use nexus_vfs_client::{ConditionalContentResult, NexusVfsClient};
 
@@ -39,6 +39,8 @@ impl Daemon {
                     "--credential",
                 ])
                 .arg(root.join("server"))
+                .arg("--crl-file")
+                .arg(root.join("crl.pem"))
                 .arg("--backend-config")
                 .arg(root.join("backends.json"))
                 .env("RUST_LOG", "info")
@@ -97,6 +99,11 @@ fn client(port: u16, credential: &LoadedCredential) -> NexusVfsClient {
 fn owner_cas_survives_restart_and_rejects_stale_and_other_owner_writers() {
     let root = tempfile::tempdir().unwrap();
     let (ca, ca_key) = generate_zone_ca("root").unwrap();
+    std::fs::write(
+        root.path().join("crl.pem"),
+        generate_crl(&[], 1, &ca, &ca_key).unwrap(),
+    )
+    .unwrap();
     let (cert, key) =
         generate_user_runtime_cert("runtime-alice", "alice", 300, &ca, &ca_key).unwrap();
     bundle(

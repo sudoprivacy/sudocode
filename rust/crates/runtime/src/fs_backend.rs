@@ -1720,16 +1720,8 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         let path = &self.to_kernel(path)?;
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
+            .map(|_| ())
             .map_err(kernel_err)
-            .and_then(|result| {
-                if result.hit {
-                    Ok(())
-                } else {
-                    Err(io::Error::other(format!(
-                        "Nexus did not write {path}: no writable backend handled this path"
-                    )))
-                }
-            })
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {

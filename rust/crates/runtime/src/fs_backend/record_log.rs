@@ -299,9 +299,6 @@ where
             let result = write_kernel
                 .sys_write(&write_path, &write_ctx, data, 0)
                 .map_err(kernel_err)?;
-            if !result.hit {
-                return Err(io::Error::other("session WAL append was not handled"));
-            }
             // WAL writes return their committed frame sequence, not byte size.
             result
                 .size

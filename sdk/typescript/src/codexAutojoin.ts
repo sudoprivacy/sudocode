@@ -177,7 +177,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
 
       // Codex is the agent its peers address: the owned scode hands each peer
       // message over instead of answering it with its own model.
-      const connection = await connectScode({ ...profile, ...(config.mailbox ? {
+      const connection = await connectScode({ ...profile, env: {
+        ...profile.env,
+        SUDOCODE_CODEX_PEER_ATTACHMENT: JSON.stringify({actor:binding.actor,workspace:path.basename(thread.cwd) || 'filesystem root'}),
+      }, ...(config.mailbox ? {
         peerInputVersion: 3 as const, onPeerUnread: () => { void owner.mailbox?.evaluate(); },
       } : { onPeerMessage: (message: ScodePeerMessage) => {
         if (!native.connected) throw new Error('Native durable ingress unavailable; retain delivery upstream');

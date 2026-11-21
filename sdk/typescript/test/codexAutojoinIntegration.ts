@@ -92,6 +92,10 @@ async function main() {
   await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
   assert.equal(owner.status().length,2,'subagents and feature workers never become root Agents');
   const first=owner.status();assert.equal(new Set(first.map(row=>row.actor)).size,2);
+  for(const row of first) {
+    assert.ok(rows().some(event=>event.method==='initialize' && event.attachment?.actor===row.actor
+      && event.attachment.workspace===path.basename(nativeWorkspace)), 'the attached helper receives the verified thread workspace basename');
+  }
   assert.throws(()=>owner!.connectionFor(undefined),/metadata/);
   assert.throws(()=>owner!.connectionFor(ids[2]),/authenticated/);
   for(const row of first){

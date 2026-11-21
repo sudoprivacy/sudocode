@@ -58,7 +58,7 @@ const app = acp.agent({ name: 'hydra-direct-fixture', version: '1' })
     // Like scode, every advertising fixture echoes peer input a client declares.
     peerOwned = scenario === 'legacy' ? 0
       : Math.min(scenario === 'mailbox' ? 3 : 2, ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version ?? 0);
-    log({ method: 'initialize', peerOwned });
+    log({ method: 'initialize', peerOwned, attachment: JSON.parse(process.env.SUDOCODE_CODEX_PEER_ATTACHMENT ?? 'null') });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       ...(scenario === 'legacy' ? {} : { _meta: { sudocode: { directA2a: {
         version: 1, hostAudit: 1, ...(scenario === 'legacy-delivery' ? {} : { delivery: 1 }), ...(scenario === 'unadvertised-refusal' ? {} : { errorOutcomes: 1 }),

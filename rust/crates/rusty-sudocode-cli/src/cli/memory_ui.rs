@@ -58,6 +58,7 @@ pub(crate) fn select_memory(
             force_fuzzy_select: true,
             back_value: None,
             initial_value: None,
+            multi_select: false,
         },
         move |value, cli, out| {
             if let Some(path) = value

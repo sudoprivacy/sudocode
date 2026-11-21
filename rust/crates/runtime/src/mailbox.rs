@@ -645,6 +645,60 @@ impl Mailbox {
         &self.self_id
     }
 
+    /// Publish the frontend's identity from its owned worker, independently of
+    /// inbox delivery. A temporarily unavailable node is retried until detach.
+    pub fn announce_attachment(
+        &self,
+        session: &str,
+        frontend: &str,
+        workspace: &str,
+        stop: crate::HookAbortSignal,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let machine = gethostname::gethostname();
+        let machine = machine.to_str()?;
+        if session.is_empty()
+            || !matches!(frontend, "scode" | "Codex")
+            || [machine, workspace].iter().any(|part| {
+                part.trim().is_empty()
+                    || part.contains(['/', '\\'])
+                    || part.chars().any(char::is_control)
+            })
+        {
+            return None;
+        }
+        let label = format!("{frontend} · {machine} · {workspace}");
+        let label = if label.chars().count() > crate::agent_description::MAX_DESCRIPTION_CHARS {
+            let mut short: String = label
+                .chars()
+                .take(crate::agent_description::MAX_DESCRIPTION_CHARS - 1)
+                .collect();
+            short.push('…');
+            short
+        } else {
+            label
+        };
+        let store = self.description_store(self.self_id()).ok()?;
+        let session = session.to_owned();
+        std::thread::Builder::new()
+            .name("a2a-peer-description".into())
+            .spawn(move || {
+                while !stop.is_aborted() {
+                    match store.publish_attachment(&session, &label) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "peer attachment description will retry");
+                        }
+                    }
+                    sleep_unless_aborted(&stop, 30_000);
+                }
+            })
+            .inspect_err(
+                |error| tracing::warn!(%error, "cannot start peer description publication"),
+            )
+            .ok()
+    }
+
     /// The persistent description in this mailbox's actual agent namespace.
     pub fn description_store(
         &self,

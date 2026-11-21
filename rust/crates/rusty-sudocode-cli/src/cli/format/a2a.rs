@@ -194,6 +194,11 @@ pub(crate) fn agent_row(agent: &Value) -> Option<String> {
     if address != name {
         let _ = write!(row, " · send_to={address}");
     }
+    if let Some(label) =
+        text(agent, "attachment").filter(|label| Some(*label) != text(agent, "description"))
+    {
+        let _ = write!(row, " · {}", truncate_for_summary(label, 160));
+    }
     if let Some(description) = text(agent, "description") {
         let _ = write!(row, " · {}", truncate_for_summary(description, 160));
         if let Some(age) =

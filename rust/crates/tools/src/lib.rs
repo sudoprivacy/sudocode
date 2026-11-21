@@ -2165,6 +2165,8 @@ pub struct AgentListRow {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2206,6 +2208,7 @@ pub fn collect_agent_list(
             .and_then(|store| store.read())
         {
             Ok(Some(description)) => {
+                row.attachment = description.attachment;
                 row.description = Some(description.description);
                 row.description_updated_at = Some(description.updated_at);
             }
@@ -2249,6 +2252,7 @@ pub fn merge_agent_list(
                 role: None,
                 description: None,
                 description_updated_at: None,
+                attachment: None,
             });
     }
 
@@ -2269,6 +2273,7 @@ pub fn merge_agent_list(
                 role,
                 description: None,
                 description_updated_at: None,
+                attachment: None,
             });
     }
 

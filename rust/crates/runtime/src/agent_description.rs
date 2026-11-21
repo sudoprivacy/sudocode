@@ -19,6 +19,11 @@ pub struct AgentDescription {
     pub description: String,
     pub updated_at: String,
     pub source_session_id: String,
+    /// Self-reported frontend, machine and workspace for the attached peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    attachment_only: bool,
 }
 
 /// Storage selected by the actual mailbox, independently of the shell workspace.
@@ -86,6 +91,10 @@ impl DescriptionStore {
                     serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 if !valid_description(&value.description)
                     || DateTime::parse_from_rfc3339(&value.updated_at).is_err()
+                    || value
+                        .attachment
+                        .as_ref()
+                        .is_some_and(|label| !valid_description(label))
                     || value.source_session_id.is_empty()
                 {
                     return Err(io::Error::new(
@@ -132,23 +141,58 @@ impl DescriptionStore {
     /// compaction that started from its predecessor. Lease-only backends retain
     /// their existing advisory-lock guarantee; conditional stores fence writes.
     pub fn publish(&self, update: &DescriptionUpdate) -> io::Result<bool> {
+        let previous = update.snapshot.previous_description().ok().flatten();
+        let value = AgentDescription {
+            description: update.description.clone(),
+            updated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            source_session_id: update.snapshot.source_session_id.clone(),
+            attachment: previous.and_then(|value| value.attachment),
+            attachment_only: false,
+        };
+        self.write_snapshot(&update.snapshot, &value)
+    }
+
+    /// Seed the description for a new peer, or add its identity alongside
+    /// the task last published by compaction. Reattaching is idempotent.
+    pub fn publish_attachment(&self, session_id: &str, label: &str) -> io::Result<bool> {
+        if !valid_description(label) || session_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid peer attachment",
+            ));
+        }
+        let snapshot = self.snapshot(session_id)?;
+        let previous = snapshot.previous_description()?;
+        if previous.as_ref().and_then(|v| v.attachment.as_deref()) == Some(label) {
+            return Ok(true);
+        }
+        let mut value = match previous {
+            Some(value) if !value.attachment_only => value,
+            _ => AgentDescription {
+                description: label.to_owned(),
+                updated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                source_session_id: session_id.to_owned(),
+                attachment: None,
+                attachment_only: true,
+            },
+        };
+        value.attachment = Some(label.to_owned());
+        self.write_snapshot(&snapshot, &value)
+    }
+
+    fn write_snapshot(
+        &self,
+        snapshot: &DescriptionSnapshot,
+        value: &AgentDescription,
+    ) -> io::Result<bool> {
         let fs = self.backend()?;
         let parent = std::path::Path::new(&self.path)
             .parent()
             .ok_or_else(|| io::Error::other("peer description has no agent directory"))?;
         fs.create_dir_all(&parent.to_string_lossy())?;
-        let value = AgentDescription {
-            description: update.description.clone(),
-            updated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            source_session_id: update.snapshot.source_session_id.clone(),
-        };
-        let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
-        if update.snapshot.conditional {
-            return match fs.write_if_version(
-                &self.path,
-                update.snapshot.version.as_ref(),
-                &bytes,
-            )? {
+        let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+        if snapshot.conditional {
+            return match fs.write_if_version(&self.path, snapshot.version.as_ref(), &bytes)? {
                 WriteOutcome::Committed(_) => Ok(true),
                 WriteOutcome::Conflict { .. } => Ok(false),
                 WriteOutcome::Unknown => Err(io::Error::other(
@@ -159,7 +203,7 @@ impl DescriptionStore {
         let Some(lock) = fs.try_lock(&format!("{}.lock", self.path), 30_000)? else {
             return Ok(false);
         };
-        if self.read_bytes(fs.as_ref())? != update.snapshot.previous || !lock.renew()? {
+        if self.read_bytes(fs.as_ref())? != snapshot.previous || !lock.renew()? {
             return Ok(false);
         }
         fs.write_atomic(&self.path, &bytes)?;
@@ -168,6 +212,14 @@ impl DescriptionStore {
 }
 
 impl DescriptionSnapshot {
+    fn previous_description(&self) -> io::Result<Option<AgentDescription>> {
+        self.previous
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(io::Error::other)
+    }
+
     /// Append only to the compaction request's existing uncached instruction.
     pub fn append_instruction(&self, prompt: &mut String, recent: &[crate::ConversationMessage]) {
         use std::fmt::Write as _;

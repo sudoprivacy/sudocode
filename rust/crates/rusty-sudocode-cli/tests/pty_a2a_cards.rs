@@ -306,8 +306,7 @@ fn agent_list_replay_distinguishes_unknown_liveness_descriptions_empty_and_trunc
             "active only · 0 agents",
             "No agents found",
             "18 agents",
-            "listed-14",
-            "+3 agents · full list preserved in session",
+            "listed-17",
             "Agent enumeration unavailable",
         ] {
             assert!(
@@ -319,10 +318,66 @@ fn agent_list_replay_distinguishes_unknown_liveness_descriptions_empty_and_trunc
             common::screen_contains(screen, "d ago"),
             "description age is visible: {screen}"
         );
-        assert!(!screen.contains("listed-15"));
+        assert!(
+            !screen.contains("full list preserved in session"),
+            "a directory that fits is listed whole: {screen}"
+        );
         assert!(!screen.contains("peer-未知状态 · active"));
         assert!(!screen.contains("peer-未知状态 · inactive"));
         assert!(!screen.contains("online"));
+    });
+}
+
+#[test]
+fn a_large_agent_list_shows_the_active_agents_and_counts_the_rest() {
+    let env = TestEnv::new_mock("agent-list-large-card-history");
+    let mut source = Session::new().with_workspace_root(env.workspace_root());
+    let directory = |id: &str, active: usize, total: usize| {
+        let agents: Vec<_> = (0..total)
+            .map(|n| {
+                let state = if n < active { "here" } else { "gone" };
+                let name = format!("{id}-{state}-{n:03}");
+                json!({"kind":"peer","name":name,"send_to":name,"active":n < active})
+            })
+            .collect();
+        json!({"count":total,"agents":agents})
+    };
+    // Mostly gone, more here than fit, and nobody seen at all.
+    for (id, active, total) in [("few", 3, 60), ("crowd", 55, 70), ("dark", 0, 53)] {
+        add(
+            &mut source,
+            id,
+            "agent_list",
+            &json!({}),
+            &directory(id, active, total),
+            false,
+        );
+    }
+    replay(&env, &source, "Recorded dark.", &[120], |screen| {
+        for expected in [
+            "AgentList · 60 agents",
+            "peer  few-here-002 · online",
+            "+57 inactive agents · full list preserved in session",
+            "AgentList · 70 agents",
+            "peer  crowd-here-049 · online",
+            "+20 agents (5 active) · full list preserved in session",
+            "AgentList · 53 agents",
+            "peer  dark-gone-049",
+            "+3 agents · full list preserved in session",
+        ] {
+            assert!(
+                common::screen_contains(screen, expected),
+                "missing {expected}: {screen}"
+            );
+        }
+        for hidden in [
+            "few-gone-003",
+            "crowd-here-050",
+            "crowd-gone-055",
+            "dark-gone-050",
+        ] {
+            assert!(!screen.contains(hidden), "{hidden} is counted, not listed");
+        }
     });
 }
 

@@ -1,6 +1,7 @@
 //! A framed append that returns an error may still have committed. `send`
 //! looks for the exact envelope in the conversation before it reports, queues
-//! a send it cannot confirm, and a retry of it reaches the receiver once.
+//! a send it cannot confirm, and a retry of it reaches the receiver once. A
+//! send stopped before its append was never written, and is queued the same.
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,7 +11,9 @@ use kernel::kernel::Kernel;
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::{FsDirEntry, FsMetadata};
 use runtime::mailbox::{InboxConvention, Mailbox};
-use runtime::send_outbox::{SendOutbox, SendOutcome, SettledSend, MAX_ATTEMPTS};
+use runtime::send_outbox::{
+    QueuedSend, SendOutbox, SendOutcome, SettledSend, MAX_AGE_SECS, MAX_ATTEMPTS,
+};
 use runtime::{FsBackend, KernelFsBackend};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -24,9 +27,24 @@ enum Fault {
     Refuse,
 }
 
+/// What a send does before its append.
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    /// Creating the conversation: its chat-list entries and transcript.
+    Provision,
+    /// Asking whether the transcript is a stream.
+    Classify,
+}
+
 struct Faulty {
     inner: Arc<dyn FsBackend>,
     fault: Mutex<Fault>,
+    /// This step fails with this kind, as a replica that is behind or a node
+    /// that is restarting would fail it.
+    before_append: Mutex<Option<(Step, io::ErrorKind)>>,
+    /// Cleared, the backend answers as one that keeps append logs as plain
+    /// files.
+    frames: AtomicBool,
     unreadable: AtomicBool,
     /// Every read returns one more frame from another sender: a stream that
     /// keeps growing for as long as anyone reads it.
@@ -40,6 +58,20 @@ struct Faulty {
 impl Faulty {
     fn set(&self, fault: Fault) {
         *self.fault.lock().unwrap() = fault;
+    }
+
+    fn fail_before_append(&self, failure: Option<(Step, io::ErrorKind)>) {
+        *self.before_append.lock().unwrap() = failure;
+    }
+
+    fn stopped_at(&self, step: Step) -> io::Result<()> {
+        match *self.before_append.lock().unwrap() {
+            Some((failing, kind)) if failing == step => Err(io::Error::new(
+                kind,
+                "this node has not applied its own writes yet",
+            )),
+            _ => Ok(()),
+        }
     }
 
     fn outbox(&self, agent: &str) -> SendOutbox {
@@ -77,6 +109,7 @@ impl FsBackend for Faulty {
         self.inner.readdir(path)
     }
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        self.stopped_at(Step::Provision)?;
         self.inner.create_dir_all(path)
     }
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -92,7 +125,11 @@ impl FsBackend for Faulty {
         self.inner.create_append_log(path, retention)
     }
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        self.stopped_at(Step::Classify)?;
         self.inner.is_append_stream(path)
+    }
+    fn frames_append_logs(&self) -> bool {
+        self.frames.load(Ordering::SeqCst) && self.inner.frames_append_logs()
     }
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         self.inner.link(alias, target)
@@ -145,6 +182,8 @@ fn pair() -> (Mailbox, Mailbox, Arc<Faulty>) {
     let faulty = Arc::new(Faulty {
         inner: Arc::clone(&fs),
         fault: Mutex::new(Fault::None),
+        before_append: Mutex::new(None),
+        frames: AtomicBool::new(true),
         unreadable: AtomicBool::new(false),
         growing: AtomicBool::new(false),
         tail_reads: AtomicUsize::new(0),
@@ -419,5 +458,162 @@ fn envelopes_without_a_send_id_are_never_taken_for_repeats() {
     assert_eq!(
         receive_through(bob, "marker"),
         ["no identity", "no identity", "marker"]
+    );
+}
+
+/// A send the node refuses before its append was never written. It is queued
+/// with its identity, costs no attempt while the node keeps refusing, and
+/// reaches the peer once when the node answers again.
+#[test]
+fn a_send_stopped_before_its_append_is_queued_and_delivered_once() {
+    for step in [Step::Provision, Step::Classify] {
+        let (alice, bob, faulty) = pair();
+        faulty.fail_before_append(Some((step, io::ErrorKind::Other)));
+        let error = alice.send(message("held", 0)).unwrap_err();
+        let queued = faulty.outbox("alice").list().unwrap();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        let send_id = queued[0].send_id().to_string();
+        assert!(error.starts_with("not sent yet: "), "{error}");
+        assert!(
+            error.contains(&format!("queued as send {send_id}"))
+                && error.contains("do not resend it yourself"),
+            "{error}"
+        );
+        assert_eq!(bodies(&bob), Vec::<String>::new());
+
+        alice.retry_outbox(None).unwrap();
+        let waiting = faulty.outbox("alice").list().unwrap();
+        assert_eq!(waiting.len(), 1, "{waiting:?}");
+        assert_eq!(
+            waiting[0].attempts, 1,
+            "a retry that never reached its append is not an attempt"
+        );
+        assert_eq!(bodies(&bob), Vec::<String>::new());
+
+        faulty.fail_before_append(None);
+        alice.retry_outbox(None).unwrap();
+        assert_eq!(bodies(&bob), ["held"]);
+        assert_eq!(
+            alice.take_settled_outcomes(),
+            [SettledSend {
+                to: "bob".into(),
+                send_id,
+                outcome: SendOutcome::Delivered,
+                attempts: 2,
+            }]
+        );
+        alice.retry_outbox(None).unwrap();
+        assert_eq!(bodies(&bob), ["held"], "a settled send is not retried");
+    }
+}
+
+/// The backend saying no is an answer, not an outage: nothing is queued.
+#[test]
+fn a_send_refused_before_its_append_is_reported_not_queued() {
+    for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidInput] {
+        let (alice, bob, faulty) = pair();
+        faulty.fail_before_append(Some((Step::Provision, kind)));
+        let error = alice.send(message("refused", 0)).unwrap_err();
+        assert!(!error.contains("queued"), "{error}");
+        assert!(error.starts_with("create chat list "), "{error}");
+        assert!(
+            faulty.outbox("alice").list().unwrap().is_empty(),
+            "a refusal queues nothing"
+        );
+        assert_eq!(bodies(&bob), Vec::<String>::new());
+    }
+}
+
+/// A backend that keeps its logs as plain files fails a send as before: its
+/// errors are the disk's, and waiting does not change them.
+#[test]
+fn a_plain_file_backend_fails_a_send_instead_of_queueing_it() {
+    let (alice, _bob, faulty) = pair();
+    faulty.frames.store(false, Ordering::SeqCst);
+    faulty.fail_before_append(Some((Step::Provision, io::ErrorKind::Other)));
+    let error = alice.send(message("lost", 0)).unwrap_err();
+    assert!(error.starts_with("create chat list "), "{error}");
+    assert!(!error.contains("queued"), "{error}");
+    assert!(
+        faulty.outbox("alice").list().unwrap().is_empty(),
+        "a plain-file backend queues nothing"
+    );
+}
+
+/// A send that still cannot start a day later is abandoned, and the agent is
+/// told once.
+#[test]
+fn a_send_that_can_never_start_is_abandoned_by_age() {
+    let (alice, bob, faulty) = pair();
+    faulty.fail_before_append(Some((Step::Provision, io::ErrorKind::Other)));
+    alice.send(message("stale", 0)).unwrap_err();
+    let queued = faulty.outbox("alice").list().unwrap().remove(0);
+    let send_id = queued.send_id().to_string();
+    let record = faulty
+        .outboxes
+        .path()
+        .join("alice")
+        .join(format!("{send_id}.json"));
+    let aged = QueuedSend {
+        first_attempt_secs: queued.first_attempt_secs - MAX_AGE_SECS,
+        ..queued
+    };
+    std::fs::write(&record, serde_json::to_vec(&aged).unwrap()).unwrap();
+
+    alice.retry_outbox(None).unwrap();
+    assert!(
+        faulty.outbox("alice").list().unwrap().is_empty(),
+        "an abandoned send leaves the queue"
+    );
+    assert_eq!(bodies(&bob), Vec::<String>::new());
+    let settled = alice.take_settled_outcomes();
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0].outcome, SendOutcome::Abandoned);
+    assert_eq!(settled[0].send_id, send_id);
+    assert!(
+        alice.take_settled_outcomes().is_empty(),
+        "an outcome is reported once"
+    );
+}
+
+/// A first message to a peer has no conversation tail to retry it from, so
+/// the receiver itself retries what is queued: no second send is needed.
+#[test]
+fn a_running_receiver_delivers_a_queued_first_message_on_its_own() {
+    let (alice, bob, faulty) = pair();
+    faulty.fail_before_append(Some((Step::Provision, io::ErrorKind::Other)));
+    alice.send(message("first words", 0)).unwrap_err();
+    assert_eq!(faulty.outbox("alice").list().unwrap().len(), 1);
+    faulty.fail_before_append(None);
+
+    // The same agent on the working backend, as after the node recovers.
+    let alice = Mailbox::new(
+        Arc::clone(&faulty.inner),
+        "alice".into(),
+        InboxConvention::new("/workspace/mail".to_string()),
+    )
+    .with_outbox(faulty.outbox("alice"));
+    let abort = runtime::HookAbortSignal::new();
+    let receiver = runtime::mailbox::spawn_inbox_record_poller(
+        Arc::new(alice),
+        100,
+        "refused-send-test",
+        abort.clone(),
+        |_| true,
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while bodies(&bob) != ["first words"] {
+        assert!(
+            Instant::now() < deadline,
+            "the receiver never sent what was queued: {:?}",
+            faulty.outbox("alice").list().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    abort.abort();
+    receiver.join().unwrap();
+    assert!(
+        faulty.outbox("alice").list().unwrap().is_empty(),
+        "a delivered send leaves the queue"
     );
 }

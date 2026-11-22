@@ -657,7 +657,7 @@ impl Mailbox {
         let machine = gethostname::gethostname();
         let machine = machine.to_str()?;
         if session.is_empty()
-            || !matches!(frontend, "scode" | "Codex")
+            || !matches!(frontend, "scode" | "Codex" | "Claude Code")
             || [machine, workspace].iter().any(|part| {
                 part.trim().is_empty()
                     || part.contains(['/', '\\'])

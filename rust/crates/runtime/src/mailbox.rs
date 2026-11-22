@@ -248,6 +248,40 @@ enum SendSearch {
     Unreadable(String),
 }
 
+/// Why a send stopped before its append.
+struct Unsent {
+    message: String,
+    /// The backend refused the request itself, so repeating it cannot succeed.
+    refused: bool,
+}
+
+impl Unsent {
+    fn io(context: std::fmt::Arguments<'_>, error: &std::io::Error) -> Self {
+        Self {
+            message: format!("{context}: {error}"),
+            refused: matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+            ),
+        }
+    }
+}
+
+impl From<String> for Unsent {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            refused: false,
+        }
+    }
+}
+
+impl From<Unsent> for String {
+    fn from(unsent: Unsent) -> Self {
+        unsent.message
+    }
+}
+
 /// The envelopes in one `tail_read` chunk: a single frame, or JSONL lines.
 fn envelopes_in(data: &[u8]) -> Vec<MailboxEnvelope> {
     MailboxEnvelope::from_bytes(data).map_or_else(
@@ -554,7 +588,7 @@ impl Mailbox {
     /// read    -> StreamNotFound            the recipient can never see it
     /// ensure  -> entry_type immutable      and can never repair its own inbox
     /// ```
-    fn ensure_provisioned(&self, recipient: &str) -> Result<(), String> {
+    fn ensure_provisioned(&self, recipient: &str) -> Result<(), Unsent> {
         {
             let seen = self
                 .provisioned
@@ -564,7 +598,7 @@ impl Mailbox {
                 return Ok(());
             }
         }
-        self.ensure_conversation(recipient)?;
+        self.build_conversation(recipient)?;
         self.provisioned
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -580,10 +614,15 @@ impl Mailbox {
     /// through `tail_read` within that operation's wait budget.
     #[inline]
     fn backend_frames(&self, path: &str) -> Result<bool, String> {
+        Ok(self.classify(path)?)
+    }
+
+    /// [`Self::backend_frames`], keeping what kind of failure stopped it.
+    fn classify(&self, path: &str) -> Result<bool, Unsent> {
         self.backend
             .resolve()?
             .is_append_stream(path)
-            .map_err(|error| format!("classify mailbox {path}: {error}"))
+            .map_err(|error| Unsent::io(format_args!("classify mailbox {path}"), &error))
     }
 
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
@@ -925,16 +964,24 @@ impl Mailbox {
     /// sentinel — a conversation half-built by an interrupted send is finished
     /// by the next one rather than being mistaken for done.
     pub fn ensure_conversation(&self, peer: &str) -> Result<(), String> {
+        Ok(self.build_conversation(peer)?)
+    }
+
+    /// [`Self::ensure_conversation`], keeping what kind of failure stopped it.
+    fn build_conversation(&self, peer: &str) -> Result<(), Unsent> {
         // A conversation is addressed by its pair, so a nameless side has no
         // conversation to be in. Refused rather than tolerated: an empty name
         // still produces a cid and still composes a path, just a degenerate one
         // (`…/conversations/`, no leaf), so the failure would otherwise surface
         // far from its cause as an unwritable directory.
         if self.self_id.is_empty() || peer.is_empty() {
-            return Err(format!(
-                "a conversation needs two names, got self={:?} peer={peer:?}",
-                self.self_id
-            ));
+            return Err(Unsent {
+                message: format!(
+                    "a conversation needs two names, got self={:?} peer={peer:?}",
+                    self.self_id
+                ),
+                refused: true,
+            });
         }
         let backend = self.backend.resolve()?;
         let root = self.convention.conversation_root(&self.self_id, peer);
@@ -942,7 +989,7 @@ impl Mailbox {
             let dir = self.convention.chat_list_dir(owner);
             backend
                 .create_dir_all(&dir)
-                .map_err(|e| format!("create chat list {dir}: {e}"))?;
+                .map_err(|e| Unsent::io(format_args!("create chat list {dir}"), &e))?;
             // A link, which is what this is: an index pointing into the flat
             // conversation store rather than a copy of where it lives.
             //
@@ -959,14 +1006,22 @@ impl Mailbox {
             // where a privilege-free symlink does not exist. `read_link` is the follow
             // half on both, so a caller resolving the index is backend-agnostic.
             let alias = self.convention.chat_list_path(owner, other);
-            backend
-                .link(&alias, &root)
-                .map_err(|e| format!("index conversation for {owner} at {alias}: {e}"))?;
+            backend.link(&alias, &root).map_err(|e| {
+                Unsent::io(
+                    format_args!("index conversation for {owner} at {alias}"),
+                    &e,
+                )
+            })?;
         }
         let path = self.transcript_path(peer);
         backend
             .create_append_log(&path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
-            .map_err(|e| format!("ensure conversation with {peer} at {path}: {e}"))
+            .map_err(|e| {
+                Unsent::io(
+                    format_args!("ensure conversation with {peer} at {path}"),
+                    &e,
+                )
+            })
     }
 
     /// Send a message to a recipient's inbox.
@@ -1022,9 +1077,12 @@ impl Mailbox {
         // so over a host FS the conversation was never indexed: the recipient
         // had nothing to discover and heard nothing, while every send reported
         // success.
-        self.ensure_provisioned(&envelope.to)?;
+        let framed = match self.prepare(&envelope.to, &path) {
+            Ok(framed) => framed,
+            Err(unsent) => return Err(self.queue_unsent(&envelope, unsent)),
+        };
 
-        if self.backend_frames(&path)? {
+        if framed {
             // Older sends to this peer still queued after an outage go first.
             if let Err(error) = self.retry_outbox(Some(&envelope.to)) {
                 tracing::warn!(%path, %error, "mailbox retry of queued sends failed");
@@ -1060,6 +1118,42 @@ impl Mailbox {
         // writing one log) as if it were a special case, and with conventions
         // collapsed there is exactly one shape to write.
         crate::agent_mailbox::append_envelope_via(self.backend.resolve()?.as_ref(), &path, envelope)
+    }
+
+    /// Provision the conversation with `to` and say whether its transcript at
+    /// `path` is framed: everything a send does before its append.
+    fn prepare(&self, to: &str, path: &str) -> Result<bool, Unsent> {
+        self.ensure_provisioned(to)?;
+        self.classify(path)
+    }
+
+    /// What `send` reports for a send that stopped before its append.
+    ///
+    /// The message was never written, so retrying it cannot deliver it twice,
+    /// and it is queued like a send whose delivery could not be confirmed. Only
+    /// where the backend frames its logs: there a failure is a replica or a
+    /// link catching up, while a plain file's failure is the disk's answer and
+    /// is reported as it is. A refusal is never queued.
+    fn queue_unsent(&self, envelope: &MailboxEnvelope, unsent: Unsent) -> String {
+        let retried = !unsent.refused
+            && self
+                .backend
+                .resolve()
+                .map_or(true, |backend| backend.frames_append_logs());
+        if !retried {
+            return unsent.message;
+        }
+        let Unsent { message, .. } = unsent;
+        let send_id = envelope.send_id.as_deref().unwrap_or_default();
+        match self.outbox.queue(envelope) {
+            Ok(()) => format!(
+                "not sent yet: {message}; it is queued as send {send_id} and will be retried \
+                 automatically with the same id — do not resend it yourself"
+            ),
+            Err(queue_error) => {
+                format!("{message} (it could not be queued for retry: {queue_error})")
+            }
+        }
     }
 
     /// Settle an append that returned an error but may have committed.
@@ -1208,10 +1302,29 @@ impl Mailbox {
             if stalled.contains(&entry.envelope.to) {
                 continue;
             }
+            let now = crate::agent_mailbox::now_secs();
             let path = self.transcript_path(&entry.envelope.to);
-            // Only a framed send is ever queued, and a raw frame appended to a
-            // byte-addressed transcript would corrupt it.
-            if !self.backend_frames(&path)? {
+            // A send queued before its conversation existed still needs one.
+            // Stopping here is not an attempt, since nothing was appended, so
+            // only its age can end it.
+            let framed = match self.prepare(&entry.envelope.to, &path) {
+                Ok(framed) => framed,
+                Err(unsent) => {
+                    if entry.past_limits(now) {
+                        self.outbox.settle(&entry, SendOutcome::Abandoned)?;
+                    } else {
+                        tracing::info!(%path, error = %unsent.message, send_id = entry.send_id(), "queued mailbox send still cannot start");
+                        stalled.push(entry.envelope.to);
+                    }
+                    continue;
+                }
+            };
+            // A raw frame appended to a byte-addressed transcript would
+            // corrupt it.
+            if !framed {
+                if entry.past_limits(now) {
+                    self.outbox.settle(&entry, SendOutcome::Abandoned)?;
+                }
                 continue;
             }
             let envelope = &entry.envelope;
@@ -1222,7 +1335,6 @@ impl Mailbox {
                 self.outbox.settle(&entry, SendOutcome::Delivered)?;
                 continue;
             }
-            let now = crate::agent_mailbox::now_secs();
             if entry.past_limits(now) {
                 self.outbox.settle(&entry, SendOutcome::Abandoned)?;
                 continue;
@@ -2574,7 +2686,16 @@ fn receive_while_seated(
     let tails_stop = crate::HookAbortSignal::new();
     let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
         std::collections::HashMap::new();
+    let mut outbox_due = std::time::Instant::now();
     while !abort.is_aborted() && seat.is_valid() {
+        // A tail retries the sends queued to its own peer. A send queued to a
+        // peer with no conversation yet has no tail, so it is retried here.
+        if std::time::Instant::now() >= outbox_due {
+            if let Err(error) = mailbox.retry_outbox(None) {
+                tracing::warn!(%error, "mailbox retry of queued sends failed");
+            }
+            outbox_due = std::time::Instant::now() + OUTBOX_RETRY_INTERVAL;
+        }
         match mailbox.list_conversations() {
             Ok(peers) => {
                 diagnostics.succeeded("conversation discovery");

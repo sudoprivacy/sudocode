@@ -310,6 +310,13 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(false)
     }
 
+    /// Whether [`Self::create_append_log`] makes a log this backend frames
+    /// itself, one record per append. A backend that keeps append logs as
+    /// plain files answers false.
+    fn frames_append_logs(&self) -> bool {
+        false
+    }
+
     /// Where `concern` is stored, when this backend imposes its own namespace.
     ///
     /// `None` — every host backend, for every concern — means the caller keeps
@@ -641,6 +648,9 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         (**self).is_append_stream(path)
+    }
+    fn frames_append_logs(&self) -> bool {
+        (**self).frames_append_logs()
     }
     fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
         (**self).managed_root(concern)
@@ -1809,6 +1819,10 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         self.is_stream_entry(vfs, Permission::Read)
     }
 
+    fn frames_append_logs(&self) -> bool {
+        true
+    }
+
     fn tail_read(
         &self,
         path: &str,
@@ -2587,6 +2601,10 @@ impl FsBackend for NexusVfsFsBackend {
         let path = &self.authorize_target(path, ResourceAccessKind::Read)?;
         self.entry_type(path, ResourceAccessKind::Read)
             .map(|entry_type| entry_type == Some(i32::from(DT_STREAM)))
+    }
+
+    fn frames_append_logs(&self) -> bool {
+        true
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

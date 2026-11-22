@@ -974,9 +974,10 @@ async fn admit_peer_receiver(
     ))
 }
 
-/// A Codex helper runs in an operator workspace. Its bridge supplies the
-/// original project basename and the actor it expects this session to own.
-fn codex_attachment(
+/// A Codex or Claude Code helper runs in an operator workspace. Its bridge
+/// supplies the original project basename, the actor it expects this session
+/// to own and, when it is not Codex, its frontend.
+fn helper_attachment(
     mailbox: &runtime::mailbox::Mailbox,
     agent: &str,
     session: &str,
@@ -986,13 +987,15 @@ fn codex_attachment(
     struct Attachment {
         actor: String,
         workspace: String,
+        frontend: Option<String>,
     }
     let raw = std::env::var("SUDOCODE_CODEX_PEER_ATTACHMENT").ok()?;
     let info: Attachment = serde_json::from_str(&raw).ok()?;
     if info.actor != agent || mailbox.self_id() != agent || !mailbox.authenticates_senders() {
         return None;
     }
-    mailbox.announce_attachment(session, "Codex", &info.workspace, stop)
+    let frontend = info.frontend.as_deref().unwrap_or("Codex");
+    mailbox.announce_attachment(session, frontend, &info.workspace, stop)
 }
 
 /// Register `agent`'s one peer worker for `session_id`, started by `start`
@@ -1027,7 +1030,7 @@ async fn admit_peer_worker(
                 let stop = HookAbortSignal::new();
                 let start = start.take().expect("a worker starts once");
                 let worker = start(stop.clone());
-                let announcement = codex_attachment(mailbox, agent, session_id, stop.clone());
+                let announcement = helper_attachment(mailbox, agent, session_id, stop.clone());
                 let receiver = Arc::new(PeerReceiver {
                     stop,
                     worker: Mutex::new(PeerReceiverWorker::Running(worker, announcement)),

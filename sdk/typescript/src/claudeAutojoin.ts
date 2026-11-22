@@ -88,7 +88,11 @@ export async function runClaudeMcp(file: string, environment: NodeJS.ProcessEnv 
       // A retryable failure keeps the binding pending, so the next attempt drives the same operation.
       await provisionBinding(bindingDirectory, binding, workspace, claim => enroll(config.enrollmentArgv, claim),
         retryableEnrollment);
-      return { ...boundProfile(binding), version: 1, auditLog: config.auditLog };
+      const profile = boundProfile(binding);
+      // The owned scode publishes this as the session's peer label.
+      return { ...profile, env: { ...profile.env, SUDOCODE_CODEX_PEER_ATTACHMENT: JSON.stringify({
+        actor: binding.actor, workspace: path.basename(workspace) || 'filesystem root', frontend: 'Claude Code' }) },
+      version: 1, auditLog: config.auditLog };
     }, lifecycle);
   } finally { await delivery.close(); }
 }

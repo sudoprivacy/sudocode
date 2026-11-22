@@ -145,6 +145,27 @@ fn cohost_mailbox_keeps_description_in_the_agents_vfs_directory() {
 }
 
 #[test]
+fn a_claude_code_attachment_is_announced_and_an_unknown_frontend_is_not() {
+    let root = tempfile::tempdir().unwrap();
+    let mailbox = Mailbox::workspace_local(root.path(), "peer".into());
+    let stop = runtime::HookAbortSignal::new();
+    assert!(mailbox
+        .announce_attachment("session", "Cursor", "nexus", stop.clone())
+        .is_none());
+    mailbox
+        .announce_attachment("session", "Claude Code", "nexus", stop)
+        .expect("a Claude Code attachment is announced")
+        .join()
+        .unwrap();
+    let store = mailbox.description_store(mailbox.self_id()).unwrap();
+    let label = store.read().unwrap().unwrap().attachment.unwrap();
+    assert!(
+        label.starts_with("Claude Code · ") && label.ends_with(" · nexus"),
+        "{label}"
+    );
+}
+
+#[test]
 fn attaching_and_compacting_preserve_each_others_metadata() {
     let root = tempfile::tempdir().unwrap();
     let mailbox = Mailbox::workspace_local(root.path(), "peer".into());

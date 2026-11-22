@@ -71,9 +71,10 @@ during compaction is preserved. Native filesystem locks exclude concurrent
 writers; node backends retain their advisory lease guarantee unless they
 provide conditional writes.
 
-When an interactive scode or a stock Codex bridge attaches to a Node, it
-publishes its frontend, machine name and workspace basename in the optional
-`attachment` field. Peers see this label before the first task description.
+When an interactive scode or a stock Codex or Claude Code bridge attaches to a
+Node, it publishes its frontend, machine name and workspace basename in the
+optional `attachment` field. Peers see this label before the first task
+description.
 Reattaching preserves the last task and its timestamp. A later compaction
 updates the task and retains the attachment.
 

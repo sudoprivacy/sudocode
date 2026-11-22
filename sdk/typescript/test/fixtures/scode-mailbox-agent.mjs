@@ -10,7 +10,7 @@ let sessionId, offered = 0, retired = false;
 const app = acp.agent({ name: 'mailbox-wire-fixture', version: '1' })
   .onRequest(acp.methods.agent.initialize, ctx => {
     const version = ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version;
-    log({ method: 'initialize', version });
+    log({ method: 'initialize', version, attachment: JSON.parse(process.env.SUDOCODE_CODEX_PEER_ATTACHMENT ?? 'null') });
     return { protocolVersion: 1, agentCapabilities: { loadSession: true },
       _meta: { sudocode: { peerInput: { version: scenario === 'older' ? 2 : version } } } };
   })

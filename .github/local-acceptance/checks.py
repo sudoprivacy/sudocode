@@ -590,15 +590,22 @@ def validate_before_host_lease(names, root, output):
     if os.name == "nt" and any(name.startswith("native-") for name in names):
         print("NATIVE_HOST_TOOLCHAIN=" + json.dumps({"msvc": str(windows_msvc_toolchain()),
                                                      "stage": "before host queue"}), flush=True)
-    if set(names) & {"rendering", "browser"}:
+    if "guard-contract" in names:
+        validate_guard_before_host_lease(root, output)
+    if set(names) & {"guard-contract", "rendering", "browser"}:
         try:
-            subprocess.run(docker_engine_probe_command(30), check=True, capture_output=True)
+            subprocess.run(docker_engine_probe_command(30), check=True, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
         except (subprocess.CalledProcessError, OSError) as error:
-            raise RuntimeError("The selected rendering/browser checks need local Docker, which did not answer. "
+            detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+            raise RuntimeError("The selected acceptance checks could not reach local Docker. "
                                "Start Docker Desktop (or correct DOCKER_HOST/context), then rerun the same "
-                               f"acceptance command; no check has started: {error}") from error
-    if "guard-contract" not in names:
-        return
+                               f"acceptance command. No host queue or container/native field has started. {detail}") from error
+        print("DOCKER_ENGINE_READINESS: server version checked before the host queue; "
+              "all selected acceptance is still required.", flush=True)
+
+
+def validate_guard_before_host_lease(root, output):
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
           "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
     executor = stage_profile_executor(root, execution_policy_ref(), "guard-contract",
@@ -1250,7 +1257,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d28aee206a7538b334ff1143916cf44a1c512f8d7118cfcd9f0c40e55425a385",
-        "e2e/local-acceptance/host_lease_acceptance.py": "68a8886260c4117ff7350e455040adee9d6ea2a3cf814f593ccce7cee242d809",
+        "e2e/local-acceptance/host_lease_acceptance.py": "cc2e96d6abfaed47e920b0fd03e5c0a82333abf95a8856d0944cd597864164c4",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",

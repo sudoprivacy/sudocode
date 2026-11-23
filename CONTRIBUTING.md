@@ -522,6 +522,11 @@ its argv placeholders do not prepare tools or execute tests. A correctly pinned
 but malformed inventory still refuses while another private workflow holds the
 host, without a ticket or completed guard credit. A valid inventory still waits
 for that holder and executes its required profile.
+After those static checks pass, a fresh guard checks the Docker Engine's server
+version before joining the FIFO, using the same bounded probe as execution.
+An unavailable Engine leaves signed preflight progress and the original client
+error. The guard verifies Docker again after acquiring the lease and publishes
+results only after running every required check.
 Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their

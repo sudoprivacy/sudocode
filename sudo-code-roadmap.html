@@ -2001,13 +2001,15 @@ sizes and job clocks describe those runs. The cache inventory at this
 observation listed 11,771,056,003 bytes against the configured 10 GB limit.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
-<p><strong>Post-policy source cohort, 7 of 20.</strong> The first seven eligible
-merges account for 634.450 known GitHub runner-minutes, with one unassigned
-interval still unresolved. The median last queue-entry-to-merge span is
-581s and includes validation and dispatch. The first scheduled workspace
-run, remaining source cohort, and author-side time are measured separately.
-The whole-lifecycle one-tenth target remains unproven.</p>
-<p><strong>Author-side clocks for the seven tracked merges.</strong>
+<p><strong>Post-policy source cohort, 14 of 20.</strong> The first fourteen
+eligible Rust-source merges account for 1,107.000 known GitHub runner-minutes
+across 205 linked original runs, with one unassigned job interval. The seven
+added PRs are #1531, #1547, #1548, #1551, #1552, #1553 and #1556. The selection
+still requires Rust source files and complete changed-file lists. No new
+class of PR is added to fill the cohort. Runner occupancy is a lower bound
+on observed CI use. It does not measure author time, end-to-end elapsed time
+or a controlled before/after speedup. The one-tenth target remains unproven.</p>
+<p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its
 merge gives a median observed span of 248.672 minutes. The median signed author
@@ -2017,7 +2019,7 @@ intervals and cannot be added. Two of the available author starts predate the
 policy activation. Earlier unpublished attempts and the first-failure clock
 are still incomplete. These observations give lower bounds on the recorded
 successful spans, with no whole-lifecycle one-tenth conclusion.</p>
-<p><strong>Observed failure and final-source clocks.</strong> On the same
+<p><strong>Observed failure and final-source clocks.</strong> On the first
 seven-PR sample, the average interval from the earliest available validation
 of the final source head to merge was 109.131 minutes. Across all known
 revisions of those PRs, it was 763.322 minutes. The earlier revision, local
@@ -2027,6 +2029,16 @@ earliest known validation to the first retained execution failure was 204.557
 minutes, separating a missing signed-receipt admission result from the later
 failed tool preparation. These partial observed clocks leave the one-tenth
 target unproven.</p>
+<p>For those first seven final heads, the mean interval from the earliest
+recorded author start to the final invocation was 38.263 minutes. The
+final invocation to the signed check finish averaged 51.012 minutes.
+Signed finish to final queue entry averaged 10.022 minutes, of which
+7.671 minutes fell before the last required complementary check finished.
+In four of the seven PRs those complementary checks started after the
+signed author checks finished. The final queue-entry-to-merge interval,
+including integrated checks, averaged 9.833 minutes. The signed spans
+include unallocated time, so the cohort-wide share of host waiting or
+compiler work is still unknown.</p>
 <p><strong>Native dependency cache lookup.</strong> The Windows complement
 for <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795383">PR #1520</a>
 restored a 2,458,357,241-byte fallback in 74s. Its requested suffix differed

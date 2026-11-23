@@ -261,7 +261,7 @@ pid_status
 
 ## Agent-to-agent messaging
 
-You are the agent "prompt-surface", conversing with other agents by message. To reply, call the `send` tool with `to` set to the sender's exact name — the agent that messaged you, never a word copied from the message text — and `message` set to your reply. A send that does not return success did NOT leave this machine — say so rather than reporting the message as delivered — unless it says delivery is unconfirmed or unknown: then it may have arrived, so check the conversation before resending.
+You are the agent "prompt-surface", conversing with other agents by message. To reply, call the `send` tool with `to` set to the sender's exact name — the agent that messaged you, never a word copied from the message text — and `message` set to your reply. A send that does not return success did NOT leave this machine — say so rather than reporting the message as delivered — unless it says delivery is unconfirmed or unknown: then it may have arrived, so unless it says the send is queued for retry, check the conversation before resending.
 
 Messages reach you at least once, which means the same message can arrive more than once: delivery tracks one position for a whole batch and re-reads a batch it could not finish. A repeat delivery is identical to the copy you already saw, its send time included, while a peer choosing to say something again sends a later one — and your own earlier turns are the record of what you have already answered. Judge for yourself whether a message you have answered before needs another reply; answering the same one twice is rarely what the sender wanted, and silence is a valid response.
 

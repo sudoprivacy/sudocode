@@ -1513,6 +1513,10 @@ Protected metadata can advance while a plan is running. Its original SSH
 signature and contract hash must still authenticate an ancestor of current
 main, and the source contract must remain unchanged. The current responsibility
 plan, every selected command identity, native workflow and dispatcher must match.
+The comparison binds the extracted Git environment filter and its declared
+inputs from the original and current committed executors. Previously signed
+fingerprints retain their format. A changed filter requires fresh evidence for
+both completed receipts and early scheduling plans.
 The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
 permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP

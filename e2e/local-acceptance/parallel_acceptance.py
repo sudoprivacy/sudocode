@@ -714,6 +714,8 @@ def run_case(output, order):
              (trusted / checks_path).read_text().replace(' return [execute', ' assert False, "changed command assertion"\n return [execute')),
             ("changed process executor", helper_path,
              executor.replace(signature, signature + '\n    assert False, "changed process executor"', 1)),
+            ("changed Git selector input", helper_path, executor.replace(
+                '"GIT_COMMON_DIR"})', '"GIT_COMMON_DIR", "SCODE_SELECTOR_FIXTURE_MARKER"})')),
             ("changed native workflow", ".github/workflows/local-acceptance.yml",
              (trusted / '.github/workflows/local-acceptance.yml').read_text() + '\n# Changed native workflow.\n'),
             ("changed native dispatcher", ".github/local-acceptance/cross_platform.py",

@@ -343,6 +343,39 @@ fn narrow_live_and_replay_keep_spacing_and_content() {
 }
 
 #[test]
+fn wrapped_submitted_input_keeps_the_text_gutter_live_and_on_resume() {
+    let env = TestEnv::new_mock("wrapped-input-history");
+    let head = "a".repeat(50);
+    let prompt = env.prompt(&format!("{head}WRAP_TAIL"), "single_turn_text");
+    let mut sess = start(&env, false, 52);
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("WRAP_TAIL"),
+        env.timeout(),
+        "wrapped draft received",
+    );
+    let marker = common::turn_status_marker(&sess);
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &marker, env.timeout(), "the wrapped input ran");
+    let assert_echo = |sess: &PtySession| {
+        let rows = rows(sess);
+        let first = position(&rows, &format!("❯ {head}"));
+        assert!(
+            rows[first + 1].starts_with("  WRAP_TAIL"),
+            "wrapped input must stay under its first line: {rows:#?}"
+        );
+        let answer = assistant_position(&rows, "The answer is 4");
+        assert_gap(&rows, first + 1, answer, 1);
+    };
+    assert_echo(&sess);
+    finish(&mut sess);
+    let mut resumed = start(&env, true, 52);
+    assert_echo(&resumed);
+    finish(&mut resumed);
+}
+
+#[test]
 fn repeated_file_read_has_one_frame_per_saved_command() {
     let env = TestEnv::new_mock("repeated-file-spacing");
     for (file, body) in [

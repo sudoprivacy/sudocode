@@ -93,6 +93,13 @@ pub(crate) fn wrap_line_with_indent(
     let width = width.max(1);
     let indent = continuation_indent.min(width.saturating_sub(2));
     let padding = " ".repeat(indent);
+    let padding_style = crossterm::style::ContentStyle {
+        background_color: source
+            .spans(range.clone())
+            .next()
+            .and_then(|(style, _)| style.background_color),
+        ..Default::default()
+    };
     let mut rows = Vec::new();
     let mut row = StyledText::default();
     let mut col = initial_col;
@@ -105,7 +112,7 @@ pub(crate) fn wrap_line_with_indent(
             for _ in 0..cells {
                 if col >= width {
                     rows.push((std::mem::take(&mut row), col));
-                    row.push(crossterm::style::ContentStyle::default(), &padding);
+                    row.push(padding_style, &padding);
                     col = indent;
                 }
                 row.push_link(style, " ", link);
@@ -114,7 +121,7 @@ pub(crate) fn wrap_line_with_indent(
         } else {
             if col > 0 && col + cells > width {
                 rows.push((std::mem::take(&mut row), col));
-                row.push(crossterm::style::ContentStyle::default(), &padding);
+                row.push(padding_style, &padding);
                 col = indent;
             }
             for (style, part, link) in source.rich_spans(start..start + grapheme.len()) {

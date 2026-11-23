@@ -1254,7 +1254,7 @@ def native_guard_files():
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "49e434344adf02e77454c9e56e8070b156c59e8ca4d195f4435efe3e20ab8d91",
         "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "a29cd12b2b4e79ba94ea32ddb1e37ab04215054ca8bc12823d7dbdb01816c799",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "5f1d72db0585929f19f0015c2991744157dc02347e5bcc21b12291492da6b700",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",

@@ -626,6 +626,7 @@ except subprocess.TimeoutExpired:
         "2ddedba1c6f5bdaee370752430cb40c802af8f10c2c552f76808380051dc2d91",
         "968aed4934bc9a4c0db73fe4387a38886204d4fe9a74ad5ad511eaedb7c4b13a",
         "6283722865444555127b62148aea36ae74b7e002d6cfe24540afd39fe61f2380",
+        "e9be3603ef2402aa7ed98b62b2ad7729418d4f8ebacacafc01401e1aa542d825",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({

@@ -3,7 +3,9 @@
 A follow-up push to a ready PR publishes its signed plan, returns, and verifies
 the exact head in the branch's own worktree in the background. A newer head
 supersedes the older check, the same head never runs twice, and every other
-push keeps the original blocking path. The compiler-cache probe is exercised
+push keeps the original blocking path. The pushes run with the GIT_DIR Git
+gives a hook in a linked worktree, and the author keeps a staged change; the
+check never uses or resets the author's HEAD and index. The compiler-cache probe is exercised
 with a stand-in server that never answers. GitHub metadata is faked in process
 and the background finalization request is made without credentials, so no
 call reaches GitHub. This grants no product journey coverage.
@@ -185,6 +187,24 @@ def exercise(output, spawned):
     assert helper.deferred_pull("elsewhere", first, preview) is None, "a non-GitHub remote keeps blocking"
     assert helper.deferred_pull("origin", first, {**preview, "ci": []}) is None, "no complementary host keeps blocking"
 
+    @contextlib.contextmanager
+    def as_hook():
+        """Git runs pre-push in a linked worktree with GIT_DIR naming it."""
+        os.environ["GIT_DIR"] = git("rev-parse", "--absolute-git-dir")
+        try:
+            yield
+        finally:
+            os.environ.pop("GIT_DIR", None)
+
+    def keep_working(name):
+        """The author stages more work while the check runs."""
+        (work / name).write_text("work in progress")
+        git("add", name)
+
+    def author_untouched(staged):
+        assert git("symbolic-ref", "--short", "HEAD") == "source", "the author's branch stays checked out"
+        assert git("diff", "--cached", "--name-only") == staged, "the author's staged work is kept"
+
     def remote_note(note_ref, head):
         fetched = subprocess.run(["git", "fetch", "--no-tags", "origin", f"+{note_ref}:{note_ref}"], cwd=work,
                                  capture_output=True)
@@ -199,19 +219,26 @@ def exercise(output, spawned):
         return current
 
     # The first head: plan published at once, check running in its own worktree.
+    keep_working("first-notes.txt")
     started = time.monotonic()
-    helper.defer_check(first, "origin", ready, trusted)
+    with as_hook():
+        helper.defer_check(first, "origin", ready, trusted)
     assert time.monotonic() - started < 60, "the push must not wait for the check"
     assert remote_note(helper.PLAN_NOTE_REF, first)["attestations"], "the signed plan precedes the push"
     first_record = record()
     worktree = helper.deferred_state("source") / "w"
     assert git("rev-parse", "HEAD", cwd=worktree) == first
     wait_for(lambda: (control / "started-first").exists(), "the first check to start")
-    assert git("status", "--porcelain") == "", "the author's checkout is untouched"
+    author_untouched("first-notes.txt")
+    assert git("status", "--porcelain") == "A  first-notes.txt", "the author's checkout is untouched"
 
-    # A newer head supersedes it: the old check stops before publishing.
+    # A newer head supersedes it: the old check stops before publishing. The
+    # existing acceptance worktree moves to it without moving the author.
     second = commit("second")
-    helper.defer_check(second, "origin", ready, trusted)
+    keep_working("second-notes.txt")
+    with as_hook():
+        helper.defer_check(second, "origin", ready, trusted)
+    author_untouched("second-notes.txt")
     import psutil
 
     wait_for(lambda: finished(first_record["pid"]), "the superseded check to stop")

@@ -35,6 +35,7 @@ REVIEWED_VERIFIER_LAYOUTS = {
     "ee11ddac8a14ea9a0d79355589c50fff2bac9f76f0c3dadce1ead90d4292000f",
     "e34b53b967976f01755ce30d77584a5e8465d73075c7e0f97de15eac5279f8f4",
     "72f50d88ff07c17f53a740a571dede377dc52f03139f298dc11d72e17ef39c81",
+    "61fd35df0aa09ff0bfa4d24f2b38bd367efba0258b48d5c1ce2f01352e6ef2a5",
 }
 
 
@@ -469,7 +470,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "5603a33d2e0bace9e742dbb87cff9253114579d3"
+        "743302cf37aeac3ea0c29f577c002951575480ba"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",
@@ -479,7 +480,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "0005e1e46f890ed4b2656ad9827db80fea27f851"
+        "a88273cd2d997bd2072786b5b4ecdca26cc89d63"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",

@@ -4,7 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
-import { connectRecoveringCodex, CodexCleanupUnknownError as RecoveryCleanupUnknownError } from '../src/codexConnection';
+import { spawnWindowsProxy, WindowsProxyCleanupError } from '../src/windowsProxyJob';
+import { connectRecoveringCodex, CodexRequestError as RecoveryRequestError } from '../src/codexConnection';
 const root = path.resolve(__dirname, '../..');
 const { connectCodex, connectCodexCallback, createCodexCallback, CodexRequestError, CodexCleanupUnknownError } = require(process.argv[2] ?? path.join(root, 'dist/index.cjs')) as typeof import('../src/index');
 
@@ -149,6 +150,25 @@ async function main(): Promise<void> {
     await assert.rejects(connectCodex({ ...config,
       codexArgv: [...config.codexArgv.slice(0, -1), 'http-refusal'] }), /Unexpected server response: 503/);
 
+    if (process.platform === 'win32') {
+      // Resolve a bare executable against the supplied PATH and exercise the
+      // native argv boundary with characters significant to both shells.
+      const binary = path.join(directory, 'fixture-node.exe');
+      fs.copyFileSync(process.execPath, binary);
+      const output = path.join(directory, 'argv roundtrip.json');
+      const selected = ['word with spaces', 'double"quote', 'trailing\\', '%PATH% & 🧪', ''];
+      const proxy = await spawnWindowsProxy(['fixture-node', '-e',
+        'require("fs").writeFileSync(process.argv[1],JSON.stringify(process.argv.slice(2))); process.exit(42)',
+        output, ...selected], { PATH: directory, SystemRoot: process.env.SystemRoot });
+      assert.equal((await proxy.exited).code, 42);
+      assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), selected);
+      // Force the keeper itself to exit through the returned ChildProcess
+      // handle. A missing drain receipt is a different case from a slow exit.
+      const interrupted = await spawnWindowsProxy([process.execPath, '-e', 'setInterval(()=>{},1000)'], process.env);
+      interrupted.child.kill();
+      await assert.rejects(interrupted.exited, WindowsProxyCleanupError);
+    }
+
     for (const version of [undefined, 0, '1', 2]) {
       durableQueueVersion = version;
       const before = calls.length;
@@ -168,34 +188,52 @@ async function main(): Promise<void> {
         'same-address reconnect to an older server refuses before a write; no legacy fallback');
     } finally { await qualified.close(); durableQueueVersion = 1; }
 
-    // POSIX inherited pipe lifetime is the failure trigger here. Windows
-    // cleanup ownership has its separate real bootstrap-failure regression.
-    if (process.platform !== 'win32') {
-    const recoveryJournal = path.join(directory, 'recovery-cleanup.jsonl');
-    const recovering = await connectRecoveringCodex({ ...config, closeTimeoutMs: 300,
-      codexArgv: [...config.codexArgv.slice(0, -1), 'fail-reconnect-close'],
-      env: { ...config.env, SCODE_FIXTURE_RECONNECT_JOURNAL: recoveryJournal } });
-    let recoveryError: unknown;
-    try {
-      await assert.rejects(recovering.request('fixture/drop', {}));
-      await assert.rejects(recovering.request('thread/loaded/list', {}), error => {
-        recoveryError = error;
-        return error instanceof RecoveryCleanupUnknownError;
-      });
-      await assert.rejects(recovering.close(), error => error === recoveryError);
-      await waitFor(() => fs.existsSync(recoveryJournal + '.drained'));
-      // Later pipe draining does not erase the retained unconfirmed cleanup.
-      await assert.rejects(recovering.close(), error => error === recoveryError);
-      await assert.rejects(recovering.request('thread/loaded/list', {}), /closed/);
-      const spawned = fs.readFileSync(recoveryJournal, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(spawned.filter(row => row.phase === 'proxy').length, 2, 'failed replacement is never retried');
-      assert.equal(spawned.filter(row => row.phase === 'stderr-holder').length, 1);
-    } finally {
-      await recovering.close().catch(error => { if (error !== recoveryError) throw error; });
-      if (fs.existsSync(recoveryJournal) && fs.readFileSync(recoveryJournal, 'utf8').includes('stderr-holder')) {
-        await waitFor(() => fs.existsSync(recoveryJournal + '.drained'));
-      }
-    }
+    for (const shutdown of [false, true]) {
+      const journal = path.join(directory, `recovery-${shutdown}.jsonl`);
+      const snapshots: Array<number | undefined> = [];
+      const recovering = await connectRecoveringCodex({ ...config, closeTimeoutMs: 300,
+        codexArgv: [...config.codexArgv.slice(0, -1), 'fail-reconnect-close'],
+        env: { ...config.env, SCODE_FIXTURE_RECONNECT_JOURNAL: journal } }, undefined, pid => snapshots.push(pid));
+      const spawned = () => fs.readFileSync(journal, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      try {
+        await assert.rejects(recovering.request('fixture/drop', {}), error =>
+          error instanceof RecoveryRequestError && error.outcome === 'unknown');
+        const rejected = await Promise.allSettled([1, 2].map(() => recovering.request('fixture/never-send', {})));
+        assert.ok(rejected.every(result => result.status === 'rejected'));
+        const proxies = spawned().filter(row => row.phase === 'proxy');
+        assert.equal(proxies.length, 2);
+        if (process.platform !== 'win32') {
+          assert.ok(rejected.every(result => result.status === 'rejected' && result.reason instanceof RecoveryRequestError
+            && result.reason.outcome === 'not_sent' && result.reason.message.includes(String(proxies[1].pid))));
+          assert.equal(snapshots.at(-1), proxies[1].pid);
+          assert.ok(!fs.existsSync(journal + '.drained'));
+        }
+        if (shutdown) {
+          await recovering.close();
+          assert.equal(spawned().filter(row => row.phase === 'proxy').length, 2);
+          await assert.rejects(recovering.request('thread/loaded/list', {}), /closed/);
+        } else {
+          const deadline = Date.now() + 15000;
+          for (;;) {
+            try { await recovering.request('thread/loaded/list', {}); break; }
+            catch (error) {
+              if (Date.now() >= deadline || !(error instanceof RecoveryRequestError && error.outcome === 'not_sent')) throw error;
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+          }
+          assert.equal(spawned().filter(row => row.phase === 'proxy').length, 3);
+        }
+        const holders = spawned().filter(row => row.phase === 'holder');
+        assert.equal(holders.length, process.platform === 'win32' ? 2 : 1);
+        if (process.platform === 'win32') {
+          for (const {pid} of holders) assert.throws(() => process.kill(pid, 0), {code:'ESRCH'});
+          assert.ok(!fs.existsSync(journal + '.drained'), 'both descendants were stopped while sleeping');
+        } else {
+          assert.ok(fs.existsSync(journal + '.drained'));
+          assert.equal(snapshots.at(-1), undefined);
+        }
+        assert.ok(!calls.some(row => row.method === 'fixture/never-send'));
+      } finally { await recovering.close(); }
     }
 
     const message = { sessionId: 'existing-acp', text: '<mailbox-message from="allowed-peer">peer data 零 🧪</mailbox-message>',

@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
-      COHOST_BUILD_PROFILE: ${{ startsWith(matrix.os, 'windows-') && 'cohost-release-windows' || 'cohost-release' }}
+      COHOST_BUILD_PROFILE: ${{ matrix.profile || 'cohost-release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,12 +79,14 @@ jobs:
           # rather than the ones in the design.
           - name: macos-x64
             os: macos-15-intel
+            profile: cohost-release-compact
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-x64
             archive_name: nexusd-cohost-macos-x64.tar.gz
             max_size_bytes: 48234496  # 46 MiB — with model drivers: 46,141,528 bytes, 4.5% headroom
           - name: windows-x64
             os: windows-2022
+            profile: cohost-release-compact
             bin: nexusd-cohost.exe
             package_dir: nexusd-cohost-windows-x64
             archive_name: nexusd-cohost-windows-x64.zip

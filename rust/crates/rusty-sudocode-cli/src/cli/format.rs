@@ -450,7 +450,11 @@ pub(crate) fn format_input_echo(
         // box uses. Live commits and replay share this presentation, shade
         // included. Continuation lines indent by two spaces to align under
         // the text.
-        let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
+        let prefix = if idx == 0 {
+            PROMPT_PREFIX
+        } else {
+            crate::render::GUTTER
+        };
         let body = format!(
             "{prefix}{}",
             mark_pasted(line, offset, pasted, &paste_on, &paste_off)
@@ -459,14 +463,18 @@ pub(crate) fn format_input_echo(
         if idx > 0 {
             rendered.push('\n');
         }
-        if let Some(style) = surface {
-            let styled = style.apply(body).to_string();
-            rendered.push_str(
-                &crate::render::text_layout::wrap_ansi_to_width(&styled, term_width).join("\n"),
-            );
-        } else {
-            rendered.push_str(&body);
-        }
+        let styled = match surface {
+            Some(style) => style.apply(body).to_string(),
+            None => body,
+        };
+        rendered.push_str(
+            &crate::render::text_layout::wrap_ansi_with_indent(
+                &styled,
+                term_width,
+                crate::render::GUTTER_COLS,
+            )
+            .join("\n"),
+        );
     }
     (rendered, raw_lines.len())
 }

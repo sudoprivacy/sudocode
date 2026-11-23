@@ -397,6 +397,11 @@ Only this existing main workflow saves the cache; no second cache writer, compil
 image alias, acceptance signer or cached test-result authority is introduced.
 Changes to the main Rust CI workflow select this publisher as well. The
 accepted merge-group run still supplies the artifact and its original key.
+An accepted queue on image `20261111.82.6` later published under its own key
+from main image `20261111.196.1`. Main verified the original archive and skipped
+the fallback compile. Subsequent consumers still require their own exact
+image and compiler inputs.
+[Original publication job](https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179).
 Archive transfer/storage costs and a subsequent matching-image consumer must be
 measured before claiming warm savings; local fixture success alone is insufficient.
 PR #1497 supplied actual hosted publication after its full native/Docker contract
@@ -1105,9 +1110,15 @@ the original receipt, signature and logs remain in their output directory. The
 required command prints `LOCAL_ACCEPTANCE_OUTPUT_INDEX` with both paths. These
 references only locate evidence: reuse still verifies its signature, source,
 host, protected commands and original log hashes. Invalid references cannot
-approve checks. An index write failure prints
+approve checks. If a newer locator exposes only part of an exact-source run,
+automatic discovery can select an older receipt whose verified compatible
+profiles contain all of those checks plus additional required profiles. The
+original explicit resume path still takes priority. An index write failure prints
 `LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
 explicit `check --resume-from /path/to/output` recovery.
+When the original check knows the PR, its printed resume command retains
+`--dispatch-publish <PR>` so the trusted publisher can finish the existing
+native CI run after the author receipt is published.
 Older external outputs can be discovered without rerunning or re-signing them:
 
 ```bash
@@ -1498,6 +1509,16 @@ permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
+
+Two reviewed changes to the native dependency cache can retain an older signed
+plan. The verifier recognizes the trusted toolchain cache command and the
+complete checkout move from `candidate` to `worktree`. This makes the raw Cargo
+configuration sort after the root toolchain pin, matching the publisher's
+cache input order. The verifier binds the committed toolchain action, adapter,
+and cache layout script and compares every other workflow byte. It refuses a
+partial checkout move, other workflow edits, or changes to these scripts. The
+original tests, signers, complementary jobs and deadlines remain required.
+A plan still cannot satisfy completed acceptance.
 
 Compiler-budget or command-completion waiting changes can preserve an older signed execution plan and its
 completed native profiles. The verifier derives this proof from both committed

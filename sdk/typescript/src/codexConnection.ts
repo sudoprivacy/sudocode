@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Duplex } from 'node:stream';
 import WebSocket from 'ws';
-import { timeout } from './timeout';
+import { spawnWindowsProxy, WindowsProxyCleanupError, type OwnedProxy } from './windowsProxyJob';
 import { requireDurableCodexQueue } from './codexCapabilities';
 
 export interface CodexConnectionConfig {
@@ -60,11 +60,37 @@ export function validateCodexConnectionConfig(config: CodexConnectionConfig): vo
 export async function connectCodex(
   config: CodexConnectionConfig, onNotification?: (notification: CodexNotification) => void | Promise<void>,
 ): Promise<CodexConnection> {
+  return connectOwnedCodex(config, onNotification);
+}
+
+function spawnPosixProxy(argv: string[], env: NodeJS.ProcessEnv): OwnedProxy {
+  const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], env });
+  const exited: OwnedProxy['exited'] = new Promise(resolve => {
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  return {
+    child, pid: child.pid, exited,
+    stop(force) {
+      if (child.exitCode === null && child.signalCode === null) child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    },
+  };
+}
+
+async function connectOwnedCodex(config: CodexConnectionConfig,
+  onNotification?: (notification: CodexNotification) => void | Promise<void>,
+  onExitWait?: (pid: number | undefined) => void,
+): Promise<CodexConnection> {
   validateCodexConnectionConfig(config);
-  const child = spawn(config.codexArgv[0], [...config.codexArgv.slice(1), 'app-server', 'proxy',
-    ...(config.socket ? ['--sock', config.socket] : [])], {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: config.env,
-    });
+  const argv = [...config.codexArgv, 'app-server', 'proxy', ...(config.socket ? ['--sock', config.socket] : [])];
+  let proxy: OwnedProxy;
+  try {
+    proxy = process.platform === 'win32' ? await spawnWindowsProxy(argv, config.env ?? process.env)
+      : spawnPosixProxy(argv, config.env ?? process.env);
+  } catch (error) {
+    if (error instanceof WindowsProxyCleanupError) throw new CodexCleanupUnknownError(error.message);
+    throw error;
+  }
+  const { child } = proxy;
   const wire = Duplex.from({ readable: child.stdout, writable: child.stdin });
   // This one-shot stdio wire is not a TCP socket and cannot enter HTTP's
   // keep-alive pool when a proxy returns a non-upgrade response.
@@ -101,13 +127,11 @@ export async function connectCodex(
   };
   child.on('error', fail);
   child.stdin.on('error', fail);
-  const exited = new Promise<{ code: number | null; signal: ChildProcess['signalCode'] }>(resolve => {
-    child.once('close', (code, signal) => {
-      stopped = true;
-      resolve({ code, signal });
-      fail(new Error(`Codex proxy exited ${code}/${signal}: ${stderr}`));
-    });
-  });
+  const exited = proxy.exited;
+  void exited.then(({ code, signal }) => {
+    stopped = true;
+    fail(new Error(`Codex proxy exited ${code}/${signal}: ${stderr}`));
+  }, error => fail(new Error(String(error))));
   socket.on('error', fail);
   socket.on('close', () => fail(new Error('Codex proxy closed; request outcome may be unknown')));
   socket.on('message', bytes => {
@@ -167,14 +191,19 @@ export async function connectCodex(
     fail(new Error('Codex connection owner closed'));
     socket.terminate();
     wire.destroy();
-    if (!stopped) child.kill(); // Only our spawn, never the native server or frontend.
-    closePromise = (async () => {
-      try { await timeout(exited, closePhaseMs, 'Codex proxy exit'); }
-      catch {
-        if (!stopped) child.kill('SIGKILL');
-        await timeout(exited, closePhaseMs, 'Codex proxy forced exit');
+    if (!stopped) proxy.stop(false);
+    const escalation = setTimeout(() => {
+      if (!stopped) {
+        onExitWait?.(proxy.pid);
+        proxy.stop(true);
       }
-    })().catch(error => { throw new CodexCleanupUnknownError(`Owned Codex proxy cleanup unconfirmed: ${String(error)}`); });
+    }, closePhaseMs);
+    closePromise = exited.then(() => {}, error => {
+      throw new CodexCleanupUnknownError(`Owned Codex proxy cleanup unconfirmed: ${String(error)}`);
+    }).finally(() => {
+      clearTimeout(escalation);
+      onExitWait?.(undefined);
+    });
     return closePromise;
   };
   try {
@@ -195,40 +224,51 @@ export async function connectCodex(
 /** Reconnect the owned proxy to the SAME server. Never replay an arbitrary
  * in-flight RPC: only the durable inbox owns idempotent delivery retries. */
 export async function connectRecoveringCodex(config: CodexConnectionConfig,
-  onNotification?: (notification: CodexNotification) => void | Promise<void>): Promise<CodexConnection> {
+  onNotification?: (notification: CodexNotification) => void | Promise<void>,
+  onExitWait?: (pid: number | undefined) => void): Promise<CodexConnection> {
   validateCodexConnectionConfig(config);
   let current: CodexConnection | undefined;
   let replacing: Promise<void> | undefined, closing: Promise<void> | undefined;
   let closed = false, retryAt = 0;
   let reconnectError: unknown;
   let recoveryStopped = false;
-  // Startup transport failure is not an authoritative empty root inventory.
-  // The owning observer remains alive and retries its next bounded read.
-  try { current = await connectCodex(config, onNotification); }
-  catch (error) {
-    if (error instanceof CodexCleanupUnknownError) throw error;
-    reconnectError = error; retryAt = performance.now() + 1000;
-  }
+  let waitingPid: number | undefined;
+  const waiters = new Set<(error: Error) => void>();
+  const waitingError = () => new CodexRequestError('not_sent', `Waiting for exit of Codex proxy pid ${waitingPid}`);
+  const observeExitWait = (pid: number | undefined) => {
+    waitingPid = pid;
+    if (pid !== undefined) for (const reject of waiters) reject(waitingError());
+    try { void Promise.resolve(onExitWait?.(pid)).catch(() => {}); } catch { /* A status observer cannot change ownership. */ }
+  };
   let finish!: (value: { code: number | null; signal: ChildProcess['signalCode'] }) => void;
   const exited = new Promise<{ code: number | null; signal: ChildProcess['signalCode'] }>(resolve => { finish = resolve; });
   const ready = async () => {
     if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
     if (recoveryStopped) throw reconnectError;
+    if (waitingPid !== undefined) throw waitingError();
     if (current?.connected) return;
     if (!replacing) {
       if (performance.now() < retryAt) throw new CodexRequestError('not_sent', `Native reconnect backoff: ${String(reconnectError)}`, undefined, reconnectError);
       replacing = (async () => {
         await current?.close();
         if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
-        current = await connectCodex(config, onNotification);
+        current = await connectOwnedCodex(config, onNotification, observeExitWait);
         reconnectError = undefined;
         if (closed) await current.close();
       })().catch(error => { reconnectError = error; recoveryStopped = error instanceof CodexCleanupUnknownError; throw error; })
-        .finally(() => { replacing = undefined; retryAt = performance.now() + 1000; });
+        .finally(() => { replacing = undefined; retryAt = reconnectError ? performance.now() + 1000 : 0; });
     }
-    await replacing;
+    // A caller whose cleanup crosses the grace period receives not_sent.
+    // Only the shared replacement stays pending; it cannot dispatch that RPC later.
+    let abandon!: (error: Error) => void;
+    const stalled = new Promise<never>((_, reject) => { abandon = reject; });
+    waiters.add(abandon);
+    try { await Promise.race([replacing, stalled]); }
+    finally { waiters.delete(abandon); }
     if (closed) throw new CodexRequestError('not_sent', 'Native connection owner closed');
   };
+  // A temporary startup failure does not prove the native inventory is empty.
+  try { await ready(); } catch (error) { if (recoveryStopped) throw error; }
   return {
     get initialized() { return current?.initialized; },
     get connected() { return !closed && !!current?.connected; },

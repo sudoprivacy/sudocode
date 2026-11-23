@@ -7,6 +7,7 @@ export type { CodexConnection, CodexConnectionConfig, CodexNotification, CodexRe
 export * from './codexCallback';
 export * from './codexNativeQueue';
 export * from './codexAutojoin';
+export * from './codexMailboxAdmission';
 export type { CodexMailboxAdmission } from './codexMailboxOwner';
 export { CodexMailboxPresentation } from './codexMailboxPresentation';
 export * from './codexMcp';

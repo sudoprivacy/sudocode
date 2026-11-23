@@ -15,14 +15,15 @@ to the exact message offered, so a delivery the client loses is offered again.
 The Codex and Claude Code attachments share this document's offer, token,
 acknowledgement and budget contracts. Every delivery is a numbered submission,
 recorded before it is sent, against a fixed budget. The native methods used
-are part of the stock app-server API and of Claude Code's hook contract,
-qualified against the exact client that owns the thread or session.
+are part of the stock app-server API and of Claude Code's hook contract;
+each attachment admits a thread or session as [Native admission](#native-admission)
+describes.
 
 ## Roles
 
 | Component | Holds | Does |
 |---|---|---|
-| Nexus mailbox | Each message as a record in a conversation transcript. Per conversation, this Agent's reader register: a frame offset behind an exclusive reader lease | The only durable copy of a peer message and of how far each conversation was read |
+| Nexus mailbox | Each message as a record in a conversation transcript. Per conversation, this Agent's reader register: a frame offset fenced by its own conditional write, written under the Agent's one receiver seat | The only durable copy of a peer message and of how far each conversation was read |
 | Owned scode session | The mailbox reader, its credentials and the Agent's acknowledgement key | Offers whole frames, verifies acknowledgement tokens and commits register prefixes. Starts no turn (`peerInput` version 3) |
 | Codex attachment (shared owner) | Per bound thread: the binding and its delivery submission log | Submits budgeted deliveries into the thread's queue; serves `scode_inbox` for acknowledgements and window reads |
 | Claude Code bridge | Per session: the binding, its delivery submission log and its spool | Appends budgeted deliveries to the spool; serves `scode_inbox` the same way |
@@ -85,8 +86,8 @@ frameId})` instead of acknowledging it. The token follows the content, so
 an output cut at its tail or replaced as a whole carries no token. That
 message then stays unread and is offered again.
 
-`maxBytes` is 64 KiB, and lower when the owning server's qualified
-model-facing output budget is lower. A frame that does not fit is read in
+`maxBytes` is 64 KiB, and lower when the owning client's admission sets a
+lower presentation bound (8192 encoded bytes for Codex). A frame that does not fit is read in
 windows, a cursor over its presentation:
 
 - `scode_inbox({read: frameId})` returns a frame that fits whole, as in an
@@ -131,10 +132,10 @@ window start, window end and SHA-256 of the window.
 - Peers never see a token, and tokens of another thread, session or Agent never
   verify.
 
-A commit takes the conversation's reader lease, then moves the register from
+A commit takes the Agent's receiver seat for that write, then moves the register from
 the start of the acknowledged run to its end when the register is still at
 that start. When the register is already past the end, the commit is a no-op
-success. Any other position, or a lease lost to another owner, refuses the
+success. Any other position, or a seat held by another owner, refuses the
 commit. The tool result then reports the refusal, and the records stay unread.
 Each conversation commits independently, and a later call with the same tokens
 retries a refused commit.
@@ -196,8 +197,8 @@ The cost contract follows from this:
 - A submission can produce no native turn: its request was lost, or it was
   logged and never sent. It can also produce more than one, when native
   recovery starts an item again after a failure between starting its turn and
-  deleting its queue item. Qualification records what one binary does on that
-  path; it is not a general ceiling.
+  deleting its queue item. The native fixture measures what one binary does on
+  that path; it is not a general ceiling.
 - A submission logged but never sent, because the owner stopped first, still
   counts. Three such stops exhaust the key's budget with no delivery. The frames
   stay unread, and the next non-delivery turn opens a new key.
@@ -370,25 +371,35 @@ for a thread proceeds as follows:
 Reader registers stay as they are. The reconciliation is idempotent, so an
 owner restarted mid-cutover repeats it from the ledger with the same result.
 
-## Native qualification
+## Native admission
 
-A qualification belongs to one native server executable: the binary of the
-app-server process that owns the thread, identified by path, version and
-SHA-256, together with the effective tool-output settings of the thread's
-configuration. It records:
+A Codex thread is admitted while the server connection that owns it answers
+the thread-scoped mailbox methods: `thread/queue/list`, `thread/turns/list`
+and `thread/read`. The owner also uses `thread/loaded/list`,
+`thread/queue/add` and the `turn/completed`, `thread/status/changed` and
+`thread/queue/changed` notifications. One answer covers that connection and
+thread; a reconnected or replaced server is checked again. A thread its
+server does not admit reports `native_unqualified` and keeps its frames
+unread. Every inventory read still parses each queue item and turn, and a
+mismatch stops submissions for that thread.
 
-- that binary's generated schema: `thread/read` with paged turns and items,
-  the `thread/queue` list and add methods, and the `turn/completed`,
-  `thread/status/changed` and `thread/queue/changed` notifications;
-- behaviour on that binary, in an isolated Codex home with a loopback model
-  endpoint, proving the cases below;
-- the model-facing output budget for an MCP tool result under those settings,
-  measured from the model-endpoint request bytes, which caps the offer bound.
+Codex results and submissions share one bound of 8192 encoded bytes. Codex
+truncates a tool result to that tool's `output_token_limit`, else to the
+model's policy: the bundled model catalog sets 10,000 tokens, and the
+fallback is 10,000 bytes. A presentation at the bound therefore reaches the
+model whole unless the operator lowers the limit for this tool.
 
-A binding is admitted only while the owning binary and settings have a
-qualification. When Codex updates its server or the settings change, bindings
-report `native_unqualified` and keep their frames unread. The qualification
-runs for the new binary, and reception resumes when it passes.
+Retirement does not depend on admission. A frame retires only on its exact
+token, a result cut at its tail carries none, and each key has at most three
+submissions. Under a lowered limit an interior cut can keep the token, and
+retirement then rests on the model withholding the ACK, as the instruction
+asks. A limit below one window cuts the read-alone window as well; windows
+keep their size, so that frame stays unread until the limit is raised. On
+Codex 0.170.0 with a 64-token tool limit, a 505-byte read-alone result was cut
+in its middle and its trailing token line stayed visible.
+
+The native mailbox fixture runs these cases in an isolated Codex home with a
+loopback model endpoint:
 
 | Case | Expected |
 |---|---|
@@ -401,7 +412,7 @@ runs for the new binary, and reception resumes when it passes.
 | delivery request lost | The submission stays unresolved; after 60 s idle the next number follows; submissions stay within three |
 | owner stops after logging | The logged submission counts; the restarted owner continues with the next number |
 | native stops between start and delete | Whether the native server starts the item again is measured and recorded with the qualification |
-| interior truncation | An offer forced over the budget so its middle is cut: the model request shows the truncation notice; reading that message alone returns it within the budget |
+| interior truncation | A tool limit above one window and below the offer cuts the offer's middle: the model request shows the truncation notice; reading that message alone returns it whole |
 | tail truncation or omission | The token is absent; the frame stays unread and is offered again |
 | compaction before acknowledgement | A context-pressure rewrite before the acknowledgement, and no valid token presented afterwards: the frame stays unread and is offered again |
 | acknowledgement omitted | The frame is re-offered with `redelivery: true` within the budget |

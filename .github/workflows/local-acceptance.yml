@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     defaults:
       run:
-        working-directory: candidate
+        working-directory: worktree
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.proof.outputs.matrix) }}
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          path: candidate
+          path: worktree
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -81,11 +81,12 @@ jobs:
           persist-credentials: false
       - uses: ./.trusted-acceptance/.github/actions/rust-toolchain
         if: matrix.family == 'native'
+        id: rust_toolchain
         with:
           # The candidate's own pin decides what its Cargo commands resolve.
           # A branch created before the pin uses the protected one.
           toolchain-file: |
-            candidate/rust-toolchain.toml
+            worktree/rust-toolchain.toml
             .trusted-acceptance/rust-toolchain.toml
           components: clippy, rustfmt
       - uses: actions/setup-node@v4
@@ -97,13 +98,14 @@ jobs:
       - name: Resolve the shared native cache paths
         if: matrix.family == 'native'
         id: cache_layout
-        run: python ../.trusted-acceptance/.github/local-acceptance/cache_layout.py --source candidate/rust --github-output
+        run: python ../.trusted-acceptance/.github/local-acceptance/cache_layout.py --source worktree/rust --github-output
       - uses: Swatinem/rust-cache@v2
         if: matrix.family == 'native'
         with:
           workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           save-if: false
       - name: Install acceptance observer dependencies
         run: python -m pip install psutil jsonschema
@@ -141,5 +143,5 @@ jobs:
         if: matrix.family == 'sdk' && success()
         with:
           name: scode-acp-${{ matrix.os }}-${{ github.event.pull_request.head.sha }}
-          path: candidate/sdk/typescript/artifacts/*
+          path: worktree/sdk/typescript/artifacts/*
           if-no-files-found: error

@@ -75,23 +75,29 @@ function matchesRegistration(value:unknown,file:string,entry:string):boolean {
 }
 
 /** Inspect the actual existing server through the configured proxy, not the
- * wrapper's version. This is the current v2 receiver's admission requirement;
- * it is not mailbox-v3 native/model qualification or a delivery probe. */
-async function checkNativeReceiver(native:CodexConnectionConfig):Promise<void> {
-  const connection=await connectCodex({...native,requireDurableQueue:true});
+ * wrapper's version. The v2 callback requires durableQueueAddOnce. The v3
+ * mailbox needs a reachable server here; its admission reads each thread's
+ * mailbox inventory on the connection that serves it. Not a delivery probe. */
+async function checkNativeReceiver(native:CodexConnectionConfig,peerInputVersion:2|3):Promise<void> {
+  const connection=await connectCodex({...native,requireDurableQueue:peerInputVersion===2});
   await connection.close();
 }
 
 /** Read-only preflight for an existing native daemon. No daemon start, thread
  * discovery, enrollment, queue submission or global configuration write. */
 export async function checkCodexNative(file:string,entry:string):Promise<{
-  checked:true; requiredCapability:'durableQueueAddOnce'; version:1; a2aJourneyVerified:false;
+  checked:true; peerInputVersion:2|3; requiredCapability:'durableQueueAddOnce'|'mailboxInventory';
+  checkedAt:'preflight'|'attach'; version:1; a2aJourneyVerified:false;
 }> {
   const before=digest(readFileSync(file));
-  const {native}=codexMcpInstallationCommands(file,entry);
-  await checkNativeReceiver(native);
+  const {native,peerInputVersion}=codexMcpInstallationCommands(file,entry);
+  await checkNativeReceiver(native,peerInputVersion);
   if(digest(readFileSync(file))!==before)throw new Error('The selected runtime changed during native preflight; run the check for its new configuration');
-  return {checked:true,requiredCapability:'durableQueueAddOnce',version:1,a2aJourneyVerified:false};
+  // v3 preflight proves only a reachable server; each thread's mailbox
+  // inventory is checked when that thread attaches.
+  return peerInputVersion===2
+    ? {checked:true,peerInputVersion,requiredCapability:'durableQueueAddOnce',checkedAt:'preflight',version:1,a2aJourneyVerified:false}
+    : {checked:true,peerInputVersion,requiredCapability:'mailboxInventory',checkedAt:'attach',version:1,a2aJourneyVerified:false};
 }
 
 /** One installation of an explicitly prepared, operator-authorized machine.
@@ -169,7 +175,7 @@ export async function installCodexMcp(file:string,entry:string,target:string):Pr
     // Refuse before registering a Task, changing global MCP configuration or
     // replacing the ordinary command. Runtime admission still checks every
     // connection, since a successful check cannot pin a future daemon.
-    await checkNativeReceiver(plan.native);
+    await checkNativeReceiver(plan.native,plan.peerInputVersion);
     unchanged();state.completed.push('nativeReceiverPreflight');delete state.inFlight;save(journal,state);
     if(process.platform==='win32'){
       const owner=prepareWindowsCodexOwner(file,entry);

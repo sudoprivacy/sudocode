@@ -51,13 +51,14 @@ export interface CodexAutojoinConfig {
   peers: string[];
   /** Explicitly admit peer data from the verified Node namespace; default is the fixed allowlist. */
   peerPolicy?: 'allowlist' | 'node-namespace';
-  /** Explicit v3 composition. Requires an operator's actual-server admission
-   * provider; JSON runtime configuration does not enable this draft path. */
+  /** v3 composition; runtime JSON `peerInputVersion: 3` selects
+   * `codexMailboxAdmission`. */
   mailbox?: CodexMailboxAdmission;
   resolveAgent: (claim: Readonly<CodexAgentClaim>) => Promise<CodexAgentProfile>;
   pollIntervalMs?: number;
   onError?: (error: unknown) => void;
   onClosed?: () => void;
+  onProxyExitWait?: (pid: number | undefined) => void;
   /** Diagnostic observation of the validated snapshot; never controls admission. */
   onInventory?: (observation: CodexRootInventory) => void | Promise<void>;
 }
@@ -176,7 +177,10 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
 
       // Codex is the agent its peers address: the owned scode hands each peer
       // message over instead of answering it with its own model.
-      const connection = await connectScode({ ...profile, ...(config.mailbox ? {
+      const connection = await connectScode({ ...profile, env: {
+        ...profile.env,
+        SUDOCODE_CODEX_PEER_ATTACHMENT: JSON.stringify({actor:binding.actor,workspace:path.basename(thread.cwd) || 'filesystem root'}),
+      }, ...(config.mailbox ? {
         peerInputVersion: 3 as const, onPeerUnread: () => { void owner.mailbox?.evaluate(); },
       } : { onPeerMessage: (message: ScodePeerMessage) => {
         if (!native.connected) throw new Error('Native durable ingress unavailable; retain delivery upstream');
@@ -305,7 +309,7 @@ export async function connectCodexAutojoin(config: CodexAutojoinConfig): Promise
   native = await connectRecoveringCodex({...config.native, requireDurableQueue:!config.mailbox}, notification => {
     for (const owner of owners.values()) owner.mailbox?.notify(notification);
     if (['thread/started', 'thread/closed'].includes(notification.method)) void refresh();
-  });
+  }, config.onProxyExitWait);
   const timer = setInterval(() => { void refresh(); }, config.pollIntervalMs ?? 1000);
   timer.unref();
   await refresh();

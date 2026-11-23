@@ -382,6 +382,70 @@ fn shared_budget_preserves_history_draft_and_cursor_in_the_real_terminal() {
     }
 }
 
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn grapheme_clusters_follow_the_terminal_rule_measured_at_startup() {
+    // xterm.js with Unicode 11 (VS Code) lays out each code point of the
+    // cluster, 4 cells; the graphemes addon draws one 2-cell glyph, as iTerm2,
+    // kitty and Windows Terminal do. The resumed history wraps at 60 columns.
+    // The cluster has two parts: the graphemes addon on Node 22 counts longer
+    // ones such as 👩🏽‍💻 as 3 cells, which is neither rule.
+    // A terminal that never reports its cursor gets the rule its kind is
+    // known for: VS Code's per code point, any other clustered. Where scode
+    // measures, the environment names the other kind, so only the measured
+    // rule passes. Windows never measures (ConPTY reports the console host's
+    // cursor), so there the environment names the terminal's own kind. Its
+    // host is the pinned VS Code build, whose bundled terminal has only VS
+    // Code's own rule, so Windows runs the Unicode 11 cases.
+    let cluster = "\u{1F468}\u{200D}\u{1F4BB}";
+    for (unicode, silent) in [
+        ("11", false),
+        ("graphemes", false),
+        ("11", true),
+        ("graphemes", true),
+    ]
+    .into_iter()
+    .filter(|(unicode, _)| !cfg!(windows) || *unicode == "11")
+    {
+        let own_kind = if unicode == "11" { "vscode" } else { "" };
+        let other_kind = if unicode == "11" { "" } else { "vscode" };
+        let program = if silent || cfg!(windows) {
+            own_kind
+        } else {
+            other_kind
+        };
+        let env = TestEnv::new(&format!("grapheme-width-{unicode}-{silent}"));
+        let mut saved = Session::new().with_workspace_root(env.workspace_root());
+        saved
+            .push_user_text(format!("Cluster echo {}", format!("{cluster} ").repeat(12)))
+            .unwrap();
+        saved
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!(
+                    "Cluster prose {}GraphemeHistoryEnd",
+                    format!("{cluster} word ").repeat(10)
+                ),
+            }]))
+            .unwrap();
+        let path = env.workspace_root().join("grapheme-session.jsonl");
+        saved.save_to_path(&path).unwrap();
+        let output = run_terminal(
+            &env,
+            &[
+                "--resume",
+                path.to_str().unwrap(),
+                "--permission-mode",
+                "read-only",
+            ],
+            "graphemes",
+            serde_json::json!({
+                "unicode": unicode, "silent": silent, "env": {"TERM_PROGRAM": program},
+            }),
+        );
+        common::terminal_host::assert_success(&output);
+    }
+}
+
 fn run_terminal(
     env: &TestEnv,
     args: &[&str],

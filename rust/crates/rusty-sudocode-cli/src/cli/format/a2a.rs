@@ -8,6 +8,9 @@ use super::{
     ToolCardContent, ToolStatus, TOOL_OUTPUT_DISPLAY_MAX_LINES,
 };
 
+/// Rows an agent directory card lists before it counts instead.
+const AGENT_LIST_DISPLAY_MAX_ROWS: usize = 50;
+
 /// The same sender-supplied summary appears on outgoing and incoming cards.
 #[inline]
 pub(crate) fn summary_preview(text: &str) -> String {
@@ -165,18 +168,34 @@ pub(super) fn agent_list_card(
     if agents.is_empty() {
         return ToolCardContent::new(header, "No agents found".into());
     }
+    let is_active = |agent: &Value| agent.get("active").and_then(Value::as_bool) == Some(true);
+    let active = agents.iter().filter(|agent| is_active(agent)).count();
+    // A directory that fits is listed whole. A larger one lists the agents
+    // that are there to talk to and counts the rest, unless none is active.
+    let listed: Vec<&Value> = agents
+        .iter()
+        .filter(|agent| {
+            agents.len() <= AGENT_LIST_DISPLAY_MAX_ROWS || active == 0 || is_active(agent)
+        })
+        .take(AGENT_LIST_DISPLAY_MAX_ROWS)
+        .collect();
     let mut rows = Vec::new();
-    for agent in agents.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
+    for agent in &listed {
         let Some(row) = agent_row(agent) else {
             return generic_tool_card("agent_list", input, Some(output), status);
         };
         rows.push(row);
     }
-    if agents.len() > rows.len() {
-        rows.push(format!(
-            "… +{} agents · full list preserved in session",
-            agents.len() - rows.len()
-        ));
+    let hidden = agents.len() - listed.len();
+    let hidden_active = active - listed.iter().filter(|agent| is_active(agent)).count();
+    if hidden > 0 {
+        rows.push(match (active, hidden_active) {
+            (0, _) => format!("… +{hidden} agents · full list preserved in session"),
+            (_, 0) => format!("… +{hidden} inactive agents · full list preserved in session"),
+            _ => format!(
+                "… +{hidden} agents ({hidden_active} active) · full list preserved in session"
+            ),
+        });
     }
     ToolCardContent::new(header, rows.join("\n"))
 }
@@ -193,6 +212,11 @@ pub(crate) fn agent_row(agent: &Value) -> Option<String> {
     );
     if address != name {
         let _ = write!(row, " · send_to={address}");
+    }
+    if let Some(label) =
+        text(agent, "attachment").filter(|label| Some(*label) != text(agent, "description"))
+    {
+        let _ = write!(row, " · {}", truncate_for_summary(label, 160));
     }
     if let Some(description) = text(agent, "description") {
         let _ = write!(row, " · {}", truncate_for_summary(description, 160));

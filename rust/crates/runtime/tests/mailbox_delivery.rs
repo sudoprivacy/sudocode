@@ -5,8 +5,8 @@ use runtime::mailbox::{CommitOutcome, CommitRefusalReason, Mailbox};
 use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
 use runtime::FsBackend;
 use runtime::KernelFsBackend;
-use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::{Duration, Instant};
 
 /// A planted descriptor carrying a resource scope that admits the daemon
 /// mail world — the `/agents` chat-list indexes and the flat
@@ -36,7 +36,7 @@ fn planted(name: &str) -> AgentDescriptor {
     descriptor
 }
 
-fn pair() -> (Mailbox, Mailbox) {
+fn mounted_kernel() -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
     kernel.vfs_router_arc().add_mount(
         "/",
@@ -44,37 +44,92 @@ fn pair() -> (Mailbox, Mailbox) {
         Some(Arc::new(runtime::test_support::MemObjectStore::default())),
         false,
     );
-    let sender = Mailbox::daemon_absolute(
+    kernel
+}
+
+fn mailbox(kernel: &Arc<Kernel>, name: &str) -> Mailbox {
+    Mailbox::daemon_absolute(
         Arc::new(KernelFsBackend::for_agent_descriptor(
-            Arc::clone(&kernel),
-            &planted("sender"),
+            Arc::clone(kernel),
+            &planted(name),
             "/",
         )),
-        "sender".into(),
-    );
-    let receiver = Mailbox::daemon_absolute(
-        Arc::new(KernelFsBackend::for_agent_descriptor(
-            kernel,
-            &planted("receiver"),
-            "/",
-        )),
-        "receiver".into(),
-    );
-    sender
-        .send(runtime::agent_mailbox::MailboxEnvelope {
-            send_id: None,
-            delivery: runtime::turn_input::InputDelivery::Steer,
-            from: "sender".into(),
-            to: "receiver".into(),
-            body: "durable delivery".into(),
-            summary: None,
-            timestamp: 0,
-            color: None,
-            kind: "message".into(),
-            request_id: None,
-        })
-        .unwrap();
+        name.into(),
+    )
+}
+
+fn note(body: &str) -> runtime::agent_mailbox::MailboxEnvelope {
+    runtime::agent_mailbox::MailboxEnvelope {
+        send_id: None,
+        delivery: runtime::turn_input::InputDelivery::Steer,
+        from: "sender".into(),
+        to: "receiver".into(),
+        body: body.into(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: "message".into(),
+        request_id: None,
+    }
+}
+
+fn pair() -> (Mailbox, Mailbox) {
+    let kernel = mounted_kernel();
+    let sender = mailbox(&kernel, "sender");
+    let receiver = mailbox(&kernel, "receiver");
+    sender.send(note("durable delivery")).unwrap();
     (sender, receiver)
+}
+
+/// A receiver running over a mailbox, recording every body offered to its
+/// consumer, in order. `accept` answers for the latest offer, given them all.
+struct Receiver {
+    offered: Arc<Mutex<Vec<String>>>,
+    abort: runtime::HookAbortSignal,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Receiver {
+    fn start(mailbox: Mailbox, accept: impl Fn(&[String]) -> bool + Send + Sync + 'static) -> Self {
+        let offered = Arc::new(Mutex::new(Vec::new()));
+        let abort = runtime::HookAbortSignal::new();
+        let log = Arc::clone(&offered);
+        let thread = runtime::mailbox::spawn_inbox_record_poller(
+            Arc::new(mailbox),
+            100,
+            "delivery-test",
+            abort.clone(),
+            move |record| {
+                let mut log = log.lock().unwrap();
+                log.push(record.envelope().body.clone());
+                accept(&log)
+            },
+        );
+        Self {
+            offered,
+            abort,
+            thread,
+        }
+    }
+
+    fn wait_for(&self, done: impl Fn(&[String]) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(&self.offered.lock().unwrap()) {
+            assert!(
+                Instant::now() < deadline,
+                "the receiver was offered {:?}",
+                self.offered.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn stop(self) -> Vec<String> {
+        self.abort.abort();
+        self.thread.join().unwrap();
+        let offered = self.offered.lock().unwrap().clone();
+        offered
+    }
 }
 
 #[test]
@@ -297,4 +352,79 @@ fn a_kernel_commit_is_refused_while_the_reader_is_held() {
         CommitOutcome::Committed
     );
     assert_eq!(receiver.read_position("sender").unwrap(), Some(end));
+}
+
+/// One send appended at two positions, as a retry of an unconfirmed append
+/// can leave it, is handed to the consumer once.
+#[test]
+fn one_send_at_two_positions_is_delivered_once() {
+    let (sender, receiver) = pair();
+    let receiver = Receiver::start(receiver, |_| true);
+    receiver.wait_for(|offered| offered == ["durable delivery"]);
+    let mut retried = note("retried");
+    retried.send_id = Some("retried-send".into());
+    sender.send(retried.clone()).unwrap();
+    receiver.wait_for(|offered| offered.len() == 2);
+    sender.send(note("between")).unwrap();
+    sender.send(retried).unwrap();
+    sender.send(note("last")).unwrap();
+    receiver.wait_for(|offered| offered.last().is_some_and(|body| body == "last"));
+    assert_eq!(
+        receiver.stop(),
+        ["durable delivery", "retried", "between", "last"]
+    );
+}
+
+/// A batch the consumer refuses part of is read again and offered whole, the
+/// sends it accepted the first time included: nothing counts as delivered
+/// until its batch is committed.
+#[test]
+fn a_refused_batch_is_redelivered_whole() {
+    let (sender, receiver) = pair();
+    sender.send(note("accepted")).unwrap();
+    sender.send(note("refused once")).unwrap();
+    let receiver = Receiver::start(receiver, |offered| {
+        offered.last().map(String::as_str) != Some("refused once")
+            || offered
+                .iter()
+                .filter(|body| *body == "refused once")
+                .count()
+                > 1
+    });
+    receiver.wait_for(|offered| offered.len() == 6);
+    assert_eq!(
+        receiver.stop(),
+        [
+            "durable delivery",
+            "accepted",
+            "refused once",
+            "durable delivery",
+            "accepted",
+            "refused once"
+        ]
+    );
+}
+
+/// The sends a receiver delivered and committed are remembered across its
+/// restart, so a retry of one that lands afterwards is not offered again.
+#[test]
+fn delivered_sends_are_remembered_across_a_receiver_restart() {
+    let kernel = mounted_kernel();
+    let sender = mailbox(&kernel, "sender");
+    let mut retried = note("before the restart");
+    retried.send_id = Some("restart-send".into());
+    sender.send(retried.clone()).unwrap();
+    let first = Receiver::start(mailbox(&kernel, "receiver"), |_| true);
+    first.wait_for(|offered| offered == ["before the restart"]);
+    assert_eq!(first.stop(), ["before the restart"]);
+
+    sender.send(retried).unwrap();
+    sender.send(note("after the restart")).unwrap();
+    let second = Receiver::start(mailbox(&kernel, "receiver"), |_| true);
+    second.wait_for(|offered| {
+        offered
+            .last()
+            .is_some_and(|body| body == "after the restart")
+    });
+    assert_eq!(second.stop(), ["after the restart"]);
 }

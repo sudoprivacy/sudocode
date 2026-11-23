@@ -32,6 +32,7 @@
 //! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
+use crate::render::layout_policy::{HistoryPart, LayoutPolicy};
 use crate::render::TextRole;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -805,12 +806,12 @@ enum OutputMsg {
     /// User echo formatted identically for live output and session replay.
     UserPrompt(runtime::turn_input::InputEcho),
     /// One event's stable history and replacement live prose, in order.
-    AssistantUpdate {
-        committed: String,
+    TranscriptUpdate {
+        committed: Vec<HistoryPart>,
         preview: PreviewUpdate,
     },
-    /// Complete line — `StdoutHandle::println` will append `\n`.
-    Line(String),
+    /// An independent message, such as a slash command report or notice.
+    Block(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
     Raw(String),
     /// Replace the transient tool summary without committing it to history.
@@ -889,14 +890,14 @@ impl OutputSender {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
     }
 
-    pub(crate) fn assistant_update(&self, committed: String, preview: PreviewUpdate) {
+    pub(crate) fn transcript_update(&self, committed: Vec<HistoryPart>, preview: PreviewUpdate) {
         let _ = self
             .tx
-            .send(OutputMsg::AssistantUpdate { committed, preview });
+            .send(OutputMsg::TranscriptUpdate { committed, preview });
     }
 
     pub fn println(&self, text: &str) {
-        let _ = self.tx.send(OutputMsg::Line(text.to_string()));
+        let _ = self.tx.send(OutputMsg::Block(text.to_string()));
     }
 
     pub fn suspend(&self) -> io::Result<TerminalSuspension> {
@@ -1177,6 +1178,7 @@ fn render_pending_overlay(
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
     prose_preview: Arc<Mutex<ProsePreview>>,
+    initial_history: LayoutPolicy,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
@@ -1221,6 +1223,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
     let prose_preview = ctx.prose_preview.clone();
     let prose_preview_for_future = ctx.prose_preview.clone();
+    let initial_history = ctx.initial_history;
     let output_rx = Arc::clone(&ctx.output_rx);
     let terminal_handoff = Arc::clone(&ctx.terminal_handoff);
     let terminal_handoff_for_future = Arc::clone(&ctx.terminal_handoff);
@@ -1769,10 +1772,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_future(async move {
         let mut todo_hide_deadline: Option<Instant> = None;
         let mut stderr_text = Utf8Stream::default();
+        let mut history = initial_history;
         let mut task_clock_tick = Instant::now();
         let mut background_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
+            let previous_history = history;
             let mut is_preview_changed = false;
 
             // Drain stderr redirect — route captured text through stdout
@@ -1781,11 +1786,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(guard) = stderr_redir_for_future.lock() {
                 if let Some(ref redir) = *guard {
                     if let Some(captured) = redir.drain() {
-                        write_iocraft_output(
-                            &stdout_for_future,
-                            &stderr_text.push(&captured),
-                            false,
-                        );
+                        let text = stderr_text.push(&captured);
+                        history.observe_external(&text);
+                        write_iocraft_output(&stdout_for_future, &text, false);
                     }
                 }
             }
@@ -1793,13 +1796,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Drain output channel.
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
-                    let (text, terminated) = match rx.try_recv() {
+                    match rx.try_recv() {
                         Ok(OutputMsg::UserPrompt(input)) => {
-                            let mut text = crate::cli::received::echo(&input, crate::render::query_terminal_width(), &crate::render::TerminalRenderer::new());
-                            crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
-                            (text, false)
+                            let text = crate::cli::received::echo(&input, crate::render::query_terminal_width(), &crate::render::TerminalRenderer::new());
+                            write_history(&stdout_for_future, &mut history, [
+                                HistoryPart::Block(text), HistoryPart::Finish,
+                            ]);
                         }
-                        Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
+                        Ok(OutputMsg::TranscriptUpdate { committed, preview }) => {
+                            write_history(&stdout_for_future, &mut history, committed);
                             prose_preview_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1807,15 +1812,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             is_preview_changed = true;
                             // use_output queues history for the same presentation
                             // as the newly rendered preview, never an empty frame.
-                            (committed, false)
                         }
-                        Ok(OutputMsg::Line(text)) => (text, true),
-                        Ok(OutputMsg::Raw(text)) => (text, false),
+                        Ok(OutputMsg::Block(text)) if text.is_empty() => {
+                            history.observe_external("\n");
+                            write_iocraft_output(&stdout_for_future, "", true);
+                        }
+                        Ok(OutputMsg::Block(text)) => {
+                            write_history(&stdout_for_future, &mut history, [HistoryPart::Block(text)]);
+                        }
+                        Ok(OutputMsg::Raw(text)) => {
+                            history.observe_external(&text);
+                            write_iocraft_output(&stdout_for_future, &text, false);
+                        }
                         Ok(OutputMsg::ToolProgress(text)) => {
                             if *tool_progress.read() != text {
                                 tool_progress.set(text);
                             }
-                            continue;
                         }
                         Ok(OutputMsg::Suspend(request)) => {
                             *terminal_handoff_for_future
@@ -1825,8 +1837,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             break;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                    };
-                    write_iocraft_output(&stdout_for_future, &text, terminated);
+                    }
                 }
             }
 
@@ -1886,7 +1897,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
-                                    write_iocraft_output(&stdout_for_future, &document, true);
+                                    write_history(&stdout_for_future, &mut history, [HistoryPart::Block(document)]);
                                 }
                             }
                             tasks_for_future
@@ -2077,6 +2088,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             } else {
                 background_tick = Instant::now();
+            }
+            if is_preview_changed || history != previous_history {
+                is_preview_changed |= prose_preview_for_future
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .position_after_history(&history);
             }
             if state == EngineState::Running || is_preview_changed {
                 frame.set(idx.wrapping_add(1));
@@ -2697,6 +2714,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 }
 
+/// Compose the ordered parts before serializing whole physical lines to iocraft.
+fn write_history(
+    stdout: &StdoutHandle,
+    layout: &mut LayoutPolicy,
+    parts: impl IntoIterator<Item = HistoryPart>,
+) {
+    let mut batch = String::new();
+    for part in parts {
+        layout.write(part, |text| batch.push_str(text));
+    }
+    if !batch.is_empty() {
+        write_iocraft_output(stdout, &batch, false);
+    }
+}
+
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
     split_lines(
@@ -2733,6 +2765,9 @@ pub fn spawn_repl_ui(
     let stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>> =
         Arc::new(Mutex::new(None));
 
+    let mut initial_history = LayoutPolicy::default();
+    initial_history.observe_external(startup_banner);
+    initial_history.observe_external("\n");
     let ctx = ReplContext {
         tasks: Arc::new(Mutex::new({
             let mut browser = TaskBrowser::default();
@@ -2740,6 +2775,7 @@ pub fn spawn_repl_ui(
             browser
         })),
         prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
+        initial_history,
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),

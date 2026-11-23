@@ -130,7 +130,7 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
 - **One receiver per agent.** A receiver tails nothing until it holds its agent's receiver seat, `agents/<name>/receiver.lock`, taken with `FsBackend::try_lock` on the same backend as the conversations.
   - Until then it stands by and retries once per discovery interval, so a second instance of the agent takes over when the first stops, resuming at the read position.
   - Losing the seat stops every tail before the receiver stands by again.
-  - Each conversation's reader seat stays as the guard on that conversation's read position, so a tail finishing a delivery while the agent seat changes hands can't be read twice.
+  - The seat is the receiver's only lease: every tail reads and commits under it, so an agent costs one renewal however many conversations it tails. Each conversation's register is fenced by its own conditional write, so a previous holder can't move a read position back. A batch in delivery while the seat changes hands is delivered again by the new holder.
   - On the node the seat is unique only within one machine until nexus routes locks by zone (N1).
   - `/status` and ACP's `_meta.sudocode.peer` report the agent, its namespace and whether this process is receiving, standing by, or running no receiver.
   - An ACP process runs one receiver per agent it serves, on the mailbox that agent's tools send through: the hosted agent's, else the namespace the session attached to, which is the pair root when the machine has no node. A message goes to a session of the agent it was sent to, rebinding to another session of that agent if the first closes; the receiver stops, freeing the seat, once no session of the agent is left.
@@ -166,7 +166,7 @@ same path on every alias and device.
 
 ### Claim and commit
 
-1. Acquire the existing conversation reader lock and read its committed record
+1. Under the Agent's receiver seat, read the conversation's committed record
    and opaque version together.
 2. Conditionally claim that same record with the next epoch, a fresh claim
    identity and the unchanged position. A verified committed claim permits
@@ -193,7 +193,7 @@ governs accepted messages and their side effects.
 A one-time, explicit operation per machine:
 
 1. **Version gate.** Refuse while older `scode` processes are running.
-2. **Fence.** Take the leaf fence lock on the disk root, then try-lock every reader `.lock` under it. If any is held, refuse; never move a held lock file.
+2. **Fence.** Take the leaf fence lock on the disk root, then try-lock every Agent's `receiver.lock` under it. If any is held, refuse; never move a held lock file.
 3. **Record the fact.** Write the durable "node enabled" fact.
 4. **Archive.** Move the disk root aside read-only and leave a placeholder file at its path, so an un-upgraded binary fails loudly instead of writing to a namespace nobody reads.
 5. **Drain.** A node-mode session drains its archived disk inbox once, within a bound, at-least-once. Unread messages are reported. Undelivered messages are never classified as abandoned.

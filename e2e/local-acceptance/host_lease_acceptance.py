@@ -160,6 +160,8 @@ def verify_host_lease(directory, source, command, environment):
         finished(start("Metadata", root=metadata))
         meta_attempt = json.loads((fixture / "Metadata/attempt.json").read_text())
         assert meta_attempt["host_lease_wait_seconds"] == 0, meta_attempt
+        meta_receipt = json.loads((fixture / "Metadata/receipt.json").read_bytes())
+        assert meta_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, meta_receipt
         assert not waiting(processes[-1]), processes[-1].log.read_text()
         assert (fixture / "Metadata/envelope.json").is_file()
         assert events() == ["start:A"], events()
@@ -186,6 +188,11 @@ def verify_host_lease(directory, source, command, environment):
         assert "Acquired this host's local acceptance lease" in queued[0].log.read_text()
         timing = json.loads((fixture / "B/attempt.json").read_text())
         assert timing["host_lease_wait_seconds"] > 0, timing
+        receipt = json.loads((fixture / "B/receipt.json").read_bytes())
+        assert receipt["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], receipt
+        index = json.loads((fixture / "B/checkpoint.json").read_bytes())
+        checkpoint = json.loads((fixture / "B/checkpoints" / index["generation"] / "receipt.json").read_bytes())
+        assert checkpoint["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], checkpoint
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
 
         # A waiter killed in the queue does not block those behind it.
@@ -216,6 +223,8 @@ def verify_host_lease(directory, source, command, environment):
         finished(restored, timeout=15)
         restored_timing = json.loads((fixture / "Reused/attempt.json").read_text())
         assert restored_timing["host_lease_wait_seconds"] == 0, restored_timing
+        restored_receipt = json.loads((fixture / "Reused/receipt.json").read_bytes())
+        assert restored_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, restored_receipt
         assert not waiting(restored), restored.log.read_text()
         assert events() == ["start:G"], events()
         # A later commit retains the original signed native result when only

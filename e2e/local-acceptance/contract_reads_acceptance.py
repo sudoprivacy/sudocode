@@ -119,11 +119,40 @@ def run(output):
         else:
             raise AssertionError(f"Committed read accepted {label}")
     assert helper.committed_blob_bytes({}) == {}
+
+    executor = ".github/scripts/local_acceptance.py"
+    checks = ".github/local-acceptance/checks.py"
+    image = ".github/local-acceptance/Dockerfile"
+    command = b"def run_command():\n    return 1"
+    (root / executor).write_bytes(command + b"\n")
+    (root / checks).write_bytes(b"def run(name):\n    if name == 'one':\n        return 1\n    else:\n        return 2\n")
+    (root / image).write_bytes(b"FROM scratch\n")
+    policy = commit("Execution fingerprint inputs")
+    names = ["one", "two"]
+    original_command_hash = helper.sha(helper.canonical({"executor": helper.sha(command),
+        checks: helper.sha(helper.tracked(policy, checks)), image: helper.sha(helper.tracked(policy, image))}))
+    assert helper.commands_hash(policy) == original_command_hash
+    receipt = {"head": policy, "commands_ref": policy, "commands_sha256": original_command_hash,
+               "profile_commands_sha256": helper.profile_commands_hashes(policy, names),
+               "reachable_profile_commands_sha256": helper.reachable_profile_commands_hashes(policy, names)}
+    for ref, expected_calls in [(policy, 2), ("HEAD", 3)]:
+        reads.clear()
+        assert helper.compatible_profile_commands(receipt, ref, names)
+        assert len(reads) == expected_calls, reads
+    (root / image).write_bytes(b"FROM scratch\n# new image recipe\n")
+    commit("Move the policy ref to different execution inputs")
+    assert not helper.compatible_profile_commands(receipt, "HEAD", names)
+    assert helper.compatible_profile_commands(receipt, policy, names)
+    (root / image).unlink()
+    commit("Remove a required execution input")
+    assert not helper.compatible_profile_commands(receipt, "HEAD", names)
+
     result = {"status": "PASS", "observations": observations, "commands": commands, "committed_reads": reads,
               "exact_binary_empty_duplicate_unicode_and_link_bytes": True,
               "working_tree_ignored_and_moved_ref_refreshed": True,
               "archive_attributes_do_not_omit_contract": True,
               "missing_required_ref_and_object_refused": True,
+              "execution_fingerprint_snapshot_reused_only_within_one_verification": True,
               "scope": "Real Git commits/object storage and original hash reference. No signature/test/coverage requirements removed."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key not in {"commands", "committed_reads"}}), flush=True)

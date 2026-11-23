@@ -34,6 +34,44 @@ def git_for_windows_bash(path=None):
     return None
 
 
+def check_compiler_priority(executor, rustc, output, environment, expected):
+    """Hold a real metadata compile on its source pipe until it is observed."""
+    driver = output / "compiler-priority-probe.py"
+    driver.write_text('''import subprocess
+import sys
+import time
+
+import psutil
+
+rustc, artifact, expected = sys.argv[1:]
+with subprocess.Popen([rustc, "--crate-name", "scope_priority_probe", "--crate-type", "lib",
+                       "--emit", "metadata", "-o", artifact, "-"], stdin=subprocess.PIPE) as compiler:
+    process = psutil.Process(compiler.pid)
+    started = time.monotonic()
+    deadline = started + 10
+    try:
+        # A surrounding executor can lower the same child first. Leave time
+        # for this executor's own 150 ms observer to record it as well.
+        while time.monotonic() - started < 0.5 or process.nice() != int(expected):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The active compiler did not reach the expected priority")
+            time.sleep(0.025)
+        compiler.communicate(b"pub fn value() -> u8 { 42 }\\n", timeout=10)
+        if compiler.returncode != 0:
+            raise RuntimeError(f"The observed metadata compile exited {compiler.returncode}")
+    finally:
+        if compiler.poll() is None:
+            compiler.kill()
+            compiler.wait()
+''', encoding="utf-8")
+    artifact = output / "compiler-priority-probe.rmeta"
+    result = executor.run_command([sys.executable, driver, rustc, artifact, expected],
+                                  executor.ROOT, output / "compiler-priority-probe.log", environment)
+    assert artifact.stat().st_size > 0
+    assert result["compiler_priorities"].get(rustc.name, {}).get(str(expected), 0) > 0, result
+    return result
+
+
 def pinned_cache_command(output, environment):
     """Run the Linux cache command with and without an unused installed Rust."""
     tools = output / "cache-tools"
@@ -1313,10 +1351,14 @@ def run(output):
     assert "Local acceptance failed (9)" in failure, failure
     environment.pop("FAIL_SCOPE_PROFILE")
     print("PASS: an actual normal-input change still reruns and fails its required profile", flush=True)
+    # Small Rust or cached builds can finish between process samples. Keep the
+    # original observations and require a real, observable compile as well.
+    expected_priority = 16384 if os.name == "nt" else 10
+    rustc = Path(command("rustc", "--print", "sysroot")) / "bin" / ("rustc.exe" if os.name == "nt" else "rustc")
+    commands.append(check_compiler_priority(executor, rustc, output, build_environment, expected_priority))
     # Each row signs {compiler name: {priority: distinct children}}.
     observed = [(priority, count) for row in commands for counts in row.get("compiler_priorities", {}).values()
                 for priority, count in counts.items()]
-    expected_priority = 16384 if os.name == "nt" else 10
     assert observed and all(priority == str(expected_priority) and count > 0 for priority, count in observed), observed
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,

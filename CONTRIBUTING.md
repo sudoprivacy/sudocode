@@ -1515,8 +1515,12 @@ main, and the source contract must remain unchanged. The current responsibility
 plan, every selected command identity, native workflow and dispatcher must match.
 The comparison binds the extracted Git environment filter and its declared
 inputs from the original and current committed executors. Previously signed
-fingerprints retain their format. A changed filter requires fresh evidence for
-both completed receipts and early scheduling plans.
+fingerprints retain their format, and legacy receipts use the same filter
+check. The exact inline-to-extracted filter transition retained six native
+journeys plus the SDK, release and preflight recipe approvals in protected
+policy. These approvals apply to the listed fingerprints. Changes to the
+filter, selected profiles or other execution inputs still require current
+evidence.
 The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
 permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP

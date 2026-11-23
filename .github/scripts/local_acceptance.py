@@ -178,6 +178,21 @@ def command_git_selector_inputs(module, function):
     return sha(canonical(profile_ast_value(bindings)))
 
 
+def compatible_git_selector_inputs(before, current):
+    """Allow the reviewed extraction only; keep every later input change bound."""
+    if before is None:
+        return current[3] is None
+    if before[3] == current[3]:
+        return True
+    # Before #1516 the literal names and filter lived in run_command.
+    # This one-way bridge proves the filter shape only. Commands with
+    # different fingerprints still need exact per-profile approval.
+    return (before[3] is None
+            and before[0] == "6f987d75cd9e3472946c39861729d8b503905b9db3845027dd884395f0ebd51d"
+            and current[0] == "ab7ac34c8cbdf5f87025d92f345993c07334c4ae2c33deabdac187a7b1556323"
+            and current[3] == "3b5bed1200aa1b8b1b5d5064a647f1851bd5d1d4bb3c7143b32dc69739b8e7a5")
+
+
 def execution_inputs(ref, *, executor_identity=None):
     checks = ".github/local-acceptance/checks.py"
     image = ".github/local-acceptance/Dockerfile"
@@ -585,6 +600,7 @@ except subprocess.TimeoutExpired:
         "01ea6891f69b892dae1389bbdd9fdce887038e7cb1cce302e4215614f6face0e",
         "2ddedba1c6f5bdaee370752430cb40c802af8f10c2c552f76808380051dc2d91",
         "968aed4934bc9a4c0db73fe4387a38886204d4fe9a74ad5ad511eaedb7c4b13a",
+        "6283722865444555127b62148aea36ae74b7e002d6cfe24540afd39fe61f2380",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -744,8 +760,8 @@ def compatible_profile_commands(receipt, policy_ref, required):
         if "commands_ref" in receipt and previous is None:
             return False
         if previous != policy_ref:
-            previous_selector_inputs = read_inputs(previous)[3] if previous is not None else None
-            if previous_selector_inputs != read_inputs(policy_ref)[3]:
+            previous_inputs = read_inputs(previous) if previous is not None else None
+            if not compatible_git_selector_inputs(previous_inputs, read_inputs(policy_ref)):
                 return False
         if "profile_commands_sha256" not in receipt:
             if previous is None:
@@ -1682,7 +1698,7 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         current_inputs = execution_inputs(protected)
         before = reachable_profile_commands_hashes(planned_policy, names, inputs=before_inputs)
         current = reachable_profile_commands_hashes(protected, names, inputs=current_inputs)
-        selector_inputs_changed = before_inputs[3] != current_inputs[3]
+        selector_inputs_changed = not compatible_git_selector_inputs(before_inputs, current_inputs)
         changed = [name for name in names if before[name] != current[name]]
         resources = resource_equivalent_profiles(planned_policy, protected, changed)
         approved = approved_equivalent_profiles(before, current, protected, changed, head)
@@ -1758,19 +1774,19 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
     if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
     profiles = list(checks) if completed_only else required
-    if "profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt:
+    if {"commands_sha256", "profile_commands_sha256", "reachable_profile_commands_sha256"} & receipt.keys():
         compatible = compatible_profile_commands(receipt, policy_ref, profiles)
     else:
-        compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
-        if not compatible and "commands_sha256" in receipt:
-            compatible = compatible_profile_commands(receipt, policy_ref, profiles)
-    if not compatible and "commands_sha256" not in receipt:
-        # Bootstrap receipts used the whole protected contract. Accept them
-        # only when that signed hash matches their actual protected base and
-        # the commands are byte-identical to today's executor/profile/image.
+        # Bootstrap receipts bind the original protected base, including the
+        # command environment helper. A match on the old command hash alone
+        # cannot preserve evidence after one of those inputs changes.
         try:
+            original_inputs = execution_inputs(receipt["base"])
+            current_inputs = execution_inputs(policy_ref)
             compatible = (receipt.get("contract_sha256") == contract_hash(receipt["base"])
-                          and commands_hash(receipt["base"]) == commands_hash(policy_ref))
+                          and commands_hash(receipt["base"], inputs=original_inputs)
+                          == commands_hash(policy_ref, inputs=current_inputs)
+                          and compatible_git_selector_inputs(original_inputs, current_inputs))
         except RuntimeError:
             compatible = False
     if not compatible:

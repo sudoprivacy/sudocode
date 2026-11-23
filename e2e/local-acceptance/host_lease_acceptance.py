@@ -268,7 +268,8 @@ def verify_host_lease(directory, source, command, environment):
     verify_service_order(fixture, source, run, isolated)
     verify_lint_preparation_order(fixture, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated)
-    verify_profile_handoff(fixture, source, run, isolated, compile_only_examples=True)
+    verify_profile_handoff(fixture, source, run, isolated, pair="examples")
+    verify_profile_handoff(fixture, source, run, isolated, pair="context")
     verify_static_before_queue(fixture, source, run, isolated)
     verify_native_inventory_before_queue(fixture, source, run, isolated)
 
@@ -286,21 +287,32 @@ def clone_private_policy(fixture, authority, run, directory):
     return repository
 
 
-def verify_profile_handoff(fixture, authority, run, environment, compile_only_examples=False):
-    """Keep ordinary handoff; share only the adjacent compile-only example reservation."""
-    directory = fixture / ("workspace-example-reservation" if compile_only_examples else "profile-handoff")
+def verify_profile_handoff(fixture, authority, run, environment, pair=None):
+    """Exercise exclusive and shared reservations with real FIFO contenders."""
+    name = {"examples": "workspace-example-reservation", "context": "services-context-reservation"}.get(
+        pair, "profile-handoff",
+    )
+    directory = fixture / name
     directory.mkdir()
     repository = clone_private_policy(fixture, authority, run, directory)
     policy = repository / "spec/local_acceptance.json"
     rules = json.loads(policy.read_text())
-    followup = "native-examples" if compile_only_examples else "native-services"
+    if pair == "context":
+        first, followup, after_profile = "native-services", "native-context", "browser"
+        rules["checks"][first] = rules["checks"].pop("native-workspace")
+        rules["checks"][after_profile] = {"include": ["after.txt"]}
+    elif pair == "examples":
+        first, followup, after_profile = "native-workspace", "native-examples", "native-resize"
+    else:
+        first, followup, after_profile = "native-workspace", "native-services", "native-resize"
     rules["checks"][followup] = {"include": ["second.txt"]}
-    if compile_only_examples:
-        rules["checks"]["native-resize"] = {"include": ["after.txt"]}
+    if pair == "examples":
+        rules["checks"][after_profile] = {"include": ["after.txt"]}
         marker = repository / "rust/crates/fixture/tests/acceptance_groups/planning.rs"
         marker.parent.mkdir(parents=True)
         marker.write_text("// Private profile scheduling fixture; no Rust acceptance is inferred.\n", encoding="utf-8")
     policy.write_text(json.dumps(rules))
+    failure = "CONTROLLED_CONTEXT_FAILURE" if pair == "context" else "CONTROLLED_EXAMPLE_FAILURE"
     (repository / "phase.py").write_text(
         'from pathlib import Path\nimport sys,time\n'
         'events,release,label=map(str,sys.argv[1:])\n'
@@ -308,14 +320,14 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
         'deadline=time.monotonic()+120\n'
         'while not Path(release).exists() and time.monotonic()<deadline: time.sleep(0.05)\n'
         'assert Path(release).exists(), "release never arrived"\n'
-        'assert Path(release).read_text() != "fail", "CONTROLLED_EXAMPLE_FAILURE"\n'
+        f'assert Path(release).read_text() != "fail", {failure!r}\n'
         'with Path(events).open("a") as stream: stream.write("end:"+label+"\\n")\n', encoding="utf-8")
     (repository / ".github/local-acceptance/checks.py").write_text(
         'import sys\n'
         'def run(name, root, output, base, execute):\n'
         '    if name == "preflight":\n'
         '        return [execute([sys.executable,"-c","print(\'metadata passed\')"],root,output/"000.log")]\n'
-        f'    label=output.parent.name+("-two" if name=={followup!r} else "-after" if name=="native-resize" else "")\n'
+        f'    label=output.parent.name+("-two" if name=={followup!r} else "-after" if name=={after_profile!r} else "")\n'
         '    return [execute([sys.executable,str(root/"phase.py"),str(root.parent/"events.log"),'
         'str(root.parent/("release-"+label)),label],root,output/"000.log")]\n', encoding="utf-8")
     run("git", "add", ".", cwd=repository)
@@ -342,7 +354,7 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
         (work / "input.txt").write_text(label)
         if second:
             (work / "second.txt").write_text("second required profile")
-            if compile_only_examples:
+            if pair == "examples":
                 (work / "rust/changed.rs").write_text("// Select the existing example profile in committed Git.\n", encoding="utf-8")
         if after:
             (work / "after.txt").write_text("another fresh profile must still yield or stop after failure")
@@ -361,7 +373,7 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
     try:
         holder = start("Holder")
         wait_until(lambda: events() == ["start:Holder"], "the private holder")
-        long = start("Long", second=True)
+        long = start("Long", second=True, after=pair == "context")
         wait_until(lambda: queued(long), "the two-profile contender to queue")
         short = start("Short")
         wait_until(lambda: queued(short), "the existing one-profile contender to queue")
@@ -369,15 +381,21 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
         wait_until(lambda: "start:Long" in events(), "the first long profile")
         (directory / "release-Long").touch()
         wait_until(lambda: "start:Short" in events() or "start:Long-two" in events(), "the next actual profile")
-        if compile_only_examples:
+        if pair:
             assert "start:Long-two" in events() and "start:Short" not in events(), events()
             pointer = json.loads((directory / "Long/checkpoint.json").read_text())
             partial = json.loads((directory / "Long/checkpoints" / pointer["generation"] / "receipt.json").read_text())
-            assert set(partial["checks"]) == {"preflight", "native-workspace"}, partial
+            assert set(partial["checks"]) == {"preflight", first}, partial
             assert not (directory / "Long/envelope.json").exists()
             (directory / "release-Long-two").touch()
-            wait_until(lambda: "start:Short" in events(), "the existing waiter after compile-only examples")
+            wait_until(lambda: "start:Short" in events(), "the existing waiter after the shared reservation")
+            if pair == "context":
+                assert "start:Long-after" not in events(), events()
+                wait_until(lambda: queued(long), "the independent browser profile to rejoin the FIFO")
             (directory / "release-Short").touch()
+            if pair == "context":
+                wait_until(lambda: "start:Long-after" in events(), "the browser profile after the existing waiter")
+                (directory / "release-Long-after").touch()
         else:
             assert "start:Short" in events() and "start:Long-two" not in events(), events()
             wait_until(lambda: queued(long), "the next long profile to rejoin the FIFO")
@@ -386,29 +404,46 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
             (directory / "release-Long-two").touch()
         for process in processes:
             assert process.wait(timeout=120) == 0
-        if compile_only_examples:
-            assert events() == ["start:Holder", "end:Holder", "start:Long", "end:Long",
-                                "start:Long-two", "end:Long-two", "start:Short", "end:Short"], events()
+        if pair:
+            expected = ["start:Holder", "end:Holder", "start:Long", "end:Long",
+                        "start:Long-two", "end:Long-two", "start:Short", "end:Short"]
+            if pair == "context":
+                expected += ["start:Long-after", "end:Long-after"]
+            assert events() == expected, events()
         else:
             assert events() == ["start:Holder", "end:Holder", "start:Long", "end:Long",
                                 "start:Short", "end:Short", "start:Long-two", "end:Long-two"], events()
         receipt = json.loads((directory / "Long/receipt.json").read_text())
-        if compile_only_examples:
-            assert set(receipt["checks"]) == {"preflight", "native-workspace", "native-examples"}, receipt
+        expected_profiles = {"preflight", first, followup}
+        if pair == "context":
+            expected_profiles.add(after_profile)
+        assert set(receipt["checks"]) == expected_profiles, receipt
+        if pair == "context":
+            assert receipt["plan"]["local_checks"] == ["preflight", first, after_profile, followup], receipt
+            log = (directory / "Long.log").read_text(encoding="utf-8")
+            scope = json.loads(next(line.split("=", 1)[1] for line in log.splitlines()
+                                    if line.startswith("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=")))
+            assert scope["serialized_checks"] == scope["pending_serialized_checks"] == [
+                first, followup, after_profile,
+            ], scope
+            assert scope["pending_reservations"] == [[first, followup], [after_profile]], scope
+        if pair:
             assert all(len(rows) == 1 and rows[0]["exit_code"] == 0 for rows in receipt["checks"].values()), receipt
-        else:
-            assert set(receipt["checks"]) == {"preflight", "native-workspace", "native-services"}, receipt
         assert (directory / "Long/envelope.json").is_file()
         attempt = json.loads((directory / "Long/attempt.json").read_text())
         acquisitions = attempt["host_lease_acquisitions"]
-        if compile_only_examples:
-            assert len(acquisitions) == 1 and acquisitions[0]["profiles"] == ["native-workspace", "native-examples"], attempt
+        expected_acquisitions = [first]
+        if pair:
+            assert acquisitions[0]["profiles"] == [first, followup], attempt
+            if pair == "context":
+                expected_acquisitions.append(after_profile)
         else:
-            assert [entry["profile"] for entry in acquisitions] == ["native-workspace", "native-services"], attempt
+            expected_acquisitions.append(followup)
+        assert [entry["profile"] for entry in acquisitions] == expected_acquisitions, attempt
         assert all(entry["wait_seconds"] > 0 for entry in acquisitions), attempt
         assert abs(attempt["host_lease_wait_seconds"] - sum(entry["wait_seconds"] for entry in acquisitions)) < 0.002, attempt
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
-        if compile_only_examples:
+        if pair:
             def resume(label, original):
                 output = directory / label
                 source = directory / ("source-" + original)
@@ -429,33 +464,38 @@ def verify_profile_handoff(fixture, authority, run, environment, compile_only_ex
             (directory / "release-Broken-two").write_text("fail")
             broken = start("Broken", second=True, after=True)
             assert broken.wait(timeout=120) != 0
-            assert "CONTROLLED_EXAMPLE_FAILURE" in (directory / "Broken.log").read_text()
+            assert failure in (directory / "Broken.log").read_text()
             assert "start:Broken-after" not in events(), events()
             pointer = json.loads((directory / "Broken/checkpoint.json").read_text())
             partial = json.loads((directory / "Broken/checkpoints" / pointer["generation"] / "receipt.json").read_text())
-            assert set(partial["checks"]) == {"preflight", "native-workspace"}, partial
+            assert set(partial["checks"]) == {"preflight", first}, partial
             assert not (directory / "Broken/envelope.json").exists()
             (directory / "release-Broken-resumed-two").touch()
             (directory / "release-Broken-resumed-after").touch()
             continued, continued_attempt = resume("Broken-resumed", "Broken")
             assert events().count("start:Broken") == 1 and "start:Broken-resumed" not in events(), events()
-            assert events()[-4:] == ["start:Broken-resumed-two", "end:Broken-resumed-two",
-                                    "start:Broken-resumed-after", "end:Broken-resumed-after"], events()
-            assert set(continued["checks"]) == {"preflight", "native-workspace", "native-examples", "native-resize"}, continued
-            assert [row["profile"] for row in continued_attempt["host_lease_acquisitions"]] == ["native-examples", "native-resize"], continued_attempt
+            resumed_labels = ["Broken-resumed-after", "Broken-resumed-two"] if pair == "context" else [
+                "Broken-resumed-two", "Broken-resumed-after",
+            ]
+            assert events()[-4:] == [f"{verb}:{label}" for label in resumed_labels for verb in ("start", "end")], events()
+            assert set(continued["checks"]) == {"preflight", first, followup, after_profile}, continued
+            expected_order = [after_profile, followup] if pair == "context" else [followup, after_profile]
+            assert [row["profile"] for row in continued_attempt["host_lease_acquisitions"]] == expected_order, continued_attempt
             assert all("profiles" not in row for row in continued_attempt["host_lease_acquisitions"]), continued_attempt
             (directory / "result.json").write_text(json.dumps({
-                "status": "PASS", "original_two_profile_receipt": receipt,
+                "status": "PASS", "original_receipt": receipt,
                 "one_shared_acquisition": acquisitions, "full_resume_without_execution": restored_attempt,
-                "original_failed_example_partial": partial, "partial_resume": continued_attempt,
+                "original_failed_followup_partial": partial, "partial_resume": continued_attempt,
                 "events": events(), "scope": "Real Git, SSH and private FIFO/child processes; no product compilation or coverage credit.",
             }, indent=2) + "\n", encoding="utf-8")
-            print("PASS: one original reservation covers adjacent workspace/examples, preserves distinct signed profiles and partial progress, then yields to the existing waiter; cumulative wait is counted once")
-            print("PASS: verified full resume takes no lease; a real example failure blocks later work and partial resume reruns only its unfinished profiles")
+            print(f"PASS: one original reservation covers {first}/{followup}, preserves distinct signed "
+                  "profiles and partial progress, then yields to the existing waiter. Cumulative wait is counted once.")
+            print(f"PASS: verified full resume takes no lease. A real {followup} failure blocks later work "
+                  "and partial resume reruns only unfinished profiles.")
         else:
             print("PASS: existing contender completes between two exclusive required profiles; all signed profiles finish once and cumulative FIFO wait is retained")
     finally:
-        for label in ["Holder", "Long", "Short", "Long-two", "Broken", "Broken-two", "Broken-after",
+        for label in ["Holder", "Long", "Short", "Long-two", "Long-after", "Broken", "Broken-two", "Broken-after",
                       "Broken-resumed-two", "Broken-resumed-after"]:
             (directory / ("release-" + label)).touch()
         for process in processes:

@@ -3,9 +3,11 @@
 
 import ast
 import builtins
+from contextlib import redirect_stdout
 import fnmatch
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -65,7 +67,7 @@ def verifier_layout_digest(source, mode, consumers):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def unchanged_profile_execution(base, head):
+def unchanged_profile_execution(base, head, *, resource_registration=None):
     """Use comparison-base code; the merge queue supplies its protected base."""
     previous = json.loads(git("show", f"{base}:{POLICY}"))
     current = json.loads(git("show", f"{head}:{POLICY}"))
@@ -81,6 +83,8 @@ def unchanged_profile_execution(base, head):
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         helper.ROOT = Path.cwd()
+        if resource_registration is not None:
+            verify_scheduling_resource_registration(helper, head, resource_registration)
         before = helper.reachable_profile_commands_hashes(base, names)
         after = helper.reachable_profile_commands_hashes(head, names)
     changed = [name for name in names if before[name] != after[name]]
@@ -179,15 +183,66 @@ def metadata_only_inputs(paths, base, head, details):
         return False
 
 
+def verify_scheduling_resource_registration(protected, head, registration):
+    """Read the exact new resource layout from the protected verifier."""
+    output = io.StringIO()
+    diagnostic = "LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED="
+    with redirect_stdout(output):
+        try:
+            protected.resource_executor_identity(head)
+        except ValueError as error:
+            if str(error) != "Unreviewed complete executor program; full current checks remain required":
+                raise
+        else:
+            if registration:
+                raise ValueError("An already reviewed executor requires no new resource registration")
+            return
+    rows = output.getvalue().splitlines()
+    if len(rows) != 1 or not rows[0].startswith(diagnostic):
+        raise ValueError("Unknown protected resource registration diagnostic")
+    refusal = json.loads(rows[0][len(diagnostic):])
+    if refusal.get("ref") != head or (refusal.get("observed_source_layout"),) != registration:
+        raise ValueError("The added resource registration does not match the committed executor")
+
+
+def scheduling_selector_identity(ref, selector, runner):
+    """Permit the exact runner blob registration and compare all other selector code."""
+    row = git("ls-tree", ref, "--", selector).split("\t", 1)[0].split()
+    if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+        raise ValueError("Scheduling registration requires a regular committed selector")
+    tree = ast.parse(git("show", f"{ref}:{selector}"))
+    registrations = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "POLICY_FIXTURE_INPUTS"
+                for target in node.targets)
+    ]
+    if len(registrations) != 1 or not isinstance(registrations[0].value, ast.Dict):
+        raise ValueError("Unknown policy fixture registration declaration")
+    registry = registrations[0].value
+    indices = [index for index, key in enumerate(registry.keys)
+               if isinstance(key, ast.Constant) and key.value == runner]
+    if len(indices) != 1:
+        raise ValueError("Expected one runner input in the policy fixture registration")
+    index = indices[0]
+    runner_row = git("ls-tree", ref, "--", runner).split("\t", 1)[0].split()
+    if ast.literal_eval(registry.values[index]) != runner_row:
+        raise ValueError("Policy fixture registration does not match the committed runner")
+    registry.values[index] = ast.Constant(value=None)
+    return row[0], ast.dump(tree, include_attributes=False)
+
+
 def scheduling_only_inputs(paths, base, head, details):
     """Keep unchanged queue executors out of author-scheduling-only acceptance."""
     runner = ".github/scripts/local_acceptance.py"
-    allowed = {runner, ".github/local-acceptance/checks.py",
+    selector = ".github/scripts/ci_input_scope.py"
+    allowed = {runner, selector, ".github/local-acceptance/checks.py",
                "e2e/local-acceptance/host_lease_acceptance.py"}
     if runner not in paths or not set(paths) <= allowed:
         details.update(decision="not_applicable")
         return False
     functions = {"host_acceptance_lease", "perform_check"}
+    registered = selector in paths
 
     def identity(ref):
         row = git("ls-tree", ref, "--", runner)
@@ -196,7 +251,22 @@ def scheduling_only_inputs(paths, base, head, details):
             raise ValueError("Scheduling proof requires a regular committed executor")
         tree = ast.parse(git("show", f"{ref}:{runner}"))
         projected, seen = [], set()
+        reviewed = None
         for node in tree.body:
+            if registered and isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+                declarations = [
+                    item for item in node.body if isinstance(item, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                            for target in item.targets)
+                ]
+                if reviewed is not None or len(declarations) != 1:
+                    raise ValueError("Expected one reviewed resource registration")
+                declaration = declarations[0]
+                reviewed = ast.literal_eval(declaration.value)
+                if not isinstance(reviewed, set) or not reviewed or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in reviewed):
+                    raise ValueError("Unknown reviewed resource registration")
+                declaration.value = ast.Constant(value=None)
             if isinstance(node, ast.FunctionDef) and node.name == "profile_reservations":
                 args = node.args
                 if (node.name in seen or node.decorator_list or node.returns
@@ -232,12 +302,24 @@ def scheduling_only_inputs(paths, base, head, details):
                     if (not isinstance(top, ast.FunctionDef) or top.name != "start_pr"
                             or ast.dump(node, include_attributes=False) != refresh):
                         raise ValueError("Unknown dynamic executor namespace")
-        return mode, ast.dump(tree, include_attributes=False)
+        return (mode, ast.dump(tree, include_attributes=False)), reviewed
 
     try:
-        if identity(base) != identity(head):
+        before, previous_reviews = identity(base)
+        after, current_reviews = identity(head)
+        if before != after:
             raise ValueError("Code outside author scheduling or its declaration changed")
-        names = unchanged_profile_execution(base, head)
+        registration = None
+        if registered:
+            if scheduling_selector_identity(base, selector, runner) != scheduling_selector_identity(head, selector, runner):
+                raise ValueError("Code outside the runner input registration changed in the selector")
+            if previous_reviews is None or current_reviews is None or previous_reviews - current_reviews:
+                raise ValueError("The committed resource registration removed an existing reviewed layout")
+            added = current_reviews - previous_reviews
+            if len(added) > 1:
+                raise ValueError("Scheduling may register only its own new resource layout")
+            registration = tuple(added)
+        names = unchanged_profile_execution(base, head, resource_registration=registration)
         details.update(decision="unchanged_queue_executors", profiles=names,
                        author_scheduling_functions=sorted(functions | {"profile_reservations"}),
                        contract_guard_required=True)

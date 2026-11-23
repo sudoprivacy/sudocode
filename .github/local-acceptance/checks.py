@@ -1219,8 +1219,8 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "44b10cc1adc694f3c8a6971421cdc5ba9d5ba78f01b1d2caee481ffdc2d19aaf",
-        ".github/workflows/rust-ci.yml": "9ae262f1e15e4824e6308f021b37f827ce270fc7a19a0bb4bf9a3af02c377299",
+        ".github/scripts/ci_input_scope.py": "854fe5206beb48d40785ffb45e2ff4631b85ed068ee1b6b26518c079795e158f",
+        ".github/workflows/rust-ci.yml": "d6d944737447ed25dd0ffcf262c36258fe130ae1afbecedaffd313335a96bca5",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
         ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415",
@@ -1234,7 +1234,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "35e6fe4c35920194525e0ccd160fc26d3ccf4d8e5636d91004c28a26a9b268fd",
+        ".github/scripts/local_acceptance.py": "00073b1e377ccb69f711f98332deb7e808c4a3ba89753ceab9c4ef2d9bcbbc90",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
@@ -1244,7 +1244,7 @@ def native_guard_files():
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
-        "e2e/local-acceptance/deferred_push_acceptance.py": "35486dbd718f9f4236811d23d32d82a9771b02a54d34bc9477bd5b0c7b39616d",
+        "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
         "e2e/local-acceptance/dependency_scope_acceptance.py": "a29cd12b2b4e79ba94ea32ddb1e37ab04215054ca8bc12823d7dbdb01816c799",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
@@ -1321,7 +1321,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'b8c70f8a98a176d84fbf0df96a0fd424428966fec7b0407e7809cb5714ea5b4a', 'native-context': '2f22a593cd367390c1b09c94bcf15f8338de406c86ba13a04d6394cdbefffac0', 'native-services': '8efcd5884b48d577d312f705a61f35a780dd7c809ced72b2c7666531f9eadcbc'}
+    expected = {'native-release': 'e8f48f465d0cc74dfd46f7a9ad97f0903f7fd263a617f7dc0d710fc5b865db97', 'native-context': 'd0b9ff35df23ce5cd89c82bb220c7a9062f9a9b9f053723789b05ca1f7d1162d', 'native-services': 'a1eadb74842db37d1814936aef8066215f2d1a051f05d4028c8982084851b576'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

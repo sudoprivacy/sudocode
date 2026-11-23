@@ -202,6 +202,99 @@ fn a_model_chosen_during_a_turn_applies_when_the_turn_ends() {
 }
 
 #[test]
+fn model_picker_and_confirmation_have_separate_history_from_streaming_thinking() {
+    let env = TestEnv::new_mock("thinking-model-picker-spacing");
+    let gate = env.workspace_root().join("release-tool");
+    let release = Release(env.workspace_root().to_path_buf());
+    let batch = json!([{
+        "id": "thinking-model-tool", "name": "Bash",
+        "input": {"command": "printf 'MODEL_SPACING_TOOL_DONE\\n'"},
+        "stream_wait_for": gate,
+        "stream_pause_at": "thinking",
+        "stream_thinking": [
+            {"thinking": "First reasoning marker.\n", "signature": "first-signature"},
+            {"thinking": "Second reasoning marker.\n", "signature": "second-signature"}
+        ]
+    }]);
+    let mut session = env.spawn_with_env_at_size(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+        60,
+        120,
+    );
+    common::expect_input_line_cleared(&session, env.timeout(), "initial prompt");
+    paste(
+        &mut session,
+        &env,
+        &env.prompt(
+            &format!("Use the fixture. TOOL_BATCH:{batch}"),
+            "tool_concurrency",
+        ),
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |screen| {
+            screen
+                .lines()
+                .any(|row| row.trim() == "✻ First reasoning marker.")
+        },
+        env.timeout(),
+        "thinking before the model picker",
+    );
+    enter(&mut session, &env, "/model");
+    common::expect_screen(
+        &session,
+        |screen| screen.contains("Select model") && screen.contains("Current:"),
+        env.timeout(),
+        "model picker opened",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |screen| {
+            screen
+                .lines()
+                .any(|row| row.trim().starts_with("Model switches to "))
+        },
+        env.timeout(),
+        "choice announced while thinking is still gated",
+    );
+    release.now();
+    let screen = common::expect_screen_rows_settled(
+        &session,
+        |screen| {
+            screen
+                .lines()
+                .any(|row| row.trim() == "Second reasoning marker.")
+                && screen.contains("Concurrency batch done.")
+                && screen.contains("Select effort")
+        },
+        env.timeout(),
+        "the streamed turn ended and opened the selected model's effort picker",
+    );
+    let rows: Vec<_> = screen.lines().collect();
+    let boundaries = [
+        "✻ First reasoning marker.",
+        "❯ /model",
+        "Current:",
+        "Model switches to ",
+        "Second reasoning marker.",
+    ]
+    .map(|marker| {
+        rows.iter()
+            .position(|row| row.trim_start().starts_with(marker))
+            .unwrap_or_else(|| panic!("missing {marker}:\n{screen}"))
+    });
+    for (before, after) in boundaries.into_iter().zip(boundaries.into_iter().skip(1)) {
+        assert_eq!(after, before + 2, "{screen}");
+        assert!(rows[before + 1].trim().is_empty(), "{screen}");
+    }
+    session.send("\x1b").unwrap();
+    finish(session, &env);
+}
+
+#[test]
 fn a_session_command_queued_during_a_turn_runs_between_the_messages_around_it() {
     let (env, mut session, release) = start_held_turn("turn-commands-queued");
     queue_message(&mut session, &env, "QUEUED_BEFORE_CLEAR");

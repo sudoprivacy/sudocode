@@ -2016,6 +2016,19 @@ checks may start after unpublished work. In
 GitHub assigned its runner after 10 minutes 5 seconds, and assigned execution
 lasted 3 minutes 34 seconds. This is one observed job on the critical path.
 The measured records still leave the end-to-end one-tenth target unproven.</p>
+<p>The first fixed cohort cannot reach the published conservative merge
+reference of 18.526 minutes. The 15 recorded final-source intervals already
+sum to 1,706.580 minutes. Even five more intervals of zero minutes would
+leave a mean of at least 85.329 minutes across the full cohort. The reference
+uses historical hosted-only timings. The matched historical author-inclusive
+mean is still unavailable, and missing earlier failures prevent an equivalent
+bound on actual first-failure times.</p>
+<p>For <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45136487423">PR #1558</a>,
+the hosted publisher reported the native complement passed 498.370 minutes
+before the signed author checks finished. The available signed author interval
+was 506.447 minutes, with 42.453 minutes summed across the recorded commands.
+The original author-attempt and lease timeline is unavailable, so these
+records cannot classify the other time as queueing or execution.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its

@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { connectScode, type ScodeAcpConfig } from './scodeAcp';
 import { listScodeAgents, requireScodeNodeIdentity } from './scodeA2a';
 import { CodexEnrollmentError, type CodexAgentProfile } from './codexAutojoin';
-import { canonicalWorkspace, identifier, type CodexAgentClaim } from './codexBindings';
+import { canonicalWorkspace, ENROLLED_ACTOR, identifier, type CodexAgentClaim } from './codexBindings';
 import { runEnrollmentCommand } from './enrollmentCommand';
 
 interface OperatorGrant {
@@ -180,10 +180,35 @@ function grantFor(file: string, claim: CodexAgentClaim): {grant: OperatorGrant; 
   const bytes=recordBytes(file);const grant=JSON.parse(bytes.toString('utf8')) as OperatorGrant;
   validateGrant(grant);
   if(!claim || claim.version!==1 || Object.keys(claim).sort().join(',')!=='actor,operationId,threadId,version,workspace'
-      || !/^(?:codex|claude)-[0-9a-f]{32}$/.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Agent enrollment claim');
+      || !ENROLLED_ACTOR.test(claim.actor) || !identifier(claim.operationId) || !identifier(claim.threadId))throw new Error('Invalid Agent enrollment claim');
   canonicalWorkspace(claim.workspace);
   // No Node/CA private key or install authority is copied into this response.
   return {grant,grantSha256:createHash('sha256').update(bytes).digest('hex')};
+}
+
+/** Read the operator's completed operation without submitting enrollment or starting ACP. */
+export function readCompletedCodexEnrollment(file: string, claim: CodexAgentClaim) {
+  const {grant,grantSha256}=grantFor(file,claim);
+  const dir=path.join(grant.stateDirectory,claim.actor);
+  const workspace=path.join(dir,'workspace');
+  const intent: OperationRecord={version:2,claim,nativeCanonicalWorkspace:canonicalWorkspace(claim.workspace),
+    nexusArgv:grant.nexusArgv};
+  const previous=readJson(path.join(dir,'operation.json')) as OperationRecord|LegacyOperationRecord;
+  const refusal=resumeRefusal(previous,intent,grantSha256,true);
+  if(refusal)throw new Error(refusal);
+  const result=readJson(path.join(dir,'result.json')) as CodexAgentProfile;
+  const configFile=path.join(dir,'profile.json');
+  if(result.actor!==claim.actor || result.configFile!==configFile || !result.workspaceBinding){
+    throw new Error('Completed enrollment lacks its original actor, profile or workspace binding');
+  }
+  const saved=readJson(path.join(dir,'session.json')) as {workspace:string;sessionId:string};
+  const profile=readJson(configFile) as ScodeAcpConfig;
+  const settings=readJson(path.join(workspace,'.nexus','sudocode','settings.json')) as {agentName:string};
+  if(settings.agentName!==claim.actor || saved.workspace!==workspace || profile.workspace!==workspace
+      || !saved.sessionId || saved.sessionId!==profile.acpSessionId){
+    throw new Error('Completed enrollment differs from the saved actor workspace or ACP session');
+  }
+  return {result,profile};
 }
 
 /** Operator implementation of enrollmentArgv. Called only after an owner has
@@ -291,7 +316,7 @@ export function refreshCodexProfiles(file: string): ProfileRefresh[] {
   validateGrant(grant);
   if(!existsSync(grant.stateDirectory))return [];
   return readdirSync(grant.stateDirectory,{withFileTypes:true})
-    .filter(entry=>entry.isDirectory() && /^(?:codex|claude)-[0-9a-f]{32}$/.test(entry.name))
+    .filter(entry=>entry.isDirectory() && ENROLLED_ACTOR.test(entry.name))
     .map(entry=>entry.name).sort()
     .map((actor): ProfileRefresh=>{
       const actorDirectory=path.join(grant.stateDirectory,actor);

@@ -3,3 +3,4 @@ export { openCodexMailboxWake, readCodexMailboxSnapshot, mailboxSubmissionTextBu
   CODEX_MAILBOX_DELIVERY_PROVENANCE } from '../src/codexMailboxWake';
 export { openCodexMailboxOwner } from '../src/codexMailboxOwner';
 export { openScodeMailbox } from '../src/scodeMailbox';
+export { upgradedMailboxProfile } from '../src/codexBindings';

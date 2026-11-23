@@ -1,13 +1,14 @@
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
-import type { CodexConnection, CodexNotification } from './codexConnection';
+import { CodexRequestError, type CodexConnection, type CodexNotification } from './codexConnection';
 import { journalHash, openCodexJournal } from './codexJournal';
 
 const nonempty = z.string().min(1);
 const cursor = nonempty.nullish();
 const user = z.object({ type: z.literal('userMessage'), clientId: nonempty.nullish() });
 const item = z.object({ type: nonempty }).passthrough();
-const turn = z.object({ id: nonempty, status: z.enum(['completed', 'failed', 'interrupted', 'inProgress']),
+const turnStatus = z.enum(['completed', 'failed', 'interrupted', 'inProgress']);
+const turn = z.object({ id: nonempty, status: turnStatus,
   itemsView: z.literal('full').optional(), items: z.array(item) });
 const headSchema = z.object({ conversation: nonempty, start: z.number().int().nonnegative().safe(), deliveryId: nonempty });
 export type CodexMailboxHead = z.infer<typeof headSchema>;
@@ -23,9 +24,9 @@ function submission(threadId: string, clientUserMessageId: string, text: string)
     input: [{ type: 'text', text: CODEX_MAILBOX_DELIVERY_PROVENANCE + '\n' + text }] };
 }
 
-/** A separate qualified bound for encoded queue-add params, including the
- * provenance, identity and JSON escaping. Tool-result qualification alone
- * does not prove that the native queue preserves a model-facing input. */
+/** A separate bound for encoded queue-add params, including the provenance,
+ * identity and JSON escaping. The tool-result bound alone does not cover the
+ * model-facing input the native queue carries. */
 export function mailboxSubmissionTextBudget(actor: string, threadId: string, encodedSubmissionBytes: number): number {
   nonempty.parse(actor); nonempty.parse(threadId);
   if (!Number.isSafeInteger(encodedSubmissionBytes) || encodedSubmissionBytes < 4096 || encodedSubmissionBytes > 65536) {
@@ -40,6 +41,8 @@ export function mailboxSubmissionTextBudget(actor: string, threadId: string, enc
 export interface CodexMailboxSnapshot {
   loaded: boolean;
   idle: boolean;
+  /** The lost-submission timer may accrue while this snapshot holds. */
+  recoveryIdle: boolean;
   queueEmpty: boolean;
   epoch: string;
   queued: ReadonlySet<string>;
@@ -47,15 +50,99 @@ export interface CodexMailboxSnapshot {
   finished: ReadonlySet<string>;
 }
 
+export async function readCodexMailboxThread(native: CodexConnection, threadId: string, includeTurns: boolean) {
+  const { thread } = z.object({ thread: z.object({ id: nonempty,
+    historyMode: z.enum(['legacy', 'paginated']).optional(),
+    status: z.object({ type: z.enum(['idle', 'active', 'notLoaded', 'systemError']) }), turns: z.array(turn) }),
+  }).parse(await native.request('thread/read', { threadId, includeTurns }));
+  if (thread.id !== threadId) throw new Error('Native mailbox thread identity differs');
+  if (thread.status.type === 'systemError') throw new Error('Native mailbox thread has a system error; state unknown');
+  return thread;
+}
+
+// Stock Codex keeps a new TUI thread in memory until its first user input.
+// The list RPC identifies that state explicitly. Missing threads, unsupported
+// methods, failed later pages and lost replies still leave history unknown.
+export async function requestCodexMailboxPage(
+  native: CodexConnection, method: string, params: { threadId?: string; cursor?: string; limit: number; itemsView?: string; sortDirection?: string },
+): Promise<unknown> {
+  try {
+    return await native.request(method, params);
+  } catch (error) {
+    if (method === 'thread/turns/list' && params.threadId && params.cursor === undefined && error instanceof CodexRequestError) {
+      const rpc = z.object({ code: z.literal(-32600), message: z.string() }).safeParse(error.rpcError);
+      const expected = `thread ${params.threadId} is not materialized yet; thread/turns/list is unavailable before first user message`;
+      if (rpc.success && rpc.data.message === expected) return { data: [], nextCursor: null };
+    }
+    throw error;
+  }
+}
+
+type PageReader = <T>(method: string, params: object,
+  parse: (value: unknown) => { data: T[]; nextCursor?: string | null }) => Promise<T[]>;
+type FinishedIds = (epoch: string) => ReadonlySet<string>;
+
+/** Walk every turn header. Read item pages only for the last non-wake epoch,
+ * active inputs and the terminal IDs the caller actually has to reconcile. */
+async function paginatedWakeHistory(pages: PageReader, threadId: string, finishedIds?: FinishedIds) {
+  const shell = z.object({ id: nonempty, status: turnStatus, itemsView: z.literal('notLoaded') });
+  const turnPage = z.object({ data: z.array(shell), nextCursor: nonempty.nullable() });
+  const turns = await pages('thread/turns/list', { threadId, sortDirection: 'desc', itemsView: 'notLoaded' },
+    value => turnPage.parse(value));
+  if (new Set(turns.map(row => row.id)).size !== turns.length) throw new Error('Native mailbox turn appeared twice');
+  const itemPage = z.object({ data: z.array(z.object({ turnId: nonempty, item: z.object({ type: nonempty,
+    clientId: nonempty.nullish() }), outputDeferred: z.boolean().optional() })), nextCursor: nonempty.nullable() });
+  const inputs = new Map<string, (string | null | undefined)[]>();
+  async function readInputs(id: string) {
+    const cached = inputs.get(id);
+    if (cached) return cached;
+    const ids = await pages('thread/items/list', { threadId, turnId: id, sortDirection: 'asc', limit: 20,
+      deferOutput: { commandExecution: true, mcpToolCall: true } }, value => {
+      const page = itemPage.parse(value);
+      if (page.data.some(row => row.turnId !== id || (row.item.type === 'userMessage' && row.outputDeferred))) {
+        throw new Error('Native mailbox item page differs from the requested turn or omits its input');
+      }
+      return { data: page.data.filter(row => row.item.type === 'userMessage').map(row => row.item.clientId),
+        nextCursor: page.nextCursor };
+    });
+    inputs.set(id, ids);
+    return ids;
+  }
+  let epochIndex = turns.length;
+  for (const [index, entry] of turns.entries()) {
+    if (entry.status === 'completed' && (await readInputs(entry.id)).some(id => !id || !isWake(id))) {
+      epochIndex = index;
+      break;
+    }
+  }
+  const epoch = turns[epochIndex]?.id ?? 'none';
+  const remaining = finishedIds && new Set(finishedIds(epoch)), running = new Set<string>(), finished = new Set<string>();
+  let blocksRecovery = false;
+  for (const [index, entry] of turns.entries()) {
+    if (entry.status === 'inProgress') {
+      for (const id of await readInputs(entry.id)) {
+        if (!id) continue;
+        running.add(id);
+        // Native can retain inProgress headers across completed human turns.
+        // Keep their IDs for reconciliation. A wake of any age still blocks.
+        if (index < epochIndex || isWake(id)) blocksRecovery = true;
+      }
+    } else if (!remaining || remaining.size) {
+      for (const id of await readInputs(entry.id)) if (id && (!remaining || remaining.delete(id))) finished.add(id);
+    }
+  }
+  return { epoch, running, finished, blocksRecovery };
+}
+
 /** Read every page. A malformed, repeated or overlarge cursor walk refuses;
  * it never turns a partial inventory into proof of an empty queue/history. */
-export async function readCodexMailboxSnapshot(native: CodexConnection, threadId: string): Promise<CodexMailboxSnapshot> {
+export async function readCodexMailboxSnapshot(native: CodexConnection, threadId: string, finishedIds?: FinishedIds): Promise<CodexMailboxSnapshot> {
   nonempty.parse(threadId);
   const pages = async <T>(method: string, params: object, parse: (value: unknown) => { data: T[]; nextCursor?: string | null }): Promise<T[]> => {
     let next: string | undefined;
     const seen = new Set<string>(), values: T[] = [];
     for (let page = 0; page < 10000; page++) {
-      const result = parse(await native.request(method, { ...params, limit: 100, ...(next ? { cursor: next } : {}) }));
+      const result = parse(await requestCodexMailboxPage(native, method, { limit: 100, ...params, ...(next ? { cursor: next } : {}) }));
       values.push(...result.data);
       if (result.nextCursor == null) return values;
       if (seen.has(result.nextCursor)) throw new Error('Native mailbox inventory repeated a cursor');
@@ -64,19 +151,24 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
     throw new Error('Native mailbox inventory is incomplete after 10000 pages');
   };
   const loaded = await pages('thread/loaded/list', {}, value => z.object({ data: z.array(nonempty), nextCursor: cursor }).parse(value));
-  if (!loaded.includes(threadId)) return { loaded: false, idle: false, queueEmpty: false, epoch: 'none',
+  if (!loaded.includes(threadId)) return { loaded: false, idle: false, recoveryIdle: false, queueEmpty: false, epoch: 'none',
     queued: new Set(), running: new Set(), finished: new Set() };
   const queue = await pages('thread/queue/list', { threadId }, value => z.object({
     data: z.array(z.object({ id: nonempty, clientUserMessageId: nonempty })), nextCursor: cursor,
   }).parse(value));
+  const queued = new Set(queue.map(row => row.clientUserMessageId));
+  const metadata = await readCodexMailboxThread(native, threadId, false);
+  if (metadata.historyMode === 'paginated') {
+    const { blocksRecovery, ...history } = await paginatedWakeHistory(pages, threadId, finishedIds);
+    const fresh = await readCodexMailboxThread(native, threadId, false);
+    if (fresh.historyMode !== 'paginated') throw new Error('Native mailbox history mode changed during observation');
+    return { ...history, loaded: fresh.status.type !== 'notLoaded', idle: fresh.status.type === 'idle',
+      recoveryIdle: metadata.status.type === 'idle' && fresh.status.type === 'idle' && !queue.length && !blocksRecovery,
+      queueEmpty: queue.length === 0, queued };
+  }
   const turns = await pages('thread/turns/list', { threadId, sortDirection: 'desc', itemsView: 'full' },
     value => z.object({ data: z.array(turn), nextCursor: cursor }).parse(value));
-  const { thread } = z.object({ thread: z.object({ id: nonempty,
-    status: z.object({ type: z.enum(['idle', 'active', 'notLoaded', 'systemError']) }), turns: z.array(turn) }),
-  }).parse(await native.request('thread/read', { threadId, includeTurns: true }));
-  if (thread.id !== threadId) throw new Error('Native mailbox thread identity differs');
-  if (thread.status.type === 'systemError') throw new Error('Native mailbox thread has a system error; state unknown');
-  const queued = new Set(queue.map(row => row.clientUserMessageId));
+  const thread = await readCodexMailboxThread(native, threadId, true);
   const running = new Set<string>(), finished = new Set<string>();
   const ids = (value: z.infer<typeof turn>) => value.items.filter(entry => entry.type === 'userMessage')
     .map(entry => user.parse(entry).clientId);
@@ -93,6 +185,7 @@ export async function readCodexMailboxSnapshot(native: CodexConnection, threadId
     if (inputs.some(id => !id || !isWake(id))) { epoch = value.id; break; }
   }
   return { loaded: thread.status.type !== 'notLoaded', idle: thread.status.type === 'idle',
+    recoveryIdle: thread.status.type === 'idle' && !queue.length && !running.size,
     queueEmpty: queue.length === 0, epoch, queued, running, finished };
 }
 
@@ -105,9 +198,9 @@ export interface CodexMailboxWakeStatus {
 }
 
 /** Internal controller: the caller must hold the shared owner's exclusive
- * lifetime bind, and qualify this actual native connection plus presentation
- * settings. Production attachment wiring remains gated on that qualification.
- * The controller never reconnects, starts a queue, starts a turn or retries an ID. */
+ * lifetime bind and admit this actual native connection and its presentation
+ * bounds. The controller never reconnects, starts a queue, starts a turn or
+ * retries an ID. */
 export function openCodexMailboxWake(options: {
   actor: string; threadId: string; journal: string; native: CodexConnection;
   encodedSubmissionBytes: number;
@@ -139,10 +232,18 @@ export function openCodexMailboxWake(options: {
         const { heads } = offerSchema.parse(await options.offer());
         if (closed) return;
         if (!heads.length) { idleSince = undefined; status = { state: 'idle' }; return; }
-        const view = await readCodexMailboxSnapshot(options.native, options.threadId);
+        const view = await readCodexMailboxSnapshot(options.native, options.threadId, epoch => {
+          const pending = new Set<string>();
+          for (const head of heads) {
+            const entries = slots.get(journalHash({ conversation: head.conversation, start: head.start, epoch }));
+            const last = entries?.at(-1);
+            if (last && last.n < 3) pending.add(last.clientId);
+          }
+          return pending;
+        });
         if (closed) return;
         if (!view.loaded) { idleSince = undefined; status = { state: 'waiting' }; return; }
-        if (view.idle && view.queueEmpty && !view.running.size) idleSince ??= performance.now();
+        if (view.recoveryIdle) idleSince ??= performance.now();
         else idleSince = undefined;
         if ([...view.queued, ...view.running].some(isWake)) { status = { state: 'waiting' }; return; }
         let exhausted: CodexMailboxWakeStatus | undefined;

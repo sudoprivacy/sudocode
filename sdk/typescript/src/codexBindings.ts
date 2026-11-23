@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { closeSync, createReadStream, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
   realpathSync, unlinkSync, writeSync } from 'node:fs';
 import { rename } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -57,8 +57,12 @@ export function assertWorkspace(binding: CodexBinding, workspace: unknown): void
   }
 }
 
-export function readProfile(file: string): ScodeAcpConfig {
-  return JSON.parse(readFileSync(file, 'utf8')) as ScodeAcpConfig;
+export function readProfile(file: string, expectedSha256?: string): ScodeAcpConfig {
+  const bytes = readFileSync(file);
+  if (expectedSha256 !== undefined && createHash('sha256').update(bytes).digest('hex') !== expectedSha256) {
+    throw new Error('Existing ACP profile differs from the selected mailbox upgrade');
+  }
+  return JSON.parse(bytes.toString('utf8')) as ScodeAcpConfig;
 }
 
 /** Freeze the original ACP context before connecting; imports may have a
@@ -86,9 +90,9 @@ function assertWorkspaceBinding(binding: CodexBinding, acpWorkspace: string, pro
   }
 }
 
-export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
+export function boundProfile(binding: CodexBinding, expectedSha256?: string): ScodeAcpConfig {
   if (!binding.configFile || !binding.acp) throw new Error('Durable binding lacks its frozen ACP context');
-  const profile = readProfile(binding.configFile);
+  const profile = readProfile(binding.configFile, expectedSha256);
   if (profile.acpSessionId !== binding.acp.sessionId) throw new Error('ACP session differs from its durable binding');
   if (canonicalWorkspace(profile.workspace) !== binding.acp.canonicalWorkspace
       || canonicalWorkspace(binding.acp.workspace) !== binding.acp.canonicalWorkspace) {
@@ -96,6 +100,28 @@ export function boundProfile(binding: CodexBinding): ScodeAcpConfig {
   }
   if (binding.workspaceBinding) assertWorkspaceBinding(binding, binding.acp.canonicalWorkspace, binding.workspaceBinding);
   return profile;
+}
+
+/** Select a verified scode executable for this attachment only. Keep the
+ * existing profile, workspace, ACP session, arguments and environment. */
+export interface MailboxScodeUpgrade {
+  readonly executable: string;
+  readonly executableSha256: string;
+  readonly profileSha256: string;
+}
+
+export async function upgradedMailboxProfile(binding: CodexBinding, upgrade: MailboxScodeUpgrade): Promise<ScodeAcpConfig> {
+  if (!upgrade || typeof upgrade.executable !== 'string' || !path.isAbsolute(upgrade.executable) || !/^[a-f0-9]{64}$/.test(upgrade.executableSha256)
+      || !/^[a-f0-9]{64}$/.test(upgrade.profileSha256)) throw new Error('Invalid mailbox executable selection');
+  const profile = boundProfile(binding, upgrade.profileSha256);
+  if (!Array.isArray(profile.scodeArgv) || typeof profile.scodeArgv[0] !== 'string' || !path.isAbsolute(profile.scodeArgv[0])) {
+    throw new Error('Existing ACP profile must select its executable by absolute path');
+  }
+  const executable = realpathSync.native(upgrade.executable);
+  const digest = createHash('sha256');
+  for await (const bytes of createReadStream(executable)) digest.update(bytes);
+  if (digest.digest('hex') !== upgrade.executableSha256) throw new Error('Selected scode executable digest changed');
+  return { ...profile, scodeArgv: [executable, ...profile.scodeArgv.slice(1)] };
 }
 
 export async function writeBinding(directory: string, binding: CodexBinding, create = false): Promise<void> {
@@ -186,12 +212,22 @@ export interface NativeRoot { id: string; cwd: string; frontend: 'codex' | 'clau
 /** The enrollment authority's answer for one claim (see enrollCodexAgent). */
 export interface ProvisionedAgent { actor: string; configFile: string; workspaceBinding?: CodexWorkspaceBinding }
 
-/** Return the root's durable binding, persisting a new pending one first. A new
- * actor is `<frontend>-<32 hex>`, the only names operator enrollment issues. */
+/** Names operator enrollment issues: `<frontend>-<32 hex>` (before readable
+ * names) or `<frontend>-<workspace slug>-<8 hex>`. */
+export const ENROLLED_ACTOR = /^(?:codex|claude)-(?:[0-9a-f]{32}|[a-z0-9][a-z0-9-]{0,23}-[0-9a-f]{8})$/;
+
+/** A new actor names its workspace folder so a peer list shows who it is. */
+export function mintActor(root: NativeRoot): string {
+  const slug = path.win32.basename(root.cwd).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '').slice(0, 24).replace(/-+$/, '') || 'workspace';
+  return `${root.frontend}-${slug}-${randomBytes(4).toString('hex')}`;
+}
+
+/** Return the root's durable binding, persisting a new pending one first. */
 export async function claimBinding(directory: string, bindings: Map<string, CodexBinding>, root: NativeRoot): Promise<CodexBinding> {
   const existing = bindings.get(root.id);
   if (existing) return existing;
-  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: `${root.frontend}-${randomUUID().replaceAll('-', '')}`,
+  const binding: CodexBinding = { version: 2, origin: 'enrollment', actor: mintActor(root),
     operationId: randomUUID(), threadId: root.id, workspace: root.cwd,
     canonicalWorkspace: canonicalWorkspace(root.cwd), state: 'pending' };
   // Persist the original operation BEFORE asking any enrollment authority.

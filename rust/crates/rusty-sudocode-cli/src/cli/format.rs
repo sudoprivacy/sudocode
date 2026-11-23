@@ -430,13 +430,13 @@ pub(crate) fn format_input_echo(
     };
     let mut rendered = String::new();
     let mut offset = lead;
-    let surface =
-        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport)
-            .then(|| theme().prompt_style());
+    // The live editor's shade, where the terminal can draw one; otherwise the
+    // echo is plain text in the terminal's own colors.
+    let surface = Some(theme().prompt_style()).filter(|style| style.background_color.is_some());
     // A shaded surface sets the prompt's foreground explicitly, and faint text
     // over it barely differs from what was typed. There a paste takes the
     // muted foreground instead, as other low-emphasis text does.
-    let (paste_on, paste_off) = match surface.filter(|style| style.background_color.is_some()) {
+    let (paste_on, paste_off) = match surface {
         Some(style) => (
             theme().fg_seq(TextRole::Secondary),
             style
@@ -447,9 +447,9 @@ pub(crate) fn format_input_echo(
     };
     for (idx, line) in raw_lines.iter().enumerate() {
         // Prefix the first line with the same `❯` prompt glyph the live input
-        // box uses. Live commits and replay share this presentation; the
-        // experiment adds the same background to both. Continuation lines indent
-        // by two spaces to align under the text.
+        // box uses. Live commits and replay share this presentation, shade
+        // included. Continuation lines indent by two spaces to align under
+        // the text.
         let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!(
             "{prefix}{}",
@@ -894,6 +894,32 @@ pub(crate) fn render_tool_card_with_width(
     )
 }
 
+/// Whether a persistent todo panel owns the complete list in this presentation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolResultView {
+    Standalone,
+    WithTodoPanel,
+}
+
+pub(crate) fn format_tool_result_for_view(
+    name: &str,
+    input: &str,
+    output: &str,
+    is_error: bool,
+    view: ToolResultView,
+) -> String {
+    if view == ToolResultView::WithTodoPanel {
+        if let Some(result) = todo::from_tool_result(name, output, is_error) {
+            return result.receipt();
+        }
+    }
+    format_tool_result(name, input, output, is_error)
+}
+
+fn format_hook_feedback(feedback: &str) -> String {
+    format!("{}{feedback}{RESET}", theme().fg_seq(TextRole::Notice))
+}
+
 pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {
     let (payload, hook_feedback) = split_hook_feedback(output);
     let status = if is_error {
@@ -931,8 +957,7 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
         };
     }
     if let (Some(feedback), false) = (hook_feedback, is_error) {
-        let hf = theme().fg_seq(TextRole::Notice);
-        let feedback_body = format!("{hf}{feedback}{RESET}");
+        let feedback_body = format_hook_feedback(feedback);
         content.body = Some(match content.body {
             Some(body) => format!("{body}\n{feedback_body}"),
             None => feedback_body,
@@ -3136,9 +3161,10 @@ mod tests {
         // share the same prompt glyph. Both reference render::PROMPT_PREFIX, so
         // this asserts the echo starts with it — if someone hardcodes a
         // different glyph again (the old `›` bug), this fails.
+        // The echo may carry the editor's shade; the visible text is checked.
         let (echo, _) = format_input_echo("hi", &[], 80);
         assert!(
-            echo.starts_with(crate::render::PROMPT_PREFIX),
+            strip_ansi(&echo).starts_with(crate::render::PROMPT_PREFIX),
             "echo must start with the shared prompt prefix: {echo:?}"
         );
     }

@@ -232,8 +232,12 @@ fn preview_continues_after_a_stable_paragraph() {
     finish(&mut session);
 }
 
+/// The live canvas and history measure a multi-code-point cluster by the one
+/// rule measured at startup, so prose with one previews live like any other.
+/// Legacy Windows console hosts can still miscount such clusters, so there
+/// the text waits for its complete block.
 #[test]
-fn ambiguous_grapheme_width_uses_complete_block_fallback() {
+fn grapheme_clusters_preview_live_except_on_legacy_windows_hosts() {
     let mut documents = vec![
         "WidthStart 👩🏽‍💻 ordinary words WidthDone".to_string(),
         "WidthStart ｶﾞﾊﾟtail ordinary words WidthDone".to_string(),
@@ -246,7 +250,7 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
         documents.push(mock_anthropic_service::PROSE_PREVIEW_DOC.to_string());
     }
     for document in documents {
-        let env = TestEnv::new_mock("prose-emoji-fallback");
+        let env = TestEnv::new_mock("prose-grapheme-cluster");
         let mut session = start(&env, 120);
         let marker = common::turn_status_marker(&session);
         let (start, end) = if document.starts_with("WidthStart") {
@@ -257,25 +261,37 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
         session
             .send(&format!("{}\r", gated_prompt(&env, &document)))
             .unwrap();
-        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-        while !env.workspace_root().join("prose-ready").exists() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
+        if cfg!(windows) {
+            let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+            while !env.workspace_root().join("prose-ready").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(160));
+            session.render(|screen| {
+                assert!(!screen
+                    .contents()
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(end));
+            });
+        } else {
+            common::expect_screen(
+                &session,
+                |screen| {
+                    screen.split_whitespace().collect::<String>().contains(end)
+                        && env.workspace_root().join("prose-ready").exists()
+                },
+                common::DEFAULT_TIMEOUT,
+                "prose with a grapheme cluster previews live",
+            );
         }
-        std::thread::sleep(Duration::from_millis(160));
-        session.render(|screen| {
-            assert!(!screen
-                .contents()
-                .split_whitespace()
-                .collect::<String>()
-                .contains(end));
-        });
         std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
         common::expect_turn_complete_after(
             &session,
             &marker,
             common::DEFAULT_TIMEOUT,
-            "ambiguous grapheme canonical flush",
+            "grapheme cluster prose flush",
         );
         let screen = session.render(common::screen_contents);
         let logical_text = screen.split_whitespace().collect::<String>();

@@ -221,7 +221,7 @@ function claudeInstallation(name: string) {
     spool: (sessionId: string) => path.join(state, `${sessionId}.wake.jsonl`),
     deliveries: (sessionId: string) => journal(path.join(state, `${sessionId}.wake.jsonl`)) as unknown as Delivery[],
     claims: () => journal(path.join(issuer, 'claims.jsonl')) as Array<{ actor: string; threadId: string; workspace: string }>,
-    acp: () => journal(path.join(issuer, 'acp.jsonl')) as Array<{ method: string; params?: any; response?: any }>,
+    acp: () => journal(path.join(issuer, 'acp.jsonl')) as Array<{ method: string; params?: any; response?: any; attachment?: any }>,
     /** scode reports the unread count again, as on a new peer frame. */
     unread: () => fs.appendFileSync(unread, '.'),
     /** scode's polled count reads zero for a moment while the frame stays unread. */
@@ -405,7 +405,7 @@ async function checkClaudeOwners(): Promise<void> {
   finally { await first.client.close().catch(() => {}); await second?.client.close(); }
 }
 
-/** Claude Code autojoin: each session enrolls its own claude-<hex> Agent once,
+/** Claude Code autojoin: each session enrolls its own claude-<workspace>-<hex> Agent once,
  * resumes it by session id, and receives deliveries through its own spool. */
 async function checkClaudeAutojoin(): Promise<void> {
   const claude = claudeInstallation('claude-autojoin');
@@ -422,8 +422,11 @@ async function checkClaudeAutojoin(): Promise<void> {
   const first = randomUUID(), second = randomUUID();
   await session(first);
   assert.equal(claude.claims().length, 1);
-  assert.match(claude.claims()[0].actor, /^claude-[0-9a-f]{32}$/, 'a Claude Code session enrolls a claude-<hex> Agent');
+  assert.match(claude.claims()[0].actor, /^claude-[a-z0-9][a-z0-9-]{0,23}-[0-9a-f]{8}$/, 'a Claude Code session enrolls a readable claude-<workspace>-<hex> Agent');
   assert.equal(claude.claims()[0].threadId, first, 'the session id is the native root');
+  assert.ok(claude.acp().some(row => row.method === 'initialize' && row.attachment?.actor === claude.claims()[0].actor
+    && row.attachment.workspace === path.basename(directory) && row.attachment.frontend === 'Claude Code'),
+    'the owned scode is told to label the session as Claude Code in its project');
   await session(first);
   assert.equal(claude.claims().length, 1, 'resuming a session reuses its original Agent and ACP session');
   await session(second);

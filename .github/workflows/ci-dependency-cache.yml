@@ -53,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-toolchain
+        id: rust_toolchain
       - name: Resolve the shared native cache paths
         id: cache_layout
         run: python ../.github/local-acceptance/cache_layout.py --source rust --github-output
@@ -63,6 +64,7 @@ jobs:
           workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
           lookup-only: true
           save-if: false
       - name: Restore dependencies for a missing key
@@ -72,6 +74,7 @@ jobs:
           workspaces: ${{ steps.cache_layout.outputs.workspaces }}
           shared-key: ci-dependencies
           env-vars: ImageOS
+          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
       - name: Compile workspace dependencies without running tests
         if: steps.lookup.outputs.cache-hit != 'true'
         # Library/bin test builds include dev dependencies, including those used
@@ -81,6 +84,8 @@ jobs:
         run: cargo test --workspace --lib --bins --locked --features engine-acp/mailbox --no-run
 
       - name: Compile production release dependencies into the same cache
-        if: steps.lookup.outputs.cache-hit != 'true'
-        # Keep one Cargo registry/Git copy per host, rather than one per profile.
+        if: github.event_name == 'workflow_dispatch' && steps.lookup.outputs.cache-hit != 'true'
+        # Cache-only dispatch retains both profiles on a miss. Automatic main
+        # publication warms dev/test on the standard CI images. Tagged builds
+        # keep their own runner, target and original release build commands.
         run: cargo build --release --locked -p rusty-sudocode-cli --bin scode

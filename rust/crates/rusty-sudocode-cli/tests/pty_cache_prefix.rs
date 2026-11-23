@@ -943,36 +943,42 @@ fn adaptive_hidden_thinking_keeps_signed_history_and_uses_provider_default_effor
     assert_thinking_replayed(&requests[1], 1);
 }
 
+/// A model declared `adaptive` asks for readable summaries when thinking is on.
+/// One left undeclared gets the budgeted request, which carries no `display`,
+/// and such a model answers with signed thinking blocks whose text is empty.
 #[test]
-fn opus48_thinking_can_be_disabled_and_reenabled_after_resume() {
-    let env = TestEnv::new_mock("opus48-thinking-toggle");
-    let capture = Capture::new();
-    let path = fixture(&env, &capture);
-    let config_path = env.config_home().join("sudocode.json");
-    let mut config: Value =
-        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-4-8");
-    std::fs::write(config_path, config.to_string()).unwrap();
-    for is_enabled in [true, false, true] {
-        std::fs::write(
-            env.config_home().join("settings.json"),
-            json!({"thinking": is_enabled}).to_string(),
-        )
-        .unwrap();
-        let mut cli = spawn(&env, &path);
-        turn(&mut cli, "Continue with the current thinking setting.");
-        exit(&mut cli);
-        let request = capture.bodies().pop().unwrap();
-        if is_enabled {
-            assert_eq!(
-                request["thinking"],
-                json!({"type":"adaptive","display":"summarized"})
-            );
-        } else {
-            assert!(request.get("thinking").is_none());
+fn optional_adaptive_thinking_can_be_disabled_and_reenabled_after_resume() {
+    for model in ["claude-opus-4-8", "claude-fable-5-2"] {
+        let env = TestEnv::new_mock(&format!("{model}-thinking-toggle"));
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        std::fs::write(config_path, config.to_string()).unwrap();
+        for is_enabled in [true, false, true] {
+            std::fs::write(
+                env.config_home().join("settings.json"),
+                json!({"thinking": is_enabled}).to_string(),
+            )
+            .unwrap();
+            let mut cli = spawn(&env, &path);
+            turn(&mut cli, "Continue with the current thinking setting.");
+            exit(&mut cli);
+            let request = capture.bodies().pop().unwrap();
+            if is_enabled {
+                assert_eq!(
+                    request["thinking"],
+                    json!({"type":"adaptive","display":"summarized"}),
+                    "{model}"
+                );
+            } else {
+                assert!(request.get("thinking").is_none(), "{model}");
+            }
+            assert_eq!(request["model"], model);
+            assert_eq!(request["output_config"]["effort"], "high", "{model}");
         }
-        assert_eq!(request["model"], "claude-opus-4-8");
-        assert_eq!(request["output_config"]["effort"], "high");
     }
 }
 

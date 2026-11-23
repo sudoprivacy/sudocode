@@ -21,13 +21,37 @@ def resolve(workspace, source):
             "workspaces": f"{source.relative_to(workspace).as_posix()} -> {relative}"}
 
 
+def align_toolchain_cache_key(workspace, source):
+    # The cache action reads root-level toolchain files from its own checkout
+    # directory, even when Cargo's configured workspace is under candidate/.
+    # Mirror the existing candidate pin byte-for-byte so an equivalent publisher
+    # and consumer hash the same inputs. Older candidates may lack this file.
+    checkout = source.parent
+    if checkout == workspace:
+        return
+    relative = "rust-toolchain.toml"
+    candidate = checkout / relative
+    if candidate.is_symlink() or not candidate.is_file():
+        return
+    target = workspace / relative
+    contents = candidate.read_bytes()
+    try:
+        with target.open("xb") as stream:
+            stream.write(contents)
+    except FileExistsError:
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != contents:
+            raise RuntimeError("Native cache toolchain pin conflicts with a file at GITHUB_WORKSPACE") from None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True)
     parser.add_argument("--github-output", action="store_true")
     args = parser.parse_args()
-    layout = resolve(Path(os.environ["GITHUB_WORKSPACE"]), args.source)
+    workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+    layout = resolve(workspace, args.source)
     if args.github_output:
+        align_toolchain_cache_key(workspace, Path(layout["source"]))
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
             for name, value in layout.items():
                 stream.write(f"{name}={value}\n")

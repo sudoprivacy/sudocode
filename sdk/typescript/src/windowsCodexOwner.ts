@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
 
-function systemExecutable(name: string): string {
+export function systemExecutable(name: string): string {
   const root = process.env.SystemRoot;
   if (process.platform !== 'win32' || !root || !path.isAbsolute(root)) {
     throw new Error('Windows owner preparation requires the current Windows user environment');

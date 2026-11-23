@@ -143,3 +143,54 @@ fn cohost_mailbox_keeps_description_in_the_agents_vfs_directory() {
     // before publication; recovery never changes the target inside an IO.
     assert_eq!(calls.load(Ordering::Relaxed), 4);
 }
+
+#[test]
+fn a_claude_code_attachment_is_announced_and_an_unknown_frontend_is_not() {
+    let root = tempfile::tempdir().unwrap();
+    let mailbox = Mailbox::workspace_local(root.path(), "peer".into());
+    let stop = runtime::HookAbortSignal::new();
+    assert!(mailbox
+        .announce_attachment("session", "Cursor", "nexus", stop.clone())
+        .is_none());
+    mailbox
+        .announce_attachment("session", "Claude Code", "nexus", stop)
+        .expect("a Claude Code attachment is announced")
+        .join()
+        .unwrap();
+    let store = mailbox.description_store(mailbox.self_id()).unwrap();
+    let label = store.read().unwrap().unwrap().attachment.unwrap();
+    assert!(
+        label.starts_with("Claude Code · ") && label.ends_with(" · nexus"),
+        "{label}"
+    );
+}
+
+#[test]
+fn attaching_and_compacting_preserve_each_others_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let mailbox = Mailbox::workspace_local(root.path(), "peer".into());
+    let store = mailbox.description_store(mailbox.self_id()).unwrap();
+    let first = "Codex · mac · nexus";
+    let second = "Codex · win · nexus";
+    assert!(store.publish_attachment("first-session", first).unwrap());
+    let seeded = store.read().unwrap().unwrap();
+    assert_eq!(seeded.description, first);
+    assert!(store.publish_attachment("another-session", first).unwrap());
+    assert_eq!(store.read().unwrap().unwrap(), seeded);
+
+    let stale = store.snapshot("slow-session").unwrap();
+    assert!(store.publish_attachment("second-session", second).unwrap());
+    assert!(!store.publish(&stale.update("obsolete").unwrap()).unwrap());
+    let fresh = store.snapshot("task-session").unwrap();
+    assert!(store
+        .publish(&fresh.update("Verify release").unwrap())
+        .unwrap());
+    let task = store.read().unwrap().unwrap();
+    assert_eq!(task.attachment.as_deref(), Some(second));
+    assert!(store.publish_attachment("third-session", first).unwrap());
+    let moved = store.read().unwrap().unwrap();
+    assert_eq!(moved.description, "Verify release");
+    assert_eq!(moved.updated_at, task.updated_at);
+    assert_eq!(moved.source_session_id, "task-session");
+    assert_eq!(moved.attachment.as_deref(), Some(first));
+}

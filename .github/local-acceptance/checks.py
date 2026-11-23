@@ -1162,12 +1162,14 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Co-host build version stamp was lost")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
-            if name == "rendering":
-                with rendering_source_inputs(root.parent) as inputs:
-                    if inputs != root.parent:
-                        # Build commands use the frozen candidate as their working directory.
-                        return run(name, inputs / "candidate", output, base, execute)
-            benchmark(name, root, output, base, command, target)
+            from functools import partial
+
+            with container_source_inputs(root.parent, name) as inputs:
+                frozen = inputs / "candidate"
+                target = native_target_directory(frozen)
+                env["CARGO_TARGET_DIR"] = str(target)
+                benchmark(name, frozen, output, base, partial(command, cwd=frozen), target,
+                          source_mount=root.parent)
         else:
             try:
                 policy_ref, candidate_ref = run.execution_refs
@@ -1612,7 +1614,7 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
-def pack_rendering_sources(root, snapshots, directory):
+def pack_container_sources(root, snapshots, directory):
     """Transport ordinary Git trees as sequential reads across the Windows bind mount."""
     for ref in dict.fromkeys(snapshots.values()):
         tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref], cwd=root)
@@ -1630,12 +1632,12 @@ def pack_rendering_sources(root, snapshots, directory):
     return digests
 
 
-def extract_rendering_source(path, destination, ref, expected_hash):
+def extract_container_source(path, destination, ref, expected_hash):
     """Read a regular-file Git archive safely on the pinned container Python."""
     from pathlib import PurePosixPath
 
     if checkout_link(path) or not path.is_file():
-        raise RuntimeError(f"Rendering archive is missing or is not a regular file: {path}")
+        raise RuntimeError(f"Source archive is missing or is not a regular file: {path}")
     destination.mkdir()
     # Git's ordinary files all reach the legacy Linux checkout with the mode
     # supplied by the Windows bind mount. Keep those modes across the transport
@@ -1644,17 +1646,17 @@ def extract_rendering_source(path, destination, ref, expected_hash):
     with path.open("rb") as payload:
         file_mode = stat.S_IMODE(os.fstat(payload.fileno()).st_mode) & 0o777
         if hashlib.file_digest(payload, "sha256").hexdigest() != expected_hash:
-            raise RuntimeError(f"Rendering archive digest mismatch: {path}")
+            raise RuntimeError(f"Source archive digest mismatch: {path}")
         payload.seek(0)
         with tarfile.open(fileobj=payload, mode="r:") as archive:
             if archive.pax_headers.get("comment") != ref:
-                raise RuntimeError(f"Rendering archive revision mismatch: {path}")
+                raise RuntimeError(f"Source archive revision mismatch: {path}")
             seen = set()
             for member in archive:
                 relative = PurePosixPath(member.name)
                 if (not relative.parts or relative.is_absolute() or ".." in relative.parts
                         or relative in seen or not (member.isdir() or member.isfile())):
-                    raise RuntimeError(f"Unexpected entry in rendering Git archive: {member.name}")
+                    raise RuntimeError(f"Unexpected entry in source Git archive: {member.name}")
                 seen.add(relative)
                 target = destination.joinpath(*relative.parts)
                 if member.isdir():
@@ -1667,28 +1669,28 @@ def extract_rendering_source(path, destination, ref, expected_hash):
                     target.chmod(file_mode)
 
 
-def rendering_source_inputs(inputs):
+def container_source_inputs(inputs, profile):
     """Expand packed inputs on the container disk before syncing the leased checkout."""
     from contextlib import nullcontext
 
     packed = inputs / "archives"
     if checkout_link(packed):
-        raise RuntimeError("Rendering archive directory must not be a link")
+        raise RuntimeError("Source archive directory must not be a link")
     if not packed.exists():
         return nullcontext(inputs)
     identity = json.loads((inputs / "identity.json").read_bytes())
-    digests = identity.get("rendering_archive_sha256")
-    labels = ("candidate", "baseline", "trusted")
+    digests = identity.get(f"{profile}_archive_sha256")
+    labels = ("candidate", "baseline", "trusted") if profile == "rendering" else ("candidate",)
     if not isinstance(digests, dict) or set(digests) != set(labels):
-        raise RuntimeError("Rendering archive inventory is incomplete")
+        raise RuntimeError(f"{profile} source archive inventory does not match the selected profile")
 
     @contextmanager
     def unpacked():
         # Do not occupy the tmpfs reserved for measured fixtures.
-        with tempfile.TemporaryDirectory(prefix="scode-rendering-inputs-", dir="/tmp") as folder:
+        with tempfile.TemporaryDirectory(prefix="scode-container-inputs-", dir="/tmp") as folder:
             staged = Path(folder)
             for label in labels:
-                extract_rendering_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
+                extract_container_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
             yield staged
 
     return unpacked()
@@ -1725,8 +1727,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     sources = output / "inputs"
     sources.mkdir()
     archives = {}
-    if name == "rendering" and os.name == "nt":
-        archives = pack_rendering_sources(root, snapshots, sources / "archives")
+    if os.name == "nt":
+        archives = pack_container_sources(root, snapshots, sources / "archives")
     if not archives:
         for label, ref in snapshots.items():
             snapshot(root, ref, sources / label)
@@ -1768,7 +1770,7 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         "rendering_release_reused": previous is not None,
     }
     if archives:
-        identity["rendering_archive_sha256"] = archives
+        identity[f"{name}_archive_sha256"] = archives
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
     if previous is not None:
@@ -1925,10 +1927,10 @@ def exclusive_benchmark_state(directory=Path("/locks")):
         yield
 
 
-def benchmark(name, root, output, base, command, target):
+def benchmark(name, root, output, base, command, target, source_mount):
     with exclusive_benchmark_state():
         migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
-        benchmark_locked(name, root, output, base, command, target)
+        benchmark_locked(name, root, output, base, command, target, source_mount=source_mount)
 
 
 def migrate_benchmark_cache(legacy, state):
@@ -2111,9 +2113,10 @@ def benchmark_driver_package(source):
     return "rusty-sudocode-cli"
 
 
-def benchmark_locked(name, root, output, base, command, target):
+def benchmark_locked(name, root, output, base, command, target, source_mount):
     if name == "browser":
-        browser_smoke(root.parent, output, command)
+        reused = verified_candidate_release(source_mount)
+        browser_smoke(root, output, command, reused)
         return
     # Run the declared workload and paired sampling policy. Moving execution
     # hosts does not change budgets or per-run interaction assertions.
@@ -2180,20 +2183,19 @@ def browser_viewport_cases():
     return ("viewport_browser_interaction", "viewport_browser_resource_exit")
 
 
-def browser_smoke(inputs, output, command):
+def browser_smoke(source, output, command, reused):
     """Painted-terminal behaviour against the measured release or a dev build.
 
     Typing latency is judged by scoped local rendering; this pass checks
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
-    reused = verified_candidate_release(inputs)
     work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
     # Rendering has finished with this mutable checkout. Synchronize the actual
     # candidate, then let normal Cargo dependency tracking validate every input.
     candidate = work / ("trusted" if reused is not None else "candidate")
-    replace_checkout(inputs / "candidate", candidate)
+    replace_checkout(source, candidate)
     terminal = candidate / "e2e/terminal-resize"
     command("npm", "ci", "--prefix", str(terminal))
     manifest = str(candidate / "rust/Cargo.toml")

@@ -10,6 +10,40 @@ import time
 SOURCE = Path(__file__).resolve().parents[2]
 
 
+def check_projection_fingerprints(helper):
+    # Exact vectors from the verifier before it shared read-only statements.
+    # Each branch has a distinct projection, including the implicit fallback.
+    source = b"""def shared():
+    return bytes([34, 255])
+def unused():
+    return 17
+
+def run(name):
+    if name == 'one':
+        return shared()
+    elif name == 'two':
+        return 2
+    else:
+        return 3
+"""
+    names = ["one", "two", "other"]
+    inputs = ("executor", source, "image", None)
+    for fingerprints, expected in [
+        (helper.profile_commands_hashes, [
+            "cf87848e8994dca360bd4ef8fd3e5e6cf87b4faa7858dd156ae3eb9a61289dff",
+            "d2703263e5b828067c3a291adb7cbc32eee11da10ff3e4c658d21d9a340fc560",
+            "c8fda9b41248ad591044f63879623404f246ee30f2a15be70d91b38475521747",
+        ]),
+        (helper.reachable_profile_commands_hashes, [
+            "2b329ed08b492cb407e91dfeeed98a742c19c586783cc22aa700634bb7b2fedd",
+            "07ade4a01d445f62bf635c7c5e52d49fb0721fbaf667e8089f2736d6c3572593",
+            "e0900c62792bbda28eab8e42d98ad5b06226b19605aaccfa8f152e046eed46b3",
+        ]),
+    ]:
+        assert fingerprints(None, names, inputs=inputs) == dict(zip(names, expected, strict=True))
+        assert fingerprints(None, reversed(names), inputs=inputs) == dict(zip(names, expected, strict=True))
+
+
 def run(output):
     output.mkdir(parents=True, exist_ok=False)
     spec = importlib.util.spec_from_file_location("contract_reads", SOURCE / ".github/scripts/local_acceptance.py")
@@ -146,6 +180,7 @@ def run(output):
     (root / image).unlink()
     commit("Remove a required execution input")
     assert not helper.compatible_profile_commands(receipt, "HEAD", names)
+    check_projection_fingerprints(helper)
 
     result = {"status": "PASS", "observations": observations, "commands": commands, "committed_reads": reads,
               "exact_binary_empty_duplicate_unicode_and_link_bytes": True,
@@ -153,6 +188,7 @@ def run(output):
               "archive_attributes_do_not_omit_contract": True,
               "missing_required_ref_and_object_refused": True,
               "execution_fingerprint_snapshot_reused_only_within_one_verification": True,
+              "both_original_profile_hash_versions_and_order_independence_verified": True,
               "scope": "Real Git commits/object storage and original hash reference. No signature/test/coverage requirements removed."}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key not in {"commands", "committed_reads"}}), flush=True)

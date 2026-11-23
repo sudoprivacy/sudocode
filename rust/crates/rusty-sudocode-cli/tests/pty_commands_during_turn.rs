@@ -274,32 +274,19 @@ fn model_picker_and_confirmation_have_separate_history_from_streaming_thinking()
         "the streamed turn ended and opened the selected model's effort picker",
     );
     let rows: Vec<_> = screen.lines().collect();
-    let first = rows
-        .iter()
-        .position(|row| row.trim() == "✻ First reasoning marker.")
-        .unwrap();
-    let echo = rows
-        .iter()
-        .position(|row| row.trim() == "❯ /model")
-        .unwrap();
-    let current = rows
-        .iter()
-        .position(|row| row.trim().starts_with("Current:"))
-        .unwrap();
-    let notice = rows
-        .iter()
-        .position(|row| row.trim().starts_with("Model switches to "))
-        .unwrap();
-    let second = rows
-        .iter()
-        .position(|row| row.trim() == "Second reasoning marker.")
-        .unwrap();
-    for (before, after) in [
-        (first, echo),
-        (echo, current),
-        (current, notice),
-        (notice, second),
-    ] {
+    let boundaries = [
+        "✻ First reasoning marker.",
+        "❯ /model",
+        "Current:",
+        "Model switches to ",
+        "Second reasoning marker.",
+    ]
+    .map(|marker| {
+        rows.iter()
+            .position(|row| row.trim_start().starts_with(marker))
+            .unwrap_or_else(|| panic!("missing {marker}:\n{screen}"))
+    });
+    for (before, after) in boundaries.into_iter().zip(boundaries.into_iter().skip(1)) {
         assert_eq!(after, before + 2, "{screen}");
         assert!(rows[before + 1].trim().is_empty(), "{screen}");
     }

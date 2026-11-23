@@ -470,7 +470,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "743302cf37aeac3ea0c29f577c002951575480ba"
+        "7351c4cb9fe04a3736a91438779ab72922bb8157"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",

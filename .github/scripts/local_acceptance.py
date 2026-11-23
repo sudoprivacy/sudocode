@@ -153,10 +153,29 @@ def contract_hash(ref):
     return sha(canonical({path: sha(data) for path, data in sorted(files.items())}))
 
 
-def run_command_source(source):
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+def run_command_source(source, *, function=None):
+    if function is None:
+        function = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "run_command")
     return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
+
+
+def command_git_selector_inputs(module, function):
+    """Bind the extracted environment filter without rewriting existing signed hashes."""
+    names = {"without_git_selectors", "GIT_LOCAL_ENV", "frozenset"}
+    if not any(isinstance(node, ast.Name) and node.id == "without_git_selectors"
+               for node in ast.walk(function)):
+        return None
+    bindings = []
+    for statement in module.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if statement.name in names:
+                bindings.append(statement)
+        elif any((isinstance(node, ast.Name) and node.id in names)
+                 or (isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) in names)
+                 for node in ast.walk(statement)):
+            bindings.append(statement)
+    return sha(canonical(profile_ast_value(bindings)))
 
 
 def execution_inputs(ref, *, executor_identity=None):
@@ -165,16 +184,22 @@ def execution_inputs(ref, *, executor_identity=None):
     executor = ".github/scripts/local_acceptance.py"
     paths = [checks, image] if executor_identity is not None else [checks, image, executor]
     files = committed_files(ref, paths)
+    selector_inputs = None
     if executor_identity is None:
-        executor_identity = run_command_source(files[executor].decode("utf-8"))
-    return sha(executor_identity.encode()), files[checks], sha(files[image])
+        source = files[executor].decode("utf-8")
+        module = ast.parse(source)
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+        executor_identity = run_command_source(source, function=function)
+        selector_inputs = command_git_selector_inputs(module, function)
+    return sha(executor_identity.encode()), files[checks], sha(files[image]), selector_inputs
 
 
 def commands_hash(ref, *, inputs=None):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    executor, checks, image = execution_inputs(ref) if inputs is None else inputs
+    executor, checks, image, _ = execution_inputs(ref) if inputs is None else inputs
     return sha(canonical({"executor": executor, ".github/local-acceptance/checks.py": sha(checks),
                           ".github/local-acceptance/Dockerfile": image}))
 
@@ -219,7 +244,7 @@ def copy_profile_module(module):
 
 def profile_commands_hashes(ref, names, *, inputs=None):
     """Bind each literal dispatch branch and all common code without importing it."""
-    executor, checks, image = execution_inputs(ref) if inputs is None else inputs
+    executor, checks, image, _ = execution_inputs(ref) if inputs is None else inputs
     module = ast.parse(checks)
     result = {}
     for name in names:
@@ -254,7 +279,7 @@ def profile_commands_hashes(ref, names, *, inputs=None):
 
 def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inputs=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
-    executor, checks, image = (execution_inputs(ref, executor_identity=executor_identity)
+    executor, checks, image, _ = (execution_inputs(ref, executor_identity=executor_identity)
                                if inputs is None else inputs)
     module = ast.parse(checks)
     result = {}
@@ -559,6 +584,7 @@ except subprocess.TimeoutExpired:
         "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
         "01ea6891f69b892dae1389bbdd9fdce887038e7cb1cce302e4215614f6face0e",
         "2ddedba1c6f5bdaee370752430cb40c802af8f10c2c552f76808380051dc2d91",
+        "968aed4934bc9a4c0db73fe4387a38886204d4fe9a74ad5ad511eaedb7c4b13a",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -717,6 +743,10 @@ def compatible_profile_commands(receipt, policy_ref, required):
         previous = attested_commands_ref(receipt, read_inputs)
         if "commands_ref" in receipt and previous is None:
             return False
+        if previous != policy_ref:
+            previous_selector_inputs = read_inputs(previous)[3] if previous is not None else None
+            if previous_selector_inputs != read_inputs(policy_ref)[3]:
+                return False
         if "profile_commands_sha256" not in receipt:
             if previous is None:
                 return False
@@ -1648,18 +1678,22 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         print("LOCAL_ACCEPTANCE_FULL_WORKSPACE_PLAN_REUSED: original signed full complementary plan retained; "
               "no checks executed or signatures changed by this responsibility proof.", flush=True)
     if contract_hash(planned_policy) != contract_hash(protected):
-        before = reachable_profile_commands_hashes(planned_policy, names)
-        current = reachable_profile_commands_hashes(protected, names)
+        before_inputs = execution_inputs(planned_policy)
+        current_inputs = execution_inputs(protected)
+        before = reachable_profile_commands_hashes(planned_policy, names, inputs=before_inputs)
+        current = reachable_profile_commands_hashes(protected, names, inputs=current_inputs)
+        selector_inputs_changed = before_inputs[3] != current_inputs[3]
         changed = [name for name in names if before[name] != current[name]]
         resources = resource_equivalent_profiles(planned_policy, protected, changed)
         approved = approved_equivalent_profiles(before, current, protected, changed, head)
         dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
-        if set(changed) - resources - approved.keys() or not dispatcher_matches:
+        if selector_inputs_changed or set(changed) - resources - approved.keys() or not dispatcher_matches:
             print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
                 "version": 1, "run_on": "original author native host", "head": head,
                 "original_policy": planned_policy, "current_policy": protected,
-                "changed_profiles": sorted(set(changed) - resources - approved.keys()),
+                "changed_profiles": sorted(names if selector_inputs_changed else set(changed) - resources - approved.keys()),
                 "native_dispatcher_changed": not dispatcher_matches,
+                "executor_git_selector_inputs_changed": selector_inputs_changed,
                 "same_head_start_pr_renewal_supported": False,
                 "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
                         "use the supported fresh-source plan route when required. Do not overwrite or re-sign the old plan.",

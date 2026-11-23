@@ -158,6 +158,8 @@ def verify_profile_compatibility(directory, work, command):
                 "    policy_ref, candidate_ref = run.execution_refs")),
             ("executor", helper, helper_source.replace('    import psutil\n',
                 '    import psutil\n    print("CHANGED_EXECUTOR")\n', 1)),
+            ("git-selector-input", helper, helper_source.replace(
+                '"GIT_COMMON_DIR"})', '"GIT_COMMON_DIR", "SCODE_SELECTOR_FIXTURE_MARKER"})')),
             ("image", image, image_source + "\nENV SCODE_CHANGED_IMAGE=1\n"),
             ("reflection", checks, future_source + '\ndef reflect_helpers():\n    return globals()\n'),
         ]

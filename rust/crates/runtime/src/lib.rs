@@ -71,6 +71,7 @@ mod remote;
 pub mod response_archive;
 pub mod runtime_status;
 pub mod sandbox;
+pub mod send_outbox;
 mod session;
 mod session_backup;
 mod session_cleanup;

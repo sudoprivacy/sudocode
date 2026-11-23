@@ -550,6 +550,7 @@ fn main() {
     // the Windows console, and so the color-tier detection that reads the same
     // VT state sees it already enabled (see `windows_console`).
     startup::measure("console", windows_console::enable_vt_processing);
+    render::grapheme_probe::assume_from_environment();
 
     if let Err(error) = run() {
         // (error handling below — success path returns from main normally)
@@ -3071,6 +3072,7 @@ fn run_repl_iocraft_dispatch(
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     render::terminal_palette::initialize();
+    render::grapheme_probe::measure();
     cli.is_repl = true;
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback, not just the banner — otherwise a resumed conversation looks empty. Both come from
@@ -3147,6 +3149,7 @@ fn run_repl_iocraft_dispatch(
     // an inbox nothing is polling. `attach` reuses the session's selected
     // mailbox, including a pending binding that this receiver retries.
     let peer = engine_host::peer::attach(&session_agent_name);
+    let peer_session_id = cli.lifecycle.session_handle().id;
     // Scheduled jobs fire through this same mailbox, so a job this agent
     // created comes back into this coordinator like a peer message. Started
     // before the UI takes keys: its Scheduled tab runs a job now through this
@@ -3302,6 +3305,22 @@ fn run_repl_iocraft_dispatch(
     // The session's one receiver, sharing the coordinator's delivery and
     // shutdown boundary.
     let mailbox_abort = runtime::HookAbortSignal::new();
+    let announcement = if peer.is_node() {
+        env::current_dir().ok().and_then(|cwd| {
+            let workspace = cwd
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("filesystem root");
+            peer.mailbox().announce_attachment(
+                &peer_session_id,
+                "scode",
+                workspace,
+                mailbox_abort.clone(),
+            )
+        })
+    } else {
+        None
+    };
     // Whether this namespace authenticated the senders it delivers.
     let peer_verified = peer.mailbox().authenticates_senders();
     let mailbox_receiver = peer.spawn_receiver(
@@ -3963,11 +3982,14 @@ fn run_repl_iocraft_dispatch(
     }
 
     // Refuse inputs that never ran, then finish cursor commits and release
-    // reader seats before process exit. No queued receipt remains in RAM.
+    // receiver seat before process exit. No queued receipt remains in RAM.
     mailbox_abort.abort();
     drop(coord_rx);
     coord.lock().unwrap().clear();
     let _ = mailbox_receiver.join();
+    if let Some(worker) = announcement {
+        let _ = worker.join();
+    }
 
     // Persist the session before shutting down the REPL — the UI thread may
     // still be alive and the shared CLI mutex must remain accessible. A failed

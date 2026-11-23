@@ -289,10 +289,11 @@ node /absolute/package/dist/server.cjs --check-codex-native \
 This connects through the runtime's exact native argv, environment and socket,
 then closes only its own proxy. It does not start a daemon, change configuration,
 enroll an actor, load a thread or submit input. It exits nonzero on missing
-capability or connection/cleanup failure. The check is for the current v2
-receiver contract, not mailbox-v3 native/model qualification. Every receiver
-connection still checks admission; a successful preflight cannot qualify a
-future updated daemon.
+capability or connection/cleanup failure. A v2 runtime requires
+durableQueueAddOnce (`checkedAt: "preflight"`); a v3 runtime requires a
+reachable server, and each thread's mailbox inventory is checked when it
+attaches (`checkedAt: "attach"`). Every receiver connection still checks
+admission; a successful preflight cannot vouch for a future updated daemon.
 
 This configures **new Codex launches**. A shell function already loaded in an
 existing terminal can still shadow the selected disk entry; verify resolution
@@ -316,6 +317,13 @@ specifies its explicit mapping document, original SID and separate native/ACP
 workspaces. Preparation refuses a running global owner or an existing mapping.
 It does not start a receiver; the previous owner must exit in the coordinated
 window before the normal global entry loads that same actor/session.
+
+For an enrollment marked `recovery_required`, first complete the original
+operator operation. Once the shared owner exits, run
+`scode-acp-bridge --recover-codex-binding THREAD_ID --config GLOBAL_FILE`
+with its installed runtime configuration. The command verifies the completed
+operator records and saves the original actor, operation and ACP session as
+`ready`. Repeating it verifies the same binding.
 
 To qualify ordinary native startup after its one-time machine preparation, run
 the existing lifecycle test with `--autojoin --managed-package-root
@@ -487,6 +495,18 @@ ACP SID, and `receiver.input`: the negotiated input owner, last observed queue
 state/revision/count, and retained last error. An unobserved queue is `unknown`.
 Foreign-session, stale and malformed updates cannot clear a failure. These
 observations never flush a queue, resume a user interruption, or replay input.
+
+If the shared owner restarts, the existing stdio client reconnects and repeats
+its MCP handshake. Submitted calls with a lost reply return `unknown`. New
+requests can use the recovered connection when it negotiates the same settings.
+An incompatible owner or private configuration requires a fresh client.
+
+During native proxy cleanup, the bridge reports `state: waiting_for_proxy_exit`
+and `waitingForProxyExitPid` if the original process or its pipes outlive the
+termination grace period. Requests refused during that wait have outcome
+`not_sent`. Reconnection waits for the old transport to drain. On Windows
+the bridge places each proxy in its own Job at launch and waits for all its
+descendants to exit. A missing Job drain receipt stops reconnection.
 
 `delivery` reports the durable callback inbox separately: pending count, current
 failure/cleanup state, and the last actual downstream queue acceptance. A closed
@@ -677,20 +697,21 @@ final handling, global idle, or exactly-once tool side effects. This recovery
 protocol does not restart a native server, change credentials, create threads
 or override approvals.
 
-The programmatic `CodexAutojoinConfig.mailbox` path uses negotiated scode
-`peerInput` v3 offers and model acknowledgements. It is not enabled by runtime
-JSON or by the v2 installer preflight. Its admission provider must qualify the
-actual owning native executable and effective thread settings on every call,
-including two separate measured bounds: `encodedSubmissionBytes` for native
-queue-add params and `encodedResultBytes` for an MCP tool result (each 4096–65536
-bytes). Both require evidence from the actual model-endpoint request. A fixture
-provider returning `true` is not production admission.
+The `CodexAutojoinConfig.mailbox` path uses negotiated scode `peerInput` v3
+offers and model acknowledgements. Runtime JSON `peerInputVersion: 3` (with
+`peerPolicy: "node-namespace"`) enables it with `codexMailboxAdmission()`, which
+sets both bounds, `encodedSubmissionBytes` for native queue-add params and
+`encodedResultBytes` for an MCP tool result, to 8192 bytes and admits a thread
+once its actual server answers `thread/queue/list`, `thread/turns/list` and
+`thread/read` for it. A programmatic provider may set other bounds within
+4096–65536 bytes. The v3 preflight requires a reachable server, not
+durableQueueAddOnce.
 
-An operator embedding the elected SDK owner can pass this provider as the
-second argument to `runCodexMcpOwner(configFile, admission)`. Authenticated
-stdio clients then discover `scode_inbox` on the existing owner connection.
-Each call resolves the native caller thread and uses that thread's admitted
-receiver. The standard CLI owner invocation still selects the v2 path.
+With either a v3 runtime or a provider passed by an operator embedding the
+elected SDK owner as `runCodexMcpOwner(configFile, admission)`, which takes
+precedence, authenticated stdio clients discover `scode_inbox` on the existing
+owner connection. Each call resolves the native caller thread and uses that
+thread's admitted receiver. A runtime without `peerInputVersion` selects v2.
 
 To adopt one previously bound session, supply its `threadId`, `actor` and
 `acpSessionId` in `admission.existingBinding`. Startup checks the ready binding
@@ -865,7 +886,7 @@ therefore do not establish scode commit behaviour.
 after building. It exercises ACP/MCP refusals, serialized ACKs, migration,
 paged native observations and owner reopens with protocol peers. It does not
 replace the actual native PTY cases or the remaining crash, compaction,
-reader-lease and Node enrollment acceptance.
+receiver-seat and Node enrollment acceptance.
 The close-drain process case holds an ACK inside an actual ACP child while its
 root unloads, then requires the original response and one commit before the
 child is closed. Its native endpoint and mailbox contents are protocol fixtures.

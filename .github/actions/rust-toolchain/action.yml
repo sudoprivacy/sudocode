@@ -23,6 +23,9 @@ outputs:
   toolchain:
     description: The installed release, for example 1.99.1.
     value: ${{ steps.install.outputs.toolchain }}
+  dependency-cache-command:
+    description: Scope the Linux dependency cache to the verified compiler pin.
+    value: ${{ steps.install.outputs.dependency-cache-command }}
 runs:
   using: composite
   steps:
@@ -144,3 +147,9 @@ runs:
         done
         rustc --version --verbose
         echo "toolchain=$channel" >> "$GITHUB_OUTPUT"
+        if [ "${RUNNER_OS:-}" = Linux ]; then
+          printf 'dependency-cache-command=node "%s/cache-command.mjs" %s {0}\n' \
+            "$GITHUB_ACTION_PATH" "$channel" >> "$GITHUB_OUTPUT"
+        else
+          echo 'dependency-cache-command={0}' >> "$GITHUB_OUTPUT"
+        fi

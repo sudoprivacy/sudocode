@@ -1649,7 +1649,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                  otherwise it is appended to your conversation with the recipient in \
                  this workspace's mailbox. The result confirms the hand-off, not a \
                  reply: a reply, if the recipient sends one, arrives later as a new \
-                 message in this conversation. ",
+                 message in this conversation. A send reported as queued is retried \
+                 with the same id; do not resend it. ",
                 "When `to` is a pid it is routed to the running process. ",
                 "A pid that has already exited is an error — its message cannot be \
                  delivered, so use `agent_list` to find a live agent (or a name, \
@@ -2164,6 +2165,8 @@ pub struct AgentListRow {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2205,6 +2208,7 @@ pub fn collect_agent_list(
             .and_then(|store| store.read())
         {
             Ok(Some(description)) => {
+                row.attachment = description.attachment;
                 row.description = Some(description.description);
                 row.description_updated_at = Some(description.updated_at);
             }
@@ -2248,6 +2252,7 @@ pub fn merge_agent_list(
                 role: None,
                 description: None,
                 description_updated_at: None,
+                attachment: None,
             });
     }
 
@@ -2268,6 +2273,7 @@ pub fn merge_agent_list(
                 role,
                 description: None,
                 description_updated_at: None,
+                attachment: None,
             });
     }
 
@@ -2296,7 +2302,10 @@ fn run_agent_list(
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    collect_agent_directory(active_only, fs, host, attention).and_then(to_pretty_json)
+    with_settled_sends(
+        &runtime::mailbox::sending_mailbox(),
+        collect_agent_directory(active_only, fs, host, attention).and_then(to_pretty_json),
+    )
 }
 
 /// Read-only directory shared by the model tool and engine navigation.
@@ -3056,16 +3065,47 @@ fn run_send_message(
     } else {
         // A name with no presence yet still lands in its durable inbox, which
         // holds the message until that peer first runs.
-        peer
+        Arc::clone(&peer)
     };
     let sender = resolve_sender(&input, &mailbox);
 
     // ── Plain text branch ──────────────────────────────────────────
-    if let Some(text) = input.message.as_str() {
-        return send_plain_message(&input, &mailbox, &sender, text);
-    }
+    let result = if let Some(text) = input.message.as_str() {
+        send_plain_message(&input, &mailbox, &sender, text)
+    } else {
+        send_structured_message(&input, &mailbox, &sender)
+    };
+    with_settled_sends(&peer, result)
+}
 
-    send_structured_message(&input, &mailbox, &sender)
+/// Add how queued sends have ended since the model last heard, one line each.
+///
+/// A send whose delivery could not be confirmed is queued and retried on its
+/// own, and the model was told not to resend it, so a later `send` or
+/// `agent_list` result is where it learns whether that send arrived. A JSON
+/// result keeps parsing: the lines go in its `earlier_queued_sends` array.
+fn with_settled_sends(
+    mailbox: &runtime::mailbox::Mailbox,
+    result: Result<String, String>,
+) -> Result<String, String> {
+    let lines: Vec<String> = mailbox
+        .take_settled_outcomes()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if lines.is_empty() {
+        return result;
+    }
+    match result {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(mut object)) => {
+                object.insert("earlier_queued_sends".into(), json!(lines));
+                to_pretty_json(Value::Object(object))
+            }
+            _ => Ok(format!("{text}\n{}", lines.join("\n"))),
+        },
+        Err(text) => Err(format!("{text}\n{}", lines.join("\n"))),
+    }
 }
 
 // ── Agent runtime registry ────────────────────────────────────

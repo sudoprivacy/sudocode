@@ -57,8 +57,7 @@ work. This is always on; a leftover `experimental.peerDescriptions` setting is
 accepted and ignored.
 
 The existing compaction call produces optional description metadata alongside
-its checkpoint. It adds no separate summarizer or repair request. New agents
-have no description until one is published. Tool-output pruning, skipped or
+its checkpoint. It adds no separate summarizer or repair request. Tool-output pruning, skipped or
 failed compaction, and ordinary turns preserve the previous description and
 its timestamp. Child agents retain their existing task descriptions.
 
@@ -67,13 +66,20 @@ mailbox namespace. Without a Nexus node, that path is relative to
 `~/.nexus/sudocode/local-mailbox/`. The record contains `description`,
 `updated_at`, and `source_session_id`. It survives process exit and resume;
 resuming an older session does not restore an older description. The owning
-agent publishes only after its checkpoint commits. A description changed
+agent publishes its task description after its checkpoint commits. A description changed
 during compaction is preserved. Native filesystem locks exclude concurrent
 writers; node backends retain their advisory lease guarantee unless they
 provide conditional writes.
 
-`agent_list` reads these records and returns optional `description` and
-`description_updated_at` fields. Terminal cards show the description and its
+When an interactive scode or a stock Codex or Claude Code bridge attaches to a
+Node, it publishes its frontend, machine name and workspace basename in the
+optional `attachment` field. Peers see this label before the first task
+description.
+Reattaching preserves the last task and its timestamp. A later compaction
+updates the task and retains the attachment.
+
+`agent_list` reads these records and returns optional `attachment`,
+`description` and `description_updated_at` fields. Terminal cards show the description and its
 age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.

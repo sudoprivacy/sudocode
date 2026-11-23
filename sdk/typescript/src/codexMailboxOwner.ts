@@ -6,9 +6,9 @@ import { mailboxSubmissionTextBudget, openCodexMailboxWake, readCodexMailboxSnap
 import { mailboxTextBudget, openScodeMailbox, scodeMailboxHeads, type ScodeMailbox } from './scodeMailbox';
 import type { ScodeConnection } from './scodeAcp';
 
-/** Operator-provided admission, not a serializable "qualified" switch. The
- * provider must bind its evidence to the actual server and effective thread
- * settings, including both presentation bounds, and recheck them on every call. */
+/** Admission of one v3 receiver: both presentation bounds and a check of the
+ * actual server connection, run before every mailbox call. The production
+ * provider is `codexMailboxAdmission`. */
 export interface CodexMailboxAdmission {
   encodedResultBytes: number;
   encodedSubmissionBytes: number;
@@ -19,8 +19,7 @@ export interface CodexMailboxAdmission {
 }
 
 /** Compose one already verified v3 receiver under the shared owner's lifetime
- * fence. The old v2 owner must have exited and joined before this function.
- * No production file-config adapter can enable this without native admission. */
+ * fence. The old v2 owner must have exited and joined before this function. */
 export async function openCodexMailboxOwner(options: {
   actor: string; threadId: string; connection: ScodeConnection; native: CodexConnection;
   callbackLog: string; admission: CodexMailboxAdmission;

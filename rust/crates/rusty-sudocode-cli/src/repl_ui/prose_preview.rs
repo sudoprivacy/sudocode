@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::render::{
     code_preview::CodePreview, styled_text::StyledText, ResponseGlyphState, ResponsePosition,
@@ -181,9 +180,6 @@ impl ProsePreview {
 }
 
 fn is_prose(source: &str) -> bool {
-    // Some terminals count grapheme sequences as individual scalar widths.
-    // A history write can then wrap where the live canvas clips. Until that
-    // capability is negotiated, use the complete-block path for such text.
     has_prose_structure(source) && !has_ambiguous_width(source)
 }
 
@@ -209,29 +205,16 @@ fn has_prose_lines(source: &str) -> bool {
     })
 }
 
+/// The live canvas and history measure clusters by one rule, the one
+/// measured at startup (`render::grapheme_probe`). Legacy Windows console
+/// hosts can still miscount combining sequences against both, so their text
+/// keeps the complete-block path.
 fn has_ambiguous_width(source: &str) -> bool {
-    !source.is_ascii()
+    cfg!(windows)
+        && !source.is_ascii()
         && source.graphemes(true).any(|grapheme| {
-            // UnicodeWidthStr assigns a nominal width to control strings;
-            // layout handles these as breaks/tab stops, never painted glyphs.
-            if matches!(grapheme, "\n" | "\r" | "\r\n" | "\t") {
-                return false;
-            }
-            // The terminal paints these marks in their own cells, while the
-            // live canvas's Unicode measure merges them. Canonical history
-            // uses the shared corrected width; avoid a mismatched live frame.
-            if grapheme.contains(['\u{FF9E}', '\u{FF9F}']) {
-                return true;
-            }
-            let width = grapheme.width();
-            // Legacy Windows console hosts can miscount combining sequences
-            // even when their Unicode scalar widths sum to the grapheme width.
-            // Preserve their original text through the complete-block path.
-            (cfg!(windows) && width > 0 && grapheme.chars().nth(1).is_some())
-                || width
-                    != grapheme
-                        .chars()
-                        .map(|ch| ch.width().unwrap_or(0))
-                        .sum::<usize>()
+            grapheme.chars().nth(1).is_some()
+                && grapheme != "\r\n"
+                && iocraft::width::grapheme_columns(grapheme) > 0
         })
 }

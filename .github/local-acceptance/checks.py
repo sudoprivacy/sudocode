@@ -614,7 +614,11 @@ def validate_guard_before_host_lease(root, output):
     # The Docker fixture reads the candidate while this validation stages the
     # policy. They coincide for a frozen contract update. Older or different
     # candidates still go through their original required full guard.
-    if getattr(run, "execution_refs", (None, None))[1] == policy_ref:
+    try:
+        _, candidate_ref = run.execution_refs
+    except AttributeError:
+        candidate_ref = None
+    if candidate_ref == policy_ref:
         program = """import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])

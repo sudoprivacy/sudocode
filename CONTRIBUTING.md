@@ -504,7 +504,11 @@ inheritance controls, including Windows byte-range locks, before long compilatio
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
 reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
-profiles and count their common wait once. The signed receipt format is unchanged.
+profiles and count their common wait once. Signed receipts and checkpoints also
+record `timing.invocation_host_lease_wait_seconds` for that invocation's completed
+acquisitions. Resume preserves the earlier signed start separately. A run that
+only reuses prior results records zero newly acquired lease wait. Older signed
+receipts may omit this timing field.
 
 A fresh `guard-contract` also validates its protected input pins, selection
 digest, release recipe and native fixture inventory before joining the host queue. The required
@@ -518,6 +522,11 @@ its argv placeholders do not prepare tools or execute tests. A correctly pinned
 but malformed inventory still refuses while another private workflow holds the
 host, without a ticket or completed guard credit. A valid inventory still waits
 for that holder and executes its required profile.
+After those static checks pass, a fresh guard checks the Docker Engine's server
+version before joining the FIFO, using the same bounded probe as execution.
+An unavailable Engine leaves signed preflight progress and the original client
+error. The guard verifies Docker again after acquiring the lease and publishes
+results only after running every required check.
 Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their

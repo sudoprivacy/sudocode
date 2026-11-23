@@ -160,6 +160,8 @@ def verify_host_lease(directory, source, command, environment):
         finished(start("Metadata", root=metadata))
         meta_attempt = json.loads((fixture / "Metadata/attempt.json").read_text())
         assert meta_attempt["host_lease_wait_seconds"] == 0, meta_attempt
+        meta_receipt = json.loads((fixture / "Metadata/receipt.json").read_bytes())
+        assert meta_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, meta_receipt
         assert not waiting(processes[-1]), processes[-1].log.read_text()
         assert (fixture / "Metadata/envelope.json").is_file()
         assert events() == ["start:A"], events()
@@ -186,6 +188,11 @@ def verify_host_lease(directory, source, command, environment):
         assert "Acquired this host's local acceptance lease" in queued[0].log.read_text()
         timing = json.loads((fixture / "B/attempt.json").read_text())
         assert timing["host_lease_wait_seconds"] > 0, timing
+        receipt = json.loads((fixture / "B/receipt.json").read_bytes())
+        assert receipt["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], receipt
+        index = json.loads((fixture / "B/checkpoint.json").read_bytes())
+        checkpoint = json.loads((fixture / "B/checkpoints" / index["generation"] / "receipt.json").read_bytes())
+        assert checkpoint["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], checkpoint
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
 
         # A waiter killed in the queue does not block those behind it.
@@ -216,6 +223,8 @@ def verify_host_lease(directory, source, command, environment):
         finished(restored, timeout=15)
         restored_timing = json.loads((fixture / "Reused/attempt.json").read_text())
         assert restored_timing["host_lease_wait_seconds"] == 0, restored_timing
+        restored_receipt = json.loads((fixture / "Reused/receipt.json").read_bytes())
+        assert restored_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, restored_receipt
         assert not waiting(restored), restored.log.read_text()
         assert events() == ["start:G"], events()
         # A later commit retains the original signed native result when only
@@ -620,7 +629,8 @@ def verify_native_inventory_before_queue(fixture, authority, run, environment):
         with (directory / (label + ".log")).open("wb") as stream:
             process = subprocess.Popen([sys.executable, str(work / ".github/scripts/local_acceptance.py"),
                 "check", "--base", policy, "--policy-ref", policy, "--output", str(directory / label)],
-                cwd=work, env=env, stdout=stream, stderr=subprocess.STDOUT)
+                cwd=work, env={**env, "PRIVATE_DOCKER_READY": str(label != "DockerUnavailable")},
+                stdout=stream, stderr=subprocess.STDOUT)
         processes.append(process)
         return process
 
@@ -631,8 +641,8 @@ def verify_native_inventory_before_queue(fixture, authority, run, environment):
     policy.write_text(json.dumps(rules))
 
     # Stage actual production files and recipes, including the deliberately
-    # malformed inventory's own correct pin. Only this fixture's executable
-    # profile is replaced; the production validator and host queue are real.
+    # malformed inventory's own correct pin. The fixture replaces the payload
+    # and supplies a private Engine response; admission and the host queue are real.
     spec = importlib.util.spec_from_file_location("inventory_fixture_profiles",
                                                  source / ".github/local-acceptance/checks.py")
     profiles = importlib.util.module_from_spec(spec)
@@ -651,6 +661,12 @@ def verify_native_inventory_before_queue(fixture, authority, run, environment):
         '    if name == "guard-contract":\n'
         '        return [execute([sys.executable,"-c","print(\'PRIVATE_GUARD_EXECUTED\')"],'
         'root,output/"000.log")]\n')
+    controlled = controlled.replace(
+        'def docker_engine_probe_command(timeout):\n',
+        'def docker_engine_probe_command(timeout):\n'
+        '    if os.environ["PRIVATE_DOCKER_READY"] == "False":\n'
+        '        return [sys.executable, "-c", "import sys; sys.exit(\'PRIVATE_ENGINE_UNAVAILABLE\')"]\n'
+        '    return [sys.executable, "-c", "print(\'private Engine version\')"]\n', 1)
     selection = {key: rules[key] for key in ["version", "repository", "checks"]}
     digest = hashlib.sha256(json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     scope_node = next(node for node in ast.walk(ast.parse(controlled))
@@ -715,6 +731,7 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(s
         policies.append((label, policy_ref, diagnostic))
     valid_policy = inventory_policy("ValidInventory", inventory_source)
     prepare_source("ValidInventory", valid_policy)
+    prepare_source("DockerUnavailable", valid_policy)
     prepare_source("Holder", holder_policy)
     try:
         holder = start("Holder", holder_policy)
@@ -731,6 +748,7 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(s
             assert diagnostic in log, log
             assert "Waiting for this host" not in log and "Acquired this host" not in log, log
             assert "PRIVATE_GUARD_EXECUTED" not in log and "DOCKER_ENGINE_PROBE" not in log, log
+            assert "DOCKER_ENGINE_READINESS" not in log, log
             attempt = json.loads((directory / label / "attempt.json").read_text())
             assert attempt["outcome"] == "failure" and attempt["host_lease_wait_seconds"] == 0, attempt
             assert attempt["host_lease_acquisitions"] == [], attempt
@@ -739,13 +757,27 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(s
             assert set(json.loads((checkpoint / "receipt.json").read_text())["checks"]) == {"preflight"}
             assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
             assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
+        unavailable = start("DockerUnavailable", valid_policy)
+        assert unavailable.wait(timeout=30) == 1
+        log = (directory / "DockerUnavailable.log").read_text(encoding="utf-8")
+        assert log.index("GUARD_STATIC_PREFLIGHT: passed") < log.index("PRIVATE_ENGINE_UNAVAILABLE"), log
+        assert "Waiting for this host" not in log and "Acquired this host" not in log, log
+        attempt = json.loads((directory / "DockerUnavailable/attempt.json").read_text())
+        assert attempt["host_lease_wait_seconds"] == 0 and attempt["host_lease_acquisitions"] == [], attempt
+        checkpoint = sorted((directory / "DockerUnavailable/checkpoints").iterdir())[-1]
+        assert set(json.loads((checkpoint / "receipt.json").read_text())['checks']) == {"preflight"}
+        assert not (directory / "DockerUnavailable/envelope.json").exists()
+        assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
+        assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
         valid = start("ValidInventory", valid_policy)
         deadline = time.monotonic() + 30
         while "Waiting for this host" not in (directory / "ValidInventory.log").read_text(encoding="utf-8"):
             assert valid.poll() is None, (directory / "ValidInventory.log").read_text(encoding="utf-8")
             assert time.monotonic() < deadline, "Valid inventory never joined the held private queue"
             time.sleep(0.05)
-        assert "GUARD_NATIVE_INVENTORY=" in (directory / "ValidInventory.log").read_text(encoding="utf-8")
+        log = (directory / "ValidInventory.log").read_text(encoding="utf-8")
+        assert "GUARD_NATIVE_INVENTORY=" in log
+        assert log.index("DOCKER_ENGINE_READINESS") < log.index("Waiting for this host"), log
         assert not (directory / "ValidInventory/envelope.json").exists()
         assert list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
         assert holder.poll() is None and events.read_text().splitlines() == ["start:Holder"]
@@ -755,8 +787,8 @@ print(json.dumps(executor.reachable_profile_commands_hashes("HEAD", json.loads(s
         valid_receipt = json.loads((directory / "ValidInventory/receipt.json").read_text())
         assert set(valid_receipt["checks"]) == {"preflight", "guard-contract"}
         assert "PRIVATE_GUARD_EXECUTED" in (directory / "ValidInventory/guard-contract/000.log").read_text()
-        print("PASS: correctly pinned count/duplicate/missing inventory faults refuse before the held FIFO; "
-              "valid inventory still waits and executes its required private profile", flush=True)
+        print("PASS: malformed inventory and an unavailable Engine refuse before the held FIFO; "
+              "a ready Engine still waits and executes its required private profile", flush=True)
     finally:
         for process in processes[1:]:
             if process.poll() is None:

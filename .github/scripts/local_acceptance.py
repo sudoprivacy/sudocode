@@ -125,15 +125,10 @@ def committed_blob_bytes(blobs):
     return documents
 
 
-def contract_hash(ref):
-    paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
-             ".github/workflows/local-acceptance-publish.yml"]
+def committed_files(ref, paths, *extra):
     # Resolve the complete tree once, then read by immutable object ID. Mutable
     # refs are never memoized and archive attributes cannot omit protected data.
-    # The periodic workflow did not exist in older authentic plans. Bind it
-    # when present without changing those original contract hashes.
-    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance",
-               ".github/workflows/local-acceptance-workspace.yml").stdout
+    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, *extra).stdout
     blobs = {}
     for row in rows.split(b"\0"):
         if not row:
@@ -146,23 +141,42 @@ def contract_hash(ref):
     missing = sorted(set(paths) - blobs.keys())
     if missing:
         raise RuntimeError(f"Acceptance contract is missing committed files: {missing}")
-    return sha(canonical({path: sha(data) for path, data in sorted(committed_blob_bytes(blobs).items())}))
+    return committed_blob_bytes(blobs)
 
 
-def executor_source(ref):
-    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
+def contract_hash(ref):
+    paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
+             ".github/workflows/local-acceptance-publish.yml"]
+    # The periodic workflow did not exist in older authentic plans. Bind it
+    # when present without changing those original contract hashes.
+    files = committed_files(ref, paths, ".github/local-acceptance", ".github/workflows/local-acceptance-workspace.yml")
+    return sha(canonical({path: sha(data) for path, data in sorted(files.items())}))
+
+
+def run_command_source(source):
     function = next(node for node in ast.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == "run_command")
     return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
 
 
-def commands_hash(ref):
+def execution_inputs(ref, *, executor_identity=None):
+    checks = ".github/local-acceptance/checks.py"
+    image = ".github/local-acceptance/Dockerfile"
+    executor = ".github/scripts/local_acceptance.py"
+    paths = [checks, image] if executor_identity is not None else [checks, image, executor]
+    files = committed_files(ref, paths)
+    if executor_identity is None:
+        executor_identity = run_command_source(files[executor].decode("utf-8"))
+    return sha(executor_identity.encode()), files[checks], sha(files[image])
+
+
+def commands_hash(ref, *, inputs=None):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
-    return sha(canonical({"executor": sha(executor_source(ref).encode()),
-                          **{p: sha(tracked(ref, p)) for p in paths}}))
+    executor, checks, image = execution_inputs(ref) if inputs is None else inputs
+    return sha(canonical({"executor": executor, ".github/local-acceptance/checks.py": sha(checks),
+                          ".github/local-acceptance/Dockerfile": image}))
 
 
 def referenced_globals(table):
@@ -203,11 +217,10 @@ def copy_profile_module(module):
     return projected
 
 
-def profile_commands_hashes(ref, names):
+def profile_commands_hashes(ref, names, *, inputs=None):
     """Bind each literal dispatch branch and all common code without importing it."""
-    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha(executor_source(ref).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    executor, checks, image = execution_inputs(ref) if inputs is None else inputs
+    module = ast.parse(checks)
     result = {}
     for name in names:
         projected = copy_profile_module(module)
@@ -239,11 +252,11 @@ def profile_commands_hashes(ref, names):
     return result
 
 
-def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
+def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inputs=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
-    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha((executor_source(ref) if executor_identity is None else executor_identity).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    executor, checks, image = (execution_inputs(ref, executor_identity=executor_identity)
+                               if inputs is None else inputs)
+    module = ast.parse(checks)
     result = {}
     # Reflection can find a function without a static Name reference. Retain
     # the complete module rather than guessing which code it might execute.
@@ -310,7 +323,7 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
     return result
 
 
-def attested_commands_ref(receipt):
+def attested_commands_ref(receipt, read_inputs):
     """Find immutable source that matches the signed complete execution hash."""
     candidates = ([receipt["commands_ref"]] if "commands_ref" in receipt
                   else [receipt["head"], receipt["base"]])
@@ -318,7 +331,7 @@ def attested_commands_ref(receipt):
         if not isinstance(candidate, str) or not re.fullmatch(r"[a-f0-9]{40}", candidate):
             continue
         try:
-            if receipt.get("commands_sha256") == commands_hash(candidate):
+            if receipt.get("commands_sha256") == commands_hash(candidate, inputs=read_inputs(candidate)):
                 return candidate
         except (RuntimeError, subprocess.CalledProcessError, StopIteration):
             continue
@@ -545,6 +558,7 @@ except subprocess.TimeoutExpired:
         "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
         "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
         "01ea6891f69b892dae1389bbdd9fdce887038e7cb1cce302e4215614f6face0e",
+        "2ddedba1c6f5bdaee370752430cb40c802af8f10c2c552f76808380051dc2d91",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -688,21 +702,32 @@ def approved_equivalent_profiles(before, current, policy_ref, names, head):
 
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
+    inputs = {}
+
+    def read_inputs(ref):
+        if ref not in inputs:
+            inputs[ref] = execution_inputs(ref)
+        return inputs[ref]
+
     try:
-        previous = attested_commands_ref(receipt)
+        if not re.fullmatch(r"[a-f0-9]{40}", policy_ref):
+            # The signed predecessor is an object ID. Read a named policy once
+            # so an alias of that same object shares its recipe calculation.
+            policy_ref = value("rev-parse", "--verify", "--end-of-options", policy_ref)
+        previous = attested_commands_ref(receipt, read_inputs)
         if "commands_ref" in receipt and previous is None:
             return False
         if "profile_commands_sha256" not in receipt:
             if previous is None:
                 return False
-            recorded = profile_commands_hashes(previous, required)
+            recorded = profile_commands_hashes(previous, required, inputs=read_inputs(previous))
         if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
             return False
         # Modern receipts validate both maps against their original source;
         # only the reachable map is compared with the current policy.
         current = None
         if "reachable_profile_commands_sha256" not in receipt:
-            current = profile_commands_hashes(policy_ref, required)
+            current = profile_commands_hashes(policy_ref, required, inputs=read_inputs(policy_ref))
             if all(recorded.get(name) == current[name] for name in required):
                 return True
         # A changed recipe is recovered from attested source, never from a
@@ -710,18 +735,20 @@ def compatible_profile_commands(receipt, policy_ref, required):
         if previous is None:
             return False
         original = (current if previous == policy_ref and current is not None
-                    else profile_commands_hashes(previous, required))
+                    else profile_commands_hashes(previous, required, inputs=read_inputs(previous)))
         if not all(recorded.get(name) == original[name] for name in required):
             return False
-        original_reachable = reachable_profile_commands_hashes(previous, required)
+        original_reachable = reachable_profile_commands_hashes(previous, required, inputs=read_inputs(previous))
         if "reachable_profile_commands_sha256" in receipt:
             reachable = receipt["reachable_profile_commands_sha256"]
             if not isinstance(reachable, dict) or any(
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
         expected = (original_reachable if previous == policy_ref
-                    else reachable_profile_commands_hashes(policy_ref, required))
+                    else reachable_profile_commands_hashes(policy_ref, required, inputs=read_inputs(policy_ref)))
         differences = [name for name in required if original_reachable[name] != expected[name]]
+        if not differences:
+            return True
         resources = resource_equivalent_profiles(previous, policy_ref, differences)
         if resources:
             print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
@@ -743,7 +770,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
             print(f"Preserving exact-head {name} evidence: trusted policy approves this previous "
                   "execution recipe as equivalent. Required checks and signed source remain verified.", flush=True)
         return True
-    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
+    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError, ValueError):
         return False
 
 
@@ -2653,13 +2680,14 @@ def perform_check(args, attempt):
               "prior_timing_available": known_start}
     attempt["first_recorded_started_at"] = timing["first_recorded_started_at"]
     results = {}
+    inputs = execution_inputs(policy_ref)
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
-               "commands_sha256": commands_hash(policy_ref),
+               "commands_sha256": commands_hash(policy_ref, inputs=inputs),
                "commands_ref": value("rev-parse", policy_ref),
-               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
-               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
+               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed, inputs=inputs),
+               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed, inputs=inputs),
                "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
     if execution_plan is not None:
         receipt["execution_plan"] = execution_plan
@@ -2678,6 +2706,12 @@ def perform_check(args, attempt):
             receipt["version"] = 1
         return referenced_store(current, store)
 
+    def record_check_time():
+        timing["checks_finished_at"] = time.time()
+        # Count only completed acquisitions made by this invocation. A resumed
+        # receipt can retain an earlier start without inheriting its wait time.
+        timing["invocation_host_lease_wait_seconds"] = attempt["host_lease_wait_seconds"]
+
     def perform_profile(name):
         if name in reusable:
             print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
@@ -2689,7 +2723,7 @@ def perform_check(args, attempt):
         else:
             print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
             results[name] = module.run(name, ROOT, output / name, base, run_command)
-        timing["checks_finished_at"] = time.time()
+        record_check_time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
               f"If this process exits, resume with: {resume_command}", flush=True)
@@ -2747,7 +2781,7 @@ def perform_check(args, attempt):
         attempt.pop("active_profile", None)
         clean(head)
     except BaseException:
-        timing["checks_finished_at"] = time.time()
+        record_check_time()
         if results:
             try:
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
@@ -2757,7 +2791,7 @@ def perform_check(args, attempt):
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
-    timing["checks_finished_at"] = time.time()
+    record_check_time()
     receipt["finished_at"] = int(time.time())
     referenced = sign_carried()
     envelope = sign_receipt(receipt, output, identity, key)

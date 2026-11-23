@@ -40,7 +40,7 @@ async function main():Promise<void>{
     }else assert.equal(call.method,'initialized','Preflight must not discover threads or submit input');
   }));
   const tasks:Array<{taskName:string;config:string}>=[];
-  const fixture=(name:string,extra:Record<string,string>={})=>{
+  const fixture=(name:string,extra:Record<string,string>={},initArgs:string[]=[])=>{
     const work=path.join(dir,name);fs.mkdirSync(work,{mode:0o700});
     const home=path.join(work,'home');fs.mkdirSync(home,{mode:0o700});
     const target=path.join(work,windows?'codex.ps1':'codex');
@@ -53,7 +53,7 @@ async function main():Promise<void>{
     const prepared=JSON.parse(execFileSync(process.execPath,[server,'--init-codex','--config',config,
       '--native-argv',JSON.stringify([fs.realpathSync.native(process.execPath),native]),
       '--native-env-file',envFile,'--enrollment',JSON.stringify([process.execPath,'never-enroll-in-this-install-test']),
-      '--peers','[]','--command-entry',target],{encoding:'utf8',windowsHide:true}));
+      '--peers','[]','--command-entry',target,...initArgs],{encoding:'utf8',windowsHide:true}));
     assert.deepEqual(prepared.installationArgv,[process.execPath,server,'--install-codex','--config',config,'--command-entry',target]);
     const runtime=JSON.parse(fs.readFileSync(config,'utf8'));
     runtime.native.socket='fixture-setup.sock';
@@ -99,7 +99,7 @@ async function main():Promise<void>{
     const check=fixture('check-only');
     const checkEntry=fs.readFileSync(check.target),checkConfig=fs.readFileSync(check.config);
     const checked=await check.preflight();assert.equal(checked.code,0,checked.stderr);
-    assert.deepEqual(JSON.parse(checked.stdout),{checked:true,requiredCapability:'durableQueueAddOnce',version:1,a2aJourneyVerified:false});
+    assert.deepEqual(JSON.parse(checked.stdout),{checked:true,peerInputVersion:2,requiredCapability:'durableQueueAddOnce',checkedAt:'preflight',version:1,a2aJourneyVerified:false});
     assert.deepEqual(check.calls(),[['app-server','proxy','--sock','fixture-setup.sock']]);
     assert(fs.readFileSync(check.target).equals(checkEntry));assert(fs.readFileSync(check.config).equals(checkConfig));
     assert(!fs.existsSync(check.config+'.installation.json'));
@@ -120,7 +120,19 @@ async function main():Promise<void>{
       assert(fs.readFileSync(unsupported.target).equals(entry));assert(fs.readFileSync(unsupported.config).equals(runtime));
       assert(!fs.existsSync(path.join(unsupported.work,'registration.json')));
       assert.equal(unsupported.calls().filter(c=>c[0]==='mcp'&&c[1]==='add').length,0);
+      // The v3 mailbox does not use the durable callback; its admission reads
+      // each thread's mailbox inventory instead.
+      const mailbox=fixture('mailbox-'+label,{},['--peer-policy','node-namespace','--peer-input-version','3']);
+      assert.equal(JSON.parse(fs.readFileSync(mailbox.config,'utf8')).peerInputVersion,3);
+      const admitted=await mailbox.preflight();assert.equal(admitted.code,0,admitted.stderr);
+      assert.deepEqual(JSON.parse(admitted.stdout),{checked:true,peerInputVersion:3,requiredCapability:'mailboxInventory',checkedAt:'attach',version:1,a2aJourneyVerified:false});
     }
+    const allowlistMailbox=path.join(dir,'mailbox-allowlist.json');
+    const allowlistRefused=await run([process.execPath,server,'--init-codex','--config',allowlistMailbox,
+      '--native-codex',fs.realpathSync.native(process.execPath),'--enrollment',JSON.stringify([process.execPath,'never-enroll']),
+      '--peers','[]','--peer-input-version','3']);
+    assert.equal(allowlistRefused.code,1);assert.match(allowlistRefused.stderr,/Invalid Codex autojoin MCP configuration/);
+    assert(!fs.existsSync(allowlistMailbox));
     capability=1;
     const unreachable=fixture('native-connection-refused',{SCODE_SETUP_PROXY_REFUSAL:'1'});
     const unreachableEntry=fs.readFileSync(unreachable.target);

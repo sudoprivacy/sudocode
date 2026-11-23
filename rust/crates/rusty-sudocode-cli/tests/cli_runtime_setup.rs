@@ -187,15 +187,87 @@ fn multi_agent_setup_keeps_an_offline_box_without_installing_a_replacement() {
         );
         assert_eq!(result["mode"], "shared");
         assert_eq!(result["box"]["endpoint"], "127.0.0.1:1");
-        assert_eq!(result["box"]["agentAuthentication"], "pending");
+        assert_eq!(result["box"]["agentAuthentication"], "missing");
+        assert_eq!(result["agent"]["credential"], "missing");
+        let recovery = result["agent"]["recovery"].as_str().unwrap();
+        assert!(
+            recovery.contains("scode setup --mode shared")
+                && recovery.contains("ask the node owner to mint"),
+            "{recovery}"
+        );
         assert_eq!(result["domainJoinAccepted"], false);
         assert!(result["service"].is_null());
         assert!(!root.path().join("services").exists());
         assert_eq!(std::fs::read(&record).unwrap(), original);
     }
-    // Setup has no Agent yet: it must neither mint nor borrow another credential.
+    // This user owns no local Box: setup must neither mint nor borrow a credential.
     assert!(!root.path().join("existing-agents").exists());
     assert!(matches!(model.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+}
+
+#[test]
+fn shared_setup_says_when_it_waits_for_an_earlier_join() {
+    let root = tempfile::tempdir().unwrap();
+    let agents = root.path().join("existing-agents");
+    configured_box(
+        root.path(),
+        &serde_json::json!({"version": 1, "endpoint": "127.0.0.1:1", "agents_dir": agents}),
+    );
+    let checked = output_json(
+        &command(root.path())
+            .args(["setup", "--check", "--output-format", "json"])
+            .output()
+            .unwrap(),
+    );
+    let name = checked["agent"]["name"].as_str().unwrap().to_string();
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join(format!(".joining-{name}")), "1").unwrap();
+    let result = command(root.path())
+        .args(["setup", "--mode", "shared", "--output-format", "json"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "Waiting for an earlier join of '{name}' to finish"
+        )),
+        "{stderr}"
+    );
+    assert_eq!(output_json(&result)["agent"]["credential"], "joining");
+}
+
+#[test]
+fn shared_setup_never_claims_an_inherited_or_configured_name() {
+    let root = tempfile::tempdir().unwrap();
+    configured_box(
+        root.path(),
+        &serde_json::json!({"version": 1, "endpoint": "127.0.0.1:1",
+            "agents_dir": root.path().join("existing-agents")}),
+    );
+    // A home session saved its derived name in the user settings, which every
+    // unconfigured workspace inherits.
+    std::fs::create_dir_all(root.path().join("config")).unwrap();
+    std::fs::write(
+        root.path().join("config/settings.json"),
+        r#"{"agentName":"inherited-home-name"}"#,
+    )
+    .unwrap();
+    let result = output_json(
+        &command(root.path())
+            .args(["setup", "--mode", "shared", "--output-format", "json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(result["agent"]["name"], "inherited-home-name");
+    let error = result["agent"]["joinError"].as_str().unwrap();
+    assert!(
+        error.contains("does not claim a configured name")
+            && error.contains("Ask the node owner to mint 'inherited-home-name'")
+            && error.contains("remove `agentName` from")
+            && error.contains("settings.json"),
+        "{error}"
+    );
+    assert!(!root.path().join("existing-agents").exists());
 }
 
 #[test]

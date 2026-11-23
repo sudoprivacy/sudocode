@@ -4,7 +4,7 @@ exclude = ["vendor/command-group", "vendor/codex-mermaid"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.43"
+version = "0.2.44"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -33,27 +33,27 @@ command-group = { path = "vendor/command-group", version = "5.0.1" }
 # bloat a standalone CLI. Per-crate features that only one member needs live here
 # too, so a member's line stays `{ workspace = true }` and the pin has no second
 # place to disagree with itself.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
-backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false, features = ["driver-local-connector"] }
-contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
-lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false, features = ["runtime-bridge"] }
-managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
-llm-mount = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false, features = ["driver-local-connector"] }
+contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
+lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false, features = ["runtime-bridge"] }
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
+llm-mount = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
 # Test the shipped authorization provider and VFS host through the same kernel.
-nexus-rebac = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
-transport = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false }
+nexus-rebac = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
+transport = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false }
 # The daemon `nexusd-cohost` IS, entered at `run_with_services` so the co-host
 # picks its service set without forking the composition root. Same pin as the
 # kernel above, necessarily: this crate and the agent runtime it hosts have to
 # agree on what `Kernel` is.
-nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10" }
-nexus-raft = { package = "raft", git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.10", default-features = false, features = ["grpc"] }
+nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13" }
+nexus-raft = { package = "raft", git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.29-rc.13", default-features = false, features = ["grpc"] }
 
 agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 axum = { version = "0.8", features = ["ws"] }
-pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", rev = "4f9e678412a276e02a7f5449eeb7cfddcd1d57a2" }
+pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", rev = "ad4cd6b1128c7044b7f51f62ea1d49cbafaed26a" }
 serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 
@@ -79,8 +79,7 @@ inherits = "release"
 opt-level = 3
 strip = "symbols"
 
-# ThinLTO with full speed optimization increases the Windows PE image. Size
-# optimization keeps that artifact within the same cap as the Unix builds.
-[profile.cohost-release-windows]
+# Intel Mac and Windows cohosts use size optimization within their release budgets.
+[profile.cohost-release-compact]
 inherits = "cohost-release"
 opt-level = "s"

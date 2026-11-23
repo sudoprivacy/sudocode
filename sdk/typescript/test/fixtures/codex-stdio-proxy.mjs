@@ -14,16 +14,32 @@ if (scenario === 'http-refusal') {
 } else if (scenario === 'fail-reconnect-close') {
   const journal = process.env.SCODE_FIXTURE_RECONNECT_JOURNAL;
   assert.ok(journal);
-  const replacement = fs.existsSync(journal);
+  const previous = fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse) : [];
+  const holders = previous.filter(row => row.phase === 'holder');
+  for (const { pid } of holders) {
+    if (process.platform === 'win32') assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    else assert.ok(fs.existsSync(journal + '.drained'));
+  }
   fs.appendFileSync(journal, JSON.stringify({ phase: 'proxy', pid: process.pid }) + '\n');
-  if (replacement) {
-    // A real child retains this proxy's stderr beyond the close deadline.
-    // The owner cannot observe ChildProcess.close yet, even though the proxy
-    // rejected its handshake. This is a bounded fixture, not a fake timer.
-    const holder = spawn(process.execPath, ['-e',
-      'setTimeout(() => { require("node:fs").writeFileSync(process.argv[1], "drained"); }, 2000);',
-      journal + '.drained'], { stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true });
-    fs.appendFileSync(journal, JSON.stringify({ phase: 'stderr-holder', pid: holder.pid }) + '\n');
+  if (previous.filter(row => row.phase === 'proxy').length === 1) {
+    // Wait for each real descendant to start before the refused handshake.
+    // On Windows the second one owns none of its parent's transport handles.
+    for (const stderr of (process.platform === 'win32' ? ['inherit', 'ignore'] : ['inherit'])) {
+      const holder = spawn(process.execPath, ['--input-type=module', '-e', `
+        import fs from 'node:fs';
+        const journal = process.argv[1];
+        fs.appendFileSync(journal, JSON.stringify({phase:'holder',pid:process.pid}) + '\\n');
+        process.send('ready');
+        process.disconnect();
+        setTimeout(() => fs.writeFileSync(journal + '.drained', 'drained'),
+          process.platform === 'win32' ? 30000 : 2000);
+      `, journal], { stdio: ['ignore', 'ignore', stderr, 'ipc'], detached: process.platform === 'win32', windowsHide: true });
+      await new Promise((resolve, reject) => {
+        holder.once('message', resolve);
+        holder.once('error', reject);
+        holder.once('exit', () => reject(new Error('fixture descendant exited before startup')));
+      });
+    }
     process.stdout.write('HTTP/1.1 503 Fixture startup refusal\r\nContent-Length: 0\r\n\r\n', () => process.exit(23));
   } else {
     runProxy();

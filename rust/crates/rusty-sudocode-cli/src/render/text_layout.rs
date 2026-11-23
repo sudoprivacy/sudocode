@@ -1,8 +1,8 @@
 //! Terminal columns, grapheme boundaries and style-preserving line layout.
 
-use std::{borrow::Cow, ops::Range};
+use iocraft::width::{grapheme_columns, str_columns};
+use std::{borrow::Cow, fmt::Write as _, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::styled_text::StyledText;
 
@@ -30,43 +30,20 @@ pub(crate) fn single_line(input: &str) -> Cow<'_, str> {
 pub(crate) fn display_width(input: &str) -> usize {
     let plain = strip_ansi(input);
     if !plain.contains('\t') {
-        return terminal_width(&plain);
+        return str_columns(&plain);
     }
     plain
         .graphemes(true)
         .fold(0, |col, grapheme| col + grapheme_width(grapheme, col))
 }
 
-/// Codex's terminal-cell correction for visible halfwidth sound marks.
-/// Source: openai/codex 970111f6cb tui/src/width.rs (Apache-2.0).
-#[inline]
-fn terminal_width(text: &str) -> usize {
-    text.width() + text.matches(['\u{FF9E}', '\u{FF9F}']).count()
-}
-
-/// Columns a grapheme may take when deciding where a row breaks. Terminals
-/// disagree on multi-code-point clusters: `👩🏽‍💻` is one 2-cell cluster to
-/// iTerm2 and `unicode-width`, but 6 cells to xterm.js with Unicode 11 (VS Code)
-/// and to vt100, which lay out each code point. A row measured short
-/// overflows, and the terminal wraps its tail into column 0; a row measured
-/// long only ends a few cells early. Breaks therefore take the larger count.
-fn row_fitting_width(grapheme: &str, col: usize) -> usize {
-    let clustered = grapheme_width(grapheme, col);
-    if grapheme.chars().nth(1).is_none() {
-        return clustered;
-    }
-    let per_code_point: usize = grapheme
-        .chars()
-        .map(|c| terminal_width(c.encode_utf8(&mut [0; 4])))
-        .sum();
-    clustered.max(per_code_point)
-}
-
+/// Columns a grapheme takes at `col`, by the terminal's measured rule
+/// (`render::grapheme_probe`), the one iocraft's live frame also uses.
 fn grapheme_width(grapheme: &str, col: usize) -> usize {
     if grapheme == "\t" {
         8 - col % 8
     } else {
-        terminal_width(grapheme)
+        grapheme_columns(grapheme)
     }
 }
 
@@ -187,6 +164,88 @@ pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) ->
         .collect()
 }
 
+/// A history line with its background padding erased instead of written.
+/// `wrap_ansi_with_indent` pads a background-coloured row to the full width
+/// with spaces in that colour. The terminal holds those spaces as text, so
+/// when it narrows each such row wraps into blank shaded rows. When a line
+/// reaches the terminal's edge (`width`) and ends in spaces that carry one
+/// background, the spaces become that background and EL. The terminal
+/// paints the same colour to the edge, and erased cells never wrap. This is
+/// the rule iocraft applies to a live frame's shaded tail (`erased_tail`),
+/// applied here where history leaves scode. Any other line comes back
+/// unchanged: one narrower than `width` (EL would colour past it), one laid
+/// out for another width, or one with controls other than SGR and links.
+pub(crate) fn erase_filled_tail(line: &str, width: usize) -> Cow<'_, str> {
+    if !line.contains('\x1b') || !only_styles_and_links(line) {
+        return Cow::Borrowed(line);
+    }
+    let styled = StyledText::from_ansi(line);
+    let end = styled.text.len();
+    let start = styled.text.trim_end_matches(' ').len();
+    if start == end || display_width(&styled.text) != width {
+        return Cow::Borrowed(line);
+    }
+    let mut background = None;
+    for (style, _, link) in styled.rich_spans(start..end) {
+        let Some(color) = style.background_color else {
+            return Cow::Borrowed(line);
+        };
+        if link.is_some() || background.is_some_and(|other| other != color) {
+            return Cow::Borrowed(line);
+        }
+        background = Some(color);
+    }
+    let Some(background) = background else {
+        return Cow::Borrowed(line);
+    };
+    let mut erased = String::with_capacity(line.len());
+    styled.write_ansi(0..start, &mut erased);
+    let _ = write!(
+        erased,
+        "{}\x1b[K{}",
+        crossterm::style::SetBackgroundColor(background),
+        super::RESET
+    );
+    Cow::Owned(erased)
+}
+
+/// Whether every control in `line` is SGR or an OSC 8 hyperlink, the only ones
+/// a styled row carries. Rewriting any other line could drop its controls.
+fn only_styles_and_links(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => match bytes.get(index + 1) {
+                Some(b'[') => {
+                    let Some(length) = bytes[index + 2..]
+                        .iter()
+                        .position(|b| (0x40..=0x7e).contains(b))
+                    else {
+                        return false;
+                    };
+                    if bytes[index + 2 + length] != b'm' {
+                        return false;
+                    }
+                    index += length + 3;
+                }
+                Some(b']') if bytes[index + 2..].starts_with(b"8;") => {
+                    let rest = &bytes[index + 2..];
+                    let Some(end) = rest.iter().position(|b| *b == 0x07 || *b == 0x1b) else {
+                        return false;
+                    };
+                    index += 2 + end + if rest[end] == 0x07 { 1 } else { 2 };
+                }
+                _ => return false,
+            },
+            b'\r' => return false,
+            byte if byte < 0x20 && byte != b'\t' => return false,
+            _ => index += 1,
+        }
+    }
+    true
+}
+
 /// [`wrap_line_with_indent`] for prose: rows end between words. A row ends
 /// at its last space that fits, the spaces are dropped, and the next row
 /// starts at `continuation_indent` with the following word. A word wider than
@@ -227,7 +286,7 @@ pub(crate) fn wrap_words_with_indent(
     let mut index = 0;
     while index < graphemes.len() {
         let (start, grapheme) = graphemes[index];
-        let cells = row_fitting_width(grapheme, col);
+        let cells = grapheme_width(grapheme, col);
         if col > 0 && col + cells > width && !fresh {
             let next = if let Some((len, end_col, run)) = space.take() {
                 row.truncate(len);
@@ -274,46 +333,8 @@ pub(crate) fn wrap_words_with_indent(
     rows
 }
 
-/// Terminal strings use grapheme widths. The pinned iocraft canvas clips by
-/// scalar widths, so its adapter must reserve those columns without splitting
-/// a grapheme. Keep that compatibility decision separate from scrollback.
-#[derive(Clone, Copy)]
-pub(crate) enum ColumnMetric {
-    Terminal,
-    Canvas,
-}
-
-impl ColumnMetric {
-    #[inline]
-    pub(crate) fn width(self, input: &str) -> usize {
-        match self {
-            Self::Terminal => display_width(input),
-            Self::Canvas => strip_ansi(input)
-                .chars()
-                .map(|ch| {
-                    if ch == '\t' {
-                        1
-                    } else {
-                        ch.width().unwrap_or(0)
-                    }
-                })
-                .sum(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn truncate(self, input: &str, max_width: usize) -> String {
-        truncate(input, max_width, self)
-    }
-}
-
-#[inline]
 pub(crate) fn truncate_to_width(input: &str, max_width: usize) -> String {
-    ColumnMetric::Terminal.truncate(input, max_width)
-}
-
-fn truncate(input: &str, max_width: usize, metric: ColumnMetric) -> String {
-    if metric.width(input) <= max_width {
+    if display_width(input) <= max_width {
         return input.to_string();
     }
     if max_width == 0 {
@@ -323,10 +344,7 @@ fn truncate(input: &str, max_width: usize, metric: ColumnMetric) -> String {
     let mut col = 0;
     let mut end = 0;
     for (offset, grapheme) in source.text.grapheme_indices(true) {
-        let cells = match metric {
-            ColumnMetric::Terminal => grapheme_width(grapheme, col),
-            ColumnMetric::Canvas => metric.width(grapheme),
-        };
+        let cells = grapheme_width(grapheme, col);
         if col + cells >= max_width {
             break;
         }

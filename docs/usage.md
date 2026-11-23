@@ -57,8 +57,7 @@ work. This is always on; a leftover `experimental.peerDescriptions` setting is
 accepted and ignored.
 
 The existing compaction call produces optional description metadata alongside
-its checkpoint. It adds no separate summarizer or repair request. New agents
-have no description until one is published. Tool-output pruning, skipped or
+its checkpoint. It adds no separate summarizer or repair request. Tool-output pruning, skipped or
 failed compaction, and ordinary turns preserve the previous description and
 its timestamp. Child agents retain their existing task descriptions.
 
@@ -67,13 +66,20 @@ mailbox namespace. Without a Nexus node, that path is relative to
 `~/.nexus/sudocode/local-mailbox/`. The record contains `description`,
 `updated_at`, and `source_session_id`. It survives process exit and resume;
 resuming an older session does not restore an older description. The owning
-agent publishes only after its checkpoint commits. A description changed
+agent publishes its task description after its checkpoint commits. A description changed
 during compaction is preserved. Native filesystem locks exclude concurrent
 writers; node backends retain their advisory lease guarantee unless they
 provide conditional writes.
 
-`agent_list` reads these records and returns optional `description` and
-`description_updated_at` fields. Terminal cards show the description and its
+When an interactive scode or a stock Codex or Claude Code bridge attaches to a
+Node, it publishes its frontend, machine name and workspace basename in the
+optional `attachment` field. Peers see this label before the first task
+description.
+Reattaching preserves the last task and its timestamp. A later compaction
+updates the task and retains the attachment.
+
+`agent_list` reads these records and returns optional `attachment`,
+`description` and `description_updated_at` fields. Terminal cards show the description and its
 age. Missing or unreadable metadata never removes an otherwise reachable peer.
 The timestamp records the last description refresh and does not assert that a
 peer is running. Descriptions persist until replaced or explicitly removed.
@@ -207,7 +213,16 @@ The REPL footer then shows `A2A: <scope> failing for <time> · /status` until
 receiving recovers. `failing` means the node binding itself cannot be used.
 `SUDOCODE_A2A_DEGRADED_GRACE_MS` changes the 30 second grace period.
 
-The connection record alone does not start Nexus or mint an agent credential.
+The connection record alone does not start Nexus. In shared mode, an
+interactive or ACP session whose workspace-derived Agent has no credential yet
+is issued one by this OS user's registered local Box in the background, without
+a prompt or restart. `scode setup --mode shared` does the same for the current
+workspace and reports the outcome; `scode setup --check` shows the Agent's
+actual credential state. Configured `agentName` values are never claimed: ask
+the node owner to mint them. A node this user does not own is never asked to
+issue: the footer says A2A is not joined, and `/status` and setup say whether
+`scode setup --mode shared` or the node owner can fix it. Shared mode
+covers every workspace, so a verified peer is any session of the node owner.
 An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
 can resume the same locally owned Box after shared selection. A missing record still
 selects the same-machine disk namespace for that process. When a node was
@@ -463,6 +478,15 @@ block; completed results remain visible while the provider is still streaming.
 Captured diagnostics use the same line framing and preserve UTF-8 characters
 split across reads.
 
+For local input/resize diagnosis, set `SCODE_TRACE_INPUT` to a writable file
+path before starting the REPL. It appends JSON lines when the UI observes
+keys and bracketed paste: the PID, a per-process sequence, event category, callback frame
+dimensions, reviewability and the existing frame guard's result. Function-key
+numbers are recorded; typed characters, paste contents, modifiers and model
+traffic are not. This is opt-in local output and does not change admission or
+chrome. A size warning acknowledges a rendered frame, not delivery of input;
+diagnostics can distinguish those two boundaries without adding timing delays.
+
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
 commands can execute concurrently, with a default limit of ten. Each complete
 tool input becomes eligible while the provider is still streaming. Pre/post
@@ -657,6 +681,15 @@ FooterSlot fold into explicit summaries rather than silently disappearing.
 Growing the window restores their full contents. Long drafts scroll within the
 same editor, preserving the complete text and cursor.
 
+In the interactive REPL, the TodoSlot owns the current todo list. Successful
+`TodoWrite` calls leave only `✓ Todos updated` in scrollback, with
+`✓ Todos cleared` for an empty list or `✓ All todos complete` when every item
+is finished. Resuming a session uses the same compact receipts. Hook feedback
+remains visible, and failures or unrecognized results retain their detailed
+tool cards. The saved session and model still receive the complete result.
+Terminal rendering without a live todo panel retains the full checklist card;
+structured output retains the complete tool result.
+
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden
@@ -741,31 +774,21 @@ For the canonical, live command list:
 scode --help
 ```
 
-### Experimental shaded prompts
+### Shaded prompts
 
-Enable `experimental.promptViewport` to try matching shaded surfaces for the
-live editor and submitted prompts:
+The live editor and every submitted prompt sit on a faint shade drawn from the
+terminal's own background, so your turns stand apart from the conversation.
+The shade replaces the separator lines above and below the editor. It uses the
+same inline editor, output writer and native terminal history as everything
+else: new output advances the editor with the conversation, and the mouse
+wheel, scrollbar and selection work on that one history.
 
-```json
-{"experimental":{"promptViewport":true}}
-```
+Where the terminal can't draw a shade (`NO_COLOR`, or a palette too small for
+one), the editor keeps its separator lines and the terminal's own colors.
+Resumed sessions show their prompts with the same shade.
 
-This temporary experiment is off by default. It uses the same inline editor,
-output writer and native terminal history as the ordinary REPL. New output
-advances the editor with the conversation; the mouse wheel and scrollbar browse
-the same terminal history. Selection uses the terminal's ordinary drag gesture.
-The draft survives returning to the latest output and resizing.
-
-The earlier fixed conversation view has been removed because its mouse scrolling
-and the terminal scrollbar controlled separate histories. The editor and prompt
-header are no longer pinned while browsing older native history. A sticky view
-would require support from the terminal host to share its scroll position.
-
-Saved sessions remain the durable record; `--resume` uses the existing replay
-formatter. Colors respect the terminal palette and `NO_COLOR`. The existing
-`promptViewport` setting name remains compatible. This changes presentation only
-and adds no model requests or prompt context. Validation requirements live in the
-[roadmap](../sudo-code-roadmap.html#prompt-viewport-experiment).
+This is always on; a leftover `experimental.promptViewport` setting, which
+enabled it while it was experimental, is accepted and ignored.
 
 ## Bash tool results
 

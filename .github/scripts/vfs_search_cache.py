@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import time
+import tomllib
 
 
 UPSTREAM = "https://github.com/nexi-lab/nexus-vfs"
@@ -66,8 +67,55 @@ def require_driver_toolchain(source):
                            f"DRIVER_TOOLCHAIN is {DRIVER_TOOLCHAIN}; update it together with the lockfile revision")
 
 
+def functional_profile(root):
+    """Bind the two functional Cargo variants to one local, profile-only input."""
+    paths = [root / ".github/actions/vfs-search-cache/functional.toml",
+             root / ".github/ci/cohost-plugin-crypto.toml"]
+    if any(path.is_symlink() or not path.is_file() for path in paths):
+        raise RuntimeError("VFS functional profile sources must be regular files")
+    contents = [path.read_bytes() for path in paths]
+    base, crypto = [tomllib.loads(data.decode("utf-8")) for data in contents]
+    required = {"opt-level": 0, "debug": 0, "incremental": False,
+                "debug-assertions": True, "overflow-checks": True,
+                "package": {"*": {"opt-level": 0}}}
+    if base != {"profile": {"dev": required, "test": required}}:
+        raise RuntimeError("VFS functional profiles must preserve assertions and both compiler variants")
+    if (set(crypto) != {"profile"} or set(crypto["profile"]) != {"dev"}
+            or set(crypto["profile"]["dev"]) != {"package"}):
+        raise RuntimeError("VFS crypto input must contain only the shared dev package overrides")
+    packages = crypto["profile"]["dev"]["package"]
+    if not packages or any(name == "*" or settings != {"opt-level": 2} for name, settings in packages.items()):
+        raise RuntimeError("VFS crypto package overrides must retain optimization level 2")
+    text = contents[0].decode("utf-8").rstrip() + "\n\n"
+    # The actual driver signs the complete plugin file before launching the
+    # current host. Keep that hashing/signature code optimized in BOTH variants,
+    # using the same package list as the candidate host's existing crypto input.
+    for profile in ["dev", "test"]:
+        for name in sorted(packages):
+            text += f"[profile.{profile}.package.{json.dumps(name)}]\nopt-level = 2\n\n"
+    tomllib.loads(text)
+    return text.encode("utf-8"), {str(path.relative_to(root)): hashlib.sha256(data).hexdigest()
+                                 for path, data in zip(paths, contents)}
+
+
+def configure_functional_profile(source):
+    """Use this checkout's private Cargo home, also inherited by nested Cargo."""
+    payload, _ = functional_profile(source.parent)
+    home = source / ".ci-cache/cargo"
+    if (home / "config").exists() or (home / "config").is_symlink():
+        raise RuntimeError("VFS compiler cache contains an unreviewed legacy Cargo configuration")
+    path = home / "config.toml"
+    if path.is_symlink() or (path.exists() and (not path.is_file() or path.read_bytes() != payload)):
+        raise RuntimeError("VFS compiler cache Cargo profile differs from its reviewed inputs")
+    if not path.exists():
+        home.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(payload)
+
+
 def environment(source):
     """Keep external fixture artifacts separate from the candidate's build graph."""
+    configure_functional_profile(source)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("CARGO_PKG_") and key not in {"CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_MANIFEST_LINKS"}}
     env.update(CARGO_HOME=str(source / ".ci-cache/cargo"),
@@ -117,6 +165,8 @@ def compiler_inputs(root):
                               if key in names or key.startswith(prefixes)},
               "cargo_configs": {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                                 for path in (root / ".cargo/config.toml", root / ".cargo/config") if path.is_file()}}
+    payload, sources = functional_profile(root)
+    inputs["functional_profile"] = {"source_files": sources, "configuration_sha256": hashlib.sha256(payload).hexdigest()}
     return inputs
 
 
@@ -132,6 +182,9 @@ def cache_key(root):
 
 
 def restore_keys(inputs):
+    if "functional_profile" in inputs:
+        # Earlier optimized-profile caches cannot seed this new compiler recipe.
+        return ["vfs-search-v2-" + compiler_context(inputs) + "-"]
     legacy = {**inputs, "recipe": LEGACY_RECIPE}
     exact_legacy = hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
     return ["vfs-search-v1-" + exact_legacy, "vfs-search-v2-" + compiler_context(inputs) + "-"]
@@ -189,6 +242,11 @@ def verify_identity(root, source, current, revision):
     if identity.is_symlink():
         raise RuntimeError("VFS compiler-input identity must be a regular file")
     if not identity.exists():
+        target = source / ".ci-cache/target"
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise RuntimeError("VFS compiler outputs must stay in a regular private target directory")
+        if target.exists() and any(target.iterdir()):
+            raise RuntimeError("Functional VFS compiler output requires a bound compiler-input identity")
         if current != revision:
             raise RuntimeError("A different VFS pin requires a bound compiler-input identity")
         return identity
@@ -277,6 +335,7 @@ def run(root, output, test=False):
     (output / "context.json").write_text(json.dumps({
         "source_revision": pin(root), "recipe_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "current_runtime_sha256": runtime_hash, "test_required_now": test,
+        "functional_profile": compiler_inputs(root)["functional_profile"],
     }, indent=2) + "\n")
     records = []
     for index, command in enumerate(commands):
@@ -296,7 +355,9 @@ def run(root, output, test=False):
             if line.startswith("{"):
                 message = json.loads(line)
                 if message.get("reason") == "compiler-artifact":
-                    artifacts.append({"name": message["target"]["name"], "fresh": message["fresh"]})
+                    artifacts.append({"name": message["target"]["name"], "fresh": message["fresh"],
+                                      "opt_level": message["profile"]["opt_level"],
+                                      "debug_assertions": message["profile"]["debug_assertions"]})
         row["compiler_artifacts"] = artifacts
         records.append(row)
         (output / "commands.json").write_text(json.dumps(records, indent=2) + "\n")

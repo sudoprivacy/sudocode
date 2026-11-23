@@ -27,6 +27,7 @@ let loaded = ids.slice(0,4);
 let owner: CodexAutojoin | undefined;
 let mcp: Client | undefined;
 let mcpOwnerPid: number | undefined;
+let firstMcpOwner: ChildProcess | undefined;
 let auditFailureOwner: ChildProcess | undefined;
 let windowsOwnerTask: ReturnType<typeof import('../src/codexMcp')['prepareWindowsCodexOwner']> | undefined;
 let holdReads = false;
@@ -91,6 +92,10 @@ async function main() {
   await new Promise(resolve=>setTimeout(resolve,1100)); await owner.refresh();
   assert.equal(owner.status().length,2,'subagents and feature workers never become root Agents');
   const first=owner.status();assert.equal(new Set(first.map(row=>row.actor)).size,2);
+  for(const row of first) {
+    assert.ok(rows().some(event=>event.method==='initialize' && event.attachment?.actor===row.actor
+      && event.attachment.workspace===path.basename(nativeWorkspace)), 'the attached helper receives the verified thread workspace basename');
+  }
   assert.throws(()=>owner!.connectionFor(undefined),/metadata/);
   assert.throws(()=>owner!.connectionFor(ids[2]),/authenticated/);
   for(const row of first){
@@ -198,7 +203,11 @@ async function main() {
   const reserved=reservation.address();assert.ok(reserved&&typeof reserved!=='string');
   await new Promise<void>(resolve=>reservation.close(()=>resolve()));
   const mcpConfig=path.join(directory,'mcp.json');
-  fs.writeFileSync(mcpConfig,JSON.stringify({version:1,mode:'codex-autojoin',native:config.native,
+  const mcpJournal=path.join(directory,'mcp-native.jsonl');
+  const mcpNative=process.platform==='win32' ? config.native : {...config.native,
+    codexArgv:[...config.native.codexArgv.slice(0,-1),'fail-reconnect-close'],
+    env:{...config.native.env,SCODE_FIXTURE_RECONNECT_JOURNAL:mcpJournal}};
+  fs.writeFileSync(mcpConfig,JSON.stringify({version:1,mode:'codex-autojoin',native:mcpNative,
     stateDirectory:path.join(directory,'mcp-bindings'),auditLog:path.join(directory,'mcp-audit.jsonl'),peers:[],
     enrollmentArgv:[process.execPath,path.join(root,'test/fixtures/codexAgentEnrollment.cjs'),directory],
     endpoint:{port:reserved.port,token:'01'.repeat(32)},
@@ -215,9 +224,19 @@ async function main() {
     execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),{timeout:10000,windowsHide:true});
     windowsOwnerTask=prepared;
   }
+  const entry=path.join(root,'dist/server.cjs');
+  firstMcpOwner=spawn(process.execPath,[entry,'--codex-owner','--config',mcpConfig],{stdio:'ignore'});
+  const firstExit=once(firstMcpOwner,'exit');
+  const auditPath=path.join(directory,'mcp-audit.jsonl');
+  const listenDeadline=Date.now()+10000;
+  while(!fs.existsSync(auditPath)||!fs.readFileSync(auditPath,'utf8').includes('"phase":"listening"')) {
+    assert.equal(firstMcpOwner.exitCode,null);
+    assert.ok(Date.now()<listenDeadline,'isolated owner did not listen');
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
   mcp=new Client({name:'autojoin-process-acceptance',version:'1'},{capabilities:{}});
-  await mcp.connect(new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/server.cjs'),
-    '--codex','--config',mcpConfig],stderr:'pipe'}));
+  const transport=new StdioClientTransport({command:process.execPath,args:[entry,'--codex','--config',mcpConfig],stderr:'pipe'});
+  await mcp.connect(transport);
   const readyDeadline=Date.now()+10000;
   for(;;){
     const status=await mcp.callTool({name:'scode_status',arguments:{}});
@@ -225,6 +244,29 @@ async function main() {
     if(JSON.parse(content[0].text).state==='observing')break;
     assert.ok(Date.now()<readyDeadline,'MCP owner did not attach its native observer');
     await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.ok(!(await mcp.listTools()).tools.some(tool=>tool.name==='scode_inbox'),'the v2 callback presents no mailbox tool');
+  if(process.platform!=='win32') {
+    for(const client of server.clients)client.terminate();
+    const deadline=Date.now()+15000;
+    let waitingPid:number|undefined;
+    for(;;) {
+      const status=await mcp.callTool({name:'scode_status',arguments:{}});
+      const snapshot=JSON.parse((status.content as Array<{text:string}>)[0].text);
+      const proxies=fs.readFileSync(mcpJournal,'utf8').trim().split('\n').map(line=>JSON.parse(line))
+        .filter(row=>row.phase==='proxy');
+      if(snapshot.state==='waiting_for_proxy_exit') {
+        assert.equal(proxies.length,2);
+        assert.equal(snapshot.waitingForProxyExitPid,proxies[1].pid);
+        waitingPid=snapshot.waitingForProxyExitPid;
+      } else if(proxies.length===3 && snapshot.state==='observing') {
+        assert.ok(waitingPid);
+        assert.equal(snapshot.waitingForProxyExitPid,undefined);
+        break;
+      }
+      assert.ok(Date.now()<deadline,'MCP did not expose the stalled PID and recover');
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
   }
   holdReads=true;loaded=[ids[0]];
   const sending=mcp.callTool({name:'scode_send',arguments:{to:'fixture-peer',message:'first resumed send',summary:'one append'},
@@ -257,8 +299,43 @@ async function main() {
   assert.throws(prepare,/owner is already running/,'preparation shares the running owner exclusion');
   assert.equal(rows().length,beforeImport,'refused preparation cannot start another receiver');
   const status=await mcp.callTool({name:'scode_status',arguments:{}});
-  mcpOwnerPid=JSON.parse((status.content as Array<{text:string}>)[0].text).ownerPid;
-  assert.ok(mcpOwnerPid);
+  const snapshot=JSON.parse((status.content as Array<{text:string}>)[0].text);
+  assert.equal(snapshot.ownerPid,firstMcpOwner.pid);
+  const frontendPid=transport.pid;
+  const firstAgent=snapshot.agents.find((row:{threadId:string})=>row.threadId===ids[0]);
+  assert.ok(firstAgent?.actor && firstAgent.receiver?.sessionId);
+  // Only the handle of this test's own foreground owner is signalled. Retire
+  // the fixture receiver first, then reload its original binding on recovery.
+  loaded=[];
+  const unloadDeadline=Date.now()+10000;
+  for(;;){
+    const current=await mcp.callTool({name:'scode_status',arguments:{}});
+    if(!JSON.parse((current.content as Array<{text:string}>)[0].text).agents.length)break;
+    assert.ok(Date.now()<unloadDeadline);
+    await new Promise(resolve=>setTimeout(resolve,40));
+  }
+  firstMcpOwner.kill('SIGTERM');await firstExit;firstMcpOwner=undefined;
+  assert.ok((await mcp.listTools()).tools.some(tool=>tool.name==='scode_send'));
+  assert.equal(transport.pid,frontendPid);
+  loaded=[ids[0]];
+  const attachDeadline=Date.now()+15000;
+  for(;;){
+    const current=await mcp.callTool({name:'scode_status',arguments:{}});
+    const recovered=JSON.parse((current.content as Array<{text:string}>)[0].text);
+    const agent=recovered.agents.find((row:{threadId:string})=>row.threadId===ids[0]);
+    if(agent?.state==='connected'){
+      assert.equal(agent.actor,firstAgent.actor);
+      assert.equal(agent.receiver?.sessionId,firstAgent.receiver?.sessionId);
+      mcpOwnerPid=recovered.ownerPid;
+      assert.notEqual(mcpOwnerPid,snapshot.ownerPid);
+      break;
+    }
+    assert.ok(Date.now()<attachDeadline,'same stdio client did not recover the original agent');
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  const lookup=await mcp.callTool({name:'scode_agent_list',arguments:{},_meta:{threadId:ids[0]}});
+  assert.equal(lookup.isError,false);
+  assert.equal(rows().filter(row=>row.method==='_sudocode/a2a/send').length,3,'owner restart never replays the previous send');
   await mcp.close();mcp=undefined;
   await new Promise(resolve=>setTimeout(resolve,6000));
   assert.doesNotThrow(()=>process.kill(mcpOwnerPid!,0),'loaded native roots keep their owner after MCP clients disconnect');
@@ -272,17 +349,18 @@ async function main() {
   }
   const retiredOwnerPid=mcpOwnerPid;
   mcpOwnerPid=undefined;
-  const lifecycle=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
+  const allEvents=fs.readFileSync(path.join(directory,'mcp-audit.jsonl'),'utf8').trim().split('\n')
     .map(line=>JSON.parse(line));
+  assert.ok(allEvents.filter(row=>row.provenance==='codex-autojoin-owner')
+    .every(row=>row.pid===snapshot.ownerPid||row.pid===retiredOwnerPid));
+  const lifecycle=allEvents.filter(row=>row.pid===retiredOwnerPid);
   const observed=lifecycle.filter(row=>row.phase==='native_inventory');
   assert.ok(observed.some(row=>row.roots.some((thread:{threadId:string;qualified:boolean})=>thread.threadId===ids[0]&&thread.qualified)),
     'the actual owner must record its qualifying native root');
   assert.deepEqual(observed.at(-1).loaded,[]);
   assert.equal(lifecycle.find(row=>row.phase==='stopping')?.reason,'no_qualified_native_roots');
   assert.equal(lifecycle.find(row=>row.phase==='stopped')?.reason,'no_qualified_native_roots');
-  assert.ok(!lifecycle.some(row=>row.phase==='owner_crash'));
-  assert.ok(lifecycle.filter(row=>row.provenance==='codex-autojoin-owner').every(row=>row.pid===retiredOwnerPid),
-    'every owner event is bound to its actual process');
+  assert.ok(!allEvents.some(row=>row.phase==='owner_crash'));
   const afterRetirement=rows().length;
   const configBytes=fs.readFileSync(mcpConfig);
   const imported=JSON.parse(prepare());
@@ -414,8 +492,7 @@ async function main() {
   }
 
   if(process.platform!=='win32') {
-    // Real POSIX proxy stderr keeps a failed reconnect's close unconfirmed.
-    // Even when its callback refuses cleanup, the sibling ACP must be closed.
+    // A delayed replacement preserves the sibling receiver and pending durable delivery.
     loaded=[ids[0]];
     const failureDirectory=path.join(directory,'cleanup-bindings');
     const reconnectJournal=path.join(directory,'autojoin-reconnect.jsonl');
@@ -426,26 +503,23 @@ async function main() {
     dropQueueOnce=true;
     await sibling.request('_fixture/peer',{from:'fixture-peer',text:'cleanup propagation regression'});
     const callbackLog=path.join(failureDirectory,`${ids[0]}.callback.jsonl`);
-    const cleanupDeadline=Date.now()+5000;
-    while(!fs.readFileSync(callbackLog,'utf8').includes('cleanup unconfirmed')) {
-      assert.ok(Date.now()<cleanupDeadline,'callback did not retain failed-reconnect cleanup');
-      await new Promise(resolve=>setTimeout(resolve,20));
-    }
-    let originalCleanup: unknown;
-    assert.equal(owner.status()[0].state,'cleanup_unknown','a connected receiver must expose unjoined downstream cleanup');
+    const deadline=Date.now()+15000;
+    const waitForLog=async (needle:string) => {
+      while(!fs.readFileSync(callbackLog,'utf8').includes(needle)) {
+        assert.ok(Date.now()<deadline,`callback did not record ${needle}`);
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+    };
+    await waitForLog('Waiting for exit of Codex proxy pid');
     assert.equal(owner.status()[0].delivery?.pendingCount,1);
-    await assert.rejects(owner.close(),error=>{
-      originalCleanup=error;return /cleanup unconfirmed/.test(String(error));
-    });
-    assert.equal(sibling.closed,true,'callback failure must not skip sibling ACP cleanup');
-    assert.equal(owner.status()[0].state,'cleanup_unknown','closed ACP does not erase unjoined downstream custody');
+    assert.equal(sibling.closed,false);
+    await waitForLog('"phase":"queued"');
+    assert.equal(owner.status()[0].delivery?.pendingCount,0);
+    assert.equal(owner.connectionFor(ids[0]),sibling);
+    assert.ok(fs.existsSync(reconnectJournal+'.drained'));
+    await owner.close();
     assert.equal((await sibling.exited).code,0);
-    await assert.rejects(owner.close(),error=>error===originalCleanup);
     owner=undefined;
-    while(!fs.existsSync(reconnectJournal+'.drained')) {
-      assert.ok(Date.now()<cleanupDeadline,'bounded fixture pipe holder did not finish');
-      await new Promise(resolve=>setTimeout(resolve,20));
-    }
     loaded=[legacyId];
   }
 
@@ -525,7 +599,8 @@ async function main() {
         owner=await connectCodexAutojoin(publicationConfig);
         assert.equal(submitted.length,1,'local publication must never resubmit enrollment');
         if(transient) {
-          assert.equal(owner.status()[0].state,'connected','transient Windows binding replacement must retain the original enrollment');
+          assert.equal(owner.status()[0].state,'connected',
+            'transient Windows binding replacement must retain the original enrollment: '+String(owner.status()[0].error));
           const binding=JSON.parse(fs.readFileSync(bindingFile,'utf8'));
           assert.equal(binding.state,'ready');assert.equal(binding.actor,submitted[0].actor);
           assert.equal(binding.operationId,submitted[0].operationId);
@@ -564,6 +639,9 @@ void main().catch(error=>{console.error(error);process.exitCode=1;}).finally(asy
   holdReads=false;for(const reply of pendingReads.splice(0))reply();
   await owner?.close();
   await mcp?.close();
+  if(firstMcpOwner?.exitCode===null && firstMcpOwner.signalCode===null){
+    const exited=once(firstMcpOwner,'exit');firstMcpOwner.kill('SIGTERM');await exited;
+  }
   if(auditFailureOwner?.exitCode===null){auditFailureOwner.kill('SIGKILL');await once(auditFailureOwner,'exit');}
   for(const client of server.clients)client.terminate();
   await new Promise<void>(resolve=>server.close(()=>resolve()));

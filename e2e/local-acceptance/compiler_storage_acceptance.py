@@ -23,6 +23,10 @@ LEGACY_REFUSAL = '''        # The backend owns every file under its data root, i
             print("COMPILER_CACHE: legacy control files are inside the managed data root; preserving that store and using original Cargo.", flush=True)
             return False
 '''
+# The restored layout predates the start-up probe compile. Left in, the probe
+# would meet the evicted lock first and retire the server before the build
+# this control measures.
+PROBE_GATE = "        if not self.answers_probe() or not self.forget_probe():\n"
 WORKER = '''import importlib.util,json,sys
 from pathlib import Path
 data=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -148,8 +152,9 @@ def run(output, cache, tool):
     output.mkdir(parents=True, exist_ok=False)
     original = Path(cache.__file__).read_text(encoding="utf-8")
     location = 'self.control = self.cache.with_name(self.cache.name + ".control")'
-    assert original.count(location) == 1 and original.count(LEGACY_REFUSAL) == 1
-    restored = original.replace(location, "self.control = self.cache", 1).replace(LEGACY_REFUSAL, "", 1)
+    assert original.count(location) == 1 and original.count(LEGACY_REFUSAL) == 1 and original.count(PROBE_GATE) == 1
+    restored = (original.replace(location, "self.control = self.cache", 1).replace(LEGACY_REFUSAL, "", 1)
+                .replace(PROBE_GATE, "        if False:\n", 1))
     mutant_file = output / "restored-inside-layout.py"
     mutant_file.write_text(restored, encoding="utf-8")
     mutant = load("restored_inside_storage_layout", mutant_file)

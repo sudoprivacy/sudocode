@@ -1,8 +1,10 @@
 # The VFS plugin fixture verifies a complete debug dylib against its trusted
 # keys. Keep the host's crypto at the pinned VFS workspace's dependency opt-level,
 # rather than hashing that large file with unoptimized debug dependencies.
-# This file is passed only to the cohost acceptance build. Assertions, overflow
-# checks, other dev/test packages and release profiles retain their defaults.
+# The cohost acceptance build uses this package list directly. The fixed search
+# driver composes it into both functional dev/test variants for whole-file
+# signing. Their remaining profile settings are owned by their respective
+# callers; assertions, overflow checks and release profiles stay unchanged.
 [profile.dev.package.ed25519-dalek]
 opt-level = 2
 

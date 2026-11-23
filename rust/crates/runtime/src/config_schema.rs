@@ -402,8 +402,9 @@ const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf(
         "promptViewport",
         FieldType::Bool,
-        "Experimental shaded prompts using native inline history",
-    ),
+        "Graduated: shaded prompts are always on; this key is ignored",
+    )
+    .compat_only(),
     FieldSchema::leaf(
         "peerDescriptions",
         FieldType::Bool,

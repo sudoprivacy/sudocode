@@ -4,6 +4,10 @@ inputs:
   publish:
     description: Save a missing key only on a protected main push
     default: 'false'
+outputs:
+  exact-hit:
+    description: The original queue key was already published on main
+    value: ${{ steps.restore.outputs.cache-hit }}
 runs:
   using: composite
   steps:

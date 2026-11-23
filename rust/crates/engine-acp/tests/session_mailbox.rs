@@ -236,6 +236,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     a2a::install_a2a_stamp_hook(&kernel, true).unwrap();
     let path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "operator"));
     common::provision_stream_transcript(&kernel, &path);
+    exercise_live_cohost_attachment(&kernel);
     let started = start_scripted_worker(&kernel, "worker");
     let (mailbox, created) = open_scripted_controller(&kernel, &started);
     let sid = created["result"]["sessionId"].as_str().unwrap();
@@ -324,6 +325,14 @@ fn write_scripted_cohost_config(config_home: &std::path::Path) {
 }
 
 fn start_scripted_worker(kernel: &Arc<Kernel>, name: &str) -> Value {
+    start_scripted_worker_with_protocol(kernel, name, None)
+}
+
+fn start_scripted_worker_with_protocol(
+    kernel: &Arc<Kernel>,
+    name: &str,
+    protocol: Option<&str>,
+) -> Value {
     let seeded = common::managed_session::seed_managed_session(
         kernel,
         &common::make_desc("seed", name, "scripted"),
@@ -331,9 +340,62 @@ fn start_scripted_worker(kernel: &Arc<Kernel>, name: &str) -> Value {
     call(
         kernel,
         "start_session_v1",
-        &json!({"agent_id":name,"model":"scripted",
+        &json!({"agent_id":name,"model":"scripted","session_protocol":protocol,
             "resume_session_id":seeded.resume_session_id}),
     )
+}
+
+fn exercise_live_cohost_attachment(kernel: &Arc<Kernel>) {
+    let protocol = a2a::session::LIVE_SESSION_PROTOCOL;
+    let started = start_scripted_worker_with_protocol(kernel, "live-worker", Some(protocol));
+    let endpoint: SessionEndpoint =
+        serde_json::from_value(started["session_endpoint"].clone()).unwrap();
+    assert_eq!(endpoint.protocol, protocol);
+    assert_eq!(endpoint.transcript, "");
+    let session = &started["session_id"];
+    let channel = &endpoint.channel_id;
+    let accepted = call(
+        kernel,
+        "session_submit_v1",
+        &json!({
+            "session_id":session,"channel_id":channel,"sequence":1,
+            "payload":{"type":"rpc","message":{"jsonrpc":"2.0","id":"live-init","method":"initialize",
+                "params":{"protocolVersion":1,"clientCapabilities":{}}}}
+        }),
+    );
+    assert_eq!(accepted["accepted_sequence"], 1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut cursor = 0;
+    loop {
+        let reply: a2a::session_live::ReadSessionResponse = serde_json::from_value(call(
+            kernel,
+            "session_read_v1",
+            &json!({
+                "session_id":session,"channel_id":channel,"after_sequence":cursor,"timeout_ms":500
+            }),
+        ))
+        .unwrap();
+        assert!(!reply.resync_required);
+        if let Some(message) = reply.frames.iter().find_map(|frame| match &frame.payload {
+            SessionPayload::Rpc { message } if message["id"] == "live-init" => Some(message),
+            _ => None,
+        }) {
+            assert_eq!(message["result"]["protocolVersion"], 1, "{message}");
+            break;
+        }
+        cursor = reply.latest_sequence;
+        assert!(
+            Instant::now() < deadline,
+            "live cohost returned no initialize result"
+        );
+    }
+    call(
+        kernel,
+        "session_submit_v1",
+        &json!({"session_id":session,"channel_id":channel,
+        "sequence":2,"payload":{"type":"closed","reason":"controller finished"}}),
+    );
+    await_terminated_cohost_processes(kernel, &[session]);
 }
 
 fn exercise_cohost_context_questions(

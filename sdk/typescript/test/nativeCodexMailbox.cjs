@@ -14,13 +14,22 @@ const { parseArgs } = require('node:util');
 const { performance } = require('node:perf_hooks');
 const { socketEntryPresent } = require('./fixtures/nativeSocket.cjs');
 const options = parseArgs({ options: { codex: { type: 'string' }, scode: { type: 'string' }, output: { type: 'string' },
+  driver: { type: 'string' }, 'process-probe': { type: 'string' }, 'temp-root': { type: 'string' },
+  'previous-scode': { type: 'string' },
   case: { type: 'string', default: 'idle' } } }).values;
-assert(['idle', 'active-reply-loss', 'interrupted', 'request-loss-budget', 'owner-crash-budget', 'whole-budget', 'real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation', 'native-settings-probe'].includes(options.case));
+assert(['idle', 'active-reply-loss', 'interrupted', 'request-loss-budget', 'owner-crash-budget', 'whole-budget', 'real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation', 'native-settings-probe', 'native-settings-warm-resume', 'native-settings-cold-resume'].includes(options.case));
 const realMailboxCase = ['real-mailbox', 'real-mailbox-restart', 'real-mailbox-burst', 'real-mailbox-truncation'].includes(options.case);
 const realMailboxBurst = options.case === 'real-mailbox-burst';
 const realMailboxTruncation = options.case === 'real-mailbox-truncation';
-const settingsProbe = options.case === 'native-settings-probe';
+const coldSettingsResume = options.case === 'native-settings-cold-resume';
+const settingsResume = coldSettingsResume || options.case === 'native-settings-warm-resume';
+const settingsProbe = settingsResume || options.case === 'native-settings-probe';
 if (realMailboxCase) assert(options.scode && path.isAbsolute(options.scode) && fs.statSync(options.scode).isFile());
+const previousScode = options['previous-scode'];
+if (previousScode !== undefined) {
+  assert.equal(options.case, 'real-mailbox-restart', 'An existing-session upgrade uses the restart journey');
+  assert(path.isAbsolute(previousScode) && fs.statSync(previousScode).isFile());
+}
 const encodedBound = realMailboxBurst || realMailboxTruncation ? 32768 : realMailboxCase || settingsProbe ? 16384 : 4096;
 const activeReplyLoss = options.case === 'active-reply-loss';
 const interrupted = options.case === 'interrupted';
@@ -30,17 +39,27 @@ const unknownSubmission = requestLoss || ownerCrash;
 const wholeBudget = options.case === 'whole-budget';
 assert(options.codex && path.isAbsolute(options.codex) && fs.statSync(options.codex).isFile());
 assert(options.output && path.isAbsolute(options.output));
-assert.equal(process.platform, 'darwin', 'This real PTY fixture currently qualifies macOS only');
+assert(['darwin', 'win32'].includes(process.platform), 'This real PTY fixture supports macOS and Windows');
+const driverArgv = options.driver ? JSON.parse(options.driver) : process.platform === 'win32' ? null
+  : ['python3', path.join(__dirname, 'fixtures/nativeCodexTui.py')];
+assert(Array.isArray(driverArgv) && driverArgv.length && driverArgv.every(arg => typeof arg === 'string' && arg && !arg.includes('\0')),
+  'A real TUI driver is required; Windows must provide --driver JSON argv. No protocol-front-end fallback.');
+const probeArgv = options['process-probe'] ? JSON.parse(options['process-probe']) : [];
+assert(Array.isArray(probeArgv) && probeArgv.every(arg => typeof arg === 'string' && arg && !arg.includes('\0'))
+  && (process.platform !== 'win32' || probeArgv.length), 'Windows requires --process-probe JSON argv for the native lookup helper');
 const sha = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+if (previousScode) assert.notEqual(sha(previousScode), sha(options.scode), 'Upgrade requires two distinct binaries');
 const output = options.output;
 fs.mkdirSync(output, { recursive: true, mode: 0o700 });
 assert(!fs.existsSync(path.join(output, 'receipt.json')), 'Preserve each original case result');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-mail-'));
+const root = fs.mkdtempSync(path.join(options['temp-root'] ?? os.tmpdir(), 'cx-mail-'));
 fs.chmodSync(root, 0o700);
 for (const name of ['home', 'user', 'work']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
 const home = path.join(root, 'home'), work = path.join(root, 'work');
 const socket = path.join(home, 'app-server-control/app-server-control.sock');
-const driver = path.join(__dirname, 'fixtures/nativeCodexTui.py');
+const driverFiles = driverArgv.filter(file => fs.existsSync(file) && fs.statSync(file).isFile());
+const probeFiles = probeArgv.filter(file => fs.existsSync(file) && fs.statSync(file).isFile());
+const promptGuard = path.join(__dirname, 'fixtures/nativeTuiPrompt.py');
 const tool = path.join(__dirname, realMailboxCase ? 'fixtures/nativeRealMailboxTool.cjs' : 'fixtures/nativeMailboxTool.cjs');
 const realFixture = path.join(__dirname, 'fixtures/realScodeMailbox.cjs');
 const ownerFixture = path.join(__dirname, 'fixtures/nativeMailboxOwner.cjs');
@@ -48,22 +67,25 @@ const library = path.resolve(__dirname, '../dist/index.cjs');
 const internals = path.resolve(__dirname, '../dist/testing/nativeMailboxInternals.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../manifest.json')));
 assert.equal(manifest.files['dist/index.cjs'].sha256, sha(library));
-const { connectCodex, CodexRequestError } = require(library);
+const { connectCodex, CodexRequestError, CodexMailboxPresentation, runCodexMcpOwner, shutdownCommand } = require(library);
 const { openCodexMailboxWake, readCodexMailboxSnapshot, mailboxSubmissionTextBudget,
   CODEX_MAILBOX_DELIVERY_PROVENANCE } = require(internals);
 const env = {};
-for (const key of ['PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL']) if (process.env[key] !== undefined) env[key] = process.env[key];
+for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'SHELL'])
+  if (process.env[key] !== undefined) env[key] = process.env[key];
 Object.assign(env, { CODEX_HOME: home, HOME: path.join(root, 'user'), USERPROFILE: path.join(root, 'user'),
+  APPDATA: path.join(root, 'roaming'), LOCALAPPDATA: path.join(root, 'local'),
   XDG_CONFIG_HOME: path.join(root, 'xdg'), NPM_CONFIG_PREFIX: path.join(root, 'npm'),
   TERM: 'xterm-256color', NO_PROXY: '127.0.0.1,localhost,::1', no_proxy: '127.0.0.1,localhost,::1',
   NATIVE_MAILBOX_FIXTURE_KEY: 'isolated-fixture-only' });
 const receipt = { at: new Date().toISOString(), status: 'RUNNING', root,
-  case: options.case,
+  case: options.case, platform: process.platform, driverArgv, probeArgv,
   scope: 'Actual installed native, isolated server/TUI, deterministic loopback model. Native presentation and clientId correlation only.',
   liveConfigChanged: false, liveEndpointUsed: false, fullMailboxQualified: false,
   sourceCommit: manifest.sourceCommit, buildDirty: manifest.dirty,
-  inputs: Object.fromEntries([options.codex, __filename, driver, tool, library, internals,
-    ...(realMailboxCase ? [options.scode, realFixture] : []), ...(ownerCrash ? [ownerFixture] : [])].map(file => [file, sha(file)])),
+  inputs: Object.fromEntries([options.codex, __filename, ...driverFiles, ...probeFiles, promptGuard, tool, library, internals,
+    ...(realMailboxCase ? [options.scode, realFixture] : []), ...(previousScode ? [previousScode] : []),
+    ...(ownerCrash ? [ownerFixture] : [])].map(file => [file, sha(file)])),
   requests: [], fixtureActions: [], notifications: [], modelRequests: [], stages: [], cleanup: [] };
 const save = () => fs.writeFileSync(path.join(output, 'receipt.json'), JSON.stringify(receipt, null, 2)+'\n', { mode: 0o600 });
 const bounded = async (promise, ms, label) => {
@@ -82,6 +104,14 @@ const fillBudget = (prefix, suffix, bytes) => {
   return content+'\u0001'.repeat(bytes-Buffer.byteLength(content+suffix))+suffix;
 };
 let phase = 'seed', expectedDelivery, expectedWindow, callIssued = false, server, serverExit, tui, tuiExit, client, wake, realMailbox;
+let sdkOwner, sdkStartupError;
+const sdkRuntime = path.join(root, 'sdk-runtime.json');
+const sdkEntry = path.join(path.dirname(library), 'server.cjs');
+const sdkRegistration = (id, limit) => ({ command: process.execPath, required: true,
+  args: [sdkEntry, '--codex', '--config', sdkRuntime, '--registration-id', id],
+  tools: { scode_inbox: { approval_mode: 'approve', output_token_limit: limit } } });
+const sdkMeasurement = settingsResume ? new CodexMailboxPresentation() : undefined;
+let sdkSample, sdkCallIssued = false;
 let realToolSequence = 0, realModelCompleted = false;
 let nativeStderr = '', tuiStderr = '', tuiBuffer = '';
 const tuiEvents = [];
@@ -103,11 +133,19 @@ const endpoint = http.createServer((req, res) => {
       const file = path.join(output, 'model-'+receipt.modelRequests.indexOf(observation)+'.json');
       fs.writeFileSync(file, body, { mode: 0o600, flag: 'wx' });
       observation.file = file; observation.sha256 = sha(file); observation.bytes = body.length;
-      const sockets = execFileSync('/usr/sbin/lsof', ['-nP', '-iTCP:'+endpoint.address().port, '-sTCP:ESTABLISHED', '-Fpn'], { encoding: 'utf8', timeout: 3000 });
-      let pid;
-      for (const line of sockets.split('\n')) {
-        if (line.startsWith('p')) pid = Number(line.slice(1));
-        if (line === 'n127.0.0.1:'+observation.remotePort+'->127.0.0.1:'+endpoint.address().port) observation.nativePid = pid;
+      if (process.platform === 'win32') {
+        // Query the original connection tuple through the Windows IP Helper
+        // API, without PowerShell/CIM startup inside the response deadline.
+        assert(Number.isInteger(observation.remotePort) && Number.isInteger(endpoint.address().port));
+        observation.nativePid = JSON.parse(execFileSync(probeArgv[0], [...probeArgv.slice(1), 'tcp',
+          String(observation.remotePort), String(endpoint.address().port)], { env, encoding: 'utf8', timeout: 3000 }));
+      } else {
+        const sockets = execFileSync('/usr/sbin/lsof', ['-nP', '-iTCP:'+endpoint.address().port, '-sTCP:ESTABLISHED', '-Fpn'], { encoding: 'utf8', timeout: 3000 });
+        let pid;
+        for (const line of sockets.split('\n')) {
+          if (line.startsWith('p')) pid = Number(line.slice(1));
+          if (line === 'n127.0.0.1:'+observation.remotePort+'->127.0.0.1:'+endpoint.address().port) observation.nativePid = pid;
+        }
       }
       assert.equal(observation.nativePid, server.pid, 'Model request must originate from the owned native server');
       const inputs = strings(value.input);
@@ -125,6 +163,14 @@ const endpoint = http.createServer((req, res) => {
         observation.truncatedWindowSeen = observation.windowPresentations.some(text =>
           text.includes('SETTINGS-WINDOW-BEGIN') && text.includes('SETTINGS-WINDOW-END')
           && /truncated/i.test(text) && !text.includes('SETTINGS-WINDOW-MIDDLE'));
+      }
+      const sampleOutput = value.input.find(item => item.type === 'function_call_output' && item.call_id === 'call_sdk_presentation');
+      if (sdkSample && sampleOutput && value.client_metadata?.thread_id === sdkSample.threadId) {
+        const parts = strings(sampleOutput.output);
+        observation.sdkSampleExact = parts.some(part => part.includes(sdkSample.expectedText));
+        observation.sdkSampleTruncated = parts.some(part => part.includes(sdkSample.expectedText.slice(0, 16))
+          && part.includes(sdkSample.expectedText.slice(-16)) && /truncated/i.test(part)
+          && !part.includes(sdkSample.expectedText.slice(1950, 1982)));
       }
       const id = 'resp_fixture_'+receipt.modelRequests.indexOf(observation);
       const events = [{ type: 'response.created', response: { id } }];
@@ -147,6 +193,17 @@ const endpoint = http.createServer((req, res) => {
           events.push({ type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: 'msg_'+id,
             content: [{ type: 'output_text', text: 'Real scode mailbox handled and acknowledged.' }] } });
         }
+      } else if (sdkSample && !sdkCallIssued && observation.exactDeliverySeen && phase === 'delivery'
+          && value.client_metadata?.thread_id === sdkSample.threadId
+          && value.input.some(item => item.type === 'function_call_output' && item.call_id === 'call_fixture_window')) {
+        const namespace = value.tools.find(entry => entry.type === 'namespace' && entry.name === 'mcp__nexus_scode');
+        const tool = namespace?.tools.find(entry => entry.name === 'scode_inbox')
+          ?? value.tools.find(entry => entry.name === 'mcp__nexus_scode__scode_inbox');
+        assert(tool && expectedDelivery.includes(sdkSample.read), 'The native model must receive the prepared SDK read');
+        sdkCallIssued = true;
+        events.push({ type: 'response.output_item.done', item: { type: 'function_call', id: 'fc_sdk_presentation',
+          call_id: 'call_sdk_presentation', ...(namespace ? { namespace: namespace.name } : {}),
+          name: tool.name, arguments: JSON.stringify({ read: sdkSample.read }) } });
       } else {
         events.push({ type: 'response.output_item.done', item: { type: 'message', role: 'assistant', id: 'msg_'+id,
           content: [{ type: 'output_text', text: 'Isolated native mailbox presentation completed.' }] } });
@@ -172,7 +229,7 @@ const endpoint = http.createServer((req, res) => {
     endpoint.listen(0, '127.0.0.1'); await once(endpoint, 'listening');
     if (realMailboxCase) {
       receipt.scope = 'Actual native server/TUI with real scode local-pair append/window/ACK. Private loopback model; not Node enrollment, full native admission or live migration.';
-      realMailbox = await require(realFixture).prepare({ root, executable: options.scode, library, internals, env, receipt,
+      realMailbox = await require(realFixture).prepare({ root, executable: options.scode, previousScode, library, internals, env, receipt,
         restartBeforeAck: options.case === 'real-mailbox-restart', burst: realMailboxBurst, truncation: realMailboxTruncation });
       stage('real-scode-pair-connected');
     }
@@ -230,9 +287,36 @@ const endpoint = http.createServer((req, res) => {
       catch (error) { row.error = String(error); throw error; }
     };
     let settingsThread;
+    let expectedGeneration;
     if (settingsProbe) {
       const params = { cwd: work, threadSource: 'user',
         config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 64 } };
+      if (settingsResume) {
+        assert.equal(manifest.files['dist/server.cjs'].sha256, sha(sdkEntry));
+        receipt.inputs[sdkEntry] = sha(sdkEntry);
+        const listener = require('node:net').createServer();
+        listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
+        const port = listener.address().port;
+        await new Promise(resolve => listener.close(resolve));
+        const auditLog = path.join(root, 'sdk-owner.jsonl');
+        fs.writeFileSync(sdkRuntime, JSON.stringify({ version: 1, mode: 'codex-autojoin',
+          native: { codexArgv: [options.codex], socket, env }, auditLog, stateDirectory: path.join(root, 'sdk-state'),
+          peers: [], peerPolicy: 'node-namespace', endpoint: { port, token: crypto.randomBytes(32).toString('hex') },
+          enrollmentArgv: [process.execPath, '-e', 'process.exit(1)'] }), {flag:'wx',mode:0o600});
+        // The actual inbox can present one operator-prepared sample even while
+        // the private owner refuses to attach an ACP receiver.
+        sdkOwner = runCodexMcpOwner(sdkRuntime, { encodedResultBytes: 4096, encodedSubmissionBytes: 4096,
+          qualified: async () => false }, sdkMeasurement);
+        sdkOwner.catch(error => { sdkStartupError = error; });
+        await wait(() => {
+          if (sdkStartupError) throw sdkStartupError;
+          return fs.existsSync(auditLog) && fs.readFileSync(auditLog, 'utf8').includes('"phase":"native_inventory"');
+        }, 5000, 'Packaged SDK owner observes its private native server');
+        expectedGeneration = crypto.randomUUID();
+        params.config['mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION'] = expectedGeneration;
+        params.config['mcp_servers.nexus_scode'] = sdkRegistration(expectedGeneration, 64);
+        if (coldSettingsResume) params.config.thread_unload_delay_secs = 0;
+      }
       const started = await client.request('thread/start', params);
       settingsThread = started.thread.id;
       receipt.fixtureActions.push({ method: 'thread/start', params, result: started });
@@ -241,12 +325,57 @@ const endpoint = http.createServer((req, res) => {
       receipt.fixtureActions.push({ method: 'turn/start', params: seedParams, result: seed });
       await wait(async () => {
         if (endpointFailure) throw new Error(endpointFailure);
+        if (!receipt.notifications.some(event => event.method === 'turn/completed'
+            && event.params?.threadId === settingsThread && event.params.turn?.id === seed.turn.id)) return false;
         return (await request('thread/read', { threadId: settingsThread, includeTurns: true })).thread.turns
           .some(turn => turn.id === seed.turn.id && turn.status === 'completed');
       }, 10000, 'Private API-created root completes seed before CLI resume');
+      if (settingsResume) {
+        const status = async () => {
+          const list = await request('mcpServerStatus/list', { threadId: settingsThread, serverName: 'mailbox_probe', detail: 'full' });
+          assert.equal(list.data.length, 1);
+          assert.equal(list.data[0].runtimeStatus, 'connected');
+          const id = list.data[0].serverInfo.version;
+          const sdk = await request('mcpServerStatus/list', { threadId: settingsThread, serverName: 'nexus_scode', detail: 'full' });
+          assert.equal(sdk.data.length, 1);
+          assert.equal(sdk.data[0].runtimeStatus, 'connected');
+          assert.equal(sdk.data[0].serverInfo.name, 'nexus-scode');
+          assert.equal(sdk.data[0].serverInfo.description, 'SCode registration ' + id);
+          assert(Object.hasOwn(sdk.data[0].tools, 'scode_inbox'));
+          return id;
+        };
+        assert.equal(await status(), expectedGeneration, 'Original native registration reports its launch generation');
+        const originalGeneration = expectedGeneration;
+        const originalRollout = fs.statSync(started.thread.path, { bigint: true });
+        assert(originalRollout.isFile() && originalRollout.ino !== 0n);
+        if (coldSettingsResume) {
+          await request('thread/unsubscribe', { threadId: settingsThread });
+          await wait(async () => {
+            const loaded = await request('thread/loaded/list', {});
+            assert.equal(loaded.nextCursor, null);
+            return !loaded.data.includes(settingsThread);
+          }, 10000, 'The original private thread unloads after its last subscriber leaves');
+        }
+        const requestedGeneration = crypto.randomUUID();
+        const resumed = await request('thread/resume', { threadId: settingsThread,
+          config: { 'mcp_servers.mailbox_probe.tools.scode_inbox.output_token_limit': 4096,
+            'mcp_servers.mailbox_probe.env.NATIVE_MAILBOX_FIXTURE_GENERATION': requestedGeneration,
+            'mcp_servers.nexus_scode': sdkRegistration(requestedGeneration, 4096) } });
+        assert.equal(resumed.thread.id, settingsThread);
+        const resumedRollout = fs.statSync(resumed.thread.path, { bigint: true });
+        assert.deepEqual([resumedRollout.dev, resumedRollout.ino], [originalRollout.dev, originalRollout.ino],
+          'Resume must select the same physical rollout file');
+        assert(resumed.thread.turns.some(turn => turn.id === seed.turn.id), 'Existing seed turn survived resume');
+        if (coldSettingsResume) expectedGeneration = requestedGeneration;
+        const observedGeneration = await status();
+        assert.equal(observedGeneration, expectedGeneration, 'Native reports the registration in use on the original thread');
+        receipt.resumeRegistration = { originalGeneration, requestedGeneration, observedGeneration, seedTurnId: seed.turn.id,
+          originalThread: settingsThread, resumedThread: resumed.thread.id, unloadedBeforeResume: coldSettingsResume };
+        stage('existing-thread-registration-after-resume');
+      }
     }
     const tuiAction = settingsProbe ? ['resume', settingsThread] : ['Reply with the isolated fixture seed.'];
-    tui = spawn('python3', [driver, options.codex, '--no-alt-screen', '--cd', work, ...tuiAction],
+    tui = spawn(driverArgv[0], [...driverArgv.slice(1), options.codex, '--no-alt-screen', '--cd', work, ...tuiAction],
       { cwd: work, env: { ...env, NATIVE_LIFECYCLE_PTY_TRACE: path.join(output, 'tui-trace.json') }, stdio: ['pipe', 'pipe', 'pipe'] });
     tuiExit = once(tui, 'close');
     tui.stdout.on('data', data => { tuiBuffer += data; let end; while ((end = tuiBuffer.indexOf('\n')) >= 0) {
@@ -285,12 +414,28 @@ const endpoint = http.createServer((req, res) => {
       // loaded thread's limit from a cwd-only config/read response.
       const diagnostics = await request('server/diagnostics', {});
       assert.equal(diagnostics.process.id, server.pid);
-      const executableRows = execFileSync('/usr/sbin/lsof', ['-a', '-p', String(server.pid), '-d', 'txt', '-Fn'],
-        { encoding: 'utf8', timeout: 3000 }).split('\n').filter(line => line.startsWith('n')).map(line => line.slice(1));
+      const executableRows = process.platform === 'win32'
+        ? [JSON.parse(execFileSync(probeArgv[0], [...probeArgv.slice(1), 'exe', String(server.pid)],
+          { env, encoding: 'utf8', timeout: 3000 }))]
+        : execFileSync('/usr/sbin/lsof', ['-a', '-p', String(server.pid), '-d', 'txt', '-Fn'],
+          { encoding: 'utf8', timeout: 3000 }).split('\n').filter(line => line.startsWith('n')).map(line => line.slice(1));
       const executable = fs.realpathSync(options.codex);
       assert(executableRows.some(file => fs.realpathSync(file) === executable), 'Diagnostics PID must map to the measured native executable');
       const configuration = await request('config/read', { cwd: work, includeLayers: true });
       const inventory = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'mailbox_probe', detail: 'full' });
+      if (settingsResume) {
+        assert.equal(inventory.data[0].serverInfo.version, expectedGeneration);
+        const sdk = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'nexus_scode', detail: 'full' });
+        assert.equal(sdk.data[0].serverInfo.description, 'SCode registration ' + expectedGeneration);
+        receipt.resumeRegistration.actualSdkDescription = sdk.data[0].serverInfo.description;
+        await assert.rejects(sdkMeasurement.prepare(client, thread.id, crypto.randomUUID(), 4096), /no matching live/);
+        sdkSample = await sdkMeasurement.prepare(client, thread.id, expectedGeneration, 4096);
+        assert.equal(Buffer.byteLength(JSON.stringify({ content: [{ type: 'text', text: sdkSample.expectedText }] })), 4096);
+        const refused = await request('mcpServer/tool/call', { threadId: thread.id, server: 'nexus_scode', tool: 'scode_inbox',
+          arguments: { read: sdkSample.read, ack: ['private-fixture'] } });
+        assert.equal(refused.isError, true);
+        assert.equal(JSON.parse(refused.content[0].text).outcome, 'not_submitted');
+      }
       receipt.settingsProbe = { diagnostics, executable, executableSha256: sha(executable),
         diskToolOutputTokens: 4096, threadStartOverrideToolOutputTokens: 64, configuration, inventory,
         boundary: 'Read-only loaded-thread settings diagnosis; no production admission or real mailbox ACK claim.' };
@@ -372,7 +517,7 @@ const endpoint = http.createServer((req, res) => {
       }
     }
     const budget = mailboxSubmissionTextBudget('fixture-actor', thread.id, encodedBound);
-    let text = 'OFFER-BEGIN-'+crypto.randomUUID()+'\n';
+    let text = 'OFFER-BEGIN-'+crypto.randomUUID()+'\n'+(sdkSample ? sdkSample.read+'\n' : '');
     while (Buffer.byteLength(text+'正文🙂"\\\n'+'OFFER-END') <= budget) text += '正文🙂"\\\n';
     text += 'OFFER-END'; expectedDelivery = CODEX_MAILBOX_DELIVERY_PROVENANCE+'\n'+text;
     if (wholeBudget) {
@@ -520,7 +665,8 @@ const endpoint = http.createServer((req, res) => {
     await wait(() => {
       if (endpointFailure) throw new Error(endpointFailure);
       return receipt.modelRequests.some(row => row.exactDeliverySeen)
-        && (realMailboxCase ? realModelCompleted : settingsProbe
+        && (!sdkSample || receipt.modelRequests.some(row => coldSettingsResume ? row.sdkSampleExact : row.sdkSampleTruncated))
+        && (realMailboxCase ? realModelCompleted : settingsProbe && !coldSettingsResume
           ? receipt.modelRequests.some(row => row.truncatedWindowSeen) : receipt.modelRequests.some(row => row.exactWindowSeen));
     }, 20000, 'Native model receives exact offer and read-alone window');
     let after;
@@ -585,12 +731,25 @@ const endpoint = http.createServer((req, res) => {
     assert(receipt.presentation.encodedSubmissionBytes <= encodedBound && receipt.presentation.encodedToolResultBytes <= encodedBound);
     if (wholeBudget) stage('actual-max-text-budget-preserved-with-json-escaping');
     if (settingsProbe) {
-      assert(!receipt.modelRequests.some(row => row.exactWindowSeen), 'Loaded thread must use its small override');
-      receipt.presentation.byteExactWindowRequired = false;
-      receipt.settingsProbe.actualWindowTruncated = true;
+      if (sdkSample) {
+        assert.equal(receipt.modelRequests.some(row => row.sdkSampleExact), coldSettingsResume);
+        assert.equal(receipt.modelRequests.some(row => row.sdkSampleTruncated), !coldSettingsResume);
+        const again = await request('mcpServer/tool/call', { threadId: thread.id, server: 'nexus_scode', tool: 'scode_inbox',
+          arguments: { read: sdkSample.read } });
+        assert(again.isError && JSON.parse(again.content[0].text).outcome === 'not_submitted');
+        receipt.sdkPresentation = { encodedResultBytes: sdkSample.encodedResultBytes,
+          registrationId: sdkSample.registrationId, connectionId: sdkSample.connectionId, actualThread: sdkSample.threadId,
+          completeAtModel: coldSettingsResume, truncatedAtModel: !coldSettingsResume, duplicateRefused: true };
+      }
+      if (coldSettingsResume) {
+        assert(receipt.modelRequests.some(row => row.exactWindowSeen), 'Cold-resumed original thread must present the complete tool output');
+        assert(!receipt.modelRequests.some(row => row.truncatedWindowSeen));
+      } else assert(!receipt.modelRequests.some(row => row.exactWindowSeen), 'Loaded thread must use its small override');
+      receipt.presentation.byteExactWindowRequired = coldSettingsResume;
+      receipt.settingsProbe.actualWindowTruncated = !coldSettingsResume;
       receipt.settingsProbe.observedConfigToolOutputTokens = receipt.settingsProbe.configuration.config
         ?.mcp_servers?.mailbox_probe?.tools?.scode_inbox?.output_token_limit ?? null;
-      stage('actual-thread-override-truncates-tool-output');
+      stage(coldSettingsResume ? 'actual-cold-resume-preserves-complete-tool-output' : 'actual-thread-override-truncates-tool-output');
     } else stage('actual-native-byte-exact-presentation-and-history');
     receipt.status = settingsProbe ? 'PASS_NATIVE_SETTINGS_DIAGNOSIS_ONLY'
       : realMailboxBurst ? 'PASS_NATIVE_REAL_SCODE_FIVE_FRAME_BURST_ONLY'
@@ -621,7 +780,12 @@ const endpoint = http.createServer((req, res) => {
       server.kill('SIGTERM');
       try { await bounded(serverExit, 5000, 'Native server close'); }
       catch (error) { server.kill('SIGKILL'); await bounded(serverExit, 3000, 'Native server forced join'); throw error; }
+      receipt.privateNativeExit = { code: server.exitCode, signal: server.signalCode };
+      // Windows implements SIGTERM with TerminateProcess. Joining this private
+      // fixture child does not qualify a shared daemon's graceful shutdown.
+      if (process.platform === 'win32') receipt.notProven = ['graceful native server shutdown'];
     });
+    if (sdkOwner) await cleanup('packaged-sdk-owner', async () => { await shutdownCommand(); await sdkOwner; });
     endpoint.closeAllConnections(); await new Promise(resolve => endpoint.close(resolve));
     receipt.endpointFailure = endpointFailure; receipt.tuiEvents = tuiEvents; receipt.tuiStderr = tuiStderr; receipt.nativeStderr = nativeStderr;
     receipt.finishedAt = new Date().toISOString(); save(); console.log(receipt.status, path.join(output, 'receipt.json'));

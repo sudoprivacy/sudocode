@@ -895,7 +895,7 @@ async fn ensure_a2a_receiver(
             agent.clone(),
             session_id.to_owned(),
         );
-        admit_peer_worker(registry, &agent, session_id, move |stop| {
+        admit_peer_worker(registry, &agent, session_id, &mailbox, move |stop| {
             let (mailbox, registry, cx, agent, session_id) = watcher;
             spawn_peer_unread_watcher(mailbox, registry, cx, agent, session_id, stop)
         })
@@ -955,7 +955,7 @@ async fn admit_peer_receiver(
     session_id: &str,
 ) -> Option<(Arc<PeerReceiver>, PeerInbox)> {
     let mut inbox = None;
-    let receiver = admit_peer_worker(registry, agent, session_id, |stop| {
+    let receiver = admit_peer_worker(registry, agent, session_id, mailbox, |stop| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PeerDelivery>();
         inbox = Some(rx);
         let callback_stop = stop.clone();
@@ -974,6 +974,30 @@ async fn admit_peer_receiver(
     ))
 }
 
+/// A Codex or Claude Code helper runs in an operator workspace. Its bridge
+/// supplies the original project basename, the actor it expects this session
+/// to own and, when it is not Codex, its frontend.
+fn helper_attachment(
+    mailbox: &runtime::mailbox::Mailbox,
+    agent: &str,
+    session: &str,
+    stop: HookAbortSignal,
+) -> Option<std::thread::JoinHandle<()>> {
+    #[derive(serde::Deserialize)]
+    struct Attachment {
+        actor: String,
+        workspace: String,
+        frontend: Option<String>,
+    }
+    let raw = std::env::var("SUDOCODE_CODEX_PEER_ATTACHMENT").ok()?;
+    let info: Attachment = serde_json::from_str(&raw).ok()?;
+    if info.actor != agent || mailbox.self_id() != agent || !mailbox.authenticates_senders() {
+        return None;
+    }
+    let frontend = info.frontend.as_deref().unwrap_or("Codex");
+    mailbox.announce_attachment(session, frontend, &info.workspace, stop)
+}
+
 /// Register `agent`'s one peer worker for `session_id`, started by `start`
 /// with the worker's stop signal. A live worker for the agent keeps serving;
 /// a stopped one is joined first, so its receiver seat is released before
@@ -982,6 +1006,7 @@ async fn admit_peer_worker(
     registry: &SharedSessionRegistry,
     agent: &str,
     session_id: &str,
+    mailbox: &runtime::mailbox::Mailbox,
     start: impl FnOnce(HookAbortSignal) -> std::thread::JoinHandle<()>,
 ) -> Option<Arc<PeerReceiver>> {
     let mut start = Some(start);
@@ -1005,9 +1030,10 @@ async fn admit_peer_worker(
                 let stop = HookAbortSignal::new();
                 let start = start.take().expect("a worker starts once");
                 let worker = start(stop.clone());
+                let announcement = helper_attachment(mailbox, agent, session_id, stop.clone());
                 let receiver = Arc::new(PeerReceiver {
                     stop,
-                    worker: Mutex::new(PeerReceiverWorker::Running(worker)),
+                    worker: Mutex::new(PeerReceiverWorker::Running(worker, announcement)),
                 });
                 receivers.insert(agent.to_owned(), Arc::clone(&receiver));
                 Ok(receiver)
@@ -2184,7 +2210,10 @@ struct PeerReceiver {
 }
 
 enum PeerReceiverWorker {
-    Running(std::thread::JoinHandle<()>),
+    Running(
+        std::thread::JoinHandle<()>,
+        Option<std::thread::JoinHandle<()>>,
+    ),
     Joined(Result<(), String>),
 }
 
@@ -2199,9 +2228,14 @@ impl PeerReceiver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = match std::mem::replace(&mut *worker, PeerReceiverWorker::Joined(Ok(()))) {
-            PeerReceiverWorker::Running(handle) => handle
-                .join()
-                .map_err(|_| "peer receiver worker panicked".to_string()),
+            PeerReceiverWorker::Running(handle, announcement) => {
+                if let Some(worker) = announcement {
+                    let _ = worker.join();
+                }
+                handle
+                    .join()
+                    .map_err(|_| "peer receiver worker panicked".to_string())
+            }
             PeerReceiverWorker::Joined(result) => result,
         };
         *worker = PeerReceiverWorker::Joined(result.clone());

@@ -489,7 +489,7 @@ except subprocess.TimeoutExpired:
         used = referenced_globals(symbols.lookup(name).get_namespace())
         pending.extend(used & definitions.keys() - consumers.keys())
     layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
-    reviewed = "32b51f2756d1ca52cec2f39f62ae50189878b2d31c44a7b8a4c3706c56251de6"
+    reviewed = "70b0ba75cdebf76162e16f9a8bfab48f479c597265f6161c1c2aa837e072a644"
     if layout != reviewed:
         print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
             "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
@@ -522,6 +522,12 @@ except subprocess.TimeoutExpired:
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
         "4f2966f3298eef8bb090cee7b4490f4bd2511f6644d0c7aea55b786d92580875",
+        "51b69bebd2b48ed2b2fc90552c624a525d61f9db280ae1599e16b53bcf62bd83",
+        "5a1503cd97bac0fb7ec58689f14b64530d2c564606a91484cecca76fd380ea14",
+        "8d2689e3285deeb2e17695bb58f28a93b584365a3aae8f59e34bc99ed41fbe41",
+        "f9c4f0cd610f4f9f6c954360b0b6364fce4dc4f962dac42236b7cc833f64c71b",
+        "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
+        "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -597,6 +603,50 @@ def execute(command, cwd, log, env=None):
         return previous[0] != updated[0] and previous[1] == updated[1]
     except (ValueError, TypeError, SyntaxError, subprocess.CalledProcessError):
         return False
+
+
+def reviewed_native_dependency_cache_transition(before, after, protected):
+    """Accept the two reviewed native cache changes, in isolation or together."""
+    toolchain_step = (b"      - uses: ./.trusted-acceptance/.github/actions/rust-toolchain\n"
+                      b"        if: matrix.family == 'native'\n")
+    cache_step = (b"      - uses: Swatinem/rust-cache@v2\n"
+                  b"        if: matrix.family == 'native'\n"
+                  b"        with:\n"
+                  b"          workspaces: ${{ steps.cache_layout.outputs.workspaces }}\n"
+                  b"          shared-key: ci-dependencies\n"
+                  b"          env-vars: ImageOS\n"
+                  b"          save-if: false\n")
+    alternatives = []
+    if before.count(toolchain_step) == before.count(cache_step) == 1:
+        alternatives.append(before.replace(toolchain_step, toolchain_step + b"        id: rust_toolchain\n").replace(
+            cache_step, cache_step.replace(
+                b"          save-if:", b"          cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}\n"
+                b"          save-if:")))
+    # The upstream cache hashes raw configuration files in path order. The
+    # new checkout sorts after the root pin, like the publisher's rust tree.
+    paths = (
+        b"        working-directory: candidate\n",
+        b"          path: candidate\n",
+        b"            candidate/rust-toolchain.toml\n",
+        b" --source candidate/rust --github-output\n",
+        b"          path: candidate/sdk/typescript/artifacts/*\n",
+    )
+    for workflow in (before, *alternatives):
+        if all(workflow.count(path) == 1 for path in paths):
+            for path in paths:
+                workflow = workflow.replace(path, path.replace(b"candidate", b"worktree"))
+            alternatives.append(workflow)
+    if after not in alternatives:
+        return False
+    # The new outputs must come from the reviewed regular-file action and
+    # adapter. Their blobs are outside the native workflow's own byte hash.
+    for path, identity in (
+            (".github/actions/rust-toolchain/action.yml", "ce7b8ad4ca80cc495808d0862d91bdbade600f70"),
+            (".github/actions/rust-toolchain/cache-command.mjs", "973592bd8bdc233854295869e87dc24ae00fd6d7"),
+            (".github/local-acceptance/cache_layout.py", "82bdafe46048139a6aae326580feca70ab543396")):
+        if value("ls-tree", protected, "--", path) != f"100644 blob {identity}\t{path}":
+            return False
+    return True
 
 
 def approved_equivalent_profiles(before, current, policy_ref, names, head):
@@ -1312,6 +1362,12 @@ def run_command(command, cwd, log, env=None):
             MSVC_ENV = {key.upper(): value for line in output.splitlines() if "=" in line and not line.startswith("=")
                         for key, value in [line.split("=", 1)]}
         environment.update(MSVC_ENV)
+    linker = Path(environment.get("VCTOOLSINSTALLDIR", "")) / "bin/Hostx64/x64"
+    if (os.name == "nt" and environment.get("VCTOOLSINSTALLDIR") and (linker / "link.exe").is_file()
+            and Path(command[0]).stem.lower() in {"cargo", "cargo-nextest", "rustc"}):
+        # With VCINSTALLDIR set, rustc takes link.exe from PATH, and Git for
+        # Windows runs hooks with its own /usr/bin (and its link) first.
+        environment["PATH"] = str(linker) + os.pathsep + environment.get("PATH", "")
     # SDK discovery also captures hook-exported repository selectors. Fixtures
     # run Git in their own repositories, so clear inherited selectors after
     # setup and before applying explicit per-command settings.
@@ -1539,8 +1595,11 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
-    if (tracked(head, workflow) != tracked(planned_policy, workflow)
-            or tracked(protected, workflow) != tracked(planned_policy, workflow)):
+    planned_workflow = tracked(planned_policy, workflow)
+    current_workflow = tracked(protected, workflow)
+    cache_only_workflow_change = planned_workflow != current_workflow
+    if (tracked(head, workflow) != planned_workflow or (cache_only_workflow_change
+            and not reviewed_native_dependency_cache_transition(planned_workflow, current_workflow, protected))):
         raise RuntimeError("Early native scheduling requires the current protected native workflow definition; integrate that workflow before starting")
     if receipt.get("checks") != {}:
         raise RuntimeError("An execution plan must contain no completed checks")
@@ -1588,6 +1647,9 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
         print("LOCAL_ACCEPTANCE_PLAN_REUSED: protected metadata advanced; original contract/signature, source, "
               "author/native responsibility, selected command effects and native workflow verified; "
               "dispatcher unchanged or restricted to known compiler budgets.", flush=True)
+    if cache_only_workflow_change:
+        print("LOCAL_ACCEPTANCE_PLAN_DEPENDENCY_CACHE_ONLY: a reviewed cache-key change; "
+              "the original signature, checks and complementary jobs remain required.", flush=True)
     return receipt
 
 
@@ -1728,35 +1790,54 @@ def publish(head, envelope, remote, note_ref=NOTE_REF, store=None):
     # Use a private temporary notes ref. Fetch+lease retries preserve evidence
     # another author publishes concurrently; never overwrite their notes tree.
     temporary = f"refs/notes/scode-publish-{os.getpid()}"
+
+    def tls_connect_eof(message):
+        message = message.lower()
+        return "tls connect error:" in message and "unexpected eof while reading" in message
+
     try:
-        for _attempt in range(5):
-            previous = remote_note_tip(remote, note_ref)
-            if previous:
-                git("fetch", "--no-tags", remote, f"+{note_ref}:{temporary}")
-                # The fetch may observe a newer tip than the preceding query.
-                # Lease exactly the notes tree this attempt actually extends.
-                previous = value("rev-parse", temporary)
-            else:
-                git("update-ref", "-d", temporary)
-            notes = read_note(head, temporary)
-            notes["attestations"][envelope["signer"]] = envelope
-            # Store each earlier envelope any current attestation references
-            # exactly once; drop those only a replaced attestation used.
-            kept = carried_store(notes["attestations"].values(), {**notes.get("envelopes", {}), **(store or {})})
-            if kept:
-                notes["envelopes"] = kept
-            else:
-                notes.pop("envelopes", None)
-            git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
-            result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
-                         f"{temporary}:{note_ref}", check=False)
-            if result.returncode == 0:
-                return
-            # Both client-side stale leases and receive-pack transaction races
-            # mean the remote advanced. Compare state instead of Git's wording;
-            # unrelated failures with an unchanged ref remain immediate errors.
-            if remote_note_tip(remote, note_ref) == previous:
-                raise RuntimeError(result.stderr.decode(errors="replace"))
+        for attempt in range(5):
+            try:
+                previous = remote_note_tip(remote, note_ref)
+                if previous:
+                    git("fetch", "--no-tags", remote, f"+{note_ref}:{temporary}")
+                    # Lease the tree the fetch actually observed.
+                    previous = value("rev-parse", temporary)
+                else:
+                    git("update-ref", "-d", temporary)
+                notes = read_note(head, temporary)
+                notes["attestations"][envelope["signer"]] = envelope
+                # Keep each envelope still referenced by an attestation once.
+                kept = carried_store(notes["attestations"].values(), {**notes.get("envelopes", {}), **(store or {})})
+                if kept:
+                    notes["envelopes"] = kept
+                else:
+                    notes.pop("envelopes", None)
+                git("notes", f"--ref={temporary}", "add", "-f", "-F", "-", head, data=canonical(notes))
+                result = git("push", f"--force-with-lease={note_ref}:{previous}", remote,
+                             f"{temporary}:{note_ref}", check=False)
+                if result.returncode == 0:
+                    return
+                message = result.stderr.decode(errors="replace")
+                try:
+                    current = remote_note_tip(remote, note_ref)
+                except RuntimeError as read_error:
+                    if not tls_connect_eof(message):
+                        raise RuntimeError(message) from read_error
+                    raise
+                if current == previous:
+                    raise RuntimeError(message)
+                if tls_connect_eof(message) and current == value("rev-parse", temporary):
+                    print("Acceptance note reached the remote before the Git TLS connection closed.", flush=True)
+                    return
+                # A different remote tip can be a concurrent receive transaction.
+                # Retry from that tree without overwriting its original notes.
+            except RuntimeError as error:
+                if not tls_connect_eof(str(error)) or attempt == 4:
+                    raise
+                print("Git TLS connection closed during acceptance note publication; retrying the same signed evidence.",
+                      flush=True)
+                time.sleep(0.5 * (attempt + 1))
         raise RuntimeError("Concurrent acceptance publishers: retry the push")
     finally:
         git("update-ref", "-d", temporary)
@@ -2013,8 +2094,8 @@ def index_existing_output(directory, policy_ref):
           "reuse still verifies the source, host, recipe, signature and original logs.", flush=True)
 
 
-def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref=None):
-    """Reuse signed exact-source checks only while their commands and logs match."""
+def prepare_resume_checks(directory, head, base, policy_ref, needed, signers_ref):
+    """Read and verify exact-source resume evidence before copying any logs."""
     directory = Path(directory).resolve()
     proof = local_proof_directory(directory)
     completed_only = proof != directory
@@ -2031,16 +2112,12 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
                                completed_only=completed_only, store=stored)
     if previous["host"] != host():
         raise RuntimeError("Resume receipt belongs to a different native host")
-    reusable = {}
+    reusable, logs = {}, {}
     owners = carried_profiles(previous)
     for name in needed:
         if name not in previous["checks"] or not compatible_profile_commands(previous, policy_ref, [name]):
             continue
-        logs = verified_profile_logs(directory, previous, name, "Resume")
-        target = output / name
-        target.mkdir()
-        for filename, contents in logs.items():
-            (target / filename).write_bytes(contents)
+        logs[name] = verified_profile_logs(directory, previous, name, "Resume")
         reusable[name] = previous["checks"][name]
     # A reused profile that the earlier attempt carried keeps its origin,
     # referenced by SHA-256 even when that attempt embedded the envelope.
@@ -2056,7 +2133,22 @@ def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref
     return reusable, {"directory": str(directory), "receipt_sha256": sha(payload),
                       "commands_ref": previous_policy, "finished_at": previous["finished_at"],
                       "timing": previous.get("timing"),
-                      "profiles": sorted(reusable)}, list(groups.values()), store
+                      "profiles": sorted(reusable)}, list(groups.values()), store, logs
+
+
+def restore_resume_checks(prepared, output):
+    reusable, resumed, groups, store, logs = prepared
+    for name, files in logs.items():
+        target = output / name
+        target.mkdir()
+        for filename, contents in files.items():
+            (target / filename).write_bytes(contents)
+    return reusable, resumed, groups, store
+
+
+def resume_checks(directory, head, base, policy_ref, output, needed, signers_ref=None):
+    """Reuse signed exact-source checks only while their commands and logs match."""
+    return restore_resume_checks(prepare_resume_checks(directory, head, base, policy_ref, needed, signers_ref), output)
 
 
 def sign_receipt(receipt, directory, identity, key, namespace=NAMESPACE):
@@ -2091,16 +2183,53 @@ def save_completed_profiles(receipt, output, identity, key, head, base_ref, poli
               f"resume with --resume-from that directory. Index error: {error}", flush=True)
 
 
-def previous_local_output(head, base):
-    """Find exact-source local progress automatically for the installed push hook."""
+def resume_start(resumed):
+    timing = resumed.get("timing")
+    return timing.get("first_recorded_started_at") if isinstance(timing, dict) else None
+
+
+def resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref):
+    """Keep the newest matching output unless an older output proves strictly more checks."""
+    required = set(needed)
+    selected = None
+    profiles = set()
+    first_start = None
     for directory in local_output_directories(head):
-        proof = local_proof_directory(directory)
-        if not (proof / "envelope.json").is_file():
+        try:
+            proof = local_proof_directory(directory)
+            if not (proof / "envelope.json").is_file():
+                continue
+            receipt = json.loads((proof / "receipt.json").read_bytes())
+            if not isinstance(receipt, dict):
+                raise RuntimeError("Invalid resume receipt metadata")
+            if receipt.get("head") != head or receipt.get("base") != base or receipt.get("host") != host():
+                continue
+            # This inventory only rules out candidates that cannot improve the current selection.
+            recorded = receipt.get("checks", {})
+            if not isinstance(recorded, dict):
+                raise RuntimeError("Invalid resume check inventory")
+            if selected is not None and not profiles < required.intersection(recorded):
+                continue
+            prepared = prepare_resume_checks(directory, head, base_ref, policy_ref, needed, signers_ref)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as error:
+            if selected is None:
+                raise
+            print(f"Not reusing additional local progress from {directory}: {error}", flush=True)
             continue
-        receipt = json.loads((proof / "receipt.json").read_bytes())
-        if receipt.get("head") == head and receipt.get("base") == base and receipt.get("host") == host():
-            return directory
-    return None
+        candidate_profiles = set(prepared[0])
+        if selected is None or profiles < candidate_profiles:
+            selected, profiles = prepared, candidate_profiles
+            start = resume_start(prepared[1])
+            if type(start) in (int, float) and 0 < start <= time.time():
+                first_start = start if first_start is None else min(first_start, start)
+            if profiles == required:
+                break
+    if selected is None:
+        return {}, None, [], {}
+    reusable, resumed, groups, store = restore_resume_checks(selected, output)
+    if first_start is not None and first_start != resume_start(resumed):
+        resumed["earliest_verified_start_at"] = first_start
+    return reusable, resumed, groups, store
 
 
 def try_host_lock(descriptor):
@@ -2478,6 +2607,10 @@ def perform_check(args, attempt):
                    branch=git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.decode().strip() or None,
                    host=host(), policy_ref=policy_ref, signers_ref=signers_ref, output=str(output))
     (output / "attempt.json").write_bytes(canonical(attempt))
+    resume_command = (f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} '
+                      f'--signers-ref {signers_ref} --resume-from "{output}" --publish --remote {args.remote}')
+    if getattr(args, "dispatch_publish", None):
+        resume_command += f" --dispatch-publish {args.dispatch_publish}"
     print("Local acceptance timing includes this invocation's setup, checks and publication; "
           "signed resume timing retains the earliest recorded start. Older or manual attempts may be unknown.", flush=True)
     (output / "plan.json").write_bytes(canonical(plan))
@@ -2485,10 +2618,11 @@ def perform_check(args, attempt):
     # Each invocation loads a fresh module. Keep the dispatcher's existing API
     # so container-only context does not invalidate unrelated native receipts.
     module.run.execution_refs = (policy_ref, head)
-    reusable, resumed, groups, store = {}, None, [], {}
-    previous = getattr(args, "resume_from", None) or previous_local_output(head, base)
+    previous = getattr(args, "resume_from", None)
     if previous:
         reusable, resumed, groups, store = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
+    else:
+        reusable, resumed, groups, store = resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref)
     # Earlier heads of this branch lend profiles that later changes do not select.
     carried, new_groups, store = carry_checks(head, base, base_ref, policy_ref, output,
                                               [name for name in needed if name not in reusable], signers_ref, store)
@@ -2502,8 +2636,8 @@ def perform_check(args, attempt):
     if carried:
         print("CARRIED_PROFILES=" + json.dumps({"head": head, "origins": {
             group["head"]: group["profiles"] for group in new_groups}}), flush=True)
-    prior_timing = (resumed or {}).get("timing")
-    prior_start = prior_timing.get("first_recorded_started_at") if isinstance(prior_timing, dict) else None
+    prior = resumed or {}
+    prior_start = prior.get("earliest_verified_start_at", resume_start(prior))
     known_start = type(prior_start) in (int, float) and 0 < prior_start <= attempt["started_at"]
     timing = {"started_at": attempt["started_at"],
               "first_recorded_started_at": prior_start if known_start else attempt["started_at"],
@@ -2549,9 +2683,7 @@ def perform_check(args, attempt):
         timing["checks_finished_at"] = time.time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
-              "If this process exits, resume with: "
-              f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-              f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+              f"If this process exits, resume with: {resume_command}", flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
     pending = [name for name in serialized if name not in reusable and name not in carried]
@@ -2611,9 +2743,8 @@ def perform_check(args, attempt):
             try:
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
                                         sign_carried())
-                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: "
-                      f'python "{__file__}" check --head {head} --base {base_ref} --policy-ref {policy_ref} --signers-ref {signers_ref} '
-                      f'--resume-from "{output}" --publish --remote {args.remote}', flush=True)
+                print(f"Saved completed profiles; failed/unrun profiles remain required. Resume with: {resume_command}",
+                      flush=True)
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
@@ -2699,6 +2830,319 @@ def refresh_managed_runner(trusted, operation):
     return current
 
 
+def deferred_pull(remote, head, preview):
+    """The one open, ready PR this branch heads, when its push can be verified
+    after it lands. None keeps the original blocking push."""
+    if os.environ.get("SCODE_ACCEPTANCE_PUSH") == "blocking" or not preview["ci"]:
+        return None
+    repository = load_policy("origin/main")["repository"]
+    try:
+        contract_remote(remote, repository)
+    except RuntimeError:
+        # Local fixtures and other remotes have no pull request to hold pending.
+        return None
+    branch = value("symbolic-ref", "--short", "HEAD")
+    try:
+        pulls = github_api(f"repos/{repository}/pulls?state=open&base=main&head="
+                           + urllib.parse.quote(repository.split("/")[0] + ":" + branch, safe=""))
+    except RuntimeError as error:
+        print(f"LOCAL_ACCEPTANCE_DEFERRED_UNAVAILABLE: {error}", flush=True)
+        return None
+    if len(pulls) != 1 or pulls[0]["draft"] or pulls[0]["head"]["repo"]["full_name"] != repository:
+        return None
+    return pulls[0]
+
+
+def deferred_state(branch):
+    """This clone's per-branch state for deferred checks, outside every checkout.
+    The name is short: Windows linkers refuse paths over 260 characters, and the
+    branch worktree under it builds the whole workspace."""
+    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    return Path.home() / ".nexus/local-acceptance/deferred" / sha(f"{common}\0{branch}".encode())[:12]
+
+
+def stop_superseded(state, head):
+    """Stop this branch's earlier deferred check. Returns True when one for the
+    same head is still running, so it is kept instead of started twice."""
+    import psutil
+
+    try:
+        record = json.loads((state / "deferred.json").read_text(encoding="utf-8"))
+        process = psutil.Process(record["pid"])
+        if process.create_time() != record["started"]:
+            return False
+    except (OSError, ValueError, KeyError, psutil.NoSuchProcess):
+        return False
+    if record["head"] == head:
+        return True
+    if os.name != "nt":
+        # start_new_session made the check its own process group leader.
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, 9)
+    for child in process.children(recursive=True)[::-1] + [process]:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.kill()
+    psutil.wait_procs([process], timeout=10)
+    with contextlib.suppress(OSError):
+        Path(record["log"]).with_suffix(".superseded.json").write_bytes(
+            canonical({"superseded_by": head, "at": time.time()}))
+    print(f"LOCAL_ACCEPTANCE_DEFERRED: stopped the check for superseded head {record['head'][:12]}", flush=True)
+    return False
+
+
+def defer_check(head, remote, pull, trusted):
+    """Publish this head's signed plan, then verify it in the background in the
+    branch's own acceptance worktree, so neither the push nor the author's
+    checkout waits. Local acceptance stays pending, and merge stays gated,
+    until the signed receipt is published."""
+    branch = value("symbolic-ref", "--short", "HEAD")
+    # The check's own output takes the normal results layout; its plan and log
+    # sit beside it.
+    output = (Path.home() / ".nexus/local-acceptance/results" / head / str(time.time_ns())).resolve()
+    plan_output = output.with_name(output.name + "-plan")
+    plan_output.mkdir(parents=True)
+    publish_plan(head, trusted, remote, plan_output)
+    state = deferred_state(branch)
+    state.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError, ValueError):
+        previous = json.loads((state / "deferred.json").read_text(encoding="utf-8"))
+        ended, healthy = deferred_status(previous)
+        if not healthy:
+            print(f"LOCAL_ACCEPTANCE_DEFERRED: the earlier check for {previous['head'][:12]} {ended}", flush=True)
+    if stop_superseded(state, head):
+        print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
+              f"see {state / 'deferred.json'}", flush=True)
+        return
+    worktree = state / "w"
+    if (worktree / ".git").exists():
+        git("checkout", "--detach", "--force", head, root=worktree)
+        git("clean", "-ffd", root=worktree)
+    else:
+        git("worktree", "add", "--detach", str(worktree), head)
+    command = [sys.executable, str(Path(__file__).resolve()), "check", "--head", head, "--base", "origin/main",
+               "--policy-ref", "origin/main", "--publish", "--remote", remote,
+               "--output", str(output), "--dispatch-publish", str(pull["number"])]
+    log = output.with_name(output.name + ".log")
+    detached = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+                if os.name == "nt" else {"start_new_session": True})
+    with log.open("wb") as stream:
+        try:
+            # Outlive a terminal or agent job that kills its tree on exit.
+            breakaway = {"creationflags": detached["creationflags"] | 0x01000000} if os.name == "nt" else detached
+            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+                                       stderr=subprocess.STDOUT, **breakaway)
+        except OSError:
+            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+                                       stderr=subprocess.STDOUT, **detached)
+    import psutil
+
+    (state / "deferred.json").write_bytes(canonical({
+        "pid": process.pid, "started": psutil.Process(process.pid).create_time(), "head": head,
+        "branch": branch, "pr": pull["number"], "output": str(output), "log": str(log)}))
+    print("LOCAL_ACCEPTANCE_DEFERRED=" + canonical({
+        "head": head, "pr": pull["number"], "worktree": str(worktree), "log": str(log),
+        "status": "Pushed with a signed plan. Local acceptance is running in the background; the required "
+                  "Local acceptance status stays pending, and merge stays blocked, until its signed receipt "
+                  "is published. Set SCODE_ACCEPTANCE_PUSH=blocking to verify before pushing instead.",
+    }).decode(), flush=True)
+
+
+def deferred_result_path(log):
+    return Path(log).with_name(Path(log).name.removesuffix(".log") + ".result.json")
+
+
+def record_deferred_result(args, outcome, finalization, error=None):
+    """Leave the background check's outcome beside its log for doctor and the next push."""
+    log = Path(args.output).with_name(Path(args.output).name + ".log")
+    deferred_result_path(log).write_bytes(canonical({
+        "head": value("rev-parse", args.head or "HEAD"), "pr": args.dispatch_publish, "outcome": outcome,
+        "finalization": finalization, "error": None if error is None else str(error)[-2000:],
+        "finished_at": time.time()}))
+
+
+def deferred_status(record):
+    """(state, healthy) of the check a deferred.json record started."""
+    import psutil
+
+    log = Path(record["log"])
+    with contextlib.suppress(psutil.NoSuchProcess, KeyError):
+        process = psutil.Process(record["pid"])
+        # A finished check stays a zombie only while its starter still runs.
+        if process.create_time() == record["started"] and process.status() != psutil.STATUS_ZOMBIE:
+            return f"is still running; log {log}", True
+    with contextlib.suppress(OSError, ValueError):
+        superseded = json.loads(log.with_suffix(".superseded.json").read_text(encoding="utf-8"))
+        return f"was stopped for {superseded['superseded_by'][:12]}", True
+    try:
+        result = json.loads(deferred_result_path(log).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"ended without recording a result; Local acceptance stays pending. See {log}", False
+    if result["outcome"] != "verified":
+        reason = next(reversed((result.get("error") or "unknown error").splitlines()), "unknown error")
+        return f"FAILED ({reason}); Local acceptance stays pending until a new head passes. See {log}", False
+    if result["finalization"] != "requested":
+        return (f"passed and published its receipt, but finalization was not requested ({result['finalization']}). "
+                f"Run `gh workflow run local-acceptance-publish.yml -f pr={record['pr']} -f head={record['head']}`"), False
+    return "passed; trusted finalization was requested", True
+
+
+def deferred_findings():
+    """One line per branch with a deferred check from this host."""
+    findings = []
+    for path in sorted((Path.home() / ".nexus/local-acceptance/deferred").glob("*/deferred.json")):
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            state, healthy = deferred_status(record)
+            findings.append((f"deferred {record['branch']} {record['head'][:12]} (PR #{record['pr']})", healthy, state))
+    return findings
+
+
+def dispatch_publish(pr, head, policy_ref):
+    """Ask the trusted publisher to read the receipt just published for `head`."""
+    repository = load_policy(policy_ref)["repository"]
+    print(f"LOCAL_ACCEPTANCE: receipt published; requesting trusted finalization for PR #{pr} at {head[:12]}",
+          flush=True)
+    github_api(f"repos/{repository}/actions/workflows/local-acceptance-publish.yml/dispatches",
+               {"ref": "main", "inputs": {"pr": str(pr), "head": head}})
+    print(f"LOCAL_ACCEPTANCE: trusted finalization requested for PR #{pr}.", flush=True)
+
+
+def compiler_store_findings(root, capacity=2147483648, stale=86400):
+    """Each shared compiler store's size against its cap and its newest write.
+    A store at its cap that has stopped taking writes wedged cold compiles on
+    2026-11-17; a probe through a scratch store cannot see that."""
+    findings = []
+    for store in sorted(path for path in root.glob("*") if path.is_dir() and not path.name.endswith(".control")):
+        size, newest = 0, 0.0
+        for directory, _, files in os.walk(store):
+            for name in files:
+                with contextlib.suppress(OSError):
+                    info = os.stat(os.path.join(directory, name))
+                    size, newest = size + info.st_size, max(newest, info.st_mtime)
+        age = time.time() - newest if newest else None
+        wedged = size >= 0.95 * capacity and (age is None or age > stale)
+        written = "never written" if age is None else f"last write {age / 3600:.1f} h ago"
+        findings.append((f"compiler store {store.name}", not wedged,
+                         f"{size / 1024**3:.2f} of {capacity / 1024**3:.0f} GiB, {written}" + (
+                             "; it is full and no longer taking writes, which can hang cold compiles. With no "
+                             f"acceptance running, move {store} aside (reversible); the next check starts a fresh store"
+                             if wedged else "")))
+    return findings
+
+
+def host_findings(names=None):
+    """This host's acceptance prerequisites as (name, ok, detail) with the fix
+    in each failing detail. `names` limits it to what those checks use; None
+    reports everything. A finding grants no acceptance; the policy's checks
+    revalidate what they need before the host queue and at execution."""
+    findings = []
+
+    def probe(command, timeout=30, **kwargs):
+        try:
+            return subprocess.run(command, capture_output=True, timeout=timeout, **kwargs)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return error
+
+    native = names is None or any(name.startswith("native-") or name == "guard-contract" for name in names)
+    docker = names is None or bool(set(names) & {"rendering", "browser", "guard-contract"})
+    if names is None:
+        for module in ["psutil", "jsonschema"]:
+            try:
+                __import__(module)
+                findings.append((f"python {module}", True, "importable"))
+            except ImportError:
+                findings.append((f"python {module}", False, f"run `{sys.executable} -m pip install {module}`"))
+        signer = git("config", "localAcceptance.signer", check=False).stdout.decode().strip()
+        key = git("config", "localAcceptance.key", check=False).stdout.decode().strip()
+        if not signer or not key or not Path(key).expanduser().is_file():
+            findings.append(("signing key", False, "run `local_acceptance.py install --signer DEVICE --key KEY` "
+                                                   "with a key enrolled in spec/local_acceptance_signers.json"))
+        else:
+            with tempfile.TemporaryDirectory(prefix="scode-doctor-") as scratch:
+                message = Path(scratch) / "probe"
+                message.write_bytes(b"doctor")
+                public = probe(["ssh-keygen", "-y", "-f", str(Path(key).expanduser())])
+                signed = probe(["ssh-keygen", "-Y", "sign", "-f", str(Path(key).expanduser()), "-n", NAMESPACE,
+                                str(message)])
+                verified = None
+                if not isinstance(public, Exception) and not isinstance(signed, Exception) and not signed.returncode:
+                    allowed = Path(scratch) / "allowed"
+                    allowed.write_bytes(signer.encode() + b" " + public.stdout.strip() + b"\n")
+                    verified = probe(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", signer, "-n", NAMESPACE,
+                                      "-s", str(message) + ".sig"], input=b"doctor")
+                ok = verified is not None and not isinstance(verified, Exception) and not verified.returncode
+                findings.append(("signing key", ok, f"{signer} signs and verifies" if ok else
+                                 "ssh-keygen could not sign and verify with the configured key; run this outside "
+                                 "a sandbox that hides the key or ssh-keygen, and check the key's permissions"))
+        gh = shutil.which("gh")
+        status = probe([gh, "auth", "status"]) if gh else None
+        findings.append(("GitHub CLI", status is not None and not isinstance(status, Exception)
+                         and not status.returncode and Path(gh).suffix.lower() not in {".cmd", ".bat"},
+                         "authenticated" if status is not None and not isinstance(status, Exception)
+                         and not status.returncode else "install the native gh and run `gh auth login`"))
+    if os.name == "nt" and native:
+        pwsh = shutil.which("pwsh.exe")
+        findings.append(("PowerShell 7", bool(pwsh), pwsh or "add an existing PowerShell 7 directory to PATH, or "
+                         "`winget install --id Microsoft.PowerShell --exact --source winget`"))
+        tools = os.environ.get("VCToolsInstallDir")
+        configured = git("config", "localAcceptance.vsdevcmd", check=False).stdout.decode().strip()
+        locator = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+        if tools:
+            linker = Path(tools) / "bin/Hostx64/x64/link.exe"
+            findings.append(("MSVC linker", linker.is_file(), f"{linker} goes first for compiler commands" if linker.is_file()
+                             else f"{linker} is missing; repair the Visual Studio C++ build tools"))
+        else:
+            ok = bool(configured and Path(configured).is_file()) or locator.is_file()
+            findings.append(("MSVC linker", ok, "found through " + (configured or str(locator)) if ok else
+                             "install the Visual Studio C++ build tools, or set "
+                             "`git config localAcceptance.vsdevcmd <path to VsDevCmd.bat>`"))
+    if names is None:
+        findings.extend(compiler_store_findings(Path.home() / ".cache/sudocode-local-acceptance/compiler-objects"))
+        prepared = sorted((Path.home() / ".cache/sudocode-local-acceptance/tools/sccache").glob("*/*/sccache*"))
+        tool = next((path for path in prepared if path.name in {"sccache", "sccache.exe"}), None)
+        if tool is None:
+            findings.append(("compiler cache", True, "not prepared yet; the first check fetches the pinned sccache"))
+        else:
+            with tempfile.TemporaryDirectory(prefix="scode-doctor-cache-") as scratch:
+                import socket
+
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                cache = {**os.environ, "SCCACHE_DIR": str(Path(scratch) / "cache"), "SCCACHE_SERVER_PORT": str(port),
+                         "SCCACHE_IDLE_TIMEOUT": "60"}
+                (Path(scratch) / "probe.rs").write_text("", encoding="utf-8")
+                probe([str(tool), "--start-server"], timeout=20, env=cache)
+                compiled = probe([str(tool), "rustc", "--crate-name", "doctor_probe", "--crate-type", "lib", "--emit",
+                                  "metadata", "--out-dir", scratch, str(Path(scratch) / "probe.rs")],
+                                 timeout=120, env=cache, cwd=scratch)
+                probe([str(tool), "--stop-server"], timeout=20, env=cache)
+            ok = not isinstance(compiled, Exception) and not compiled.returncode
+            findings.append(("compiler cache", ok, f"{tool} compiles through its own server" if ok else
+                             f"{tool} did not compile a probe within 120s; acceptance falls back to original Cargo, "
+                             "or set any SCCACHE_* variable to skip the cache"))
+    if docker:
+        server = probe(["docker", "version", "--format", "{{.Server.Version}}"])
+        ok = not isinstance(server, Exception) and not server.returncode
+        findings.append(("Docker", ok, f"server {server.stdout.decode().strip()}" if ok else
+                         "start Docker Desktop (or the Docker daemon) and rerun"))
+    return findings
+
+
+def doctor(args):
+    """Report every prerequisite with its fix; runs no acceptance check."""
+    findings = host_findings()
+    for name, ok, detail in findings:
+        print(f"{'ok ' if ok else 'fix'} {name}: {detail}", flush=True)
+    # Background checks are reported, not counted as host readiness.
+    for name, ok, detail in deferred_findings():
+        print(f"{'ok ' if ok else 'see'} {name}: {detail}", flush=True)
+    failed = [name for name, ok, _ in findings if not ok]
+    if failed:
+        raise RuntimeError("fix " + ", ".join(failed) + " before running local acceptance")
+    print("This host is ready for local acceptance. A doctor run grants no acceptance.", flush=True)
+
+
 def pre_push(args):
     global ROOT
     ROOT = Path(value("rev-parse", "--show-toplevel", root=Path.cwd()))
@@ -2740,6 +3184,10 @@ def pre_push(args):
                 comparison = value("merge-base", "origin/main", head)
                 preview = acceptance_plan(policy,
                     selected(policy, changed_paths(comparison, head), base=comparison, head=head), host())
+                pull = deferred_pull(args.remote, head, preview)
+                if pull is not None:
+                    defer_check(head, args.remote, pull, value("rev-parse", "origin/main"))
+                    continue
                 if preview["ci"]:
                     print("LOCAL_ACCEPTANCE_PARALLEL_AVAILABLE=" + canonical({
                         "current_push_mode": "serial",
@@ -2800,6 +3248,44 @@ def plan_pre_push(args):
           "complete author checks and native CI still gate merge.", flush=True)
 
 
+def publish_plan(head, trusted, remote, output):
+    """Sign and publish this head's execution plan, or reuse the one already
+    published from this host. The plan schedules native CI; it proves no test."""
+    repository = load_policy(trusted)["repository"]
+    contract_remote(remote, repository)
+    base = value("merge-base", trusted, head)
+    policy = load_policy(trusted)
+    names = selected(policy, changed_paths(base, head), base=base, head=head)
+    plan = acceptance_plan(policy, names, host())
+    for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
+        fetched = git("fetch", "--no-tags", remote, f"+{note_ref}:{note_ref}", check=False)
+        if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
+            raise RuntimeError(fetched.stderr.decode(errors="replace"))
+    prior = None
+    if read_note(head, PLAN_NOTE_REF)["attestations"]:
+        prior = read_execution_plan(head, trusted, trusted)
+        if prior["host"] != host():
+            raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
+        plan = prior["plan"]
+    if not plan["ci"]:
+        raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
+    identity = value("config", "localAcceptance.signer")
+    key = Path(value("config", "localAcceptance.key")).expanduser()
+    receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+               "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+               "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
+    if prior is None:
+        envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
+    else:
+        envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
+                        if json.loads(base64.b64decode(item["payload"])) == prior)
+    verify_execution_plan(envelope, head, trusted, trusted)
+    if prior is None:
+        publish(head, envelope, remote, note_ref=PLAN_NOTE_REF)
+    git("fetch", "--no-tags", remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
+    return plan, envelope
+
+
 def start_pr(args, api=None, context=None):
     """Start native CI and mandatory author checks together for frozen source."""
     api = api or github_api
@@ -2840,37 +3326,7 @@ def start_pr(args, api=None, context=None):
             delegated = True
             return namespace["start_pr"](args, api=api, context={**context, "refreshes": context["refreshes"] + 1})
         repository = load_policy(trusted)["repository"]
-        contract_remote(args.remote, repository)
-        base = value("merge-base", trusted, head)
-        policy = load_policy(trusted)
-        names = selected(policy, changed_paths(base, head), base=base, head=head)
-        plan = acceptance_plan(policy, names, host())
-        for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
-            fetched = git("fetch", "--no-tags", args.remote, f"+{note_ref}:{note_ref}", check=False)
-            if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
-                raise RuntimeError(fetched.stderr.decode(errors="replace"))
-        prior = None
-        if read_note(head, PLAN_NOTE_REF)["attestations"]:
-            prior = read_execution_plan(head, trusted, trusted)
-            if prior["host"] != host():
-                raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
-            plan = prior["plan"]
-        if not plan["ci"]:
-            raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
-        identity = value("config", "localAcceptance.signer")
-        key = Path(value("config", "localAcceptance.key")).expanduser()
-        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
-                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
-                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-        if prior is None:
-            envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
-        else:
-            envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                            if json.loads(base64.b64decode(item["payload"])) == prior)
-        verify_execution_plan(envelope, head, trusted, trusted)
-        if prior is None:
-            publish(head, envelope, args.remote, note_ref=PLAN_NOTE_REF)
-        git("fetch", "--no-tags", args.remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
+        plan, envelope = publish_plan(head, trusted, args.remote, output)
         with tempfile.TemporaryDirectory(prefix="scode-plan-push-") as temporary:
             hook = Path(temporary) / "pre-push"
             interpreter = shlex.quote(sys.executable.replace("\\", "/"))
@@ -2907,6 +3363,7 @@ def start_pr(args, api=None, context=None):
         except RuntimeError:
             check(argparse.Namespace(head=head, base=trusted, policy_ref=trusted, signers_ref=trusted,
                 output=str(output / "author"), resume_from=None, publish=True, remote=args.remote,
+                dispatch_publish=pull["number"],
                 outer_started_at=wall_start, outer_monotonic_started_at=started, execution_plan=envelope))
         else:
             if existing["host"] != host():
@@ -3014,6 +3471,9 @@ def main():
                                  help="Reuse unchanged checks from a signed exact-source output directory")
             command.add_argument("--publish", action="store_true")
             command.add_argument("--remote", default="origin")
+            command.add_argument("--dispatch-publish", type=int, metavar="PR",
+                                 help="After publishing, ask the trusted publisher to finalize this PR")
+    sub.add_parser("doctor", help="Report this host's acceptance prerequisites and how to fix each; runs no check")
     command = sub.add_parser("install")
     command.add_argument("--signer")
     command.add_argument("--key")
@@ -3069,7 +3529,22 @@ def main():
         elif args.operation == "check":
             if args.policy_ref == "origin/main":
                 args.policy_ref = authorized_policy(value("rev-parse", args.head or "HEAD"), args.base, args.policy_ref)
-            check(args)
+            if not args.dispatch_publish:
+                check(args)
+            else:
+                try:
+                    check(args)
+                except BaseException as error:
+                    record_deferred_result(args, "failed", "not requested", error)
+                    raise
+                try:
+                    dispatch_publish(args.dispatch_publish, value("rev-parse", args.head or "HEAD"), args.policy_ref)
+                except BaseException as error:
+                    record_deferred_result(args, "verified", f"failed: {error}")
+                    raise
+                record_deferred_result(args, "verified", "requested")
+        elif args.operation == "doctor":
+            doctor(args)
         elif args.operation == "index-output":
             index_existing_output(args.directory, value("rev-parse", args.policy_ref))
         elif args.operation == "install":

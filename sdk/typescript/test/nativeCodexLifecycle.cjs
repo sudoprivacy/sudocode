@@ -49,13 +49,6 @@ if(installedCommand)assert(options.autojoin && options['operator-context'],
 const autojoinServer=installedCommand?'nexus_scode':'nexus_auto';
 const evidence = path.resolve(options.output);
 fs.mkdirSync(evidence,{recursive:true,mode:0o700});
-const library = path.resolve(__dirname,'../dist/index.cjs');
-const buildManifest = JSON.parse(fs.readFileSync(path.resolve(__dirname,'../manifest.json'),'utf8'));
-const librarySha256 = crypto.createHash('sha256').update(fs.readFileSync(library)).digest('hex');
-assert.match(buildManifest.sourceCommit,/^[0-9a-f]{40}$/);
-assert.equal(buildManifest.files['dist/index.cjs'].sha256,librarySha256,'Use the hash-bound canonical library');
-const { connectCodex } = require(library);
-assert.equal(typeof connectCodex,'function','Build the canonical SDK including #1080 first');
 const driverArgv = options.driver ? JSON.parse(options.driver) : process.platform === 'win32' ? null
   : ['python3',path.join(__dirname,'fixtures/nativeCodexTui.py')];
 assert(Array.isArray(driverArgv) && driverArgv.length && driverArgv.every(arg=>typeof arg==='string' && arg && !arg.includes('\0')),
@@ -68,6 +61,17 @@ if(operatorContext){
     && fs.realpathSync(root).startsWith(fs.realpathSync(operatorContext.fixtureRoot)+path.sep),
     'Real enrollment requires the enclosing private native Node fixture; never adopt a live user installation');
 }
+const mailboxV3=operatorContext?.mailboxV3===true;
+if(mailboxV3)assert(installedCommand && options.case==='idle' && operatorContext.installedSdk);
+const sdkRoot = operatorContext?.installedSdk ?? path.resolve(__dirname,'..');
+const entry = path.join(sdkRoot,'dist/server.cjs');
+const library = path.join(sdkRoot,'dist/index.cjs');
+const buildManifest = JSON.parse(fs.readFileSync(path.join(sdkRoot,'manifest.json'),'utf8'));
+const librarySha256 = crypto.createHash('sha256').update(fs.readFileSync(library)).digest('hex');
+assert.match(buildManifest.sourceCommit,/^[0-9a-f]{40}$/);
+assert.equal(buildManifest.files['dist/index.cjs'].sha256,librarySha256,'Use the hash-bound canonical library');
+const { connectCodex } = require(library);
+assert.equal(typeof connectCodex,'function','Build the canonical SDK including #1080 first');
 if(options['legacy-import'])assert(operatorContext && managedPackageRoot && options.case==='idle',
   'Legacy import is an isolated real-Node managed-entry fixture, separate from the new-thread cases');
 const readAutojoinClaims=()=>operatorContext
@@ -111,7 +115,7 @@ const receipt = {
     .update(fs.readFileSync(path.join(managedPackageRoot,'bin/codex.js'))).digest('hex')}:{}),
   at: new Date().toISOString(), scenario:options.case, platform:process.platform, driverArgv,
   probeSourceSha256:crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex'),
-  source: buildManifest.sourceCommit, libraryBuildDirty: buildManifest.dirty,
+  source: buildManifest.sourceCommit, library, entry, mailboxV3, libraryBuildDirty: buildManifest.dirty,
   librarySha256,
   driverFiles:driverArgv.filter(arg=>fs.existsSync(arg) && fs.statSync(arg).isFile()).map(file=>({
     file,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),
@@ -131,6 +135,8 @@ const waitUntil = async (test, ms, label) => {
 let phase='idle';
 const peerMarker='REAL_NODE_AUTOJOIN_'+crypto.randomUUID();
 let expectedPeerInput;
+let mailboxArrival;
+const requestsPerArrival=mailboxV3 ? 3 : 1;
 const heldResponses=new Set();
 const endpoint = http.createServer((req,res)=>{
   const observation={method:req.method,url:req.url,phase};receipt.modelRequests.push(observation);
@@ -138,6 +144,51 @@ const endpoint = http.createServer((req,res)=>{
   let body='';req.on('data',bytes=>{if(body.length<=2097152)body+=bytes;});
   req.on('end',()=>{observation.peerMarkerSeen=body.includes(peerMarker);
     observation.exactPeerInputSeen=peerInput!==undefined&&body.includes(peerInput);observation.bodyBytes=Buffer.byteLength(body);});
+  if(phase==='peer-inbound' && mailboxV3){
+    req.on('end',()=>{
+      try{
+        const requestBody=JSON.parse(body);
+        assert.equal(requestBody.client_metadata?.thread_id,mailboxArrival.threadId);
+        const items=requestBody.input;
+        const index=mailboxArrival.steps.length;
+        const callId=mailboxArrival.id+'-'+index;
+        let item;
+        if(index<2){
+          const namespace=requestBody.tools.find(t=>t.type==='namespace' && t.name==='mcp__nexus_scode');
+          const tool=namespace?.tools.find(t=>t.name==='scode_inbox') ??
+            requestBody.tools.find(t=>t.name==='mcp__nexus_scode__scode_inbox');
+          assert(tool,'the installed server must advertise scode_inbox to the model');
+          let args={};
+          if(index===0){
+            assert(items.some(i=>i.role==='user' && i.content?.some(c=>c.text?.includes(peerInput))),
+              'automatic wake must present the complete peer message to the native model');
+          }else{
+            const output=items.find(i=>i.type==='function_call_output' && i.call_id===mailboxArrival.id+'-0');
+            const offer=JSON.stringify(output?.output ?? '');
+            assert(offer.includes(peerInput),'the real inbox must still offer the same unread message');
+            const tokens=[...offer.matchAll(/⟦ack ([^\s⟧]+)⟧/g)];
+            assert.equal(tokens.length,1);
+            args={ack:[tokens[0][1]]};
+          }
+          item={type:'function_call',id:'fc_'+callId,call_id:callId,name:tool.name,
+            ...(namespace ? {namespace:namespace.name} : {}),arguments:JSON.stringify(args)};
+        }else{
+          assert.equal(index,2);
+          const output=items.find(i=>i.type==='function_call_output' && i.call_id===mailboxArrival.id+'-1');
+          assert(JSON.stringify(output?.output ?? '').includes('⟦unread 0⟧'),'the explicit ACK must retire the offered frame');
+          item={type:'message',role:'assistant',id:'msg_'+callId,content:[{type:'output_text',text:'Fixture message acknowledged.'}]};
+        }
+        mailboxArrival.steps.push(['offer requested','ACK submitted','empty inbox confirmed'][index]);
+        const id='resp_'+callId;
+        res.writeHead(200,{'content-type':'text/event-stream'});
+        for(const event of [{type:'response.created',response:{id}},{type:'response.output_item.done',item},
+          {type:'response.completed',response:{id,usage:{input_tokens:0,output_tokens:0,total_tokens:0}}}])
+          res.write('event: '+event.type+'\ndata: '+JSON.stringify(event)+'\n\n');
+        res.end();
+      }catch(error){mailboxArrival.error??=String(error);res.writeHead(500);res.end('Fixture mailbox expectation failed');}
+    });
+    return;
+  }
   if(phase==='cancelled-seed' && req.method==='POST' && req.url==='/v1/responses'){
     // A 503 drives retries before the user item appears on some native builds.
     // Keep this explicit cancelled seed pending until turn/interrupt or cleanup.
@@ -222,16 +273,17 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
       const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
       autojoinConfig=path.join(root,'autojoin.json');
       fs.writeFileSync(autojoinConfig,JSON.stringify({version:1,mode:'codex-autojoin',
+        ...(mailboxV3 ? {peerInputVersion:3} : {}),
         native:{codexArgv:configured.codexArgv,socket:selectedSocket,env:childEnv},
         stateDirectory:path.join(root,'bindings'),auditLog:path.join(root,'autojoin-audit.jsonl'),peers:[],
         peerPolicy:operatorContext?'node-namespace':'allowlist',
         enrollmentArgv:operatorContext
-          ? [process.execPath,path.resolve(__dirname,'../dist/server.cjs'),'--enroll-codex','--config',operatorContext.sdkGrant]
+          ? [process.execPath,entry,'--enroll-codex','--config',operatorContext.sdkGrant]
           : [process.execPath,path.join(__dirname,'fixtures/codexAgentEnrollment.cjs'),root],
         endpoint:{port,token:crypto.randomBytes(32).toString('hex')},
       }),{mode:0o600});
       if(process.platform==='win32' && !installedCommand){
-        const prepared=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+        const prepared=require(library).prepareWindowsCodexOwner(autojoinConfig,entry);
         const registered=execFileSync(prepared.installationArgv[0],prepared.installationArgv.slice(1),
           {encoding:'utf8',timeout:10000,windowsHide:true});
         windowsOwnerPreparation=prepared;
@@ -251,9 +303,8 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         '\nargs = ['+JSON.stringify(path.join(__dirname,'fixtures/mcpStartupContext.cjs'))+']\nrequired = true\n'+
         '[mcp_servers.context_probe.env]\nCODEX_MCP_CONTEXT_OUTPUT = '+JSON.stringify(root)+'\n' : '')+
       (options.autojoin && !installedCommand ? '[mcp_servers.nexus_auto]\ncommand = '+JSON.stringify(process.execPath)+
-        '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
+        '\nargs = ['+[entry,'--codex','--config',autojoinConfig].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n' : ''), {mode:0o600});
     if(humanReviewEntry && !installedCommand){
-      const entry=path.resolve(__dirname,'../dist/server.cjs');
       const configFile=autojoinConfig??path.join(root,'user-entry.json');
       if(!autojoinConfig)require(library).prepareCodexMcp(configFile,configured.codexArgv,
         [process.execPath,'fixture-enrollment-must-not-run'],[],entry);
@@ -267,7 +318,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
       fs.writeFileSync(legacyProfile,JSON.stringify({...profile,version:1,auditLog:path.join(root,'legacy-audit.jsonl')}),{mode:0o600});
       const withoutGlobal=standard.slice(0,standard.indexOf('[mcp_servers.nexus_auto]'));
       fs.writeFileSync(file,withoutGlobal+'[mcp_servers.nexus_legacy]\ncommand = '+JSON.stringify(process.execPath)+
-        '\nargs = ['+[path.resolve(__dirname,'../dist/server.cjs'),'--config',legacyProfile].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n');
+        '\nargs = ['+[entry,'--config',legacyProfile].map(s=>JSON.stringify(s)).join(',')+']\nrequired = true\n');
       const legacyEnv={...childEnv};delete legacyEnv.CODEX_MANAGED_PACKAGE_ROOT;delete legacyEnv.CODEX_MANAGED_BY_NPM;
       // Let the official listener create its parent with the platform's private
       // permissions. The shared temporary directory cannot satisfy Windows DACLs.
@@ -348,7 +399,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
           const quote=value=>"'"+value.replace(/'/g,"''")+"'";
           fs.writeFileSync(commandEntry,'& '+quote(executable)+' @args\r\nexit $LASTEXITCODE\r\n');
         }else fs.symlinkSync(executable,commandEntry);
-        const argv=[process.execPath,path.resolve(__dirname,'../dist/server.cjs'),
+        const argv=[process.execPath,entry,
           '--install-codex','--config',autojoinConfig,'--command-entry',commandEntry];
         const result=spawnSync(argv[0],argv.slice(1),{cwd:workspace,encoding:'utf8',env:childEnv,timeout:35000});
         receipt.machineInstallation={argv,status:result.status,stdout:result.stdout,stderr:result.stderr,
@@ -365,7 +416,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
                 const privateRoot=fs.realpathSync(root)+path.sep;
                 assert(fs.realpathSync(autojoinConfig).startsWith(privateRoot));
                 assert(fs.realpathSync(autojoinConfig+'.windows-owner.xml').startsWith(privateRoot));
-                const expected=require(library).prepareWindowsCodexOwner(autojoinConfig,path.resolve(__dirname,'../dist/server.cjs'));
+                const expected=require(library).prepareWindowsCodexOwner(autojoinConfig,entry);
                 assert.deepEqual(partial.ownerTask,expected,'Only the canonical private owner Task may be cleaned up');
                 windowsOwnerPreparation=expected;
                 receipt.windowsOwnerTask={...expected,
@@ -381,6 +432,13 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         const installed=JSON.parse(result.stdout);
         assert.equal(installed.installed,true);assert.equal(installed.commandEntry,commandEntry);
         assert.equal(installed.a2aJourneyVerified,false,'setup alone must not claim an A2A journey');
+        if(mailboxV3){
+          // Grant just the fixture's mailbox tool. Every other tool retains
+          // the installed entry's ordinary human-review policy.
+          fs.appendFileSync(path.join(isolatedHome,'config.toml'),
+            '\n[mcp_servers.nexus_scode.tools.scode_inbox]\napproval_mode = "approve"\n');
+          receipt.machineInstallation.fixtureInboxApproval='approve';
+        }
         const journal=JSON.parse(fs.readFileSync(installed.journal,'utf8'));
         assert.equal(journal.phase,'installed');assert.ok(journal.completed.includes('finalReadback'));
         receipt.machineInstallation.journal={phase:journal.phase,completed:journal.completed,
@@ -639,10 +697,33 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         const queuedBefore=queuedRows().length;
         await request(observer,'fixture peer name','thread/name/set',{threadId:original.threadId,name:'Isolated actual peer receiver'});
         expectedPeerInput=peerMarker+' '+epoch+' Peer data only. Do not reply or ACK.';
+        if(mailboxV3)mailboxArrival={id:crypto.randomUUID(),threadId:original.threadId,steps:[]};
         const sent=await sendScodeMessage(peer,{to:original.actor,
           message:expectedPeerInput,summary:'Isolated automatic peer reception'});
         assert.equal(sent.isError,false,JSON.stringify(sent));
         let end=Date.now()+15000;
+        if(mailboxV3){
+          do {
+            if(mailboxArrival.error)throw new Error(mailboxArrival.error);
+            if(mailboxArrival.steps.length<3){
+              await new Promise(resolve=>setTimeout(resolve,50));
+              continue;
+            }
+            const {thread}=await request(observer,'actual v3 peer wake','thread/read',{threadId:original.threadId,includeTurns:false});
+            const history=await request(observer,'v3 wake history','thread/turns/list',{
+              threadId:original.threadId,itemsView:'full',sortDirection:'desc',limit:10});
+            assert.equal(history.nextCursor,null,'complete private thread history');
+            const turns=history.data.filter(t=>t.items?.some(i=>i.type==='userMessage' && i.clientId?.startsWith('scode-wake:') &&
+              i.content?.some(c=>c.text?.includes(expectedPeerInput))));
+            assert(turns.length<=1,'one append may wake the original thread only once');
+            if(mailboxArrival.steps.length===3 && turns.length===1 && turns[0].status==='completed' && thread.status.type==='idle'){
+              assert.equal(receipt.modelRequests.length-before,requestsPerArrival);
+              return {epoch,threadId:thread.id,actor:original.actor,turnId:turns[0].id,steps:mailboxArrival.steps, sent};
+            }
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }while(Date.now()<end);
+          throw new Error('Real Node v3 wake and model ACK timed out: '+JSON.stringify(mailboxArrival));
+        }
         let interruptedQueue;
         while(true){
           const {thread}=await request(observer,'actual peer wake','thread/read',{threadId:original.threadId,includeTurns:true});
@@ -879,7 +960,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
         const peer=await connectScode(JSON.parse(fs.readFileSync(operatorContext.inboundSenderProfile,'utf8')));
         try{
           receipt.actualPeerReception=await receivePeer(peer,receipt.autojoinClaims[0],'before frontend close');
-          assert.equal(receipt.modelRequests.length,startupModelRequests+1,'one actual received peer input, no duplicate native inference');
+          assert.equal(receipt.modelRequests.length,startupModelRequests+requestsPerArrival,'exactly one wake for the first arrival');
           if(managedPackageRoot){
             const first=tuis.find(own=>own.label==='first');
             const second=tuis.find(own=>own.label==='second');
@@ -927,7 +1008,7 @@ const spawnTui = async (label,args=[],env=childEnv,launchWorkspace=workspace) =>
             assert.equal(receipt.modelRequests.length,beforeSend,'surviving direct send adds no inference');
             observation.peerReception=await receivePeer(peer,claim,'after first frontend unload');
             assert.deepEqual(readAutojoinClaims(),receipt.autojoinClaims,'frontend close never creates another actor or operation');
-            assert.equal(receipt.modelRequests.length,startupModelRequests+2,'two distinct explicit peer arrivals, one native request each');
+            assert.equal(receipt.modelRequests.length,startupModelRequests+2*requestsPerArrival,'exactly one wake per arrival');
           }
         }finally{await peer.close();}
       }

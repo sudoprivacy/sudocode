@@ -47,6 +47,7 @@ mod ansi_text;
 mod choice_text;
 mod footer;
 mod input_history;
+mod input_trace;
 mod layout;
 mod prompt_text;
 mod queued_message;
@@ -1283,6 +1284,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // to maintain consistent hook ordering.
     let (term_width, term_height) = hooks.use_terminal_size();
     let input_frame = hooks.use_input_frame();
+    let input_trace = hooks.use_memo(
+        || input_trace::InputTrace::open().map(|trace| Arc::new(Mutex::new(trace))),
+        (),
+    );
 
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -1330,6 +1335,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_terminal_events({
         let _pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
+        let record_input = move |input, frame_current| {
+            if let Some(trace) = &input_trace {
+                trace.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(
+                    input,
+                    (term_width, term_height),
+                    input_reviewable.get(),
+                    frame_current,
+                );
+            }
+        };
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
                 code,
@@ -1337,6 +1352,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 modifiers,
                 ..
             }) if kind != KeyEventKind::Release => {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Key(code), frame_current);
                 let current_slot = input_slot.read().clone();
                 let interaction = focused_interaction.read().clone();
                 if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::ALT)
@@ -1369,7 +1386,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
                 if !(code == KeyCode::Esc
-                    || input_reviewable.get() && input_frame.is_current()
+                    || input_reviewable.get() && frame_current
                     || code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
@@ -1766,7 +1783,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // not mounted, so route the paste into the active buffer here using
             // the SAME normalize/placeholder logic (DRY).
             TerminalEvent::Paste(pasted) => {
-                if !input_reviewable.get() || !input_frame.is_current() {
+                let frame_current = input_frame.is_current();
+                record_input(input_trace::ObservedInput::Paste, frame_current);
+                if !input_reviewable.get() || !frame_current {
                     return;
                 }
                 let current_slot = input_slot.read().clone();
@@ -2545,12 +2564,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .map_or(0, |text| text.text.lines().count());
     let slot_width = Size::Length(u32::from(term_width));
     // Styling changes the existing editor, never the owner of terminal history.
-    let shaded_prompts =
-        runtime::experiments::is_enabled(runtime::experiments::Experiment::PromptViewport);
-    let prompt_style = shaded_prompts.then(|| crate::render::theme().prompt_style());
     // The shade replaces the separator lines only where it is drawn. Without
-    // color (NO_COLOR, or a palette too small for a shade) the experiment
-    // has no surface, and the lines are the editor's only boundary.
+    // color (NO_COLOR, or a palette too small for a shade) there is no
+    // surface: the lines are the editor's boundary and its text keeps the
+    // terminal's own colors.
+    let prompt_style = Some(crate::render::theme().prompt_style())
+        .filter(|style| style.background_color.is_some());
     let input_background = prompt_style
         .and_then(|style| style.background_color)
         .and_then(ansi_text::ui_color);
@@ -2762,10 +2781,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
-    split_lines(text, terminated, |op| match op {
-        OutputOp::Println(line) => stdout.println(line),
-        OutputOp::Print(chunk) => stdout.print(chunk),
-    });
+    split_lines(
+        text,
+        terminated,
+        crate::render::query_terminal_width(),
+        |op| match op {
+            OutputOp::Println(line) => stdout.println(line),
+            OutputOp::Print(chunk) => stdout.print(chunk),
+        },
+    );
 }
 
 /// Spawn the iocraft REPL UI on a dedicated thread and return a handle
@@ -2820,7 +2844,9 @@ pub fn spawn_repl_ui(
             // Print banner before entering the render loop so the user sees
             // session info in the scrollback. iocraft's render_loop enters
             // raw mode immediately, so we print first.
-            println!("{banner}");
+            // Through the shared line framing, like all later history, so a
+            // replayed row's background fill is erased rather than written.
+            let _ = crate::render::output::write_stdout(&format!("{banner}\n"));
 
             // Activate stderr redirect before entering raw mode so that
             // any library writing to fd 2 is captured and routed through

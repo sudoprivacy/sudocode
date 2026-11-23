@@ -254,7 +254,7 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
     }
 }
 
-fn hide_console(command: &mut Command) {
+pub(crate) fn hide_console(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

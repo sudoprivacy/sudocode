@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const assert = require('node:assert/strict');
 const { performance } = require('node:perf_hooks');
+const { rowText } = require('./shade-rows.js');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -18,9 +19,18 @@ function createHost(config) {
     windowsPty: process.platform === 'win32'
       ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined,
   });
-  terminal.loadAddon(new (load('@xterm/addon-unicode11').Unicode11Addon)());
-  terminal.unicode.activeVersion = '11';
+  // Unicode 11 lays out each code point of a ZWJ cluster, as VS Code does;
+  // `unicode: 'graphemes'` draws it as one glyph, as iTerm2, kitty, Ghostty
+  // and Windows Terminal do.
+  if (config.unicode === 'graphemes') {
+    terminal.loadAddon(new (load('@xterm/addon-unicode-graphemes').UnicodeGraphemesAddon)());
+    terminal.unicode.activeVersion = '15-graphemes';
+  } else {
+    terminal.loadAddon(new (load('@xterm/addon-unicode11').Unicode11Addon)());
+    terminal.unicode.activeVersion = '11';
+  }
   const metadata = { platform: process.platform, os: os.release(), arch: process.arch,
+    unicode: terminal.unicode.activeVersion,
     node: process.versions.node, electron: process.versions.electron,
     pty: load('node-pty/package.json').version,
     xterm: load('@xterm/headless/package.json').version, backend: config.backend };
@@ -45,7 +55,11 @@ function createHost(config) {
     }
     return false;
   });
-  terminal.onData(data => child.write(data));
+  // `silent: true` models a terminal that never reports its cursor position.
+  terminal.onData(data => {
+    const reply = config.silent ? data.replace(/\x1b\[\d+;\d+R/g, '') : data;
+    if (reply) child.write(reply);
+  });
   if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c' }, params => {
     if (!params.length || (params.length === 1 && params[0] === 0)) {
       child.write('\x1b[?61;4c'); return true;
@@ -53,14 +67,14 @@ function createHost(config) {
     return false;
   });
   child.onExit(event => { state.exited = true; state.exitCode = event.exitCode; });
+  const row = line => rowText(line, terminal.cols);
   function snapshot() {
     const buffer = terminal.buffer.active;
-    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
+    return Array.from({ length: buffer.length }, (_, i) => row(buffer.getLine(i))).join('\n');
   }
   function viewport() {
     const buffer = terminal.buffer.active;
-    return Array.from({ length: terminal.rows }, (_, i) => buffer.getLine(buffer.baseY + i)
-      .translateToString(true)).join('\n');
+    return Array.from({ length: terminal.rows }, (_, i) => row(buffer.getLine(buffer.baseY + i))).join('\n');
   }
   async function wait(predicate, { notBefore = 0, quietMs = 0, timeoutMs = 45000, pollMs = 25 } = {}) {
     const deadline = performance.now() + timeoutMs;
@@ -100,7 +114,8 @@ function createHost(config) {
     fs.writeFileSync(path.join(config.logRoot, 'terminal.txt'), snapshot());
     terminal.dispose();
   }
-  return { child, terminal, state, metadata, sleep, snapshot, viewport, wait, resize, resizeFrame, close,
+  const output = () => wire.map(row => row.data || '').join('');
+  return { child, terminal, state, metadata, sleep, snapshot, viewport, wait, resize, resizeFrame, close, output,
     settle: (predicate, notBefore = 0) => wait(predicate, { notBefore, quietMs: 300, timeoutMs: 20000 }),
     frame: (predicate, notBefore = 0) => wait(predicate, { notBefore }),
     onPresentation: observer => subscribe(presentations, observer),
@@ -109,10 +124,14 @@ function createHost(config) {
 
 
 function launch(config, initial, load = name => require(name)) {
+  // Declare the terminal this host models, as that terminal does: Unicode 11
+  // is VS Code's terminal, which sets TERM_PROGRAM. scode takes its grapheme
+  // rule from this where it cannot measure the terminal (Windows).
   const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
     HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
     COLORFGBG: '15;0', SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue',
     SUDOCODE_TODO_STORE: config.todos, SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10',
+    TERM_PROGRAM: config.unicode === 'graphemes' ? '' : 'vscode',
     ...config.env };
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
     delete env[key];

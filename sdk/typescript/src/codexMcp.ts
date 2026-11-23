@@ -1,21 +1,28 @@
 import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import * as path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { codexMailboxAdmission } from './codexMailboxAdmission';
 import { connectCodexAutojoin, type CodexAgentClaim, type CodexAgentProfile, type CodexAutojoin } from './codexAutojoin';
+import type { CodexMailboxAdmission } from './codexMailboxOwner';
+import type { CodexMailboxPresentation } from './codexMailboxPresentation';
 import { runEnrollmentCommand } from './enrollmentCommand';
+import { readCompletedCodexEnrollment } from './codexEnrollment';
 import { validateCodexConnectionConfig, CodexCleanupUnknownError, type CodexConnectionConfig } from './codexConnection';
 import { ScodeCleanupUnknownError } from './scodeAcp';
 import { registerCommandShutdown } from './lifecycle';
 import { registerScodeMcpTools } from './mcpTools';
 import { timeout } from './timeout';
+import { relayCodexMcp } from './codexMcpRelay';
 import { prepareWindowsOwnerTask, startWindowsOwnerTask, type WindowsCodexOwnerPreparation } from './windowsCodexOwner';
 import { ScodeA2aError } from './scodeA2a';
 import { runCodexUserEntry } from './codexLaunch';
-import { bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
+import { assertWorkspace, bindProfile, canonicalWorkspace, identifier, readBindings, readProfile, writeBinding,
   type CodexBinding } from './codexBindings';
 
 export interface CodexMcpConfig {
@@ -26,6 +33,10 @@ export interface CodexMcpConfig {
   auditLog: string;
   peers: string[];
   peerPolicy?: 'allowlist' | 'node-namespace';
+  /** 3 reads peer frames through `scode_inbox` and wakes an idle root with one
+   * queued turn (requires `node-namespace`); 2, the default, keeps the durable
+   * callback, which requires the native durableQueueAddOnce capability. */
+  peerInputVersion?: 2 | 3;
   /** Explicit operator-owned adapter to the existing authorized enrollment path. */
   enrollmentArgv: string[];
   endpoint: {port: number; token: string};
@@ -33,11 +44,11 @@ export interface CodexMcpConfig {
 
 /** The initializer and one-time installation consume the same native commands. */
 export function codexMcpInstallationCommands(file: string, entry: string): {
-  native: CodexConnectionConfig; registrationArgv: string[]; nativePreparationArgv: string[];
+  native: CodexConnectionConfig; peerInputVersion: 2 | 3; registrationArgv: string[]; nativePreparationArgv: string[];
 } {
   const {config} = readConfig(file);
   if (!path.isAbsolute(entry) || !statSync(entry).isFile()) throw new Error('An existing absolute bridge entry is required');
-  return {native:config.native,...nativeCommands(file,config.native.codexArgv,entry)};
+  return {native:config.native,peerInputVersion:config.peerInputVersion??2,...nativeCommands(file,config.native.codexArgv,entry)};
 }
 
 function nativeCommands(file:string,codexArgv:string[],entry:string):{
@@ -53,7 +64,8 @@ function nativeCommands(file:string,codexArgv:string[],entry:string):{
  * Deliberately do not change a running controller, node or global configuration.
  */
 export function prepareCodexMcp(file: string, nativeCommand: string | string[] | CodexConnectionConfig, enrollmentArgv: string[], peers: string[],
-  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist', commandEntry?:string): {
+  entry: string, port = 23262, peerPolicy: CodexMcpConfig['peerPolicy'] = 'allowlist', commandEntry?:string,
+  peerInputVersion?: CodexMcpConfig['peerInputVersion']): {
     configFile: string; registrationArgv: string[]; nativePreparationArgv: string[]; nativeProxyArgv: string[];
     ownerPreparationArgv?: string[]; userEntryArgv: string[]; installationArgv?:string[]; installed: false;
   } {
@@ -68,7 +80,8 @@ export function prepareCodexMcp(file: string, nativeCommand: string | string[] |
   mkdirSync(parent,{recursive:true,mode:0o700});
   const config: CodexMcpConfig = {version:1,mode:'codex-autojoin',native,
     stateDirectory:path.join(parent,'codex-agents'),auditLog:path.join(parent,'codex-network.jsonl'),
-    peers,peerPolicy,enrollmentArgv,endpoint:{port,token:randomBytes(32).toString('hex')}};
+    peers,peerPolicy,...(peerInputVersion===undefined?{}:{peerInputVersion}),enrollmentArgv,
+    endpoint:{port,token:randomBytes(32).toString('hex')}};
   // Validate before publishing. This initializer neither runs the enrollment
   // command nor copies its authority into the runtime package.
   validateConfig(config);
@@ -113,9 +126,7 @@ export async function prepareExistingCodexBinding(file: string, existing: Existi
       || typeof existing.acpSessionId !== 'string' || !existing.acpSessionId.trim()) {
     throw new Error('An explicit existing thread, actor, native workspace, ACP profile and session are required');
   }
-  const listener = createServer(socket=>socket.destroy());
-  await claimOwner(listener, config.endpoint.port);
-  try {
+  return withStoppedOwner(config, async () => {
     const bindings = readBindings(config.stateDirectory);
     if (bindings.has(existing.threadId) || [...bindings.values()].some(binding=>binding.actor===existing.actor)) {
       throw new Error('An existing thread or actor binding cannot be overwritten or assigned twice');
@@ -128,7 +139,44 @@ export async function prepareExistingCodexBinding(file: string, existing: Existi
     bindProfile(binding, profile);
     await writeBinding(config.stateDirectory, binding, true);
     return {prepared:true,startedAgent:false,threadId:existing.threadId,actor:existing.actor,acpSessionId:existing.acpSessionId};
-  } finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
+  });
+}
+
+/** Settle one original binding from the configured operator's completed records. */
+export async function recoverCompletedCodexBinding(file: string, threadId: string) {
+  if (!identifier(threadId)) throw new Error('An original Codex thread ID is required');
+  const {config} = readConfig(file);
+  const argv = config.enrollmentArgv;
+  if (argv.length !== 5 || !path.isAbsolute(argv[1]) || argv[2] !== '--enroll-codex'
+      || argv[3] !== '--config' || !path.isAbsolute(argv[4])) {
+    throw new Error('Binding recovery requires the configured SDK enrollment operator');
+  }
+  return withStoppedOwner(config, async () => {
+    const binding = readBindings(config.stateDirectory).get(threadId);
+    if (!binding || binding.origin !== 'enrollment' || !['recovery_required','ready'].includes(binding.state)) {
+      throw new Error('An original enrollment awaiting recovery or already ready is required');
+    }
+    const {actor,operationId,workspace} = binding;
+    assertWorkspace(binding, workspace);
+    const {result,profile} = readCompletedCodexEnrollment(argv[4], {version:1,actor,operationId,threadId,workspace});
+    const restored: CodexBinding = {...binding, state:'ready', configFile:result.configFile};
+    bindProfile(restored, profile, result.workspaceBinding);
+    if ((binding.configFile !== undefined && binding.configFile !== restored.configFile)
+        || (binding.acp !== undefined && !isDeepStrictEqual(binding.acp, restored.acp))
+        || (binding.workspaceBinding !== undefined && !isDeepStrictEqual(binding.workspaceBinding, restored.workspaceBinding))
+        || (binding.state === 'ready' && !isDeepStrictEqual(binding, restored))) {
+      throw new Error('Completed enrollment differs from a previously frozen binding');
+    }
+    if (binding.state !== 'ready') await writeBinding(config.stateDirectory, restored);
+    return {state:'ready',threadId,actor,operationId,acpSessionId:profile.acpSessionId};
+  });
+}
+
+async function withStoppedOwner<T>(config: CodexMcpConfig, action: () => Promise<T>): Promise<T> {
+  const listener = createServer(socket=>socket.destroy());
+  await claimOwner(listener, config.endpoint.port);
+  try {return await action();}
+  finally {await new Promise<void>((resolve,reject)=>listener.close(error=>error?reject(error):resolve()));}
 }
 
 async function claimOwner(listener: Server, port: number): Promise<void> {
@@ -153,6 +201,8 @@ function validateConfig(config: CodexMcpConfig): void {
       || !path.isAbsolute(config.enrollmentArgv[0])
       || !Array.isArray(config.peers) || config.peers.some(peer=>typeof peer!=='string'||!peer)
       || (config.peerPolicy!==undefined && !['allowlist','node-namespace'].includes(config.peerPolicy))
+      || (config.peerInputVersion!==undefined && ![2,3].includes(config.peerInputVersion))
+      || (config.peerInputVersion===3 && config.peerPolicy!=='node-namespace')
       || !Number.isInteger(config.endpoint?.port) || config.endpoint.port < 1024 || config.endpoint.port > 65535
       || !/^[0-9a-f]{64}$/.test(config.endpoint.token)) throw new Error('Invalid Codex autojoin MCP configuration');
   validateCodexConnectionConfig(config.native);
@@ -175,7 +225,7 @@ function equal(a: unknown, b: string): boolean {
 function readHeader(socket: Socket): Promise<unknown> {
   return new Promise((resolve,reject) => {
     let buffer = Buffer.alloc(0);
-    const cleanup = () => {socket.removeListener('data',data);socket.removeListener('error',error);socket.removeListener('end',end);};
+    const cleanup = () => {socket.removeListener('data',data);socket.removeListener('error',error);socket.removeListener('end',end);socket.removeListener('close',end);};
     const error = (error: Error) => {cleanup();reject(error);};
     const end = () => error(new Error('Local bridge closed before authentication'));
     const data = (bytes: Buffer) => {
@@ -190,7 +240,7 @@ function readHeader(socket: Socket): Promise<unknown> {
         socket.unshift(buffer.subarray(newline+1));resolve(result);
       } catch(e) {reject(e);}
     };
-    socket.on('data',data);socket.once('error',error);socket.once('end',end);socket.resume();
+    socket.on('data',data);socket.once('error',error);socket.once('end',end);socket.once('close',end);socket.resume();
   });
 }
 
@@ -203,9 +253,15 @@ export async function enroll(argv: string[], claim: CodexAgentClaim): Promise<Co
 
 /** One per-user owner, elected by an exclusive loopback bind. It owns the native
  * observer and all Agent receivers; stdio clients only forward the MCP stream.
+ * Runtime JSON `peerInputVersion: 3` selects `codexMailboxAdmission`; an
+ * embedding operator can supply another v3 provider here, which takes
+ * precedence. The same provider gates the selected receiver and its inbox
+ * calls. It never comes from a stdio client.
  */
-export async function runCodexMcpOwner(file: string): Promise<void> {
+export async function runCodexMcpOwner(file: string, mailbox?: CodexMailboxAdmission, presentation?: CodexMailboxPresentation): Promise<void> {
+  if (presentation && !mailbox) throw new Error('Presentation measurement requires a mailbox owner');
   const {config,sha256} = readConfig(file);
+  const admission = mailbox ?? (config.peerInputVersion===3 ? codexMailboxAdmission() : undefined);
   const audit = (entry: unknown) => appendFileSync(config.auditLog,JSON.stringify({
     ...entry as object,at:new Date().toISOString(),provenance:'codex-autojoin-owner',pid:process.pid,
   })+'\n',{mode:0o600});
@@ -215,6 +271,7 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     try {audit(entry);} catch { /* Diagnostics cannot prevent runtime cleanup. */ }
   };
   let network: CodexAutojoin | undefined;
+  let waitingForProxyExitPid: number | undefined;
   let networkTask: Promise<CodexAutojoin> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let stopping: Promise<void> | undefined;
@@ -257,11 +314,21 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     socket.on('error',()=>{});
     socket.once('close',()=>{sockets.delete(socket);scheduleExit();});
     void (async()=>{
-      const hello = await timeout(readHeader(socket),3000,'Local MCP authentication') as {token?: unknown;configSha256?: unknown};
+      const hello = await timeout(readHeader(socket),3000,'Local MCP authentication') as {
+        token?: unknown; configSha256?: unknown; registrationId?: unknown;
+      };
       if(!equal(hello?.token,config.endpoint.token) || !equal(hello?.configSha256,sha256)) {
         throw new Error('Local MCP owner configuration/authentication mismatch');
       }
-      const server = new McpServer({name:'nexus-scode',version:'1.0.0'});
+      const registrationId = hello.registrationId;
+      if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
+      const measurement = presentation?.attach(registrationId, mailbox?.existingBinding?.threadId);
+      if (measurement) socket.once('close', measurement.close);
+      // This public ID identifies the registration used by this particular
+      // stdio client. It confers no mailbox or thread authority.
+      const server = new McpServer({name:'nexus-scode',version:'1.0.0',
+        ...(registrationId ? { description: 'SCode registration ' + registrationId } : {})});
+      if (measurement) server.server.registerCapabilities(measurement.capabilities);
       registerScodeMcpTools(server,async extra=>{
         if(!network)throw new ScodeA2aError('Native inventory is not ready; no A2A command was submitted','not_submitted');
         // A resumed root may precede the periodic poll. Finish its attachment
@@ -271,8 +338,9 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
           mailbox:network.mailboxFor(extra._meta?.threadId),
           auditLog:config.auditLog};
       },undefined,()=>({mode:'codex-autojoin',ownerPid:process.pid,agents:network?.status()??[],
-        state:network?'observing':'connecting',frontendPresence:'not inferred; ownership follows loaded native roots'}));
-      socket.write(JSON.stringify({ready:true})+'\n');
+        state:waitingForProxyExitPid!==undefined?'waiting_for_proxy_exit':network?'observing':'connecting',
+        waitingForProxyExitPid,frontendPresence:'not inferred; ownership follows loaded native roots'}), admission !== undefined, measurement?.read);
+      socket.write(JSON.stringify({ready:true,registrationId})+'\n');
       await server.connect(new StdioServerTransport(socket,socket));
       socket.resume();
     })().catch(()=>socket.destroy());
@@ -286,8 +354,9 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
     process.on('uncaughtExceptionMonitor',onCrash);
     scheduleExit();
     networkTask = connectCodexAutojoin({native:config.native,stateDirectory:config.stateDirectory,peers:config.peers,
-      peerPolicy:config.peerPolicy,
+      peerPolicy:config.peerPolicy,mailbox:admission,
       onClosed:()=>{void stop('native_connection_closed').catch(error=>observe({phase:'cleanup_unknown',error:String(error)}));},
+      onProxyExitWait:pid=>{waitingForProxyExitPid=pid;},
       onInventory:observation=>{
         const value=JSON.stringify(observation);
         if(value!==lastInventory){observe({phase:'native_inventory',...observation});lastInventory=value;}
@@ -307,23 +376,21 @@ export async function runCodexMcpOwner(file: string): Promise<void> {
   }
 }
 
-async function dial(port: number): Promise<Socket> {
+async function dial(port: number, signal?: AbortSignal): Promise<Socket> {
   return new Promise((resolve,reject)=>{
-    const socket=connect(port,'127.0.0.1');
+    const socket=connect({port,host:'127.0.0.1',signal});
     socket.once('connect',()=>{socket.removeListener('error',reject);resolve(socket);});
     socket.once('error',reject);
   });
 }
 
-/** A global Codex MCP entry. Startup performs no inference and never infers a
- * thread from cwd/env. Host tool-call _meta is passed through byte for byte.
- */
-export async function runCodexMcp(file: string, entry: string): Promise<void> {
-  const {config,sha256} = readConfig(file);
+async function connectMcpOwner(config: CodexMcpConfig, sha256: string, file: string, entry: string,
+  registrationId?: string, signal?: AbortSignal): Promise<Socket> {
   let socket: Socket;
-  try {socket=await dial(config.endpoint.port);}
+  try {socket=await dial(config.endpoint.port,signal);}
   catch(error) {
     if((error as NodeJS.ErrnoException).code!=='ECONNREFUSED')throw error;
+    signal?.throwIfAborted();
     const end=Date.now()+5000;
     let launchError: unknown;
     if(process.platform==='win32'){
@@ -337,22 +404,44 @@ export async function runCodexMcp(file: string, entry: string): Promise<void> {
       child.on('error',()=>{});child.unref();
     }
     for(;;){
-      try {socket=await dial(config.endpoint.port);break;}
+      try {socket=await dial(config.endpoint.port,signal);break;}
       catch(e){
         if((e as NodeJS.ErrnoException).code!=='ECONNREFUSED' || Date.now()>end)throw launchError??e;
-        await new Promise(resolve=>setTimeout(resolve,50));
+        await delay(50, undefined, {signal});
       }
     }
   }
   socket.on('error',()=>{});
   try {
     const welcome=readHeader(socket);
-    socket.write(JSON.stringify({token:config.endpoint.token,configSha256:sha256})+'\n');
-    if((await timeout(welcome,3000,'Local MCP owner handshake') as {ready?:unknown})?.ready!==true)throw new Error('Invalid local MCP owner');
-    process.stdin.pipe(socket);socket.pipe(process.stdout);socket.resume();
-    await new Promise<void>((resolve,reject)=>{
-      socket.once('close',()=>resolve());socket.once('error',reject);
-      process.stdin.once('end',()=>socket.end());
-    });
-  } finally {socket.destroy();}
+    socket.write(JSON.stringify({token:config.endpoint.token,configSha256:sha256,registrationId})+'\n');
+    const reply = await timeout(welcome,3000,'Local MCP owner handshake') as {ready?:unknown;registrationId?:unknown};
+    if(reply?.ready!==true || reply.registrationId!==registrationId)throw new Error('Invalid local MCP owner or registration');
+    return socket;
+  } catch (error) { socket.destroy(); throw error; }
+}
+
+/** A global Codex MCP entry. Startup performs no inference and never infers a
+ * thread from cwd/env. Host tool-call _meta is passed through byte for byte.
+ */
+export async function runCodexMcp(file: string, entry: string, registrationId?: string): Promise<void> {
+  if (registrationId !== undefined && !identifier(registrationId)) throw new Error('Invalid MCP registration ID');
+  const {config,sha256} = readConfig(file);
+  const connectOwner = (signal?: AbortSignal) => connectMcpOwner(config, sha256, file, entry, registrationId, signal);
+  const first = await connectOwner();
+  await relayCodexMcp(first, async signal => {
+    // A stopping owner can still hold the port while draining its receivers.
+    // Its early EOF precedes the next owner's election.
+    const deadline = performance.now() + 5000;
+    for (;;) {
+      signal.throwIfAborted();
+      try { return await connectOwner(signal); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (performance.now() >= deadline || !(code === 'ECONNRESET' || code === 'EPIPE'
+            || (error instanceof Error && error.message === 'Local bridge closed before authentication'))) throw error;
+        await delay(100, undefined, {signal});
+      }
+    }
+  });
 }

@@ -4,6 +4,20 @@ cd "$(dirname "$0")"
 . ./lib.sh
 CARGO_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 daemon_logs() { tail -40 "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null || true; }
+
+if [[ "${1:-}" == --prepare-tests && "$#" == 1 ]]; then
+  # These four targets use the same package, profile and Cargo feature set.
+  # Schedule their links together, before any CLI subprocess can read scode.
+  # The original Cargo test commands still check freshness and run in order.
+  echo '== [build] prepare the existing CLI integration-test targets =='
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" --locked -q \
+    -p rusty-sudocode-cli --no-run \
+    --test pty_agent_duet --test acp_a2a_receive --test pty_node_record --test acp_integration
+elif [[ "$#" != 0 ]]; then
+  echo "Usage: $0 [--prepare-tests]" >&2
+  exit 2
+fi
+
 echo "== [deterministic] two scode processes, one daemon =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "team-lead")" \

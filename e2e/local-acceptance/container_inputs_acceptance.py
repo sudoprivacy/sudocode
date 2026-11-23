@@ -8,6 +8,7 @@ developer credentials are mounted by this fixture.
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -64,15 +65,19 @@ from pathlib import Path
 expected=json.loads(Path('/evidence/expected.json').read_text())
 image=Path('/fixture-policy').read_text()
 assert image==expected['policy'],f'policy image mismatch: {image} != {expected}'
-actual={label:(Path('/inputs')/label/'marker.txt').read_text()
-        for label in ['candidate','baseline','trusted'] if (Path('/inputs')/label).exists()}
-assert actual==expected['sources'],f'Git snapshot mismatch: {actual} != {expected}'
-assert not any((Path('/inputs')/label/'private-untracked.txt').exists() for label in actual)
 package=json.loads(Path('/context/package.json').read_text())
 assert package['fixturePolicy']==expected['policy'],'image context used another policy'
 spec=importlib.util.spec_from_file_location('actual_profiles','/inputs/runner/.github/local-acceptance/checks.py')
 checks=importlib.util.module_from_spec(spec);spec.loader.exec_module(checks)
-observed={'sources':actual,'image_policy':image}
+inputs=Path('/inputs')
+packed=(inputs/'archives').is_dir()
+assert packed==expected['packed_sources'], 'unexpected rendering transport'
+with checks.rendering_source_inputs(inputs) as frozen:
+    actual={label:(frozen/label/'marker.txt').read_text()
+            for label in ['candidate','baseline','trusted'] if (frozen/label).exists()}
+    assert actual==expected['sources'],f'Git snapshot mismatch: {actual} != {expected}'
+    assert not any((frozen/label/'private-untracked.txt').exists() for label in actual)
+observed={'sources':actual,'image_policy':image,'packed_sources':packed}
 if set(actual)=={'candidate'}:
     for name in ['gui-smoke.py','benchmark.py','gui-policy.json']:
         control=Path('/inputs/runner/e2e/terminal-resize')/name
@@ -82,6 +87,7 @@ if set(actual)=={'candidate'}:
 def workload(name,root,output,base,command,target):
     # Keep the real main(), run(), output creation and command executor. Only
     # replace the expensive product workload; it must use the supplied output.
+    assert (root/'marker.txt').read_text()==actual['candidate'],'command cwd lost the frozen candidate'
     binary=output/'scode-candidate'
     reused=checks.verified_candidate_release(Path('/inputs')) if name=='browser' else None
     shutil.copy2(reused or sys.executable,binary)
@@ -126,8 +132,11 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
                 f'LABEL scode.container-input-fixture="{token}"\n'
                 f'RUN python3 -c "from pathlib import Path; Path(\'/fixture-policy\').write_text(\'{label}\')"\n'
                 'COPY e2e/terminal-resize/package*.json /context/\n'
-                'ENTRYPOINT ["python3","/inputs/candidate/probe.py"]\n',
-            "e2e/terminal-resize/package.json": json.dumps({"name": "container-input-fixture", "fixturePolicy": label}),
+                'RUN python3 -c "import json; from pathlib import Path; '
+                'Path(\'/probe.py\').write_text(json.loads(Path(\'/context/package.json\').read_text())[\'fixtureProbe\'])"\n'
+                'ENTRYPOINT ["python3","/probe.py"]\n',
+            "e2e/terminal-resize/package.json": json.dumps({"name": "container-input-fixture", "fixturePolicy": label,
+                                                           "fixtureProbe": probe}),
             "e2e/terminal-resize/package-lock.json": '{"lockfileVersion":3}',
             "e2e/terminal-resize/performance-policy.json": json.dumps({"baseline_commit": baseline}),
             **{f"e2e/terminal-resize/{name}": label
@@ -156,10 +165,12 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", lease])
     execute(["docker", "volume", "create", "--label", f"scode.container-input-fixture={token}", cache])
 
-    def launch(name, policy_ref, expected, *, swap_image=None, profile="rendering", parent=output):
+    def launch(name, policy_ref, expected, *, swap_image=None, profile="rendering", parent=output,
+               corrupt_archive=False):
         evidence = parent / name
         evidence.mkdir(parents=True)
-        (evidence / "expected.json").write_text(json.dumps(expected))
+        packed = profile == "rendering" and os.name == "nt"
+        (evidence / "expected.json").write_text(json.dumps({**expected, "packed_sources": packed}))
 
         def execute_profile(arguments, cwd, log, environment=None):
             if list(arguments[:2]) == ["docker", "run"]:
@@ -168,6 +179,9 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
                 # Docker operations, so stage the actual executor it delegates to.
                 shutil.copyfile(SOURCE / ".github/scripts/local_acceptance.py",
                                 evidence / "inputs/runner/.github/scripts/local_acceptance.py")
+                if corrupt_archive:
+                    with (evidence / "inputs/archives/candidate.tar").open("ab") as archive:
+                        archive.write(b"unexpected archive bytes")
             execute(arguments, cwd=cwd, extra=environment, log=log)
             if list(arguments[:2]) == ["docker", "build"]:
                 tag = arguments[arguments.index("--tag") + 1]
@@ -279,7 +293,21 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
             print("PASS: wrong-policy container rejected by the real input probe", flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
-        result = {"status": "PASS", "cases": 8,
+        if os.name == "nt":
+            try:
+                launch("negative-modified-rendering-archive", protected, {"policy": "main-policy", "sources": {
+                    "candidate": "next-candidate", "baseline": "baseline", "trusted": "main-policy"}},
+                    corrupt_archive=True)
+            except RuntimeError:
+                errors = [Path(row["log"]).read_text(errors="replace") for row in commands
+                          if docker_operation(row, "run")]
+                assert "Rendering archive digest mismatch" in errors[-1], errors[-1]
+                assert not (output / "negative-modified-rendering-archive/container/rendering/scode-candidate").exists()
+                print("PASS: changed archive bytes are refused before the native workload", flush=True)
+            else:
+                raise AssertionError("A changed Windows rendering archive was used")
+        result = {"status": "PASS", "cases": 9 if os.name == "nt" else 8,
+            "windows_packed_archive_corruption_refused": os.name == "nt",
             "production_main_and_dispatcher_layout": True, "browser_candidate_only": True,
             "runner_gui_harness_uses_frozen_policy": True,
             "same_invocation_image_and_release_reused": True, "changed_release_refused_before_container": True,

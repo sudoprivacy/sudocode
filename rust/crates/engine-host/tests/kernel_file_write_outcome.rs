@@ -38,7 +38,13 @@ fn a_write_tool_cannot_report_success_when_no_mount_handled_the_write() {
     let fs = agent_backend(&kernel, "owner", "root", "agent", "/proc/p1/workspace");
     let error = write_file(&fs, "missing/proof.txt", "must not disappear")
         .expect_err("an unhandled kernel write must fail the tool");
-    assert!(error.to_string().contains("Nexus did not write"));
+    assert!(
+        matches!(
+            error.get_ref().and_then(|cause| cause.downcast_ref::<kernel::kernel::KernelError>()),
+            Some(kernel::kernel::KernelError::IOError(reason)) if reason.contains("missing/proof.txt")
+        ),
+        "{error:?}"
+    );
     assert!(fs.read("missing/proof.txt").is_err());
     assert!(fs
         .append("missing/proof.txt", b"must not disappear")

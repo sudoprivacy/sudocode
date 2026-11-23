@@ -35,9 +35,17 @@ def fixture_inventory(repository, output, args):
         "--output", str(output / "github-asset-credentials"),
     ], SOURCE, output / "github-asset-credentials.log")
     fixture([
+        sys.executable, str(SOURCE / "e2e/shared-services/grpcurl_process_acceptance.py"),
+        "--output", str(output / "grpcurl-process"),
+    ], SOURCE, output / "grpcurl-process.log")
+    fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/parallel_acceptance.py"),
         "--output", str(output / "parallel-acceptance"),
     ], SOURCE, output / "parallel-acceptance.log")
+    fixture([
+        sys.executable, str(SOURCE / "e2e/local-acceptance/deferred_push_acceptance.py"),
+        "--output", str(output / "deferred-push"),
+    ], SOURCE, output / "deferred-push.log")
     fixture([
         sys.executable, str(SOURCE / "e2e/local-acceptance/docker_health_acceptance.py"),
         "--output", str(output / "docker-health"),
@@ -91,8 +99,8 @@ def fixture_inventory(repository, output, args):
     ], SOURCE, output / "native-lint.log")
     protocol = [row for row in fixtures if Path(row["command"][1]).name == "parallel_acceptance.py"]
     native = [row for row in fixtures if row not in protocol]
-    if len(protocol) != 1 or len(native) != 14:
-        raise RuntimeError(f"Native guard inventory requires 1 protocol and 14 native fixtures; "
+    if len(protocol) != 1 or len(native) != 16:
+        raise RuntimeError(f"Native guard inventory requires 1 protocol and 16 native fixtures; "
                            f"found {len(protocol)} protocol and {len(native)} native. "
                            "Reconcile the fixture list and required counts, then rerun the same acceptance command. "
                            "Full guard execution remains required.")

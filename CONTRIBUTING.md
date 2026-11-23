@@ -224,6 +224,27 @@ time. The required command prints this split. A real Git/Cargo/native-process
 guard verifies feature compilation, dev execution and refusal of a missing stamp;
 it adds no product journey coverage.
 
+A follow-up push to a branch whose single open PR is ready for review does not
+wait for those checks. The hook publishes the head's signed execution plan, lets
+the push through, and runs the same checks in the background in the branch's
+own worktree under `~/.nexus/local-acceptance/deferred/`, so the author's
+checkout stays free. `LOCAL_ACCEPTANCE_DEFERRED` prints the log path. A newer
+head stops the check for the older one. The required `Local acceptance` status
+stays pending, and merge stays blocked, until that check publishes its signed
+receipt and requests trusted finalization. A first push, a draft PR, a branch
+without complementary native hosts and `SCODE_ACCEPTANCE_PUSH=blocking` keep
+verifying before the push. A background check records its outcome beside its
+log; the next push to that branch and `doctor` report one that failed, ended
+without a result or could not request finalization.
+`python .github/scripts/local_acceptance.py doctor` lists this host's
+prerequisites (Python modules, the signing key's sign/verify round trip, gh,
+PowerShell 7, the MSVC toolchain, the compiler cache and each shared compiler
+store's size and last write, and Docker) with the fix for each; it grants no
+acceptance. The checks themselves
+also verify the MSVC toolchain and Docker before joining the host queue, and a
+compiler-cache server that does not answer a probe compile within 2 minutes is
+replaced by plain Cargo for that run.
+
 The queue separates CLI daemon journeys from co-host/search acceptance. CLI
 source changes retain the real pinned daemon, cross-node CLI and authenticated
 sender journeys. The independent co-host duet, VFS search owner/restart and
@@ -308,6 +329,15 @@ results; the outer harness still closes its private daemon. Daemon
 restart and SIGSTOP stay serial, outside the batch. Real native control
 processes verify overlap, failure and missing/non-ignored-case refusal;
 they add no product coverage. The same seven real daemon cases still run in CI.
+The Linux A2A queue can start the original managed CLI and mock-service bin
+build after the serial CLI lane completes, while the previously prepared fault
+tests run. Both lanes keep the original four-worker allocation. The early step
+only builds binaries. After the join and post-join daemon checks, the original
+managed command verifies freshness with Cargo and runs all managed tests on its
+private daemon. Custom runs keep the original schedule unless explicitly opted
+in. The command artifact records the early build and the CI log marks the later
+freshness check. Compare both timings and the full queue job before crediting a
+saving.
 Changes confined to the A2A shell/Python harness leave the native Rust workspace
 unchanged. They skip its Cargo/PTY product reruns on the author and complementary
 hosts; the Linux queue still executes the changed real-daemon harness. Author
@@ -325,27 +355,83 @@ only that revision and retains every compiler/environment binding. Before
 switching a restored source pin, the helper verifies its old Git tree and saved
 compiler identity, fetches the required revision with checkout hooks disabled,
 cleans old workspace outputs, and verifies the new Git tree. Registry and Git
-dependency artifacts remain available to normal Cargo. An old producer's exact
-current-pin key is recognized for the one-time cache format migration; unrelated
-legacy keys are excluded. A missing main key restores compatible inputs before
+dependency artifacts remain available to normal Cargo. The functional compiler recipe excludes optimized-profile legacy keys. Its
+compatible prefix retains the complete functional/profile/crypto binding; an
+unbound nonempty target is refused before compilation. A missing main key restores compatible inputs before
 prewarming, even when the initial lookup did not download a cache.
 The required interface reports the actual restored key. Refusal messages identify
 that key for recovery rather than telling an agent to delete a missing new key.
 Source bytes are checked against the pinned Git tree before use, including same-mtime edits
 and unexpected files. Every invocation still asks Cargo to build normally and
 runs the original search authorization/restart case against the current
-checkout's co-host, outside this cache. The fixed driver and plugin retain their
-original optimization profiles. Cache hits never substitute a previous test
-result. The required command prints builds and stores timings and failure logs.
+checkout's co-host, outside this cache. The fixed driver and plugin use one
+private Cargo-home configuration for both outer test and nested dev builds:
+workspace/dependency optimization 0, debug 0, incremental disabled, debug
+assertions and overflow checks enabled. This configuration is composed from
+`.github/actions/vfs-search-cache/functional.toml` and the existing host crypto
+package overrides. Both dev/test variants retain crypto optimization 2 for
+signing the complete plugin file. The configuration bytes and source hashes bind
+the compiler key. Linked, legacy or changed cached Cargo configurations refuse
+before metadata/build execution; global/user Cargo settings are untouched.
+The candidate cohost and all release/performance profiles retain their original
+settings, and the original search case, assertions and 90s bounds remain.
+This ordinary journey no longer checks optimized fixed-driver/plugin artifacts.
+It supplies no replacement proof for optimization-specific driver/plugin behavior;
+the existing release/performance gates are unchanged.
+Cache hits never substitute a previous test result. The required command prints builds and stores timings and failure logs.
 The main publisher alone performs explicit prewarming. Consumers invoke normal
 `cargo test`, which compiles its driver and runs the original case's plugin build.
+The same main publisher can instead retain compiler inputs from the newest
+successful current attempt of its exact accepted merge-group head. The original
+co-host/search/feature steps and uploads must all succeed; source hashes, original
+Cargo command/log, artifact digest and bounded archive inventory are checked.
+The producer's complete original key, including `ImageVersion`, is retained.
+Transferring that archive across runner images does not authorize compiling or
+executing it on the publishing image. The publisher only verifies/stores it;
+future consumers still require their own exact compiler context and real journey.
+An exact warm queue key exports only small identity data; a missing key exports
+the compiler archive. Cache-infrastructure changes also exercise the data path.
+Absent older exports retain the existing main prewarm fallback. A present corrupt,
+foreign, stale-attempt or mismatched export refuses instead of masking the error.
+Only this existing main workflow saves the cache; no second cache writer, compiler
+image alias, acceptance signer or cached test-result authority is introduced.
+Changes to the main Rust CI workflow select this publisher as well. The
+accepted merge-group run still supplies the artifact and its original key.
+An accepted queue on image `20261111.82.6` later published under its own key
+from main image `20261111.196.1`. Main verified the original archive and skipped
+the fallback compile. Subsequent consumers still require their own exact
+image and compiler inputs.
+[Original publication job](https://github.com/sudoprivacy/sudocode/actions/runs/44463895201/job/135356918179).
+Archive transfer/storage costs and a subsequent matching-image consumer must be
+measured before claiming warm savings; local fixture success alone is insufficient.
+PR #1497 supplied actual hosted publication after its full native/Docker contract
+and original queue journeys passed. Main verified the accepted producer data,
+skipped prewarming, and saved a persistent 773,897,615-byte cache under the
+unchanged producer key. Both actual images were `20261111.196.1`; this run
+qualifies publication under the matching image only. The linked
+39 job records, including unallocated skips, total 33.600 known hosted
+runner-minutes; local failures and interruptions are retained separately. See
+[the original source/publication/cost records](docs/ci-vfs-queue-publication-20261118.json).
+These engineering costs are not recurring savings or proof of the lifecycle
+one-tenth target.
+
+PR #1496's actual merge queue restored that exact main cache key on image
+`20261111.196.1` and ran the same VFS search and restart case against its
+newly built co-host. The command elapsed time was 17.598s versus the previous
+cold 193.735s (9.08%). The warm run passed one case and filtered 21. Its queue
+exported only identity metadata, and the following main publisher found the
+existing exact key and skipped the archive download, import and save. Different
+runner instances and co-host revisions limit the timing comparison to those
+two observed commands. The queue job, PR lifecycle and cross-image behavior
+need their own measurements.
 The required job refuses a redundant pre-test build directory; this avoids extra
 switches between the plugin's semantic and default-off dependency variants.
 Outer builds use the cluster package metadata that Cargo supplies to the test's
 nested plugin build. This prevents native dependencies such as ring from
 rebuilding solely because inherited Cargo package variables flip between unset
 and test values. Each build script still receives its own package metadata;
-compiler flags and optimization profiles remain unchanged.
+both Cargo variants use that selected functional configuration and keep their
+original command arguments.
 Real Git/Cargo/tar/native fixtures cover restore, changed inputs and wrong-runtime
 refusal; they add no product journey credit. The actual cache footprint and
 cold/warm product timings must be measured before claiming a lifecycle saving.
@@ -484,6 +570,29 @@ The later service journey uses that exact resolved file and verifies its bytes
 again; both original service journeys still run. Real Bash/curl proxy-504,
 invalid-executable, offline-cache and unselected-profile controls protect this
 ordering. These are infrastructure checks and add no product journey credit.
+
+Existing-Box polling retains the full original grpcurl stderr before classifying
+its result. Process exit 2 stops immediately as `GrpcurlProcessError`, even when
+stderr begins with an RPC-looking message or stdout contains successful JSON.
+The pinned client's RPC status codes use an offset of 64, so remote Unknown is
+66 and remains distinct. Existing transport, RPC-status, malformed-JSON and typed
+VFS retry behavior, the 5s client timeout and 30s predicate deadline stay unchanged.
+Both required contract-guard hosts run a real synthetic-process regression with
+the original response body as a negative control. This prevents retrying a failed
+client to a later success; it neither diagnoses nor fixes the retained Windows
+Go runtime crash, replaces the pinned client, nor establishes a lifecycle saving.
+
+The contract image prepares the VFS fixture's independently pinned Rust
+toolchain in a reusable Docker build layer. The version comes from the
+protected VFS cache helper. The image checks the compiler and Cargo offline
+before any fixture uses them. The first build still downloads the toolchain.
+Report warm image results separately from the initial preparation.
+
+The native guard can install both pinned terminal executables from the existing
+checksum-verified archive. The isolated Git/SSH/HTTP protocol cases create
+their own home and lease without seeding compiler and terminal tools they never
+invoke. The full native and Docker executions, command logs and checks remain
+required.
 
 Contract validation requires the Docker Engine version API to answer within
 30 seconds before container/native checks start. Its required output names the
@@ -663,8 +772,10 @@ preflight checks actual conflicts against its supplied base and fetched
 paths and recovery step without changing the checkout or index. Clean branches
 may stay behind main. Preflight stages the exact hash-pinned checker from its
 protected policy, so an older author branch does not need a source update to
-receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture stays required
-in CI preflight; editing it alone skips unrelated native product builds.
+receive these diagnostics. The Git-only `e2e/pr-history/run.py` fixture remains
+required when its reviewed inputs change or a full manual CI run is requested;
+editing it alone skips unrelated native product builds. The actual PR history
+check and protected integrated-history gate stay required.
 Development-only Cargo manifest/lock changes do not select normal release,
 service, co-host or daemon builds. The shared selector reads committed Git/TOML:
 resolver 2 and normal workspace settings must stay unchanged. For the standard
@@ -953,6 +1064,14 @@ macOS process-name fallback failure. One compiler worker, lowered compiler prior
 Normal test priority, commands and budgets remain unchanged; protected equivalence
 pins retain successful earlier evidence for those unchanged commands. The new native
 guard always needs its own actual run, including a refused process-name query.
+The CI lint fixture also records the real compiler child's OS priority immediately
+after spawning it and before collecting its exit status. This private Cargo wrapper
+preserves the original compiler arguments, streams and exit code. It keeps the
+priority assertion meaningful for compiler processes shorter than the polling
+interval; real short-process controls run on both hosts and Linux retains an
+actual wrong-priority control. Windows never raises a compiler above its existing
+host supervisor's enforced priority to manufacture that control. No
+production compiler wrapper, lint case or deadline is changed.
 On a Windows box with unregistered Build Tools, set
 `git config localAcceptance.vsdevcmd C:/path/to/Common7/Tools/VsDevCmd.bat`;
 otherwise the runner discovers Visual Studio or uses the existing Developer shell.
@@ -991,9 +1110,15 @@ the original receipt, signature and logs remain in their output directory. The
 required command prints `LOCAL_ACCEPTANCE_OUTPUT_INDEX` with both paths. These
 references only locate evidence: reuse still verifies its signature, source,
 host, protected commands and original log hashes. Invalid references cannot
-approve checks. An index write failure prints
+approve checks. If a newer locator exposes only part of an exact-source run,
+automatic discovery can select an older receipt whose verified compatible
+profiles contain all of those checks plus additional required profiles. The
+original explicit resume path still takes priority. An index write failure prints
 `LOCAL_ACCEPTANCE_OUTPUT_INDEX_UNAVAILABLE` and preserves signed progress for
 explicit `check --resume-from /path/to/output` recovery.
+When the original check knows the PR, its printed resume command retains
+`--dispatch-publish <PR>` so the trusted publisher can finish the existing
+native CI run after the author receipt is published.
 Older external outputs can be discovered without rerunning or re-signing them:
 
 ```bash
@@ -1146,7 +1271,29 @@ the combined Git history. No unique product test is removed by this consolidatio
 After merge, main reuses those completed integrity checks and does not start
 another Rust CI preflight. Independent cache/package publishers retain their
 own main-push triggers. PR, queue, legacy development-branch pushes and explicit
-runs retain the full preflight; no product assertion is removed.
+runs retain all actual current-source checks; no product assertion is removed.
+
+Independent policy self-tests now have explicit source selection. Only ordinary
+Rust production `.rs` files under a crate/vendor `src/`, registered root docs and
+Markdown/HTML/JSON under `docs/` can omit their replay. The selector requires a
+clean workflow checkout, its actual declared Git identity and exact reviewed Git
+blob/mode identities for all 23 self-test programs, first-party dependencies,
+workflow/toolchain and checkout-layout inputs. It checks the running combined
+workflow tree, not merely the PR head. Changed/deleted/linked inputs, tests,
+configuration, infrastructure, unknown layouts, empty/unknown history and any
+unreviewed fixture version retain the entire original self-test group. Manual
+CI runs retain it too. A registry refresh itself selects full execution.
+
+The original history/boundary/pin/format/schema checks still inspect every
+current source; the canonical pin check precedes the self-test group so bad
+input fails before repeated fixture work. This deliberately reduces per-PR
+self-test coverage of unchanged infrastructure. A change in the hosted runtime
+outside committed inputs may first surface in an infrastructure/manual run.
+Omission is reported as omitted, never as a cached test pass or product coverage.
+The original seven command bodies, assertions, deadlines and native/provider
+selection remain. Observed original self-test step totals of roughly 13-19s are
+not a controlled saving or proof of the whole-lifecycle one-tenth target.
+
 Signature verification and status publication use Windows runners, with an
 explicit Python interpreter, to avoid two extra admissions to the busy Linux
 pool. This metadata placement does not replace native Linux or macOS tests.
@@ -1362,6 +1509,16 @@ permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
 controls verify both completion orders, unchanged notes/logs and native jobs
 executed once. A scheduling plan still cannot satisfy completed acceptance.
+
+Two reviewed changes to the native dependency cache can retain an older signed
+plan. The verifier recognizes the trusted toolchain cache command and the
+complete checkout move from `candidate` to `worktree`. This makes the raw Cargo
+configuration sort after the root toolchain pin, matching the publisher's
+cache input order. The verifier binds the committed toolchain action, adapter,
+and cache layout script and compares every other workflow byte. It refuses a
+partial checkout move, other workflow edits, or changes to these scripts. The
+original tests, signers, complementary jobs and deadlines remain required.
+A plan still cannot satisfy completed acceptance.
 
 Compiler-budget or command-completion waiting changes can preserve an older signed execution plan and its
 completed native profiles. The verifier derives this proof from both committed
@@ -1670,6 +1827,13 @@ Credentials are only needed when invoking a live model; the build,
 tests, and lints run without them.
 
 ## Rust toolchain
+
+The shared dependency cache warms dev/test inputs on automatic main pushes on
+the existing Linux, Windows and macOS hosts. A cache-only manual dispatch on a
+missing key also warms optimized release dependencies. Tags retain their
+original release builds and acceptance. For a nested native complement, the
+cache layout mirrors the candidate's exact root toolchain file into the action's
+outer workspace. An existing mismatched file refuses before cache use.
 
 `rust-toolchain.toml` pins one exact Rust release with `clippy` and
 `rustfmt`. Local builds, every CI job and both local acceptance images

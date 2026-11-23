@@ -2,7 +2,7 @@
 //! stop renewing without dying.
 //!
 //! A killed holder releases its lock; a frozen one keeps it while doing no
-//! work, which is the harder case the reader-lease handoff has to survive: a
+//! work, which is the harder case the receiver-seat handoff has to survive: a
 //! laptop asleep, a paused VM, a debugger break, a `SIGSTOP`. The two platforms
 //! reach that state differently -- Unix sends `SIGSTOP`/`SIGCONT`, Windows asks
 //! ntdll to suspend every thread -- but both stop at the same observable point:

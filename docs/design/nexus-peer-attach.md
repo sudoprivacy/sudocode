@@ -58,9 +58,48 @@ node binding even when configuration or credentials cannot yet be loaded:
 Failures retain their specific cause in status and tool results. A malformed
 record, unsupported version, invalid endpoint/directory, missing bundle or
 identity mismatch leaves the selected node unavailable rather than stopping an
-ordinary standalone session or selecting disk. Credentials are minted by the
-node owner; `scode` never mints one. An explicitly Nexus-mounted model still
-needs that node's authenticated filesystem.
+ordinary standalone session or selecting disk. An explicitly Nexus-mounted
+model still needs that node's authenticated filesystem.
+
+Credentials are issued by the node owner; `scode` holds no CA or signing key.
+When the user selected shared mode and this OS user owns the registered local
+Box named by the record, an interactive or ACP session asks that Box to issue
+its own Agent the first time it attaches without a credential. The session
+starts pending and the issuance runs in the background; its tools and receiver
+pick the credential up when it lands. It runs the Box's pinned Node executable,
+whose online `auth mint` goes to the Box's loopback listener under an owner
+lock and never uses `--allow-existing`. Only the name derived from the
+workspace's own path joins, automatically or through `scode setup --mode
+shared`; a configured `agentName`, including one inherited from the user's
+settings, and a directory whose settings are the user's own (the home
+directory by default) are never claimed by scode. A name already
+claimed elsewhere is refused by Nexus, which then writes nothing. While an
+issuance runs, a `.joining-<name>` marker beside the bundle keeps every session
+from using it; sessions check it after reading the bundle and again before
+dialling. The credential is accepted with the Node's online receipt and a
+manifest naming that Agent; an explicit offline signature is never kept. An
+issuance that cannot confirm itself (it timed out, its receipt was unfamiliar,
+or its session quit first and left the marker) is settled by the Node's own
+`auth list`. A listed Agent is kept only if its bundle is this Box's own
+credential for it, issued during that issuance: the Box's CA, a certificate
+for `nexus://agent/<name>` and a key. A listed Agent without one is set aside,
+and only the node owner can issue the name again (`auth mint --allow-existing`;
+revoking never frees a name). An unlisted one is set aside and issued again.
+Set aside means moved to `.unconfirmed-<name>-<time>`, or, if it cannot be
+moved, left blocked by the marker; it is never used. While the Node cannot be
+asked, the bundle stays unused. A fresh leftover marker first gets the
+issuance's own time bound, in case the Node child of a session that quit is
+still writing.
+Any other node, a stopped Box or a refusal leaves the binding pending with that
+cause, the outcome of the join, and the recovery.
+
+Shared mode is the owner's one consent for every workspace. A verified sender
+on this Node therefore means "a session of the Node owner's OS user", not an
+Agent the owner admitted individually: a freshly cloned repository's session
+is verified as that workspace's own Agent too. Peers treat message contents as
+untrusted data either way. Each workspace keeps its identity on the Node;
+retiring one is the node owner's `auth revoke --agent` operation, which leaves
+the name taken.
 
 Namespace selection, including the pending binding, is cached per Agent for the
 process lifetime. Tools and receiver therefore cannot select different stores.
@@ -91,7 +130,7 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
 - **One receiver per agent.** A receiver tails nothing until it holds its agent's receiver seat, `agents/<name>/receiver.lock`, taken with `FsBackend::try_lock` on the same backend as the conversations.
   - Until then it stands by and retries once per discovery interval, so a second instance of the agent takes over when the first stops, resuming at the read position.
   - Losing the seat stops every tail before the receiver stands by again.
-  - Each conversation's reader seat stays as the guard on that conversation's read position, so a tail finishing a delivery while the agent seat changes hands can't be read twice.
+  - The seat is the receiver's only lease: every tail reads and commits under it, so an agent costs one renewal however many conversations it tails. Each conversation's register is fenced by its own conditional write, so a previous holder can't move a read position back. A batch in delivery while the seat changes hands is delivered again by the new holder.
   - On the node the seat is unique only within one machine until nexus routes locks by zone (N1).
   - `/status` and ACP's `_meta.sudocode.peer` report the agent, its namespace and whether this process is receiving, standing by, or running no receiver.
   - An ACP process runs one receiver per agent it serves, on the mailbox that agent's tools send through: the hosted agent's, else the namespace the session attached to, which is the pair root when the machine has no node. A message goes to a session of the agent it was sent to, rebinding to another session of that agent if the first closes; the receiver stops, freeing the seat, once no session of the agent is left.
@@ -127,7 +166,7 @@ same path on every alias and device.
 
 ### Claim and commit
 
-1. Acquire the existing conversation reader lock and read its committed record
+1. Under the Agent's receiver seat, read the conversation's committed record
    and opaque version together.
 2. Conditionally claim that same record with the next epoch, a fresh claim
    identity and the unchanged position. A verified committed claim permits
@@ -154,7 +193,7 @@ governs accepted messages and their side effects.
 A one-time, explicit operation per machine:
 
 1. **Version gate.** Refuse while older `scode` processes are running.
-2. **Fence.** Take the leaf fence lock on the disk root, then try-lock every reader `.lock` under it. If any is held, refuse; never move a held lock file.
+2. **Fence.** Take the leaf fence lock on the disk root, then try-lock every Agent's `receiver.lock` under it. If any is held, refuse; never move a held lock file.
 3. **Record the fact.** Write the durable "node enabled" fact.
 4. **Archive.** Move the disk root aside read-only and leave a placeholder file at its path, so an un-upgraded binary fails loudly instead of writing to a namespace nobody reads.
 5. **Drain.** A node-mode session drains its archived disk inbox once, within a bound, at-least-once. Unread messages are reported. Undelivered messages are never classified as abandoned.

@@ -53,11 +53,26 @@ real output, policy, approvals, actor audit and conservative Unknown semantics.
 Ownership follows **loaded native root runtimes**, including work that outlives
 a frontend. This does not establish whether a TUI window is currently visible.
 An unloaded root closes its owned scode; loading it again uses the saved profile.
-When the native proxy exits, all of this owner's scode connections close. After
-the last MCP connection closes, the shared owner refreshes inventory and exits
+After a native transport loss the owner retains each receiver and its ACP SID.
+It reconnects to the configured server after the old proxy and its stdio have
+closed. If cleanup exceeds the termination grace period, `scode_status`
+reports `waiting_for_proxy_exit` with the old PID. Calls refused while waiting
+are `not_sent`; an RPC already in flight retains its unknown outcome.
+On Windows each proxy starts in a private Job. Recovery requires confirmation
+that the Job has no live processes. Owner shutdown joins the same cleanup.
+
+After the last MCP connection closes, the shared owner refreshes inventory and exits
 only when no qualified root remains. Unavailable inventory keeps the owner
 alive and tools unavailable; it does not establish that roots have exited.
 It never stops the native server or the Nexus Node.
+
+Each native frontend keeps its stdio MCP client across an owner restart. The
+client authenticates a replacement against the original configuration and
+registration, repeats MCP initialization, and checks the negotiated response
+before forwarding new calls. A call that lost its response reports `unknown`.
+Requests refused before forwarding report `not_submitted`. A changed handshake
+(including a connection-specific presentation capability) requires fresh
+frontend initialization. Closing the frontend cancels a pending reconnection.
 
 On Windows, the owner is launched by a prepared current-user on-demand Task
 Scheduler action. Actual native 0.163.0 field evidence showed the old detached
@@ -281,6 +296,14 @@ status distinguish attachment from directory visibility; an unavailable native
 inventory prevents tool admission. Callback errors remain pending/Unknown and
 are not automatically replayed.
 
+After the configured enrollment operator completes the original claim, run
+`--recover-codex-binding THREAD_ID --config GLOBAL_FILE` with the shared
+owner stopped. Recovery holds the owner's exclusive endpoint while it checks
+the saved claim, workspace mapping, actor settings, profile and ACP session
+and publishes the ready binding. Missing records or conflicting frozen
+fields leave the binding in its prior state. Running it again verifies the
+ready binding without issuing credentials or starting ACP.
+
 For an existing fixed-session Agent, prepare a private mapping document with
 exactly `threadId`, `workspace` (native cwd), `actor`, `configFile` (existing ACP
 profile), and `acpSessionId` (original SID). Run the common package's
@@ -316,15 +339,15 @@ queue. On unload or owner exit, it drains an ACK already in flight before
 closing its ACP child. Legacy v2 inboxes remain immutable, with cutover outcomes
 in a separate hash-only ledger after the old owner has exited.
 
-Production admission must bind both encoded queue-submission and MCP-result
-limits to the actual native executable and effective loaded-thread settings,
-and recheck that evidence on every call. A fixture callback returning true is
-not admission. This path has no runtime JSON or installer enable switch; the
-existing installer still requires its durable queue capability. In an isolated
-Codex 0.169.0 process, `config/read` reported the disk's 4096-token limit while a
-loaded root retained a temporary 64-token limit and truncated a tool result.
-That API and the thread-specific MCP catalog do not establish the effective
-limit. A production qualification provider remains outstanding.
+Runtime JSON `peerInputVersion: 3` selects this path (initializer flag
+`--peer-input-version 3`, with `--peer-policy node-namespace`); 2, the default,
+keeps the durable callback. The owner then admits each thread with
+`codexMailboxAdmission`: one 8192-byte bound for MCP results and queue
+submissions, and a check that the thread's actual server answers its mailbox
+methods, as [Native admission](peer-mailbox-delivery.md#native-admission)
+describes. This path uses the stock app-server queue, so its installer
+preflight connects to the server without requiring durableQueueAddOnce and
+reports `checkedAt: "attach"`.
 
 The [native mailbox fixture](../../sdk/typescript/README.md#native-mailbox-presentation-fixture)
 records actual PTY, native and scode evidence using a deterministic loopback

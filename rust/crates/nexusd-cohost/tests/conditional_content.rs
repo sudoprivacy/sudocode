@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use lib::transport_primitives::{user_runtime_server_name, AgentCredential, LoadedCredential};
 use nexus_raft::transport::{
-    generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
+    generate_crl, generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
 };
 use nexus_vfs_client::{ConditionalContentResult, NexusVfsClient};
 
@@ -39,6 +39,8 @@ impl Daemon {
                     "--credential",
                 ])
                 .arg(root.join("server"))
+                .arg("--crl-file")
+                .arg(root.join("crl.pem"))
                 .arg("--backend-config")
                 .arg(root.join("backends.json"))
                 .env("RUST_LOG", "info")
@@ -93,25 +95,27 @@ fn client(port: u16, credential: &LoadedCredential) -> NexusVfsClient {
     .unwrap()
 }
 
+fn provision_credentials(root: &Path) -> [LoadedCredential; 2] {
+    let (ca, ca_key) = generate_zone_ca("root").unwrap();
+    std::fs::write(
+        root.join("crl.pem"),
+        generate_crl(&[], 1, &ca, &ca_key).unwrap(),
+    )
+    .unwrap();
+    let (cert, key) =
+        generate_user_runtime_cert("runtime-alice", "alice", 300, &ca, &ca_key).unwrap();
+    bundle(&root.join("server"), "runtime-alice", &ca, &cert, &key);
+    ["alice", "bob"].map(|owner| {
+        let actor = format!("client-{owner}");
+        let (cert, key) = generate_session_agent_cert(&actor, owner, 300, &ca, &ca_key).unwrap();
+        bundle(&root.join(owner), &actor, &ca, &cert, &key)
+    })
+}
+
 #[test]
 fn owner_cas_survives_restart_and_rejects_stale_and_other_owner_writers() {
     let root = tempfile::tempdir().unwrap();
-    let (ca, ca_key) = generate_zone_ca("root").unwrap();
-    let (cert, key) =
-        generate_user_runtime_cert("runtime-alice", "alice", 300, &ca, &ca_key).unwrap();
-    bundle(
-        &root.path().join("server"),
-        "runtime-alice",
-        &ca,
-        &cert,
-        &key,
-    );
-    let mut identities = Vec::new();
-    for owner in ["alice", "bob"] {
-        let actor = format!("client-{owner}");
-        let (cert, key) = generate_session_agent_cert(&actor, owner, 300, &ca, &ca_key).unwrap();
-        identities.push(bundle(&root.path().join(owner), &actor, &ca, &cert, &key));
-    }
+    let [owner_credential, outsider_credential] = provision_credentials(root.path());
     std::fs::write(
         root.path().join("backends.json"),
         serde_json::to_vec(&serde_json::json!({"mounts": [{
@@ -126,7 +130,7 @@ fn owner_cas_survives_restart_and_rejects_stale_and_other_owner_writers() {
     drop(listener);
 
     let daemon = Daemon::start(root.path(), port);
-    let owner = Arc::new(client(port, &identities[0]));
+    let owner = Arc::new(client(port, &owner_credential));
     assert!(owner.read_versioned(REGISTER, "").unwrap().is_none());
     let ConditionalContentResult::Committed { version } =
         owner.write_if_version(REGISTER, None, b"", "").unwrap()
@@ -177,7 +181,7 @@ fn owner_cas_survives_restart_and_rejects_stale_and_other_owner_writers() {
     drop(daemon);
 
     let _daemon = Daemon::start(root.path(), port);
-    let owner = client(port, &identities[0]);
+    let owner = client(port, &owner_credential);
     let restored = owner.read_versioned(REGISTER, "").unwrap().unwrap();
     assert_eq!(restored.content, committed.content);
     assert_eq!(restored.version, committed.version);
@@ -187,7 +191,7 @@ fn owner_cas_survives_restart_and_rejects_stale_and_other_owner_writers() {
             .unwrap(),
         ConditionalContentResult::Conflict { .. }
     ));
-    let outsider = client(port, &identities[1]);
+    let outsider = client(port, &outsider_credential);
     assert!(outsider.read_versioned(REGISTER, "").is_err());
     assert!(outsider
         .write_if_version(REGISTER, Some(&restored.version), b"forbidden", "")

@@ -13,6 +13,7 @@ mod code_theme;
 mod color_math;
 mod color_theme;
 pub(crate) mod diff_colors;
+pub(crate) mod grapheme_probe;
 mod hyperlink;
 pub(crate) mod layout_policy;
 pub(crate) mod left_frame;
@@ -364,7 +365,6 @@ impl SpinnerHandle {
                             token_budget,
                         },
                         query_terminal_width(),
-                        text_layout::ColumnMetric::Terminal,
                         progress.is_stalled(thinking),
                     );
                     frame_index += 1;

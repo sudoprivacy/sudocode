@@ -44,11 +44,14 @@ use serde::{Deserialize, Serialize};
 /// cursor for a whole batch, so a batch it could not finish is read again and
 /// its frames arrive a second time, byte-identical to ones already answered.
 /// Left unsaid, a receiver treats every arrival as new — observed live, where a
-/// single re-read marker drew three replies. The decision stays with the model
-/// rather than becoming suppression in the poller: knowing what it had already
-/// forwarded would need a second durable fact beside [`crate::mailbox::ReaderRegister`],
-/// a new SSOT next to the one that exists to fix this very class of bug, while
-/// the model already holds the history that answers it.
+/// single re-read marker drew three replies. The poller drops only a send it
+/// has already delivered and committed past, which is what a sender's retry of
+/// an unconfirmed append puts in the transcript twice; a batch it re-reads is
+/// redelivered whole, so that a crash cannot lose a message, and judging those
+/// repeats stays with the model, which holds the history that answers it.
+///
+/// The send half says that a queued unconfirmed send is retried on its own: a
+/// resend by hand is a new send, which nothing can tell from the original.
 #[must_use]
 pub fn a2a_reply_contract(self_id: &str) -> String {
     format!(
@@ -58,8 +61,8 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
          and `message` set to your reply. A send \
          that does not return success did NOT leave this machine — say so rather \
          than reporting the message as delivered — unless it says delivery is \
-         unconfirmed or unknown: then it may have arrived, so check the \
-         conversation before resending.\n\n\
+         unconfirmed or unknown: then it may have arrived, so unless it says the send \
+         is queued for retry, check the conversation before resending.\n\n\
          Messages reach you at least once, which means the same message can arrive \
          more than once: delivery tracks one position for a whole batch and re-reads \
          a batch it could not finish. A repeat delivery is identical to the copy you \
@@ -161,7 +164,8 @@ pub struct MailboxEnvelope {
     /// of the same words gets a new one. Unlike `timestamp` (whole seconds)
     /// and `request_id` (question/reply correlation), it tells two sends of
     /// identical bytes apart, which is what lets a sender whose append
-    /// returned an error find out whether THIS send committed.
+    /// returned an error find out whether THIS send committed, and a receiver
+    /// drop a retry of a send it has already delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_id: Option<String>,
 }
@@ -418,6 +422,10 @@ mod prompt_tests {
         assert!(
             c.contains("unconfirmed or unknown") && c.contains("before resending"),
             "an uncertain send must not be resent blindly: {c}"
+        );
+        assert!(
+            c.contains("queued for retry"),
+            "a queued unconfirmed send is retried for the model, never resent by hand: {c}"
         );
     }
 

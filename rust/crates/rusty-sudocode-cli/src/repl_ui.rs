@@ -1828,7 +1828,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if *tool_progress.read() != text {
                                 tool_progress.set(text);
                             }
-                            continue;
                         }
                         Ok(OutputMsg::Suspend(request)) => {
                             *terminal_handoff_for_future

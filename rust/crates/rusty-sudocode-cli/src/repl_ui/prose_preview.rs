@@ -14,7 +14,7 @@ pub(crate) const MAX_SOURCE_BYTES: usize = 8192;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreviewPosition {
     pub(crate) response: ResponsePosition,
-    pub(crate) gap: &'static str,
+    pub(crate) starts_block: bool,
 }
 
 /// Oversized provider packets never allocate an unbounded preview copy.
@@ -53,6 +53,7 @@ pub(crate) struct ProsePreview {
     code: CodePreview,
     source: String,
     position: Option<PreviewPosition>,
+    gap: &'static str,
     is_dirty: bool,
     is_frozen: bool,
     width: usize,
@@ -62,6 +63,19 @@ pub(crate) struct ProsePreview {
 }
 
 impl ProsePreview {
+    pub(crate) fn position_after_history(
+        &mut self,
+        history: &crate::render::layout_policy::LayoutPolicy,
+    ) -> bool {
+        let gap = self
+            .position
+            .map_or("", |position| history.before_stream(position.starts_block));
+        let changed = gap != self.gap;
+        self.gap = gap;
+        self.is_dirty |= changed;
+        changed
+    }
+
     pub(crate) fn update(&mut self, update: PreviewUpdate) {
         match update {
             PreviewUpdate::Append { delta, position } => {
@@ -150,7 +164,7 @@ impl ProsePreview {
             };
             if let (Some(position), Some(markdown)) = (self.position, markdown) {
                 let mut glyph = ResponseGlyphState::from_position(width, position.response);
-                self.rendered.plain(position.gap);
+                self.rendered.plain(self.gap);
                 self.rendered.append(&glyph.apply_styled(&markdown));
                 // MixedText's measure uses str::lines: the last terminator
                 // advances the cursor but owns no extra row. Keep both

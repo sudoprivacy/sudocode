@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
@@ -2472,10 +2473,10 @@ def host_acceptance_lease(attempt, head):
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. A complete workspace and its immediately following compile-only
-    examples can share one reservation. All other fresh work rejoins the FIFO,
-    so already waiting work runs before this invocation's next reservation. Processes
-    started under the holder inherit its acquisition claim. A nested check
+    a memory kill. Workspace and compile-only examples can share a reservation.
+    Native services and compiler context can also share one. Between reservations,
+    fresh work rejoins the FIFO behind existing waiters. Processes started under
+    the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
     directory = Path.home() / ".nexus/local-acceptance"
@@ -2508,7 +2509,7 @@ def host_acceptance_lease(attempt, head):
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
                       "this invocation rejoins the FIFO between fresh reservations; "
-                      "only a workspace and its following compile-only examples may share one.", flush=True)
+                      "eligible workspace/examples and native services/context pairs share a reservation.", flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -2596,12 +2597,21 @@ def scheduled_checks(needed):
 
 
 def profile_reservations(ordered, pending):
-    """Share only adjacent fresh workspace/example work; keep order and logical receipts."""
+    """Group eligible fresh profiles while preserving their separate signed results."""
     ordered, pending = list(ordered), set(pending)
+    if {"native-services", "native-context"} <= pending:
+        # Both build the same native target. Keep the original commands and
+        # move only past the independent container benchmark profiles.
+        service = ordered.index("native-services")
+        context = ordered.index("native-context")
+        if service < context and set(ordered[service + 1:context]) <= {"rendering", "browser"}:
+            ordered.insert(service + 1, ordered.pop(context))
+
+    shared_pairs = {("native-workspace", "native-examples"), ("native-services", "native-context")}
     reservations, index = [], 0
     while index < len(ordered):
         pair = ordered[index:index + 2]
-        if pair == ["native-workspace", "native-examples"] and set(pair) <= pending:
+        if tuple(pair) in shared_pairs and set(pair) <= pending:
             reservations.append(pair)
             index += 2
         else:
@@ -2805,8 +2815,10 @@ def perform_check(args, attempt):
               f"If this process exits, resume with: {resume_command}", flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
-    pending = [name for name in serialized if name not in reusable and name not in carried]
-    reservations = profile_reservations(serialized, pending)
+    fresh_profiles = set(serialized) - reusable.keys() - carried.keys()
+    reservations = profile_reservations(serialized, fresh_profiles)
+    serialized = [name for members in reservations for name in members]
+    pending = [name for name in serialized if name in fresh_profiles]
     prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
     lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
                         and serialized.index("guard-contract") < serialized.index("native-workspace"))
@@ -2817,7 +2829,7 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "adjacent_fresh_workspace_and_compile_only_examples_share_one;_others_requeue",
+        "reservation": "fresh_workspace_examples_and_services_context_pairs_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:

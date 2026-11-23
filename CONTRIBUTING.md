@@ -481,9 +481,12 @@ command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
 `host-lease.json`, its active profile and the queue position. Adjacent fresh
-workspace and compile-only examples share one reservation, with a separate
-checkpoint for each. Other fresh profiles rejoin the FIFO, so existing waiters
-run before this invocation's next reservation. A running reservation keeps the
+workspace and compile-only examples share one reservation. When native services
+and compiler context both need fresh execution and only rendering or browser
+checks intervene, compiler context runs immediately after native services
+within the same reservation. Each profile saves its own signed checkpoint.
+Between reservations, fresh profiles rejoin the FIFO behind existing waiters.
+A running reservation keeps the
 lease through its execution and checkpoints. Waiters start in arrival order
 when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
@@ -988,10 +991,13 @@ On the author's machine, a fresh `native-workspace` and its immediately
 following fresh `native-examples` share one existing FIFO reservation. Their
 order, commands, separate signed results and original command fingerprints
 remain unchanged. Workspace success is checkpointed before examples begin;
-an example failure preserves it for verified resume. All other fresh profiles
-rejoin the FIFO, and reused profiles need no reservation. The mandatory
-`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups;
-acquisition timing lists both profiles and counts their common wait once.
+an example failure preserves it for verified resume. Native services and
+compiler context also share a reservation when both need fresh execution and
+no profile besides rendering or browser intervenes. Both Cargo commands remain
+required. If compiler context fails, the signed services checkpoint can still
+be restored. Reused profiles need no reservation. The mandatory
+`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups.
+Acquisition timing lists both profiles and counts their common wait once.
 This removes an additional queue admission, not the example build. Hosted
 complementary profiles and all native cases remain unchanged. Real private
 Git/SSH/process controls verify the shared acquisition, the existing waiter's

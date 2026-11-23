@@ -99,6 +99,26 @@ def verify_profile_compatibility(directory, work, command):
         # Selected commands, common state, process execution and images must
         # reject the genuinely signed prior execution, in both receipt formats.
         helper_source = helper.read_text()
+        # Hold the selected commands and image unchanged so older formats
+        # exercise the original equal-command-hash path as well as the per-profile verifier.
+        bootstrap = signed_note({key: value for key, value in legacy_payload.items()
+                                 if key != "commands_sha256"})
+        run("git", "checkout", "-b", "compat-selector-only", original_main)
+        selector_source = helper_source.replace(
+            '"GIT_COMMON_DIR"})', '"GIT_COMMON_DIR", "SCODE_SELECTOR_ONLY_CONTROL"})')
+        assert selector_source != helper_source
+        helper.write_text(selector_source)
+        run("git", "add", helper.relative_to(work))
+        run("git", "commit", "-m", "Change extracted selector inputs and keep the command source")
+        selector_policy = run("git", "rev-parse", "HEAD")
+        run("git", "checkout", original_branch)
+        for note in [*variants.values(), bootstrap]:
+            install_note(note)
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", original_main)
+            run(sys.executable, trusted, "verify", "--head", head, "--policy-ref", selector_policy,
+                success=False, error="Acceptance commands changed")
+        print("PASS: modern, legacy and bootstrap SSH receipts bind the selector inputs despite equal command hashes")
+
         # A reviewed priority-only migration may preserve exact old recipes.
         # The private hook still authenticates the original real-process run;
         # no previous result is converted into a new command's execution.

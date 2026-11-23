@@ -249,24 +249,50 @@ def profile_ast_value(value):
     raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
 
 
-def copy_profile_module(module):
-    """Copy the dispatcher we mutate; keep other read-only nodes shared."""
+def copy_profile_module(module, dispatcher):
+    """Share read-only statements while projecting a fresh dispatcher body."""
     projected = copy.copy(module)
-    projected.body = [copy.deepcopy(node) if isinstance(node, ast.FunctionDef) and node.name == "run"
-                      else node for node in module.body]
-    return projected
+    dispatch = copy.copy(dispatcher)
+    projected.body = [dispatch if node is dispatcher else node for node in module.body]
+    return projected, dispatch
+
+
+def profile_module_value(module, statements):
+    """Keep the existing JSON shape without serializing shared statements again."""
+    def statement_value(statement):
+        if statement not in statements:
+            statements[statement] = profile_ast_value(statement)
+        return statements[statement]
+
+    return {"node": type(module).__name__, "fields": {
+        name: ([statement_value(statement) for statement in field]
+               if name == "body" else profile_ast_value(field))
+        for name, field in ast.iter_fields(module)
+        if field is not None and not (isinstance(field, list) and not field)
+    }}
+
+
+def profile_dispatcher(module):
+    dispatcher = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    parameter = dispatcher.args.args[0].arg
+    # Reassigning the profile parameter can make dispatch branches overlap.
+    reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                     for node in ast.walk(dispatcher))
+    return dispatcher, parameter, reassigned
 
 
 def profile_commands_hashes(ref, names, *, inputs=None):
     """Bind each literal dispatch branch and all common code without importing it."""
     executor, checks, image, _ = execution_inputs(ref) if inputs is None else inputs
     module = ast.parse(checks)
+    names = tuple(names)
+    if not names:
+        return {}
+    original_dispatcher, parameter, reassigned = profile_dispatcher(module)
+    statements = {}
     result = {}
     for name in names:
-        projected = copy_profile_module(module)
-        dispatcher = next(node for node in projected.body
-                          if isinstance(node, ast.FunctionDef) and node.name == "run")
-        parameter = dispatcher.args.args[0].arg
+        projected, dispatcher = copy_profile_module(module, original_dispatcher)
 
         def project(node):
             test = node.test if isinstance(node, ast.If) else None
@@ -278,17 +304,14 @@ def profile_commands_hashes(ref, names, *, inputs=None):
             tail = project(node.orelse[0]) if len(node.orelse) == 1 else node.orelse
             if test.comparators[0].value != name:
                 return tail
-            node.orelse = tail
-            return [node]
+            selected = copy.copy(node)
+            selected.orelse = tail
+            return [selected]
 
-        # If the dispatcher rewrites its profile parameter, its branches may
-        # cease to be disjoint. Keep the whole module in that conservative case.
-        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
-                         for node in ast.walk(dispatcher))
         if not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
         result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
-                                     "profile": profile_ast_value(projected)}))
+                                     "profile": profile_module_value(projected, statements)}))
     return result
 
 
@@ -297,6 +320,11 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inp
     executor, checks, image, _ = (execution_inputs(ref, executor_identity=executor_identity)
                                if inputs is None else inputs)
     module = ast.parse(checks)
+    names = tuple(names)
+    if not names:
+        return {}
+    original_dispatcher, parameter, reassigned = profile_dispatcher(module)
+    statements, references = {}, {}
     result = {}
     # Reflection can find a function without a static Name reference. Retain
     # the complete module rather than guessing which code it might execute.
@@ -306,10 +334,7 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inp
                         | {"__dict__", "__globals__", "modules", "f_globals", "f_locals", "_getframe", "get_objects"})
                     for node in ast.walk(module))
     for name in names:
-        projected = copy_profile_module(module)
-        dispatcher = next(node for node in projected.body
-                          if isinstance(node, ast.FunctionDef) and node.name == "run")
-        parameter = dispatcher.args.args[0].arg
+        projected, dispatcher = copy_profile_module(module, original_dispatcher)
 
         def project(node):
             test = node.test if isinstance(node, ast.If) else None
@@ -335,8 +360,6 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inp
                 matched = not matched
             return [child for item in (node.body if matched else node.orelse) for child in project(item)]
 
-        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
-                         for node in ast.walk(dispatcher))
         if not reflected and not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
             functions = {node.name: node for node in projected.body if isinstance(node, ast.FunctionDef)}
@@ -351,15 +374,17 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inp
             pending = roots[:]
             retained = {node.name for node in roots if isinstance(node, ast.FunctionDef)}
             while pending:
-                references = {node.id for node in ast.walk(pending.pop())
-                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
-                for reference in references & functions.keys() - retained:
+                definition = pending.pop()
+                if definition not in references:
+                    references[definition] = {node.id for node in ast.walk(definition)
+                                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+                for reference in references[definition] & functions.keys() - retained:
                     retained.add(reference)
                     pending.append(functions[reference])
             projected.body = [node for node in projected.body
                               if not isinstance(node, ast.FunctionDef) or node.name in retained]
         result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
-                                     "profile": profile_ast_value(projected)}))
+                                     "profile": profile_module_value(projected, statements)}))
     return result
 
 

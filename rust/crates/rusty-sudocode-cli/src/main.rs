@@ -3498,10 +3498,10 @@ fn run_repl_iocraft_dispatch(
                 }
                 if let CoordinatorEvent::TurnComplete(outcome) = event {
                     let mut queue = coord.lock().unwrap();
-                    if !matches!(outcome, ReplTurnOutcome::Completed) {
-                        queue.finish_failed_turn();
-                    } else {
+                    if matches!(outcome, ReplTurnOutcome::Completed) {
                         queue.finish_turn();
+                    } else {
+                        queue.finish_failed_turn();
                     }
                     for receipt in initial_peer_receipts.drain(..) {
                         if !matches!(outcome, ReplTurnOutcome::Failed) {

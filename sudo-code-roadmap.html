@@ -2001,14 +2001,21 @@ sizes and job clocks describe those runs. The cache inventory at this
 observation listed 11,771,056,003 bytes against the configured 10 GB limit.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
-<p><strong>Post-policy source cohort, 14 of 20.</strong> The first fourteen
-eligible Rust-source merges account for 1,107.000 known GitHub runner-minutes
-across 205 linked original runs, with one unassigned job interval. The seven
-added PRs are #1531, #1547, #1548, #1551, #1552, #1553 and #1556. The selection
-still requires Rust source files and complete changed-file lists. No new
-class of PR is added to fill the cohort. Runner occupancy is a lower bound
-on observed CI use. It does not measure author time, end-to-end elapsed time
-or a controlled before/after speedup. The one-tenth target remains unproven.</p>
+<p><strong>Post-policy source cohort, 15 of 20.</strong> The first fifteen
+eligible Rust-source merges account for 1,160.317 known GitHub runner-minutes.
+The eight added PRs after the first seven are #1531, #1547, #1548, #1551,
+#1552, #1553, #1556 and #1558. The selection continues to require Rust source
+files and complete changed-file lists. Runner occupancy is a lower bound;
+one job's allocation remains unknown.</p>
+<p>Across these 15 sources, the mean from the final revision's earliest
+available validation to merge is 113.772 minutes. Seven PRs have a confirmed
+executed failure, with a mean of 168.290 minutes from the earliest known
+validation to the first retained execution failure. The first retained
+checks may start after unpublished work. In
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/job/137843369274">PR #1558's final macOS Clippy job</a>,
+GitHub assigned its runner after 10 minutes 5 seconds, and assigned execution
+lasted 3 minutes 34 seconds. This is one observed job on the critical path.
+The measured records still leave the end-to-end one-tenth target unproven.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its

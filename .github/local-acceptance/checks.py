@@ -608,8 +608,32 @@ def validate_before_host_lease(names, root, output):
 def validate_guard_before_host_lease(root, output):
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
           "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
-    executor = stage_profile_executor(root, execution_policy_ref(), "guard-contract",
-                                      output / "guard-contract" / "prequeue-static-policy")
+    policy_ref = execution_policy_ref()
+    static_snapshot = output / "guard-contract" / "prequeue-static-policy"
+    executor = stage_profile_executor(root, policy_ref, "guard-contract", static_snapshot)
+    # The Docker fixture reads the candidate while this validation stages the
+    # policy. They coincide for a frozen contract update. Older or different
+    # candidates still go through their original required full guard.
+    try:
+        _, candidate_ref = run.execution_refs
+    except AttributeError:
+        candidate_ref = None
+    if candidate_ref == policy_ref:
+        program = """import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import local_acceptance
+from ci_input_scope import check_guard_registrations
+local_acceptance.ROOT = Path.cwd()
+try:
+    check_guard_registrations(sys.argv[2])
+except (ValueError, RuntimeError) as error:
+    raise SystemExit(f"GUARD_REGISTRATIONS_REFUSED: {error}")
+"""
+        subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                        str(static_snapshot / ".github/scripts"), policy_ref], cwd=root, check=True)
+        print("GUARD_REGISTRATIONS: reviewed resource, policy and verifier registrations match the committed source.",
+              flush=True)
     spec = importlib.util.spec_from_file_location("prequeue_native_inventory", executor)
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
@@ -1228,7 +1252,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "c07f6f95ce89f0f84a55fff961db2c80623afcaff8ddbb3bea5c9476ba2e8065",
+        ".github/scripts/ci_input_scope.py": "192b1d5f4df9a397fa47f44ccebf88fad8303533fa50201ba2b3af7884846f73",
         ".github/workflows/rust-ci.yml": "d6d944737447ed25dd0ffcf262c36258fe130ae1afbecedaffd313335a96bca5",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1254,7 +1278,7 @@ def native_guard_files():
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "0334d86aff40b82a03fc7dd1c668b2f15ab5606e252096819a05d72059c8ebf1",
         "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "5f1d72db0585929f19f0015c2991744157dc02347e5bcc21b12291492da6b700",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "a0f0c2a208931eba3a6aecdf86818ae36fa04d9d67b470d7ff96e2ed6e18457b",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",

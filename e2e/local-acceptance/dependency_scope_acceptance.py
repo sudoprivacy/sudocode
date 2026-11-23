@@ -659,7 +659,8 @@ def policy_fixture_scope(output, environment):
                                  for target in node.targets))
     registry = ast.literal_eval(registry_node.value)
     sources = {name: (SOURCE / name).read_text(encoding="utf-8")
-               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock"}}
+               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock",
+                            ".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"}}
 
     def write(name, contents):
         path = repository / name
@@ -688,6 +689,41 @@ def policy_fixture_scope(output, environment):
         git("add", "--", name)
         git("commit", "-m", "Private policy scope input")
         return git("rev-parse", "HEAD")
+
+    # Exercise the committed registration predicates independently of the
+    # workflow event. Only the complete guard grants acceptance credit.
+    validate = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import local_acceptance
+from ci_input_scope import check_guard_registrations
+local_acceptance.ROOT = Path.cwd()
+check_guard_registrations(sys.argv[2])
+'''
+
+    def amended_registration(name, key):
+        text = sources[name]
+        declaration, = [node for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == key for target in node.targets)]
+        original = ast.get_source_segment(text, declaration.value)
+        assert original and text.count(original) == 1
+        return text.replace(original, repr({"0" * 64}), 1)
+
+    runner = ".github/scripts/local_acceptance.py"
+    fixture_input = "scripts/publish_release_mirror.py"
+    controls = [("valid-registrations", base, None),
+                ("unreviewed-resource-layout", commit(runner, amended_registration(runner, "reviewed_sources")),
+                 "Unreviewed complete executor program"),
+                ("stale-policy-input", commit(fixture_input, sources[fixture_input] + "\n# Changed input\n"),
+                 "Unreviewed policy-fixture input: " + fixture_input),
+                ("stale-verifier-layout", commit(selector, amended_registration(selector, "REVIEWED_VERIFIER_LAYOUTS")),
+                 "Verifier scope registration failed")]
+    for label, ref, diagnostic in controls:
+        git("switch", "--detach", ref)
+        result = command(label, [sys.executable, "-I", "-B", "-c", validate, repository / ".github/scripts", ref],
+                         expected=1 if diagnostic else 0)
+        if diagnostic:
+            assert diagnostic.encode() in result.stderr, (label, result.stderr)
 
     def observe(label, first, head, expected, *, checkout=None, events=None, declared=None):
         git("switch", "--detach", checkout or head)
@@ -815,6 +851,8 @@ def policy_fixture_scope(output, environment):
     assert lines.index("      - name: Canonical Nexus contract and daemon resolve one published pin") < lines.index(
         "      - name: Exercise real Git histories")
     result = {"status": "PASS", "cases": cases, "commands": commands,
+              "committed_registration_controls": [{"case": label, "accepted": diagnostic is None}
+                                                   for label, _, diagnostic in controls],
               "actual_broken_scanner_fixture_refused": True,
               "unsafe_selector_omits_that_required_fixture": True,
               "original_actual_current_source_checks_ungated": True,

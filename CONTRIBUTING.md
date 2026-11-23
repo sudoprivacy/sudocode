@@ -522,6 +522,11 @@ its argv placeholders do not prepare tools or execute tests. A correctly pinned
 but malformed inventory still refuses while another private workflow holds the
 host, without a ticket or completed guard credit. A valid inventory still waits
 for that holder and executes its required profile.
+When the candidate is the frozen contract being qualified, static admission also
+checks the existing resource executor layout, policy fixture inputs and CI
+verifier layout against that commit. A registration mismatch stops before the
+Docker probe and reports the original refusal. The complete guard still runs
+its original positive and negative controls under the lease.
 After those static checks pass, a fresh guard checks the Docker Engine's server
 version before joining the FIFO, using the same bounded probe as execution.
 An unavailable Engine leaves signed preflight progress and the original client

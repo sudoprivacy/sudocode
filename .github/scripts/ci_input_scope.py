@@ -529,6 +529,39 @@ POLICY_FIXTURE_INPUTS = {
 }
 
 
+def reviewed_policy_inputs(ref, extra=()):
+    """Match the committed inputs of the ordinary-source policy fixture."""
+    if not POLICY_FIXTURE_INPUTS:
+        raise ValueError("No reviewed policy-fixture input registry")
+    rows = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref, "--", *POLICY_FIXTURE_INPUTS, *extra])
+    observed = {}
+    for row in rows.split(b"\0"):
+        if not row:
+            continue
+        entry, path = row.split(b"\t", 1)
+        fields = entry.decode("ascii").split()
+        if len(fields) != 3:
+            raise ValueError("Unknown committed policy-fixture input")
+        observed[path.decode("utf-8")] = fields
+    for path, expected in POLICY_FIXTURE_INPUTS.items():
+        if observed.get(path) != expected:
+            raise ValueError(f"Unreviewed policy-fixture input: {path}. "
+                             f"Registered {expected}; committed {observed.get(path)}.")
+    return observed
+
+
+def check_guard_registrations(ref):
+    """Exercise existing required positive controls on a frozen updated contract."""
+    from local_acceptance import resource_executor_identity
+
+    resource_executor_identity(ref)
+    reviewed_policy_inputs(ref)
+    details = {}
+    if not metadata_only_inputs([".github/scripts/local_acceptance.py"], ref, ref, details):
+        raise ValueError(f"Verifier scope registration failed: {details.get('reason')}. "
+                         f"Observed layout: {details.get('observed_layout')}.")
+
+
 def policy_fixture_scope(paths, event_name, details):
     """Omit only unchanged policy self-tests for bounded ordinary source edits."""
     if event_name == "workflow_dispatch" or not paths:
@@ -544,28 +577,13 @@ def policy_fixture_scope(paths, event_name, details):
         details.update(decision="full", reason="changed_or_unknown_policy_inputs")
         return True
     try:
-        if not POLICY_FIXTURE_INPUTS:
-            raise ValueError("No reviewed policy-fixture input registry")
         checkout = git("rev-parse", "HEAD")
         declared = os.environ.get("GITHUB_SHA")
         if declared is not None and declared != checkout:
             raise ValueError("The workflow checkout differs from its declared source")
         if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"]).strip():
             raise ValueError("The workflow source has uncommitted inputs")
-        rows = subprocess.check_output(["git", "ls-tree", "-r", "-z", checkout, "--",
-                                        *POLICY_FIXTURE_INPUTS, *paths])
-        observed = {}
-        for row in rows.split(b"\0"):
-            if not row:
-                continue
-            entry, path = row.split(b"\t", 1)
-            fields = entry.decode("ascii").split()
-            if len(fields) != 3:
-                raise ValueError("Unknown committed policy-fixture input")
-            observed[path.decode("utf-8")] = fields
-        for path, expected in POLICY_FIXTURE_INPUTS.items():
-            if observed.get(path) != expected:
-                raise ValueError("Unreviewed policy-fixture input: " + path)
+        observed = reviewed_policy_inputs(checkout, paths)
         for path in paths:
             entry = observed.get(path)
             if entry is None or entry[0] not in {"100644", "100755"} or entry[1] != "blob":

@@ -5,6 +5,7 @@ identity. This infrastructure acceptance does not claim product browser coverage
 """
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -428,6 +429,25 @@ def run(output, profiles):
         commands.append(row)
         return log
 
+    compiling = False
+    scoped_builds = []
+
+    @contextmanager
+    def compiler_scope():
+        nonlocal compiling
+        assert not compiling
+        compiling = True
+        try:
+            yield
+        finally:
+            compiling = False
+
+    def scoped_command(*args, **kwargs):
+        assert compiling == (args[0] == "cargo"), args
+        if compiling:
+            scoped_builds.append(args[1])
+        return command(*args, **kwargs)
+
     driver = '''#[test]
 #[ignore]
 fn {name}() {{
@@ -538,7 +558,8 @@ out=Path(a.output);out.mkdir()
     locks.mkdir()
     before = len(commands)
     with checks.exclusive_benchmark_state(locks):
-        checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command, output / "unused-target")
+        checks.benchmark_locked("browser", inputs / "candidate", evidence, "fixture-base", command,
+                                output / "unused-target", source_mount=inputs, compiler_scope=None)
     smoke_commands = commands[before:]
     assert len(smoke_commands) == 4 + len(viewport_cases), "A browser smoke build/driver/run stage was omitted"
     assert [row["command"][1] for row in smoke_commands[-len(viewport_cases):]] == list(viewport_cases)
@@ -565,7 +586,7 @@ out=Path(a.output);out.mkdir()
     try:
         with checks.exclusive_benchmark_state(locks):
             checks.benchmark_locked("rendering", inputs / "candidate", invalid_plan_output,
-                                    "fixture-base", command, output / "unused-target")
+                                    "fixture-base", command, output / "unused-target", source_mount=inputs, compiler_scope=None)
     except RuntimeError:
         pass
     else:
@@ -584,7 +605,9 @@ out=Path(a.output);out.mkdir()
     stage.mkdir()
     before = len(commands)
     with checks.exclusive_benchmark_state(locks):
-        checks.benchmark_locked("rendering", inputs / "candidate", stage, "fixture-base", command, output / "unused-target")
+        checks.benchmark_locked("rendering", inputs / "candidate", stage, "fixture-base", scoped_command,
+                                output / "unused-target", source_mount=inputs, compiler_scope=compiler_scope)
+    assert scoped_builds == ["build", "build", "test"] and not compiling
     rendering = json.loads((stage / "measurements/short/fixture.json").read_text())
     assert rendering["candidate_sha256"] == hashlib.sha256((stage / "scode-candidate").read_bytes()).hexdigest()
     assert subprocess.check_output([str(stage / "scode-candidate"), "--build-profile"]).decode().strip() == "release"
@@ -609,9 +632,14 @@ out=Path(a.output);out.mkdir()
         "sha256": rendering["candidate_sha256"]}))
     paired = output / "paired-browser"
     paired.mkdir()
+    # The archive is unpacked separately from the original binary mount.
+    unpacked_candidate = output / "unpacked/candidate"
+    checks.replace_checkout(inputs / "candidate", unpacked_candidate)
     before = len(commands)
     with checks.exclusive_benchmark_state(locks):
-        checks.benchmark_locked("browser", inputs / "candidate", paired, "fixture-base", command, output / "unused-target")
+        checks.benchmark_locked("browser", unpacked_candidate, paired, "fixture-base", scoped_command,
+                                output / "unused-target", source_mount=inputs, compiler_scope=compiler_scope)
+    assert scoped_builds == ["build", "build", "test", "test"] and not compiling
     reused_commands = commands[before:]
     assert len(reused_commands) == 3 + len(viewport_cases)
     assert [row["command"][1] for row in reused_commands[-len(viewport_cases):]] == list(viewport_cases)
@@ -638,7 +666,7 @@ out=Path(a.output);out.mkdir()
     try:
         with checks.exclusive_benchmark_state(locks):
             checks.benchmark_locked("browser", inputs / "candidate", missing_viewport_output,
-                                    "fixture-base", command, output / "unused-target")
+                                    "fixture-base", command, output / "unused-target", source_mount=inputs, compiler_scope=None)
     except RuntimeError as error:
         assert str(error) == f"No actual passing viewport lifecycle test: {viewport_cases[1]}"
         missing = [(index, row) for index, row in enumerate(commands[before:], before)
@@ -658,7 +686,8 @@ out=Path(a.output);out.mkdir()
     changed_driver_output.mkdir()
     try:
         with checks.exclusive_benchmark_state(locks):
-            checks.benchmark_locked("browser", inputs / "candidate", changed_driver_output, "fixture-base", command, output / "unused-target")
+            checks.benchmark_locked("browser", inputs / "candidate", changed_driver_output, "fixture-base", command,
+                                    output / "unused-target", source_mount=inputs, compiler_scope=None)
     except RuntimeError:
         assert "changed candidate driver reached Cargo" in (output / "commands" / f"{len(commands)-1:03d}.log").read_text()
         assert not (changed_driver_output / "smoke").exists()
@@ -673,7 +702,8 @@ out=Path(a.output);out.mkdir()
     changed_dependency_output.mkdir()
     try:
         with checks.exclusive_benchmark_state(locks):
-            checks.benchmark_locked("browser", inputs / "candidate", changed_dependency_output, "fixture-base", command, output / "unused-target")
+            checks.benchmark_locked("browser", inputs / "candidate", changed_dependency_output, "fixture-base", command,
+                                    output / "unused-target", source_mount=inputs, compiler_scope=None)
     except RuntimeError:
         assert 'left: "changed"' in (output / "commands" / f"{len(commands)-1:03d}.log").read_text()
         assert not (changed_dependency_output / "smoke/fixture.json").exists()
@@ -691,7 +721,8 @@ out=Path(a.output);out.mkdir()
         refused_output.mkdir()
         before = len(commands)
         try:
-            checks.benchmark_locked("browser", inputs / "candidate", refused_output, "fixture-base", command, output / "unused-target")
+            checks.benchmark_locked("browser", unpacked_candidate, refused_output, "fixture-base", command,
+                                    output / "unused-target", source_mount=inputs, compiler_scope=None)
         except RuntimeError:
             refusals.append(field)
         else:
@@ -753,7 +784,8 @@ out=Path(a.output);out.mkdir()
     legacy_output.mkdir()
     before = len(commands)
     with checks.exclusive_benchmark_state(locks):
-        checks.benchmark_locked("browser", legacy / "candidate", legacy_output, "fixture-base", command, output / "unused-target")
+        checks.benchmark_locked("browser", legacy / "candidate", legacy_output, "fixture-base", command,
+                                output / "unused-target", source_mount=legacy, compiler_scope=None)
     assert all(row["command"][row["command"].index("-p") + 1] == "rusty-sudocode-cli"
                for row in commands[before:] if "--test" in row["command"])
     assert json.loads((legacy_output / "smoke/fixture.json").read_text())["candidate_sha256"] == digest
@@ -773,7 +805,8 @@ out=Path(a.output);out.mkdir()
     before = len(commands)
     try:
         with checks.exclusive_benchmark_state(locks):
-            checks.benchmark_locked("browser", legacy / "candidate", broken_output, "fixture-base", command, output / "unused-target")
+            checks.benchmark_locked("browser", legacy / "candidate", broken_output, "fixture-base", command,
+                                    output / "unused-target", source_mount=legacy, compiler_scope=None)
     except RuntimeError:
         pass
     else:

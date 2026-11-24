@@ -2,8 +2,10 @@
 
 import argparse
 import ast
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,44 @@ def git_for_windows_bash(path=None):
             if candidate.is_file():
                 return str(candidate)
     return None
+
+
+def check_compiler_priority(executor, rustc, output, environment, expected):
+    """Hold a real metadata compile on its source pipe until it is observed."""
+    driver = output / "compiler-priority-probe.py"
+    driver.write_text('''import subprocess
+import sys
+import time
+
+import psutil
+
+rustc, artifact, expected = sys.argv[1:]
+with subprocess.Popen([rustc, "--crate-name", "scope_priority_probe", "--crate-type", "lib",
+                       "--emit", "metadata", "-o", artifact, "-"], stdin=subprocess.PIPE) as compiler:
+    process = psutil.Process(compiler.pid)
+    started = time.monotonic()
+    deadline = started + 10
+    try:
+        # A surrounding executor can lower the same child first. Leave time
+        # for this executor's own 150 ms observer to record it as well.
+        while time.monotonic() - started < 0.5 or process.nice() != int(expected):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The active compiler did not reach the expected priority")
+            time.sleep(0.025)
+        compiler.communicate(b"pub fn value() -> u8 { 42 }\\n", timeout=10)
+        if compiler.returncode != 0:
+            raise RuntimeError(f"The observed metadata compile exited {compiler.returncode}")
+    finally:
+        if compiler.poll() is None:
+            compiler.kill()
+            compiler.wait()
+''', encoding="utf-8")
+    artifact = output / "compiler-priority-probe.rmeta"
+    result = executor.run_command([sys.executable, driver, rustc, artifact, expected],
+                                  executor.ROOT, output / "compiler-priority-probe.log", environment)
+    assert artifact.stat().st_size > 0
+    assert result["compiler_priorities"].get(rustc.name, {}).get(str(expected), 0) > 0, result
+    return result
 
 
 def pinned_cache_command(output, environment):
@@ -285,11 +325,12 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     def write(name, contents):
         path = repository / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents, encoding="utf-8")
+        path.write_text(contents, encoding="utf-8", newline="\n")
 
     runner = ".github/scripts/local_acceptance.py"
+    selector = ".github/scripts/ci_input_scope.py"
     profiles = ".github/local-acceptance/checks.py"
-    names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+    names = [runner, selector, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
              "e2e/local-acceptance/resource_scheduling_acceptance.py",
              "e2e/local-acceptance/host_lease_acceptance.py"]
     sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
@@ -393,6 +434,69 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
     ]
     if not metadata_only:
+        # Derive the required new review with the original verifier, before
+        # changing either registry. The selector later sees only Git objects.
+        write(runner, pure)
+        git("add", ".")
+        git("commit", "-m", "Scheduling control before registration")
+        unregistered = git("rev-parse", "HEAD")
+        spec = importlib.util.spec_from_file_location("original_registration_verifier", SOURCE / runner)
+        protected = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protected)
+        protected.ROOT = repository
+        diagnostic = io.StringIO()
+        with redirect_stdout(diagnostic):
+            try:
+                protected.resource_executor_identity(unregistered)
+            except ValueError as error:
+                assert str(error) == "Unreviewed complete executor program; full current checks remain required"
+            else:
+                raise AssertionError("New scheduling source requires a fresh layout registration")
+        prefix = "LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED="
+        line, = diagnostic.getvalue().splitlines()
+        assert line.startswith(prefix)
+        layout = json.loads(line[len(prefix):])["observed_source_layout"]
+        registration = "    reviewed_sources = {\n"
+        assert pure.count(registration) == 1
+        registered = pure.replace(registration, registration + f'        "{layout}",\n', 1)
+
+        def runner_pin(source):
+            blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
+            modified, count = re.subn(
+                r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+                lambda match: match[1] + blob + match[2], sources[selector])
+            assert count == 1
+            return modified
+
+        base_selector = runner_pin(sources[runner])
+        # Bind the fixture baseline to the actual tracked runner bytes too.
+        git("switch", "--detach", base)
+        write(selector, base_selector)
+        if git("status", "--porcelain"):
+            git("add", ".")
+            git("commit", "-m", "Register original private runner Git blob")
+        original = git("rev-parse", "HEAD")
+        wrong_layout = registered.replace(layout, "1" * 64, 1)
+        runner_changed = insert_body(registered, "run_command")
+        extra_layout = registered.replace(registration, registration + '        "' + "2" * 64 + '",\n', 1)
+        for label, source, selector_source, expected in [
+            ("registered-scheduling-edit", registered, runner_pin(registered), True),
+            ("stale-selector-registration", registered, runner_pin(pure), False),
+            ("selector-code-changed", registered,
+             insert_body(runner_pin(registered), "main"), False),
+            ("missing-resource-registration", pure, runner_pin(pure), False),
+            ("wrong-resource-registration", wrong_layout, runner_pin(wrong_layout), False),
+            ("runner-code-changed", runner_changed, runner_pin(runner_changed), False),
+            ("extra-resource-registration", extra_layout, runner_pin(extra_layout), False),
+        ]:
+            git("switch", "--detach", original)
+            write(runner, source)
+            write(selector, selector_source)
+            git("add", ".")
+            git("commit", "-m", "Registered scheduling scope " + label)
+            observe(label, original, git("rev-parse", "HEAD"), expected,
+                    events=None if expected else ["merge_group"])
+
         for label, edits, expected in cases:
             git("switch", "--detach", base)
             for name, contents in edits.items():
@@ -621,7 +725,8 @@ def policy_fixture_scope(output, environment):
                                  for target in node.targets))
     registry = ast.literal_eval(registry_node.value)
     sources = {name: (SOURCE / name).read_text(encoding="utf-8")
-               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock"}}
+               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock",
+                            ".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"}}
 
     def write(name, contents):
         path = repository / name
@@ -650,6 +755,41 @@ def policy_fixture_scope(output, environment):
         git("add", "--", name)
         git("commit", "-m", "Private policy scope input")
         return git("rev-parse", "HEAD")
+
+    # Exercise the committed registration predicates independently of the
+    # workflow event. Only the complete guard grants acceptance credit.
+    validate = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import local_acceptance
+from ci_input_scope import check_guard_registrations
+local_acceptance.ROOT = Path.cwd()
+check_guard_registrations(sys.argv[2])
+'''
+
+    def amended_registration(name, key):
+        text = sources[name]
+        declaration, = [node for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == key for target in node.targets)]
+        original = ast.get_source_segment(text, declaration.value)
+        assert original and text.count(original) == 1
+        return text.replace(original, repr({"0" * 64}), 1)
+
+    runner = ".github/scripts/local_acceptance.py"
+    fixture_input = "scripts/publish_release_mirror.py"
+    controls = [("valid-registrations", base, None),
+                ("unreviewed-resource-layout", commit(runner, amended_registration(runner, "reviewed_sources")),
+                 "Unreviewed complete executor program"),
+                ("stale-policy-input", commit(fixture_input, sources[fixture_input] + "\n# Changed input\n"),
+                 "Unreviewed policy-fixture input: " + fixture_input),
+                ("stale-verifier-layout", commit(selector, amended_registration(selector, "REVIEWED_VERIFIER_LAYOUTS")),
+                 "Verifier scope registration failed")]
+    for label, ref, diagnostic in controls:
+        git("switch", "--detach", ref)
+        result = command(label, [sys.executable, "-I", "-B", "-c", validate, repository / ".github/scripts", ref],
+                         expected=1 if diagnostic else 0)
+        if diagnostic:
+            assert diagnostic.encode() in result.stderr, (label, result.stderr)
 
     def observe(label, first, head, expected, *, checkout=None, events=None, declared=None):
         git("switch", "--detach", checkout or head)
@@ -777,6 +917,8 @@ def policy_fixture_scope(output, environment):
     assert lines.index("      - name: Canonical Nexus contract and daemon resolve one published pin") < lines.index(
         "      - name: Exercise real Git histories")
     result = {"status": "PASS", "cases": cases, "commands": commands,
+              "committed_registration_controls": [{"case": label, "accepted": diagnostic is None}
+                                                   for label, _, diagnostic in controls],
               "actual_broken_scanner_fixture_refused": True,
               "unsafe_selector_omits_that_required_fixture": True,
               "original_actual_current_source_checks_ungated": True,
@@ -1313,10 +1455,14 @@ def run(output):
     assert "Local acceptance failed (9)" in failure, failure
     environment.pop("FAIL_SCOPE_PROFILE")
     print("PASS: an actual normal-input change still reruns and fails its required profile", flush=True)
+    # Small Rust or cached builds can finish between process samples. Keep the
+    # original observations and require a real, observable compile as well.
+    expected_priority = 16384 if os.name == "nt" else 10
+    rustc = Path(command("rustc", "--print", "sysroot")) / "bin" / ("rustc.exe" if os.name == "nt" else "rustc")
+    commands.append(check_compiler_priority(executor, rustc, output, build_environment, expected_priority))
     # Each row signs {compiler name: {priority: distinct children}}.
     observed = [(priority, count) for row in commands for counts in row.get("compiler_priorities", {}).values()
                 for priority, count in counts.items()]
-    expected_priority = 16384 if os.name == "nt" else 10
     assert observed and all(priority == str(expected_priority) and count > 0 for priority, count in observed), observed
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,

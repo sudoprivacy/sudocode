@@ -2029,6 +2029,21 @@ before the signed author checks finished. The available signed author interval
 was 506.447 minutes, with 42.453 minutes summed across the recorded commands.
 The original author-attempt and lease timeline is unavailable, so these
 records cannot classify the other time as queueing or execution.</p>
+<p>Across the same 15 PRs, the exact-head Local acceptance success to merge
+averaged 10.976 minutes. The final recorded queue entry to merge averaged
+9.801 minutes, including checks on the queue commit. For
+<a href="https://github.com/sudoprivacy/sudocode/pull/1547">PR #1547</a>,
+40 minutes 4 seconds elapsed between the signed author finish and PR creation.
+The exact-head hosted acceptance run was created three seconds after the PR.</p>
+<p><strong>Windows browser input and receipt verification.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1563">PR #1563</a>
+merged after the signed Windows and Docker guard and both merge-group workflows
+passed. A matched 1,146-file Windows Docker fixture spent 17.573 and 17.653
+seconds on mounted-file synchronization and 1.053 and 1.044 seconds on the
+archive route. The measurement covers source preparation. The accepted change
+also reuses committed file reads during receipt verification, signs the host
+wait for each invocation, and checks Docker Engine before entering the host
+queue. These measurements leave the full lifecycle target unproven.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its

@@ -590,19 +590,50 @@ def validate_before_host_lease(names, root, output):
     if os.name == "nt" and any(name.startswith("native-") for name in names):
         print("NATIVE_HOST_TOOLCHAIN=" + json.dumps({"msvc": str(windows_msvc_toolchain()),
                                                      "stage": "before host queue"}), flush=True)
-    if set(names) & {"rendering", "browser"}:
+    if "guard-contract" in names:
+        validate_guard_before_host_lease(root, output)
+    if set(names) & {"guard-contract", "rendering", "browser"}:
         try:
-            subprocess.run(docker_engine_probe_command(30), check=True, capture_output=True)
+            subprocess.run(docker_engine_probe_command(30), check=True, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
         except (subprocess.CalledProcessError, OSError) as error:
-            raise RuntimeError("The selected rendering/browser checks need local Docker, which did not answer. "
+            detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+            raise RuntimeError("The selected acceptance checks could not reach local Docker. "
                                "Start Docker Desktop (or correct DOCKER_HOST/context), then rerun the same "
-                               f"acceptance command; no check has started: {error}") from error
-    if "guard-contract" not in names:
-        return
+                               f"acceptance command. No host queue or container/native field has started. {detail}") from error
+        print("DOCKER_ENGINE_READINESS: server version checked before the host queue; "
+              "all selected acceptance is still required.", flush=True)
+
+
+def validate_guard_before_host_lease(root, output):
     print("GUARD_STATIC_PREFLIGHT: validate protected pins, selection and release recipe before "
           "joining the host queue; no Docker/native field has started. Full guard remains required.", flush=True)
-    executor = stage_profile_executor(root, execution_policy_ref(), "guard-contract",
-                                      output / "guard-contract" / "prequeue-static-policy")
+    policy_ref = execution_policy_ref()
+    static_snapshot = output / "guard-contract" / "prequeue-static-policy"
+    executor = stage_profile_executor(root, policy_ref, "guard-contract", static_snapshot)
+    # The Docker fixture reads the candidate while this validation stages the
+    # policy. They coincide for a frozen contract update. Older or different
+    # candidates still go through their original required full guard.
+    try:
+        _, candidate_ref = run.execution_refs
+    except AttributeError:
+        candidate_ref = None
+    if candidate_ref == policy_ref:
+        program = """import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import local_acceptance
+from ci_input_scope import check_guard_registrations
+local_acceptance.ROOT = Path.cwd()
+try:
+    check_guard_registrations(sys.argv[2])
+except (ValueError, RuntimeError) as error:
+    raise SystemExit(f"GUARD_REGISTRATIONS_REFUSED: {error}")
+"""
+        subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                        str(static_snapshot / ".github/scripts"), policy_ref], cwd=root, check=True)
+        print("GUARD_REGISTRATIONS: reviewed resource, policy and verifier registrations match the committed source.",
+              flush=True)
     spec = importlib.util.spec_from_file_location("prequeue_native_inventory", executor)
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
@@ -1155,12 +1186,30 @@ def run(name, root, output, base, execute):
             raise RuntimeError("Co-host build version stamp was lost")
     elif name in {"rendering", "browser"}:
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
-            if name == "rendering":
-                with rendering_source_inputs(root.parent) as inputs:
-                    if inputs != root.parent:
-                        # Build commands use the frozen candidate as their working directory.
-                        return run(name, inputs / "candidate", output, base, execute)
-            benchmark(name, root, output, base, command, target)
+            from functools import partial
+
+            @contextmanager
+            def compiler_scope():
+                nonlocal execute
+                module, tool = prepare_compiler_cache(output / "compiler-cache")
+                if tool is None:
+                    yield
+                    return
+                cache = Path("/state/compiler-objects") / f"{tool['cache_namespace']}-{tool['target']}-v2"
+                direct = execute
+                with module.session(tool, output / "compiler-cache", direct, cache) as active:
+                    execute = active.execute
+                    try:
+                        yield
+                    finally:
+                        execute = direct
+
+            with container_source_inputs(root.parent, name) as inputs:
+                frozen = inputs / "candidate"
+                target = native_target_directory(frozen)
+                env["CARGO_TARGET_DIR"] = str(target)
+                benchmark(name, frozen, output, base, partial(command, cwd=frozen), target,
+                          source_mount=root.parent, compiler_scope=compiler_scope)
         else:
             try:
                 policy_ref, candidate_ref = run.execution_refs
@@ -1219,7 +1268,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "854fe5206beb48d40785ffb45e2ff4631b85ed068ee1b6b26518c079795e158f",
+        ".github/scripts/ci_input_scope.py": "52a37d07dd7c8be4ed975e8723dec251f67a066e9b54f98800a0ea4a91576302",
         ".github/workflows/rust-ci.yml": "d6d944737447ed25dd0ffcf262c36258fe130ae1afbecedaffd313335a96bca5",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1234,7 +1283,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "00073b1e377ccb69f711f98332deb7e808c4a3ba89753ceab9c4ef2d9bcbbc90",
+        ".github/scripts/local_acceptance.py": "389555491f5cc82e08b78732092c4d22703e8dc4f6a16b83f1421ce66d0ab883",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
@@ -1243,22 +1292,22 @@ def native_guard_files():
         ".github/workflows/local-acceptance-workspace.yml": "ef46222e71c38e472b6ca53a86792efb50dd4ba40b96369ded9afba19b1d3a1b",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
-        "e2e/local-acceptance/contract_reads_acceptance.py": "c40da37df440cbad3db58907c488673578b4fe9caab31b4919d2eff30eaf8a37",
+        "e2e/local-acceptance/contract_reads_acceptance.py": "0334d86aff40b82a03fc7dd1c668b2f15ab5606e252096819a05d72059c8ebf1",
         "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "a29cd12b2b4e79ba94ea32ddb1e37ab04215054ca8bc12823d7dbdb01816c799",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "7233d3b740be3ea1b0d5875c859c9c188553553fa7722100eef47803ff875db5",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d28aee206a7538b334ff1143916cf44a1c512f8d7118cfcd9f0c40e55425a385",
-        "e2e/local-acceptance/host_lease_acceptance.py": "2681ac28620f89c383220b774c727aa75774d90ce51d4802e0768979e7a192dc",
+        "e2e/local-acceptance/host_lease_acceptance.py": "04e8ad7f62dd6e0045b6e5ca6c3fd770dbe802e611c604bd0a533334cfa7ad51",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
         "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
-        "e2e/local-acceptance/parallel_acceptance.py": "e790719488538aedb216eea3caa6883b71ef7c608b9c11fd33c9c9ca043ecd60",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
+        "e2e/local-acceptance/parallel_acceptance.py": "bac9a257cb0daac0bfe91920dd8f23552bfc98567ded9aa2fd6e340de704fd9a",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "242045ab62ef54ce11c1d5424e824ddfe94460569133e7c651795aa2e5427b29",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
-        "e2e/local-acceptance/profile_compat_acceptance.py": "c85423b23353ac6359e42fe648b2148c6dc68299462b1b92576cf2b7575c36be",
+        "e2e/local-acceptance/profile_compat_acceptance.py": "97bbd63bcd0739daa689def0b48f41fb1aba466d40df109b45636df90b839408",
         "e2e/local-acceptance/publication_acceptance.py": "597998d9fe8cd3bffb9491839d367c85528b6f5638a77258811209ef8382d392",
         "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
@@ -1605,7 +1654,7 @@ def snapshot(root, ref, destination):
             stream.extractall(destination, filter="data")
 
 
-def pack_rendering_sources(root, snapshots, directory):
+def pack_container_sources(root, snapshots, directory):
     """Transport ordinary Git trees as sequential reads across the Windows bind mount."""
     for ref in dict.fromkeys(snapshots.values()):
         tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref], cwd=root)
@@ -1623,12 +1672,12 @@ def pack_rendering_sources(root, snapshots, directory):
     return digests
 
 
-def extract_rendering_source(path, destination, ref, expected_hash):
+def extract_container_source(path, destination, ref, expected_hash):
     """Read a regular-file Git archive safely on the pinned container Python."""
     from pathlib import PurePosixPath
 
     if checkout_link(path) or not path.is_file():
-        raise RuntimeError(f"Rendering archive is missing or is not a regular file: {path}")
+        raise RuntimeError(f"Source archive is missing or is not a regular file: {path}")
     destination.mkdir()
     # Git's ordinary files all reach the legacy Linux checkout with the mode
     # supplied by the Windows bind mount. Keep those modes across the transport
@@ -1637,17 +1686,17 @@ def extract_rendering_source(path, destination, ref, expected_hash):
     with path.open("rb") as payload:
         file_mode = stat.S_IMODE(os.fstat(payload.fileno()).st_mode) & 0o777
         if hashlib.file_digest(payload, "sha256").hexdigest() != expected_hash:
-            raise RuntimeError(f"Rendering archive digest mismatch: {path}")
+            raise RuntimeError(f"Source archive digest mismatch: {path}")
         payload.seek(0)
         with tarfile.open(fileobj=payload, mode="r:") as archive:
             if archive.pax_headers.get("comment") != ref:
-                raise RuntimeError(f"Rendering archive revision mismatch: {path}")
+                raise RuntimeError(f"Source archive revision mismatch: {path}")
             seen = set()
             for member in archive:
                 relative = PurePosixPath(member.name)
                 if (not relative.parts or relative.is_absolute() or ".." in relative.parts
                         or relative in seen or not (member.isdir() or member.isfile())):
-                    raise RuntimeError(f"Unexpected entry in rendering Git archive: {member.name}")
+                    raise RuntimeError(f"Unexpected entry in source Git archive: {member.name}")
                 seen.add(relative)
                 target = destination.joinpath(*relative.parts)
                 if member.isdir():
@@ -1660,28 +1709,28 @@ def extract_rendering_source(path, destination, ref, expected_hash):
                     target.chmod(file_mode)
 
 
-def rendering_source_inputs(inputs):
+def container_source_inputs(inputs, profile):
     """Expand packed inputs on the container disk before syncing the leased checkout."""
     from contextlib import nullcontext
 
     packed = inputs / "archives"
     if checkout_link(packed):
-        raise RuntimeError("Rendering archive directory must not be a link")
+        raise RuntimeError("Source archive directory must not be a link")
     if not packed.exists():
         return nullcontext(inputs)
     identity = json.loads((inputs / "identity.json").read_bytes())
-    digests = identity.get("rendering_archive_sha256")
-    labels = ("candidate", "baseline", "trusted")
+    digests = identity.get(f"{profile}_archive_sha256")
+    labels = ("candidate", "baseline", "trusted") if profile == "rendering" else ("candidate",)
     if not isinstance(digests, dict) or set(digests) != set(labels):
-        raise RuntimeError("Rendering archive inventory is incomplete")
+        raise RuntimeError(f"{profile} source archive inventory does not match the selected profile")
 
     @contextmanager
     def unpacked():
         # Do not occupy the tmpfs reserved for measured fixtures.
-        with tempfile.TemporaryDirectory(prefix="scode-rendering-inputs-", dir="/tmp") as folder:
+        with tempfile.TemporaryDirectory(prefix="scode-container-inputs-", dir="/tmp") as folder:
             staged = Path(folder)
             for label in labels:
-                extract_rendering_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
+                extract_container_source(packed / f"{label}.tar", staged / label, identity[label], digests[label])
             yield staged
 
     return unpacked()
@@ -1718,8 +1767,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     sources = output / "inputs"
     sources.mkdir()
     archives = {}
-    if name == "rendering" and os.name == "nt":
-        archives = pack_rendering_sources(root, snapshots, sources / "archives")
+    if os.name == "nt":
+        archives = pack_container_sources(root, snapshots, sources / "archives")
     if not archives:
         for label, ref in snapshots.items():
             snapshot(root, ref, sources / label)
@@ -1761,7 +1810,7 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
         "rendering_release_reused": previous is not None,
     }
     if archives:
-        identity["rendering_archive_sha256"] = archives
+        identity[f"{name}_archive_sha256"] = archives
     (output / "container-provenance.json").write_text(json.dumps(identity, indent=2))
     (sources / "identity.json").write_text(json.dumps(identity, indent=2))
     if previous is not None:
@@ -1779,6 +1828,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
+    (runner / "local-acceptance/compiler_cache.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{protected}:.github/local-acceptance/compiler_cache.py"], cwd=root))
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
     if name == "browser":
         # The executor owns this harness, including for candidates that predate
@@ -1797,10 +1848,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
               "This isolates render measurements from host disk flushes and does not qualify "
               "persistent-storage performance. Other profiles retain their storage; "
               "exit assertions, deadlines and performance budgets are unchanged.", flush=True)
+    cache_volume = lease_volume + "-cache-v1"
+    # The pinned tool loader uses the default root cache. Give it the existing
+    # leased volume so a new image/context never has to provision the tool again.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048", *scratch,
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
-            "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
+            "--mount", f"type=volume,source={cache_volume},target=/state",
+            "--mount", f"type=volume,source={cache_volume},target=/root/.cache/sudocode-local-acceptance,volume-nocopy",
             "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo",
@@ -1918,10 +1973,11 @@ def exclusive_benchmark_state(directory=Path("/locks")):
         yield
 
 
-def benchmark(name, root, output, base, command, target):
+def benchmark(name, root, output, base, command, target, source_mount, compiler_scope):
     with exclusive_benchmark_state():
         migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
-        benchmark_locked(name, root, output, base, command, target)
+        benchmark_locked(name, root, output, base, command, target, source_mount=source_mount,
+                         compiler_scope=compiler_scope)
 
 
 def migrate_benchmark_cache(legacy, state):
@@ -2104,9 +2160,12 @@ def benchmark_driver_package(source):
     return "rusty-sudocode-cli"
 
 
-def benchmark_locked(name, root, output, base, command, target):
+def benchmark_locked(name, root, output, base, command, target, source_mount, compiler_scope):
+    from contextlib import nullcontext
+
     if name == "browser":
-        browser_smoke(root.parent, output, command)
+        reused = verified_candidate_release(source_mount)
+        browser_smoke(root, output, command, reused, compiler_scope=compiler_scope)
         return
     # Run the declared workload and paired sampling policy. Moving execution
     # hosts does not change budgets or per-run interaction assertions.
@@ -2127,16 +2186,17 @@ def benchmark_locked(name, root, output, base, command, target):
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    for label, source in [("baseline", baseline), ("candidate", candidate)]:
-        command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
-    # The copied production binaries above stay fixed when dev features build the driver.
-    package, prefix = benchmark_driver_targets(trusted)
-    driver = f"{prefix}_render_performance"
-    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
-                  "--target-dir", str(targets / "driver"), "-p", package,
-                  "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
+    with (compiler_scope or nullcontext)():
+        for label, source in [("baseline", baseline), ("candidate", candidate)]:
+            command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
+                    "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+            shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+        # The copied production binaries above stay fixed when dev features build the driver.
+        package, prefix = benchmark_driver_targets(trusted)
+        driver = f"{prefix}_render_performance"
+        log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
+                      "--target-dir", str(targets / "driver"), "-p", package,
+                      "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
             "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
@@ -2173,20 +2233,21 @@ def browser_viewport_cases():
     return ("viewport_browser_interaction", "viewport_browser_resource_exit")
 
 
-def browser_smoke(inputs, output, command):
+def browser_smoke(source, output, command, reused, compiler_scope):
     """Painted-terminal behaviour against the measured release or a dev build.
 
     Typing latency is judged by scoped local rendering; this pass checks
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
-    reused = verified_candidate_release(inputs)
+    from contextlib import nullcontext
+
     work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
     # Rendering has finished with this mutable checkout. Synchronize the actual
     # candidate, then let normal Cargo dependency tracking validate every input.
     candidate = work / ("trusted" if reused is not None else "candidate")
-    replace_checkout(inputs / "candidate", candidate)
+    replace_checkout(source, candidate)
     terminal = candidate / "e2e/terminal-resize"
     command("npm", "ci", "--prefix", str(terminal))
     manifest = str(candidate / "rust/Cargo.toml")
@@ -2194,20 +2255,21 @@ def browser_smoke(inputs, output, command):
     profile = ["--release"] if reused is not None else []
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
-    if reused is None:
-        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
-                "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / "candidate/debug/scode", binary)
-    else:
-        shutil.copy2(reused, binary)
-        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
-    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-    package, prefix = benchmark_driver_targets(candidate)
-    links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
-    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
-                  "-p", package, "--test", links, "--test", viewport,
-                  "--no-run", "--message-format=json-render-diagnostics")
+    with (compiler_scope or nullcontext)():
+        if reused is None:
+            command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                    "-p", "rusty-sudocode-cli", "--bin", "scode")
+            shutil.copy2(targets / "candidate/debug/scode", binary)
+        else:
+            shutil.copy2(reused, binary)
+            print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+                  "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+        expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        package, prefix = benchmark_driver_targets(candidate)
+        links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
+        log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
+                      "-p", package, "--test", links, "--test", viewport,
+                      "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
     command(sys.executable, str(smoke), "--driver", drivers[links],

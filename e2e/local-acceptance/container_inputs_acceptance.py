@@ -71,25 +71,30 @@ spec=importlib.util.spec_from_file_location('actual_profiles','/inputs/runner/.g
 checks=importlib.util.module_from_spec(spec);spec.loader.exec_module(checks)
 inputs=Path('/inputs')
 packed=(inputs/'archives').is_dir()
-assert packed==expected['packed_sources'], 'unexpected rendering transport'
-with checks.rendering_source_inputs(inputs) as frozen:
+assert packed==expected['packed_sources'], 'unexpected source transport'
+observed={'image_policy':image,'packed_sources':packed}
+def workload(name,root,output,base,command,target,*,source_mount,compiler_scope):
+    assert callable(compiler_scope),'production dispatcher did not supply the compiler scope'
+    assert (Path.home()/'.cache/sudocode-local-acceptance').samefile('/state'), 'compiler tools are not on the leased volume'
+    assert Path(checks.__file__).with_name('compiler_cache.py').is_file(), 'compiler tool loader was not staged'
+    # Keep the real main(), run(), output creation and command executor. Only
+    # replace the expensive product workload; it must use the supplied output.
+    frozen=root.parent
+    assert source_mount==inputs, 'lost the readonly input mount'
     actual={label:(frozen/label/'marker.txt').read_text()
             for label in ['candidate','baseline','trusted'] if (frozen/label).exists()}
     assert actual==expected['sources'],f'Git snapshot mismatch: {actual} != {expected}'
     assert not any((frozen/label/'private-untracked.txt').exists() for label in actual)
-observed={'sources':actual,'image_policy':image,'packed_sources':packed}
-if set(actual)=={'candidate'}:
-    for name in ['gui-smoke.py','benchmark.py','gui-policy.json']:
-        control=Path('/inputs/runner/e2e/terminal-resize')/name
-        assert control.read_text()==expected['policy'],f'GUI harness used another policy: {name}'
-    assert not (Path('/inputs/candidate/e2e/terminal-resize/gui-smoke.py')).exists()
-    observed['trusted_gui_harness']=True
-def workload(name,root,output,base,command,target):
-    # Keep the real main(), run(), output creation and command executor. Only
-    # replace the expensive product workload; it must use the supplied output.
+    observed['sources']=actual
+    if name=='browser':
+        for script in ['gui-smoke.py','benchmark.py','gui-policy.json']:
+            control=Path('/inputs/runner/e2e/terminal-resize')/script
+            assert control.read_text()==expected['policy'],f'GUI harness used another policy: {script}'
+        assert not (root/'e2e/terminal-resize/gui-smoke.py').exists()
+        observed['trusted_gui_harness']=True
     assert (root/'marker.txt').read_text()==actual['candidate'],'command cwd lost the frozen candidate'
     binary=output/'scode-candidate'
-    reused=checks.verified_candidate_release(Path('/inputs')) if name=='browser' else None
+    reused=checks.verified_candidate_release(source_mount) if name=='browser' else None
     shutil.copy2(reused or sys.executable,binary)
     # This private probe is later deliberately corrupted by the non-root host.
     # Docker owns the output on Linux; retain execution while allowing that edit.
@@ -127,6 +132,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         files = {
             "marker.txt": label,
             "probe.py": probe,
+            ".github/local-acceptance/compiler_cache.py": (SOURCE / ".github/local-acceptance/compiler_cache.py").read_text(encoding="utf-8"),
             ".github/local-acceptance/Dockerfile": f'FROM {base_image}\n'
                 'RUN pip install --no-cache-dir psutil==7.2.2\n'
                 f'LABEL scode.container-input-fixture="{token}"\n'
@@ -169,7 +175,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
                corrupt_archive=False):
         evidence = parent / name
         evidence.mkdir(parents=True)
-        packed = profile == "rendering" and os.name == "nt"
+        packed = os.name == "nt"
         (evidence / "expected.json").write_text(json.dumps({**expected, "packed_sources": packed}))
 
         def execute_profile(arguments, cwd, log, environment=None):
@@ -243,8 +249,7 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         tag_id = execute(["docker", "image", "inspect", "--format", "{{.Id}}", second["image_tag"]]).read_text().strip()
         assert tag_id == first["image_id"] != second["image_id"], "Fixture did not actually replace the tag"
         print("PASS: actual Git ref moves and Docker retag preserve frozen input/image selection", flush=True)
-        # The browser smoke stages only the candidate: no baseline or trusted
-        # source enters its container, and every invocation builds its image.
+        # Standalone browser smoke stages only the candidate and builds its image.
         before = sum(docker_operation(row, "build") for row in commands)
         launch("browser-candidate-only", protected,
                {"policy": "main-policy", "sources": {"candidate": "candidate-policy"}}, profile="browser",
@@ -294,19 +299,21 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         else:
             raise AssertionError("A real container using the wrong policy was accepted")
         if os.name == "nt":
-            try:
-                launch("negative-modified-rendering-archive", protected, {"policy": "main-policy", "sources": {
-                    "candidate": "next-candidate", "baseline": "baseline", "trusted": "main-policy"}},
-                    corrupt_archive=True)
-            except RuntimeError:
-                errors = [Path(row["log"]).read_text(errors="replace") for row in commands
-                          if docker_operation(row, "run")]
-                assert "Rendering archive digest mismatch" in errors[-1], errors[-1]
-                assert not (output / "negative-modified-rendering-archive/container/rendering/scode-candidate").exists()
-                print("PASS: changed archive bytes are refused before the native workload", flush=True)
-            else:
-                raise AssertionError("A changed Windows rendering archive was used")
-        result = {"status": "PASS", "cases": 9 if os.name == "nt" else 8,
+            for profile, inputs in [("rendering", {"baseline": "baseline", "trusted": "main-policy"}),
+                                    ("browser", {})]:
+                name = f"negative-modified-{profile}-archive"
+                try:
+                    launch(name, protected, {"policy": "main-policy", "sources": {
+                        "candidate": "next-candidate", **inputs}}, profile=profile, corrupt_archive=True)
+                except RuntimeError:
+                    error = next(Path(row["log"]).read_text(errors="replace") for row in reversed(commands)
+                                 if docker_operation(row, "run"))
+                    assert "Source archive digest mismatch" in error, error
+                    assert not (output / name / "container" / profile / "scode-candidate").exists()
+                    print(f"PASS: changed {profile} archive bytes are refused before the native workload", flush=True)
+                else:
+                    raise AssertionError(f"A changed Windows {profile} archive was used")
+        result = {"status": "PASS", "cases": 10 if os.name == "nt" else 8,
             "windows_packed_archive_corruption_refused": os.name == "nt",
             "production_main_and_dispatcher_layout": True, "browser_candidate_only": True,
             "runner_gui_harness_uses_frozen_policy": True,

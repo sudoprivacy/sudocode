@@ -1452,6 +1452,11 @@ raw UTF-8 event metadata with UTF-8 mode disabled and the POSIX C locale. The
 controls record the child process's actual default file encoding. The gate
 and publisher share one event-file decoder;
 PR text and workflow metadata do not depend on the runner's locale.
+The acceptance gate fetches the pull ref and two notes namespaces together
+when the pull request belongs to the workflow repository. One atomic fetch
+updates the refs before verification. If Git reports an optional namespace
+missing, the same per-ref fetches used for forks supply the available
+evidence. Signature, signer, source and execution-plan checks still run.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after Clippy, CLI daemon or cohost acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the

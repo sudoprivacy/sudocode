@@ -2,8 +2,10 @@
 
 import argparse
 import ast
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -323,11 +325,12 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     def write(name, contents):
         path = repository / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents, encoding="utf-8")
+        path.write_text(contents, encoding="utf-8", newline="\n")
 
     runner = ".github/scripts/local_acceptance.py"
+    selector = ".github/scripts/ci_input_scope.py"
     profiles = ".github/local-acceptance/checks.py"
-    names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+    names = [runner, selector, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
              "e2e/local-acceptance/resource_scheduling_acceptance.py",
              "e2e/local-acceptance/host_lease_acceptance.py"]
     sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
@@ -431,6 +434,69 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
     ]
     if not metadata_only:
+        # Derive the required new review with the original verifier, before
+        # changing either registry. The selector later sees only Git objects.
+        write(runner, pure)
+        git("add", ".")
+        git("commit", "-m", "Scheduling control before registration")
+        unregistered = git("rev-parse", "HEAD")
+        spec = importlib.util.spec_from_file_location("original_registration_verifier", SOURCE / runner)
+        protected = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protected)
+        protected.ROOT = repository
+        diagnostic = io.StringIO()
+        with redirect_stdout(diagnostic):
+            try:
+                protected.resource_executor_identity(unregistered)
+            except ValueError as error:
+                assert str(error) == "Unreviewed complete executor program; full current checks remain required"
+            else:
+                raise AssertionError("New scheduling source requires a fresh layout registration")
+        prefix = "LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED="
+        line, = diagnostic.getvalue().splitlines()
+        assert line.startswith(prefix)
+        layout = json.loads(line[len(prefix):])["observed_source_layout"]
+        registration = "    reviewed_sources = {\n"
+        assert pure.count(registration) == 1
+        registered = pure.replace(registration, registration + f'        "{layout}",\n', 1)
+
+        def runner_pin(source):
+            blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
+            modified, count = re.subn(
+                r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+                lambda match: match[1] + blob + match[2], sources[selector])
+            assert count == 1
+            return modified
+
+        base_selector = runner_pin(sources[runner])
+        # Bind the fixture baseline to the actual tracked runner bytes too.
+        git("switch", "--detach", base)
+        write(selector, base_selector)
+        if git("status", "--porcelain"):
+            git("add", ".")
+            git("commit", "-m", "Register original private runner Git blob")
+        original = git("rev-parse", "HEAD")
+        wrong_layout = registered.replace(layout, "1" * 64, 1)
+        runner_changed = insert_body(registered, "run_command")
+        extra_layout = registered.replace(registration, registration + '        "' + "2" * 64 + '",\n', 1)
+        for label, source, selector_source, expected in [
+            ("registered-scheduling-edit", registered, runner_pin(registered), True),
+            ("stale-selector-registration", registered, runner_pin(pure), False),
+            ("selector-code-changed", registered,
+             insert_body(runner_pin(registered), "main"), False),
+            ("missing-resource-registration", pure, runner_pin(pure), False),
+            ("wrong-resource-registration", wrong_layout, runner_pin(wrong_layout), False),
+            ("runner-code-changed", runner_changed, runner_pin(runner_changed), False),
+            ("extra-resource-registration", extra_layout, runner_pin(extra_layout), False),
+        ]:
+            git("switch", "--detach", original)
+            write(runner, source)
+            write(selector, selector_source)
+            git("add", ".")
+            git("commit", "-m", "Registered scheduling scope " + label)
+            observe(label, original, git("rev-parse", "HEAD"), expected,
+                    events=None if expected else ["merge_group"])
+
         for label, edits, expected in cases:
             git("switch", "--detach", base)
             for name, contents in edits.items():

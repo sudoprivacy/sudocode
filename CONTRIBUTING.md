@@ -274,7 +274,11 @@ outside `host_acceptance_lease` and `perform_check` bodies and the plain
 `profile_reservations(ordered, pending)` declaration. The required policy and
 every non-guard reachable execution fingerprint must still match. Companion
 edits are limited to dispatcher changes with those same non-guard fingerprints,
-the host-lease enforcement fixture and documentation. Changed command runners,
+the host-lease enforcement fixture and documentation. When a scheduling edit
+updates the selector, both commits must register their actual runner Git blobs
+and every other selector statement must match. An added resource layout must
+match the committed runner as computed by the comparison base's verifier.
+Changed command runners,
 imports, globals, runner declarations,
 product code, workflows, unknown inputs or execution fingerprints retain the
 original daemon scope. `acceptance_scheduling_scope` in the mandatory CI JSON

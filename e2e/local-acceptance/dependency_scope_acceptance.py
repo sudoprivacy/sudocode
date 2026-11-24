@@ -106,6 +106,13 @@ esac
     result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
                             env=fixture, capture_output=True)
     assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+    preinstalled = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache-command.mjs"
+    host = "x86_64-unknown-linux-gnu"
+    assert subprocess.check_output([node, preinstalled, host, "rustup", "toolchain", "list", "--quiet"],
+                                   env=fixture, timeout=10).decode().strip() == f"stable-{host}"
+    call = [node, preinstalled, host, node, "-e", "process.stdout.write(process.env.RUSTUP_TOOLCHAIN);process.exitCode=17"]
+    result = subprocess.run(call, capture_output=True, timeout=10)
+    assert result.returncode == 17 and result.stdout.decode() == f"stable-{host}"
     print("PASS: the cache command binds the active pin, preserves conservative inventory, and forwards command results",
           flush=True)
 
@@ -148,13 +155,6 @@ def preinstalled_cache_probe(output):
     with patch.dict(os.environ, {**environment, "RUSTUP_TOOLCHAIN": "stable", "GITHUB_OUTPUT": str(output / "outputs")}):
         module.main()
     assert not (output / "outputs").exists()
-
-    node = shutil.which("node")
-    assert node, "Cache-command acceptance requires Node"
-    script = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache-command.mjs"
-    call = [node, script, host, node, "-e", "process.stdout.write(process.env.RUSTUP_TOOLCHAIN);process.exitCode=17"]
-    result = subprocess.run(call, capture_output=True, timeout=10)
-    assert result.returncode == 17 and result.stdout.decode() == f"stable-{host}"
 
 
 def workflow_scope(output, environment):

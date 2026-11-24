@@ -1738,6 +1738,11 @@ compiler name. A profile's cache session (tool, wrapper, server, statistics,
 priorities and tool commands) is recorded once, on its first cached command; the others
 name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
+On Windows without a loaded SDK, the optional cache wrapper can fail to find
+the linker before Cargo starts. That exact diagnostic leaves the wrapper log
+and returns to the original Cargo executor, which can load the installed SDK.
+The profile still runs its full commands. Compiler errors from those commands
+still fail the profile.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
 processes with independent outputs, changed features/compile-time environment,

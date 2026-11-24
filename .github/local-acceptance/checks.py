@@ -951,7 +951,27 @@ def native_compiler_run(name, root, output, base, execute):
           "source/features/environment keys. Explicit user wrappers/configuration remain authoritative; "
           "busy storage adds no wait. This is not a source-freshness attestation.", flush=True)
     with module.session(tool, output / "compiler-cache", execute) as active:
-        selected = active.execute
+        def cached_command(argv, cwd, log, env):
+            nonlocal selected
+            try:
+                return active.execute(argv, cwd, log, env)
+            except RuntimeError as error:
+                # The original Cargo executor can discover the Windows SDK.
+                # Keep its command when only the optional standalone wrapper
+                # failed to find the linker, before any cache server started.
+                wrapper_log = active.directory / "wrapper-build.log"
+                if (os.name != "nt" or os.environ.get("LIB") or active.environment is not None
+                        or active.wrapper is not None or not str(error).endswith(f"; evidence: {wrapper_log}")
+                        or not wrapper_log.is_file()
+                        or b"error: linker `link.exe` not found" not in wrapper_log.read_bytes().splitlines()):
+                    raise
+                active.close()
+                selected = execute
+                print("COMPILER_CACHE: wrapper could not find the MSVC linker; running the original native commands.",
+                      flush=True)
+                return selected(argv, cwd, log, env)
+
+        selected = cached_command
         return run(name, root, output, base, command)
 
 
@@ -1255,7 +1275,7 @@ def native_guard_files():
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "1308faa13a6a40c55d26a30da2d8f3b706550e5e352b5336c4356355575e86d6",
         ".github/local-acceptance/compiler_cache.py": "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1",
         "e2e/nexus-a2a/lib.sh": "44bd7d3f6a857c6397ebdece41a396825c43d6d1b8382a3d8279089ca3d90073",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
@@ -1370,7 +1390,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'e8f48f465d0cc74dfd46f7a9ad97f0903f7fd263a617f7dc0d710fc5b865db97', 'native-context': 'd0b9ff35df23ce5cd89c82bb220c7a9062f9a9b9f053723789b05ca1f7d1162d', 'native-services': 'a1eadb74842db37d1814936aef8066215f2d1a051f05d4028c8982084851b576'}
+    expected = {'native-release': 'e90ec06c9399d80f2e12b1eca8c06bd46ba8169401f5dcd3b9a3c493d22b9a1c', 'native-context': '2d23cbb5403b5f150f994cee1df36a4897ea4a58d5176bb518beae7196f9077e', 'native-services': '8c5889626bd07542997bd5723ebe45adb2c13eaddd6f722a1b16871216e8394c'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:

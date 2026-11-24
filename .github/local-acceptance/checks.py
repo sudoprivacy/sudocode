@@ -1560,15 +1560,20 @@ def guard_image_context(root, policy_ref, context):
 
 
 def verify_guard_image(image, command):
-    """Recheck the image's verified tool offline before the decision matrix."""
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
-            image, "/opt/nextest_seed.py")
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
-            image, "/opt/compiler_seed.py")
-    print("GUARD_COMPILER_DEPENDENCIES: verify the protected manifest/lock dependencies offline "
-          "before either guard matrix; original compiler and PTY controls remain required.", flush=True)
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "cargo",
-            image, "fetch", "--offline", "--locked", "--manifest-path", "/opt/compiler-objects/Cargo.toml")
+    """Run all three offline preflight checks on the same immutable image."""
+    program = """
+echo 'GUARD_OFFLINE_CHECK: nextest archive and executable'
+python3 /opt/nextest_seed.py
+echo 'GUARD_OFFLINE_CHECK: compiler cache archive and executable'
+python3 /opt/compiler_seed.py
+echo 'GUARD_OFFLINE_CHECK: locked compiler fixture dependencies'
+exec cargo fetch --offline --locked --manifest-path /opt/compiler-objects/Cargo.toml
+"""
+    # Both seeds verify distinct cached tools. Their receipts and Cargo's
+    # registry metadata use separate paths in this disposable container.
+    # Forward interrupts to the running tool while the shell is waiting.
+    command("docker", "run", "--rm", "--init", "--network", "none",
+            "--env", "TINI_KILL_PROCESS_GROUP=1", "--entrypoint", "sh", image, "-ec", program)
 
 
 def prepare_contract_container(root, output, command):

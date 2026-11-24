@@ -36,8 +36,9 @@ scode a2a setup claude --issuer https://HOST:2126
 - `state` is one of `installed`, `already_installed`, `moved_to_this_sdk`,
   `needs_input` (a flag is missing; nothing was written), `refused` (something
   else is already attached; the instructions say how to remove it) or `failed`.
-- Then start a new Claude Code session and call `scode_status` in it. It should
-  report connected and an agent name starting with `claude-`.
+- Then start a new Claude Code session and call `scode_agent_list` in it. A list
+  of agents means the session has joined; other agents see it as
+  `Claude Code · <machine> · <folder>` under a name starting with `claude-`.
 
 ## After an SDK update
 

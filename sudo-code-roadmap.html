@@ -2147,6 +2147,22 @@ the ordinary cache graph for a separate cohost comparison. Cargo tree records
 dependency resolution. Compiler object reuse, added archive bytes and net
 runner time still require matched runs. See the
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45218960852/job/137847669992">original Windows publisher</a>.</p>
+<p><strong>Native failure timestamps and runner occupancy.</strong> The
+68 original complements include 49 successful jobs with 25,433 runner
+seconds, eight failed jobs with 3,117 seconds and 11 cancelled jobs with
+3,537 seconds. Successful jobs account for 79.3% of known complement
+occupancy. Both same-head Windows grpcurl extraction failures ended before
+product Cargo execution, after spending 107 seconds combined in the cache
+step. Three original Windows resize failures followed 338.128 seconds
+combined between their examples Cargo launches and cache bookkeeping
+markers. That is observed work. Changing the order can also change what
+Cargo reuses on successful and failed runs.</p>
+<p>Job-level REST downloads verified all 68 logs against their original
+job intervals. An earlier CLI fetch returned attempt 3's log for the
+attempt 2 job in one rerun. The distinct direct logs confirm both failures
+and the prior 29 Windows cache and profile-order results. See
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135441523265">attempt 2</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135610094106">attempt 3</a>.</p>
 <p><strong>Same-repository acceptance ref fetch.</strong> The signature gate
 and publisher fetch the pull ref and both notes namespaces in one atomic
 Git transaction when all three refs are available. A missing optional

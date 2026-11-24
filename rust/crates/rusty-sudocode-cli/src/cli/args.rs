@@ -319,8 +319,8 @@ enum AcpSub {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub(crate) enum A2aSub {
-    /// Attach Claude Code: one command, safe to run again. Prints one JSON
-    /// object whose "instructions" say what to do next
+    /// Attach Claude Code or Codex: one command, safe to run again. Prints one
+    /// JSON object whose "instructions" say what to do next
     Setup(super::a2a::A2aSetupArgs),
 }
 

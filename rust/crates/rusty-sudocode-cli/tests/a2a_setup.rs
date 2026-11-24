@@ -188,6 +188,71 @@ fn setup_hands_over_to_the_package_with_what_the_caller_typed() {
 }
 
 #[test]
+fn codex_goes_to_its_own_setup_and_misplaced_options_are_refused() {
+    let Some(node) = node() else {
+        eprintln!("skipped: no node on PATH");
+        return;
+    };
+    let home = temp_home("codex");
+    let package = fixture_package(&home, true);
+
+    // Codex goes to the package's Codex setup, with its own options.
+    let codex = scode(&home)
+        .env("PATH", node.parent().expect("node has a folder"))
+        .args([
+            "a2a",
+            "setup",
+            "codex",
+            "--issuer",
+            "https://founder.example:2126",
+        ])
+        .args(["--approve-tools", "--port", "24000", "--sdk"])
+        .arg(&package)
+        .output()
+        .expect("scode runs");
+    assert_eq!(
+        codex.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&codex.stderr)
+    );
+    let report = json(&codex);
+    let argv: Vec<&str> = report["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(argv[0], "--setup-codex");
+    assert!(
+        argv.windows(2).any(|pair| pair == ["--port", "24000"]),
+        "{argv:?}"
+    );
+    assert!(argv.contains(&"--approve-tools"), "{argv:?}");
+
+    // An option for the other program is refused by name, before anything runs.
+    fs::remove_file(package.join("dist").join("setup-ran")).expect("the fixture ran above");
+    let misplaced = scode(&home)
+        .env("PATH", node.parent().expect("node has a folder"))
+        .args(["a2a", "setup", "claude", "--approve-tools", "--sdk"])
+        .arg(&package)
+        .output()
+        .expect("scode runs");
+    assert_eq!(misplaced.status.code(), Some(1));
+    let report = json(&misplaced);
+    assert_eq!(report["state"], "needs_input");
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("--approve-tools does not apply to `setup claude`"),
+        "{report}"
+    );
+    assert!(!package.join("dist").join("setup-ran").exists());
+    fs::remove_dir_all(home).expect("cleanup");
+}
+
+#[test]
 fn a_package_that_fails_its_integrity_check_sets_nothing_up() {
     let Some(node) = node() else {
         eprintln!("skipped: no node on PATH");

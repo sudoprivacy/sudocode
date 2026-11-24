@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
-import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { accessSync, appendFileSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync,
+  renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -63,6 +65,40 @@ export interface SharedSetup {
 export function journalLine(journal: string, record: Record<string, unknown>): void {
   mkdirSync(path.dirname(journal), { recursive: true, mode: 0o700 });
   appendFileSync(journal, JSON.stringify({ at: new Date().toISOString(), ...record }) + '\n', { mode: 0o600 });
+}
+
+/** Replace `file` in one step, so a reader never sees half of it. */
+export function atomicWrite(file: string, bytes: Buffer | string, mode: number): void {
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}`);
+  const handle = openSync(temporary, 'wx', mode);
+  try { writeFileSync(handle, bytes); fsyncSync(handle); } finally { closeSync(handle); }
+  try { renameSync(temporary, file); } catch (error) { try { unlinkSync(temporary); } catch { /* Best effort. */ } throw error; }
+}
+
+/** Quote one word for a POSIX shell; plain paths stay readable. */
+export function shellWord(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/** Split a command line the way a POSIX shell would for quotes and blanks. */
+export function splitShellWords(command: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let quote: '"' | "'" | undefined;
+  let open = false;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      if (c === quote) quote = undefined;
+      else if (quote === '"' && c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1])) word += command[++i];
+      else word += c;
+    } else if (c === '"' || c === "'") { quote = c; open = true; }
+    else if (c === '\\' && i + 1 < command.length) { word += command[++i]; open = true; }
+    else if (/\s/.test(c)) { if (open || word) { words.push(word); word = ''; open = false; } }
+    else word += c;
+  }
+  if (open || word) words.push(word);
+  return words;
 }
 
 /** The first `name` on PATH that is a file this user may execute. */

@@ -40,6 +40,35 @@ scode a2a setup claude --issuer https://HOST:2126
   of agents means the session has joined; other agents see it as
   `Claude Code · <machine> · <folder>` under a name starting with `claude-`.
 
+## Codex
+
+```sh
+scode a2a setup codex --issuer https://HOST:2126
+```
+
+macOS and Linux. On Windows use the documented manual steps
+(`sdk/typescript/README.md`, "Global native Codex attachment").
+
+- Codex must have been started and signed in once on the machine.
+- The command writes the bridge config, starts Codex's own background server
+  if it is not running (`codex app-server daemon start`), and registers the
+  `nexus_scode` entry through `codex mcp add`. `--issuer` is not needed again
+  if Claude Code was set up first.
+- Codex asks before it calls each of the bridge's four tools. Until they are
+  allowed, a message cannot wake an idle session. Add `--approve-tools` to
+  allow them in Codex's `config.toml`; without it nothing is granted, and
+  approvals that already exist are kept.
+- If you start Codex with `-c approvals_reviewer=user`, Codex runs a private
+  server the bridge cannot see. Start it without that option, or add
+  `--command-entry PATH` to write a `codex` launcher that removes it. `PATH`
+  must come before the real `codex` on PATH; a real program is never replaced.
+- All open Codex sessions share one bridge process. A fresh setup reaches only
+  sessions started afterwards, and a move to a newer package is refused until
+  every Codex session is closed (the bridge stops by itself about two minutes
+  later). Conversations keep their agent names when resumed.
+- Then, in a Codex session, call `scode_agent_list`. Other agents see the
+  session as `Codex · <machine> · <folder>`.
+
 ## After an SDK update
 
 Run the same command with the new scode. It writes the new package beside the
@@ -49,11 +78,20 @@ restarted, so the old version folder is left in place.
 
 ## Undo
 
+Claude Code:
+
 1. `claude mcp remove nexus_scode -s user`
 2. In Claude Code's `settings.json`, delete the hook entries whose command
    contains `--claude-watch` or `--claude-deliver`. The copy from before setup
    is under `<config root>/claude/backups/`.
-3. The config root (default `~/.config/sudocode/acp/a2a`) holds the enrollment
-   grant, the operator record and each session's identity. Removing it makes
-   every session enroll a new agent name on its next start; the old names stay
-   on the network.
+
+Codex, with every Codex session closed: `codex mcp remove nexus_scode`, and put
+the original `codex` command back if a launcher was installed (the setup
+journal records what was there).
+
+Both:
+
+- The config root (default `~/.config/sudocode/acp/a2a`) holds the enrollment
+  grant, the operator record and each session's identity. Removing it makes
+  every session enroll a new agent name on its next start; the old names stay
+  on the network.

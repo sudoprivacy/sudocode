@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import { findOnPath, journalLine, prepareSharedSetup, setupConfigRoot, setupFailure, SetupStop,
-  type SetupOptions, type SetupResult } from './a2aSetup';
+import { atomicWrite, findOnPath, journalLine, prepareSharedSetup, setupConfigRoot, setupFailure, SetupStop, shellWord,
+  splitShellWords, type SetupOptions, type SetupResult } from './a2aSetup';
 import { validateClaudeAutojoinConfig, type ClaudeAutojoinConfig } from './claudeAutojoin';
 
 const execute = promisify(execFile);
@@ -34,32 +34,6 @@ export function claudeUserFiles(environment: NodeJS.ProcessEnv = process.env): {
     return { global: path.join(directory, '.claude.json'), settings: path.join(directory, 'settings.json') };
   }
   return { global: path.join(os.homedir(), '.claude.json'), settings: path.join(os.homedir(), '.claude', 'settings.json') };
-}
-
-/** Quote for the shell Claude Code runs hooks in; plain paths stay readable. */
-function shellWord(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-/** Split a hook command the way a POSIX shell would for quotes and blanks. */
-export function splitShellWords(command: string): string[] {
-  const words: string[] = [];
-  let word = '';
-  let quote: '"' | "'" | undefined;
-  let open = false;
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    if (quote) {
-      if (c === quote) quote = undefined;
-      else if (quote === '"' && c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1])) word += command[++i];
-      else word += c;
-    } else if (c === '"' || c === "'") { quote = c; open = true; }
-    else if (c === '\\' && i + 1 < command.length) { word += command[++i]; open = true; }
-    else if (/\s/.test(c)) { if (open || word) { words.push(word); word = ''; open = false; } }
-    else word += c;
-  }
-  if (open || word) words.push(word);
-  return words;
 }
 
 function readJson<T>(file: string): { value: T; bytes: Buffer } | undefined {
@@ -105,13 +79,6 @@ function bridgeHooks(settings: Settings, node: string, entry: string, configFile
     }));
   }
   return found;
-}
-
-function atomicWrite(file: string, bytes: Buffer | string, mode: number): void {
-  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}`);
-  const handle = openSync(temporary, 'wx', mode);
-  try { writeFileSync(handle, bytes); fsyncSync(handle); } finally { closeSync(handle); }
-  try { renameSync(temporary, file); } catch (error) { try { unlinkSync(temporary); } catch { /* Best effort. */ } throw error; }
 }
 
 /** One command that attaches Claude Code to the agent network: grant and

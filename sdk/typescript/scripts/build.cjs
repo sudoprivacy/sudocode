@@ -12,11 +12,11 @@ if (Object.keys(library.metafile.inputs).some(name => /(?:node-pty|electron|grpc
 }
 await build({ ...shared, entryPoints: ['src/server.ts'], outfile: 'dist/server.cjs', plugins: [{
   name: 'reuse-library', setup(build) {
-    build.onResolve({ filter: /^\.\/(mcp|codexMcp|codexEnrollment|codexSetup|claudeSetup|lifecycle|receiverOwner)$/ }, args => args.importer === path.join(root, 'src/server.ts')
+    build.onResolve({ filter: /^\.\/(mcp|codexMcp|codexEnrollment|codexSetup|claudeSetup|codexA2aSetup|lifecycle|receiverOwner)$/ }, args => args.importer === path.join(root, 'src/server.ts')
       ? { path: './index.cjs', external: true } : undefined);
   },
 }] });
-for (const test of ['acpIntegration', 'mcpIntegration', 'mailboxAdmission', 'codexMailboxMcpIntegration', 'mailboxIntegration', 'mailboxOwnerIntegration', 'nativeMailboxInternals', 'codexConnectionIntegration', 'codexLaunchIntegration', 'codexSetupIntegration', 'claudeSetupIntegration', 'codexAutojoinIntegration', 'operatorEnrollmentIntegration', 'nativeQueueIntegration']) {
+for (const test of ['acpIntegration', 'mcpIntegration', 'mailboxAdmission', 'codexMailboxMcpIntegration', 'mailboxIntegration', 'mailboxOwnerIntegration', 'nativeMailboxInternals', 'codexConnectionIntegration', 'codexLaunchIntegration', 'codexSetupIntegration', 'claudeSetupIntegration', 'codexA2aSetupIntegration', 'codexAutojoinIntegration', 'operatorEnrollmentIntegration', 'nativeQueueIntegration']) {
   await build({ ...shared, entryPoints: [`test/${test}.ts`], outfile: `dist/testing/${test}.cjs`,
     external: ['../dist/index.cjs'] });
 }

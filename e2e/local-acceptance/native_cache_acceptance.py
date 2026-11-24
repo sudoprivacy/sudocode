@@ -95,7 +95,7 @@ fn main() {
     assert layouts[0]["workspaces"] == "rust -> target"
     assert layouts[1]["workspaces"] == "worktree/rust -> ../../rust/target"
     assert sentinel.read_text(encoding="utf-8") == "UNCHANGED=1\n", "Configuration changed the pre-restore environment"
-    for workflow, count in [("local-acceptance.yml", 1), ("ci-dependency-cache.yml", 2)]:
+    for workflow, count in [("local-acceptance.yml", 1), ("ci-dependency-cache.yml", 3)]:
         text = (SOURCE / ".github/workflows" / workflow).read_text(encoding="utf-8")
         assert text.count("workspaces: ${{ steps.cache_layout.outputs.workspaces }}") == count
     workflow = (SOURCE / ".github/workflows/local-acceptance.yml").read_text(encoding="utf-8")

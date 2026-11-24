@@ -304,7 +304,10 @@ protected base; PRs use the target merge base, and push records name their prior
 branch commit. The required JSON identifies that source commit and its kind;
 final acceptance continues through the protected gate. An edited candidate
 algorithm cannot bless a changed command. Companion paths are limited to
-those metadata enforcement fixtures and protected pins. New declarations,
+the metadata enforcement fixtures, protected pins and the selector's exact
+runner blob registration. Both selector revisions must name their committed
+runner blob and all other selector statements and registrations must match.
+New declarations,
 function signatures, command effects, policy, signer, workflow, product and
 unknown mixed inputs keep the original daemon checks. The mandatory CI JSON
 prints `acceptance_metadata_scope` with its proof or conservative fallback.
@@ -312,6 +315,8 @@ Preflight and the complete native/Docker contract guard still run. This removes
 general daemon smoke coverage for qualifying verifier-body changes; selected
 journeys keep every case, assertion and deadline. Real private Git PR/push/queue
 controls retain the original 66 scheduling events and 28 bounded metadata events.
+Seven additional metadata events cover the verified registration and require
+full scope for the wrong blob, other selector changes or mixed product input.
 Three old-behavior mutation controls and six actual helper-launched children
 prove that eager module/default/decorator observers can change command
 environments, and that unknown layouts refuse before executing the callback.

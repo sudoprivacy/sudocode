@@ -416,6 +416,14 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
         return "".join(lines)
 
+    def runner_pin(source):
+        blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
+        modified, count = re.subn(
+            r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+            lambda match: match[1] + blob + match[2], sources[selector])
+        assert count == 1
+        return modified
+
     def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None, overrides=None):
         for event_name in events or ["pull_request", "push", "merge_group"]:
             if event_name == "pull_request":
@@ -521,14 +529,6 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         registration = "    reviewed_sources = {\n"
         assert pure.count(registration) == 1
         registered = pure.replace(registration, registration + f'        "{layout}",\n', 1)
-
-        def runner_pin(source):
-            blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
-            modified, count = re.subn(
-                r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
-                lambda match: match[1] + blob + match[2], sources[selector])
-            assert count == 1
-            return modified
 
         base_selector = runner_pin(sources[runner])
         # Bind the fixture baseline to the actual tracked runner bytes too.
@@ -642,6 +642,38 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         observe("metadata-" + label, base, git("rev-parse", "HEAD"), expected,
                 kind="metadata", rust=label == "product", clippy=label in {"product", "workflow"},
                 events=None if label in {"single-verifier", "forged-fingerprint-and-command"} else ["merge_group"])
+    git("switch", "--detach", base)
+    write(selector, runner_pin(sources[runner]))
+    if git("status", "--porcelain"):
+        git("add", ".")
+        git("commit", "-m", "Register original verifier Git blob")
+    registered_base = git("rev-parse", "HEAD")
+    registered_selector = runner_pin(metadata_source)
+    other_pin, count = re.subn(
+        r'("scripts/publish_release_mirror\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+        lambda match: match[1] + "0" * 40 + match[2], registered_selector)
+    assert count == 1 and other_pin != registered_selector
+    for label, selector_source, expected, extra in [
+        ("registered-verifier", registered_selector, True, {}),
+        ("wrong-verifier-blob", runner_pin(pure), False, {}),
+        ("selector-code", insert_body(registered_selector, "main"), False, {}),
+        ("other-registry-entry", other_pin, False, {}),
+        ("registered-mixed-product", registered_selector, False,
+         {"rust/crates/runtime/src/metadata_registration.rs": "// Product input\n"}),
+    ]:
+        git("switch", "--detach", registered_base)
+        write(runner, metadata_source)
+        write(selector, selector_source)
+        for name, contents in extra.items():
+            write(name, contents)
+        git("add", ".")
+        git("commit", "-m", "Verifier registration scope " + label)
+        observe("metadata-" + label, registered_base, git("rev-parse", "HEAD"), expected,
+                kind="metadata", rust=bool(extra), events=None if expected else ["merge_group"])
+        if expected:
+            for row in records[-3:]:
+                assert row["actual"]["acceptance_metadata_scope"]["selector_registration"] == "matches_committed_runner"
+                assert row["actual"]["policy_fixtures_required"] == "true"
     for label, body in [("static-observer", "return verify_envelope"),
                         ("dynamic-observer", 'return globals().get("verify_" + "envelope")'),
                         ("frame-observer", "return RUNNER_CODE")]:

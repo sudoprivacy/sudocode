@@ -422,6 +422,35 @@ fn main() {
             recorded["session"], sort_keys=True, separators=(",", ":")).encode()).hexdigest(), recorded
         example = rust / "target/debug/examples" / ("cache.exe" if os.name == "nt" else "cache")
         assert command("dispatcher-example", [str(example)], rust).strip() == "REAL_DISPATCHER_EXAMPLE"
+        if os.name == "nt":
+            # Force just the optional wrapper's linker diagnostic even when
+            # the Windows runner already has an SDK on PATH.
+            cold = output / "cold-dispatcher"
+            wrapper_log = cold / "native-examples/compiler-cache/wrapper-build.log"
+            target = cold / "target"
+            previous = {name: os.environ.pop(name, None) for name in ("LIB", "CARGO_TARGET_DIR")}
+
+            def missing_wrapper_linker(argv, cwd, log, env=None):
+                if log == wrapper_log:
+                    assert Path(argv[0]).stem.lower() == "rustc"
+                    log.write_text("error: linker `link.exe` not found\n", encoding="utf-8")
+                    raise RuntimeError(f"Local acceptance failed (1); evidence: {log}")
+                return helper.run_command(argv, cwd, log, env)
+
+            os.environ["CARGO_TARGET_DIR"] = str(target)
+            try:
+                staged.prepare_native_checks(["native-examples"], project, cold, missing_wrapper_linker)
+                [fallback] = staged.run("native-examples", project, cold / "native-examples", "HEAD", missing_wrapper_linker)
+                assert fallback["exit_code"] == 0 and "compiler_cache" not in fallback
+                assert fallback["command"] == original[0]["command"] and wrapper_log.is_file()
+                assert command("cold-dispatcher-example", [str(target / "debug/examples/cache.exe")],
+                               rust).strip() == "REAL_DISPATCHER_EXAMPLE"
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
         os.environ["RUSTC_WRAPPER"] = ""
         try:
             staged.prepare_native_checks(["native-examples"], project, output / "caller-dispatcher", helper.run_command)

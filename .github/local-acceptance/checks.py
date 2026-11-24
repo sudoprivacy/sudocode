@@ -1188,12 +1188,28 @@ def run(name, root, output, base, execute):
         if os.environ.get("SCODE_ACCEPTANCE_CONTAINER") == "1":
             from functools import partial
 
+            @contextmanager
+            def compiler_scope():
+                nonlocal execute
+                module, tool = prepare_compiler_cache(output / "compiler-cache")
+                if tool is None:
+                    yield
+                    return
+                cache = Path("/state/compiler-objects") / f"{tool['cache_namespace']}-{tool['target']}-v2"
+                direct = execute
+                with module.session(tool, output / "compiler-cache", direct, cache) as active:
+                    execute = active.execute
+                    try:
+                        yield
+                    finally:
+                        execute = direct
+
             with container_source_inputs(root.parent, name) as inputs:
                 frozen = inputs / "candidate"
                 target = native_target_directory(frozen)
                 env["CARGO_TARGET_DIR"] = str(target)
                 benchmark(name, frozen, output, base, partial(command, cwd=frozen), target,
-                          source_mount=root.parent)
+                          source_mount=root.parent, compiler_scope=compiler_scope)
         else:
             try:
                 policy_ref, candidate_ref = run.execution_refs
@@ -1760,14 +1776,21 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     context_hash = hashlib.sha256()
     for source, destination in [
         (".github/local-acceptance/Dockerfile", "Dockerfile"),
+        (".github/local-acceptance/compiler_cache.py", "compiler_cache.py"),
         ("e2e/terminal-resize/package.json", "e2e/terminal-resize/package.json"),
         ("e2e/terminal-resize/package-lock.json", "e2e/terminal-resize/package-lock.json"),
     ]:
         path = context / destination
         path.parent.mkdir(parents=True, exist_ok=True)
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
+        if destination == "Dockerfile":
+            contents += (b"\nCOPY compiler_seed.py compiler_cache.py /opt/\n"
+                         b"RUN nice -n 10 python3 /opt/compiler_seed.py\n")
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
+    compiler_seed = guard_tool_variant_source(root, protected, True)
+    (context / "compiler_seed.py").write_bytes(compiler_seed)
+    context_hash.update(b"compiler_seed.py\0" + compiler_seed + b"\0")
     image_receipt = output / "image-id.txt"
     # Only a successful rendering call in this process can authorize reuse.
     try:
@@ -1812,6 +1835,7 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
+    shutil.copyfile(context / "compiler_cache.py", runner / "local-acceptance/compiler_cache.py")
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
     if name == "browser":
         # The executor owns this harness, including for candidates that predate
@@ -1951,10 +1975,11 @@ def exclusive_benchmark_state(directory=Path("/locks")):
         yield
 
 
-def benchmark(name, root, output, base, command, target, source_mount):
+def benchmark(name, root, output, base, command, target, source_mount, compiler_scope):
     with exclusive_benchmark_state():
         migrate_benchmark_cache(Path("/legacy-state"), Path("/state"))
-        benchmark_locked(name, root, output, base, command, target, source_mount=source_mount)
+        benchmark_locked(name, root, output, base, command, target, source_mount=source_mount,
+                         compiler_scope=compiler_scope)
 
 
 def migrate_benchmark_cache(legacy, state):
@@ -2137,10 +2162,12 @@ def benchmark_driver_package(source):
     return "rusty-sudocode-cli"
 
 
-def benchmark_locked(name, root, output, base, command, target, source_mount):
+def benchmark_locked(name, root, output, base, command, target, source_mount, compiler_scope):
+    from contextlib import nullcontext
+
     if name == "browser":
         reused = verified_candidate_release(source_mount)
-        browser_smoke(root, output, command, reused)
+        browser_smoke(root, output, command, reused, compiler_scope=compiler_scope)
         return
     # Run the declared workload and paired sampling policy. Moving execution
     # hosts does not change budgets or per-run interaction assertions.
@@ -2161,16 +2188,17 @@ def benchmark_locked(name, root, output, base, command, target, source_mount):
     # Dependencies must match the checkout's lock; the image supplies the exact
     # Chromium and its system libraries, not a different JS dependency graph.
     command("npm", "ci", "--prefix", str(terminal))
-    for label, source in [("baseline", baseline), ("candidate", candidate)]:
-        command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
-                "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
-    # The copied production binaries above stay fixed when dev features build the driver.
-    package, prefix = benchmark_driver_targets(trusted)
-    driver = f"{prefix}_render_performance"
-    log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
-                  "--target-dir", str(targets / "driver"), "-p", package,
-                  "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
+    with (compiler_scope or nullcontext)():
+        for label, source in [("baseline", baseline), ("candidate", candidate)]:
+            command("cargo", "build", "--locked", "--release", "--manifest-path", str(source / "rust/Cargo.toml"),
+                    "--target-dir", str(targets / label), "-p", "rusty-sudocode-cli", "--bin", "scode")
+            shutil.copy2(targets / label / "release/scode", output / f"scode-{label}")
+        # The copied production binaries above stay fixed when dev features build the driver.
+        package, prefix = benchmark_driver_targets(trusted)
+        driver = f"{prefix}_render_performance"
+        log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
+                      "--target-dir", str(targets / "driver"), "-p", package,
+                      "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
             "--base", str(output / "scode-baseline"), "--candidate", str(output / "scode-candidate")]
@@ -2207,13 +2235,15 @@ def browser_viewport_cases():
     return ("viewport_browser_interaction", "viewport_browser_resource_exit")
 
 
-def browser_smoke(source, output, command, reused):
+def browser_smoke(source, output, command, reused, compiler_scope):
     """Painted-terminal behaviour against the measured release or a dev build.
 
     Typing latency is judged by scoped local rendering; this pass checks
     what only a real browser terminal shows: clickable links, native selection
     surviving streaming, viewport wheel and selection, and an idle terminal.
     """
+    from contextlib import nullcontext
+
     work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
     # Rendering has finished with this mutable checkout. Synchronize the actual
@@ -2227,20 +2257,21 @@ def browser_smoke(source, output, command, reused):
     profile = ["--release"] if reused is not None else []
     binary = output / "scode-candidate"
     # Copy before the drivers build: their dev features rebuild the shared graph.
-    if reused is None:
-        command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
-                "-p", "rusty-sudocode-cli", "--bin", "scode")
-        shutil.copy2(targets / "candidate/debug/scode", binary)
-    else:
-        shutil.copy2(reused, binary)
-        print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-              "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
-    expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-    package, prefix = benchmark_driver_targets(candidate)
-    links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
-    log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
-                  "-p", package, "--test", links, "--test", viewport,
-                  "--no-run", "--message-format=json-render-diagnostics")
+    with (compiler_scope or nullcontext)():
+        if reused is None:
+            command("cargo", "build", "--locked", "--manifest-path", manifest, "--target-dir", build,
+                    "-p", "rusty-sudocode-cli", "--bin", "scode")
+            shutil.copy2(targets / "candidate/debug/scode", binary)
+        else:
+            shutil.copy2(reused, binary)
+            print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
+                  "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+        expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        package, prefix = benchmark_driver_targets(candidate)
+        links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"
+        log = command("cargo", "test", "--locked", *profile, "--manifest-path", manifest, "--target-dir", build,
+                      "-p", package, "--test", links, "--test", viewport,
+                      "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [links, viewport])
     smoke = Path(__file__).resolve().parents[2] / "e2e/terminal-resize/gui-smoke.py"
     command(sys.executable, str(smoke), "--driver", drivers[links],

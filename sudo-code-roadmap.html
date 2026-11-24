@@ -2235,6 +2235,35 @@ raw toolchain pin and Cargo configuration in path order. The old nested
 checkout reversed that order. A source-layout change aligns the exact key;
 the observed fallback already contained the publisher's bytes, so this
 comparison establishes the mismatch without measuring a time saving.</p>
+<p><strong>Check the dependency cache before installing Rust.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1587">PR #1587</a> lets
+the dependency publisher query the exact key with the image toolchain after
+verifying the official compiler commit, host, and components. Toolchain
+selection stays inside the lookup command processes. A prefix hit, miss, or
+failed probe runs the original numeric installation and publisher path.</p>
+<p>The <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45220406620">previous publisher run</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45367813218">first main run after merge</a>
+used the same runner image and exact archive key on each platform. The
+new run skipped installation on all three. Assigned runner time changed
+from 14s to 9s on Ubuntu, 20s to 15s on macOS, and 36s to 27s on Windows.
+The paired run totals were 70s and 51s, a 27.1% observed reduction for
+these publisher jobs. Hosted assignment and whole-PR clocks remain separate.</p>
+<p><strong>Protected acceptance publication clocks.</strong> In the fixed
+15 Rust-source merges, the median time from the final proof to the exact
+source's green status was 35s. Publisher creation to runner assignment
+took a median 3s and at most 5s. Checkout took a median 11s, and the final
+verification step took a median 12s up to the status write. These are
+separate medians. The five sources with signed parallel plans had a median
+27.694s from the final proof to publisher creation, while the ten ordinary
+receipts recorded 4s. Those intervals include different author and completion
+handoffs.</p>
+<p>The same sample has 68 publisher job records across 67 runs. Seven assigned
+jobs ran without posting a status and occupied 148s. Five skipped jobs had
+no runner assignment. An older publisher attempt reported an incomplete run
+during a concurrent native rerun. The protected publisher still writes the
+required <code>Local acceptance</code> status for the integrated queue head.
+See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466779212/job/135441297116">original incomplete publication</a>
+and the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45367655842">successful integrated-head publication</a>.</p>
 <p>The <a href="https://github.com/sudoprivacy/sudocode/pull/1528">shared daemon
 tool change</a> also triggered the normal <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44581106560">VFS publisher</a>.
 The job found the exact key in 29 assigned runner seconds. It skipped compiler

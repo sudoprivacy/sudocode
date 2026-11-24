@@ -2016,6 +2016,13 @@ checks may start after unpublished work. In
 GitHub assigned its runner after 10 minutes 5 seconds, and assigned execution
 lasted 3 minutes 34 seconds. This is one observed job on the critical path.
 The measured records still leave the end-to-end one-tenth target unproven.</p>
+<p>Including earlier retained revisions, the observed interval to the first
+confirmed executed failure or accepted merge averages 151.811 minutes across
+the same 15 PRs, with a median of 77.255 minutes. An admission refusal before
+any check executes does not end this interval. Missing earlier starts can
+increase the actual duration, and missing earlier failures can move its end
+earlier. Compare these wall-clock intervals separately from the sum of GitHub
+runner occupancy.</p>
 <p>The first fixed cohort cannot reach the published conservative merge
 reference of 18.526 minutes. The 15 recorded final-source intervals already
 sum to 1,706.580 minutes. Even five more intervals of zero minutes would
@@ -2044,6 +2051,21 @@ archive route. The measurement covers source preparation. The accepted change
 also reuses committed file reads during receipt verification, signs the host
 wait for each invocation, and checks Docker Engine before entering the host
 queue. These measurements leave the full lifecycle target unproven.</p>
+<p><strong>Local reservations and benchmark compilation.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1569">PR #1569</a>
+shares one host reservation for fresh native services and context.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1571">PR #1571</a>
+does the same for fresh rendering and browser checks. Checkpoints retain
+individual profile outcomes and permit the normal resume. In
+<a href="https://github.com/sudoprivacy/sudocode/pull/1572">PR #1572</a>,
+rendering and browser use a checksum-pinned compiler cache during their
+existing Cargo commands. Independent Linux containers verified tool reuse
+without network access on the second invocation and checked that each cache
+server exited before the compiled program ran. The signed Windows and Docker
+guard, hosted executor fixtures and final main workflows passed. The change
+spent 80 seconds from entry in the merge queue to merge. That clock covers
+this infrastructure PR. The timing benefit for product compiler commands
+remains unmeasured.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its
@@ -2514,8 +2536,11 @@ reported outcomes, evidence hashes and the non-additive calculation rules.</p>
       Paired runs reuse the measured normal release and immutable image; browser-only
       runs retain the dev build. Paired drivers share the leased release Cargo cache,
       synchronized to the candidate and rebuilt normally; standalone drivers retain
-      the dev profile/cache. Both drivers still execute, and native harnesses refuse
-      an unexpected driver digest before execution.</td>
+      the dev profile/cache. When both profiles need to run, they share one
+      host reservation. Their Cargo commands can reuse checksum-pinned objects
+      on the existing Linux volume. The cache server exits before any measured
+      sample or browser journey. Both drivers still execute, and native
+      harnesses refuse an unexpected driver digest before execution.</td>
       <td>No; their drivers back no Feature inventory row.</td>
       <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>

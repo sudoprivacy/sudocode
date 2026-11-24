@@ -1324,7 +1324,7 @@ def native_guard_files():
         "e2e/local-acceptance/host_lease_acceptance.py": "7de681901fbcbc4a4b85d42f15e211fcd2e9c6abe984ddf6daa0d558abb206e3",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
+        "e2e/local-acceptance/native_cache_acceptance.py": "b71091dec05e5a44e372037e0fd73a1a75244c914c0c4d67024694165a268042",
         "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
         "e2e/local-acceptance/parallel_acceptance.py": "bac9a257cb0daac0bfe91920dd8f23552bfc98567ded9aa2fd6e340de704fd9a",
         "e2e/local-acceptance/policy_guard_acceptance.py": "242045ab62ef54ce11c1d5424e824ddfe94460569133e7c651795aa2e5427b29",

@@ -485,7 +485,11 @@ command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
 `host-lease.json`, its active profile and the queue position. Adjacent fresh
-workspace and compile-only examples share one reservation. When native services
+workspace and compile-only examples share one reservation. An immediately
+following terminal resize check joins that reservation when all three need
+fresh execution. The profiles keep their original order and separate signed
+checkpoints. An existing waiter starts after the group finishes or a profile
+fails. When native services
 and compiler context both need fresh execution and only rendering or browser
 checks intervene, compiler context runs immediately after native services
 within the same reservation. Adjacent rendering and browser checks also share
@@ -512,8 +516,8 @@ The native author guard and complementary native jobs run the same real-process
 inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
-reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
-profiles and count their common wait once. Signed receipts and checkpoints also
+reservation's wait under `host_lease_acquisitions`; shared acquisitions list
+their profiles and count their common wait once. Signed receipts and checkpoints also
 record `timing.invocation_host_lease_wait_seconds` for that invocation's completed
 acquisitions. Resume preserves the earlier signed start separately. A run that
 only reuses prior results records zero newly acquired lease wait. Older signed

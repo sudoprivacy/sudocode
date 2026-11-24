@@ -269,6 +269,7 @@ def verify_host_lease(directory, source, command, environment):
     verify_lint_preparation_order(fixture, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated, pair="examples")
+    verify_profile_handoff(fixture, source, run, isolated, pair="examples-resize")
     verify_profile_handoff(fixture, source, run, isolated, pair="context")
     verify_profile_handoff(fixture, source, run, isolated, pair="graphics")
     verify_static_before_queue(fixture, source, run, isolated)
@@ -292,10 +293,12 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
     """Exercise exclusive and shared reservations with real FIFO contenders."""
     name = {
         "examples": "workspace-example-reservation",
+        "examples-resize": "workspace-example-resize-reservation",
         "context": "services-context-reservation",
         "graphics": "rendering-browser-reservation",
     }.get(pair, "profile-handoff")
-    has_after = pair in {"context", "graphics"}
+    resize_shared = pair == "examples-resize"
+    has_after = pair in {"context", "graphics", "examples-resize"}
     directory = fixture / name
     directory.mkdir()
     repository = clone_private_policy(fixture, authority, run, directory)
@@ -308,18 +311,21 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
     elif pair == "graphics":
         first, followup, after_profile = "rendering", "browser", "native-cohost"
         rules["checks"][first] = rules["checks"].pop("native-workspace")
-    elif pair == "examples":
+    elif pair in {"examples", "examples-resize"}:
         first, followup, after_profile = "native-workspace", "native-examples", "native-resize"
     else:
         first, followup, after_profile = "native-workspace", "native-services", "native-resize"
     rules["checks"][followup] = {"include": ["second.txt"]}
-    if pair in {"examples", "graphics"}:
+    if pair in {"examples", "examples-resize", "graphics"}:
         rules["checks"][after_profile] = {"include": ["after.txt"]}
-    if pair == "examples":
+    if pair in {"examples", "examples-resize"}:
         marker = repository / "rust/crates/fixture/tests/acceptance_groups/planning.rs"
         marker.parent.mkdir(parents=True)
         marker.write_text("// Private profile scheduling fixture; no Rust acceptance is inferred.\n", encoding="utf-8")
     policy.write_text(json.dumps(rules))
+    shared = [first, followup]
+    if resize_shared:
+        shared.append(after_profile)
     failure = {"context": "CONTROLLED_CONTEXT_FAILURE", "graphics": "CONTROLLED_BROWSER_FAILURE"}.get(
         pair, "CONTROLLED_EXAMPLE_FAILURE",
     )
@@ -341,7 +347,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         '    return [execute([sys.executable,str(root/"phase.py"),str(root.parent/"events.log"),'
         'str(root.parent/("release-"+label)),label],root,output/"000.log")]\n', encoding="utf-8")
     run("git", "add", ".", cwd=repository)
-    run("git", "commit", "-m", "Protected two-profile FIFO fixture", cwd=repository)
+    run("git", "commit", "-m", "Protected profile FIFO fixture", cwd=repository)
     home = directory / "home"
     home.mkdir()
     env = {key: value for key, value in environment.items() if key != LEASE_ENV}
@@ -364,7 +370,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         (work / "input.txt").write_text(label)
         if second:
             (work / "second.txt").write_text("second required profile")
-            if pair == "examples":
+            if pair in {"examples", "examples-resize"}:
                 (work / "rust/changed.rs").write_text("// Select the existing example profile in committed Git.\n", encoding="utf-8")
         if after:
             (work / "after.txt").write_text("another fresh profile must still yield or stop after failure")
@@ -384,7 +390,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         holder = start("Holder")
         wait_until(lambda: events() == ["start:Holder"], "the private holder")
         long = start("Long", second=True, after=has_after)
-        wait_until(lambda: queued(long), "the two-profile contender to queue")
+        wait_until(lambda: queued(long), "the multi-profile contender to queue")
         short = start("Short")
         wait_until(lambda: queued(short), "the existing one-profile contender to queue")
         (directory / "release-Holder").touch()
@@ -398,12 +404,21 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             assert set(partial["checks"]) == {"preflight", first}, partial
             assert not (directory / "Long/envelope.json").exists()
             (directory / "release-Long-two").touch()
+            if resize_shared:
+                wait_until(lambda: "start:Long-after" in events() or "start:Short" in events(),
+                           "the resize profile within the original reservation")
+                assert "start:Long-after" in events() and "start:Short" not in events(), events()
+                pointer = json.loads((directory / "Long/checkpoint.json").read_text())
+                partial = json.loads((directory / "Long/checkpoints" / pointer["generation"] / "receipt.json").read_text())
+                assert set(partial["checks"]) == {"preflight", first, followup}, partial
+                assert not (directory / "Long/envelope.json").exists()
+                (directory / "release-Long-after").touch()
             wait_until(lambda: "start:Short" in events(), "the existing waiter after the shared reservation")
-            if has_after:
+            if has_after and not resize_shared:
                 assert "start:Long-after" not in events(), events()
                 wait_until(lambda: queued(long), f"the independent {after_profile} profile to rejoin the FIFO")
             (directory / "release-Short").touch()
-            if has_after:
+            if has_after and not resize_shared:
                 wait_until(lambda: "start:Long-after" in events(), f"{after_profile} after the existing waiter")
                 (directory / "release-Long-after").touch()
         else:
@@ -416,8 +431,11 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             assert process.wait(timeout=120) == 0
         if pair:
             expected = ["start:Holder", "end:Holder", "start:Long", "end:Long",
-                        "start:Long-two", "end:Long-two", "start:Short", "end:Short"]
-            if has_after:
+                        "start:Long-two", "end:Long-two"]
+            if resize_shared:
+                expected += ["start:Long-after", "end:Long-after"]
+            expected += ["start:Short", "end:Short"]
+            if has_after and not resize_shared:
                 expected += ["start:Long-after", "end:Long-after"]
             assert events() == expected, events()
         else:
@@ -437,7 +455,8 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             assert scope["serialized_checks"] == scope["pending_serialized_checks"] == [
                 first, followup, after_profile,
             ], scope
-            assert scope["pending_reservations"] == [[first, followup], [after_profile]], scope
+            expected_reservations = [shared] if resize_shared else [shared, [after_profile]]
+            assert scope["pending_reservations"] == expected_reservations, scope
         if pair:
             assert all(len(rows) == 1 and rows[0]["exit_code"] == 0 for rows in receipt["checks"].values()), receipt
         assert (directory / "Long/envelope.json").is_file()
@@ -445,8 +464,8 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         acquisitions = attempt["host_lease_acquisitions"]
         expected_acquisitions = [first]
         if pair:
-            assert acquisitions[0]["profiles"] == [first, followup], attempt
-            if has_after:
+            assert acquisitions[0]["profiles"] == shared, attempt
+            if has_after and not resize_shared:
                 expected_acquisitions.append(after_profile)
         else:
             expected_acquisitions.append(followup)
@@ -499,7 +518,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
                 "original_failed_followup_partial": partial, "partial_resume": continued_attempt,
                 "events": events(), "scope": "Real Git, SSH and private FIFO/child processes; no product compilation or coverage credit.",
             }, indent=2) + "\n", encoding="utf-8")
-            print(f"PASS: one original reservation covers {first}/{followup}, preserves distinct signed "
+            print(f"PASS: one original reservation covers {'/'.join(shared)}, preserves distinct signed "
                   "profiles and partial progress, then yields to the existing waiter. Cumulative wait is counted once.")
             print(f"PASS: verified full resume takes no lease. A real {followup} failure blocks later work "
                   "and partial resume reruns only unfinished profiles.")

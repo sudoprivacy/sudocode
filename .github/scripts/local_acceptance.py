@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
         "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
         "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
@@ -2474,8 +2475,9 @@ def host_acceptance_lease(attempt, head):
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Workspace and compile-only examples can share a reservation.
-    Native services and compiler context can share one, as can adjacent fresh
+    a memory kill. Adjacent fresh workspace and compile-only examples can share a
+    reservation with an immediately following fresh resize check. Native services
+    and compiler context can share one, as can adjacent fresh
     rendering and browser checks. Between reservations, fresh work rejoins
     the FIFO behind existing waiters. Processes started under
     the holder inherit its acquisition claim. A nested check
@@ -2511,7 +2513,7 @@ def host_acceptance_lease(attempt, head):
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
                       "this invocation rejoins the FIFO between fresh reservations; "
-                      "eligible workspace/examples, services/context and rendering/browser pairs share a reservation.",
+                      "eligible workspace/examples/resize, services/context and rendering/browser groups share a reservation.",
                       flush=True)
                 reported = time.monotonic()
             time.sleep(1)
@@ -2617,6 +2619,12 @@ def profile_reservations(ordered, pending):
     }
     reservations, index = [], 0
     while index < len(ordered):
+        workspace = ordered[index:index + 3]
+        if (workspace == ["native-workspace", "native-examples", "native-resize"]
+                and pending.issuperset(workspace)):
+            reservations.append(workspace)
+            index += len(workspace)
+            continue
         pair = ordered[index:index + 2]
         if tuple(pair) in shared_pairs and set(pair) <= pending:
             reservations.append(pair)
@@ -2836,7 +2844,7 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "fresh_workspace_examples_services_context_and_rendering_browser_pairs_share_one_each;_others_requeue",
+        "reservation": "fresh_workspace_examples_with_optional_resize_services_context_and_rendering_browser_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:

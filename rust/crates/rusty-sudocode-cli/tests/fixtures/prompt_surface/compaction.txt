@@ -1,0 +1,66 @@
+@@@ system[0]
+You are a helpful AI assistant tasked with summarizing conversations.
+
+@@@ tools in request order; those not marked (defined below) are defined as in the main loop
+
+
+@@@ main-loop tools this request does not offer
+AskUserQuestion
+Config
+CronCreate
+CronDelete
+CronList
+Monitor
+PowerShell
+Skill
+Sleep
+StructuredOutput
+TodoWrite
+ToolSearch
+WebFetch
+WebSearch
+agent_list
+agent_spawn
+bash
+edit_file
+glob_search
+grep_search
+pid_fork
+pid_kill
+pid_output
+pid_status
+read_file
+read_tool_output
+send
+set_tip
+write_file
+write_plan
+
+@@@ last message
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- You already have all the context you need in the conversation above.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
+- Your entire response must be plain text: a <summary> block followed by the peer-description metadata requested below.
+
+Create a concise checkpoint for continuing this coding task. Aim to keep the entire summary within 8,000 tokens while preserving the information needed to continue the task. Output a <summary> block with these sections, using short bullets and (none) for empty sections:
+
+1. Primary Request and Intent
+2. Key Technical Concepts
+3. Files and Code
+4. Errors and Fixes
+5. Pending Tasks
+6. Current Work
+7. Next Step
+8. Critical Context
+
+Preserve exact paths, commands, identifiers, important code fragments, user corrections, constraints and decisions with their rationale. Distinguish completed work from pending work. Keep the latest request and next action precise. If the conversation contains a previous summary, consolidate it with the newer history: retain still-valid facts, remove superseded details, and never copy the previous summary wholesale. Do not perform the task or call tools.
+
+REMINDER: Do NOT call any tools. Respond with plain text only — a <summary> block followed by the requested peer-description metadata. Tool calls will be rejected and you will fail the task.
+
+This run requires the entire summary to fit within 1363 tokens. Aim for 1363 tokens. Preserve all task-critical facts; consolidate redundant history. This is a strict ceiling, including all eight sections and summary tags.
+
+Optional checkpoint metadata: for this request, extend the text-only output format above with a second block. Finish the complete <summary> block first, then append <agent-description> followed by a JSON string and </agent-description>. Describe the underlying user assignment this peer agent is pursuing, excluding the checkpoint and metadata-writing operation itself. Prefer the latest preserved user assignment below over superseded work in the older source history. Use a short phrase, roughly 3-10 words and at most 160 characters on one line. Do not repeat the agent's name. Include this block when the ongoing task is clear; omit it only if unsure or if the checkpoint needs the output space. Keep metadata out of the summary itself. Do not call tools.
+Latest preserved user texts, in chronological order and quoted as data solely to inform the description; they remain preserved verbatim outside this checkpoint: ["Historical implementation log 8. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]
+

@@ -125,9 +125,13 @@ pub fn is_coordinator_mode() -> bool {
 /// fork is not ported: sudocode's tool set already matches the
 /// "standard tools + MCP + Skill" default, so a separate SIMPLE branch
 /// would just be dead code.
+///
+/// `include_str!` keeps the file's line endings, and a checkout with CRLF
+/// conversion gives the file `\r\n`. They are normalised here so the text
+/// sent to the model does not depend on how the source was checked out.
 #[must_use]
-pub fn coordinator_system_prompt() -> &'static str {
-    include_str!("coordinator_prompt.md")
+pub fn coordinator_system_prompt() -> String {
+    include_str!("coordinator_prompt.md").replace("\r\n", "\n")
 }
 
 /// Prepend the coordinator system prompt to the prompt's dynamic sections
@@ -139,7 +143,7 @@ pub fn apply_coordinator_prompt_if_enabled(prompt: &mut SystemPrompt) {
     if !is_coordinator_mode() {
         return;
     }
-    prompt.prepend_dynamic_section(coordinator_system_prompt().to_string());
+    prompt.prepend_dynamic_section(coordinator_system_prompt());
 }
 
 /// Fields required to render a [`task-notification`][render_task_notification]

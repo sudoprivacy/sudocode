@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
         "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
@@ -2474,8 +2475,9 @@ def host_acceptance_lease(attempt, head):
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
     a memory kill. Workspace and compile-only examples can share a reservation.
-    Native services and compiler context can also share one. Between reservations,
-    fresh work rejoins the FIFO behind existing waiters. Processes started under
+    Native services and compiler context can share one, as can adjacent fresh
+    rendering and browser checks. Between reservations, fresh work rejoins
+    the FIFO behind existing waiters. Processes started under
     the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
@@ -2509,7 +2511,8 @@ def host_acceptance_lease(attempt, head):
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
                       "this invocation rejoins the FIFO between fresh reservations; "
-                      "eligible workspace/examples and native services/context pairs share a reservation.", flush=True)
+                      "eligible workspace/examples, services/context and rendering/browser pairs share a reservation.",
+                      flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -2607,7 +2610,11 @@ def profile_reservations(ordered, pending):
         if service < context and set(ordered[service + 1:context]) <= {"rendering", "browser"}:
             ordered.insert(service + 1, ordered.pop(context))
 
-    shared_pairs = {("native-workspace", "native-examples"), ("native-services", "native-context")}
+    shared_pairs = {
+        ("native-workspace", "native-examples"),
+        ("native-services", "native-context"),
+        ("rendering", "browser"),
+    }
     reservations, index = [], 0
     while index < len(ordered):
         pair = ordered[index:index + 2]
@@ -2829,7 +2836,7 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "fresh_workspace_examples_and_services_context_pairs_share_one_each;_others_requeue",
+        "reservation": "fresh_workspace_examples_services_context_and_rendering_browser_pairs_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:

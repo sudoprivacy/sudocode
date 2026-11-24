@@ -270,6 +270,7 @@ def verify_host_lease(directory, source, command, environment):
     verify_profile_handoff(fixture, source, run, isolated)
     verify_profile_handoff(fixture, source, run, isolated, pair="examples")
     verify_profile_handoff(fixture, source, run, isolated, pair="context")
+    verify_profile_handoff(fixture, source, run, isolated, pair="graphics")
     verify_static_before_queue(fixture, source, run, isolated)
     verify_native_inventory_before_queue(fixture, source, run, isolated)
 
@@ -289,9 +290,12 @@ def clone_private_policy(fixture, authority, run, directory):
 
 def verify_profile_handoff(fixture, authority, run, environment, pair=None):
     """Exercise exclusive and shared reservations with real FIFO contenders."""
-    name = {"examples": "workspace-example-reservation", "context": "services-context-reservation"}.get(
-        pair, "profile-handoff",
-    )
+    name = {
+        "examples": "workspace-example-reservation",
+        "context": "services-context-reservation",
+        "graphics": "rendering-browser-reservation",
+    }.get(pair, "profile-handoff")
+    has_after = pair in {"context", "graphics"}
     directory = fixture / name
     directory.mkdir()
     repository = clone_private_policy(fixture, authority, run, directory)
@@ -301,18 +305,24 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         first, followup, after_profile = "native-services", "native-context", "browser"
         rules["checks"][first] = rules["checks"].pop("native-workspace")
         rules["checks"][after_profile] = {"include": ["after.txt"]}
+    elif pair == "graphics":
+        first, followup, after_profile = "rendering", "browser", "native-cohost"
+        rules["checks"][first] = rules["checks"].pop("native-workspace")
     elif pair == "examples":
         first, followup, after_profile = "native-workspace", "native-examples", "native-resize"
     else:
         first, followup, after_profile = "native-workspace", "native-services", "native-resize"
     rules["checks"][followup] = {"include": ["second.txt"]}
-    if pair == "examples":
+    if pair in {"examples", "graphics"}:
         rules["checks"][after_profile] = {"include": ["after.txt"]}
+    if pair == "examples":
         marker = repository / "rust/crates/fixture/tests/acceptance_groups/planning.rs"
         marker.parent.mkdir(parents=True)
         marker.write_text("// Private profile scheduling fixture; no Rust acceptance is inferred.\n", encoding="utf-8")
     policy.write_text(json.dumps(rules))
-    failure = "CONTROLLED_CONTEXT_FAILURE" if pair == "context" else "CONTROLLED_EXAMPLE_FAILURE"
+    failure = {"context": "CONTROLLED_CONTEXT_FAILURE", "graphics": "CONTROLLED_BROWSER_FAILURE"}.get(
+        pair, "CONTROLLED_EXAMPLE_FAILURE",
+    )
     (repository / "phase.py").write_text(
         'from pathlib import Path\nimport sys,time\n'
         'events,release,label=map(str,sys.argv[1:])\n'
@@ -373,7 +383,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
     try:
         holder = start("Holder")
         wait_until(lambda: events() == ["start:Holder"], "the private holder")
-        long = start("Long", second=True, after=pair == "context")
+        long = start("Long", second=True, after=has_after)
         wait_until(lambda: queued(long), "the two-profile contender to queue")
         short = start("Short")
         wait_until(lambda: queued(short), "the existing one-profile contender to queue")
@@ -389,12 +399,12 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             assert not (directory / "Long/envelope.json").exists()
             (directory / "release-Long-two").touch()
             wait_until(lambda: "start:Short" in events(), "the existing waiter after the shared reservation")
-            if pair == "context":
+            if has_after:
                 assert "start:Long-after" not in events(), events()
-                wait_until(lambda: queued(long), "the independent browser profile to rejoin the FIFO")
+                wait_until(lambda: queued(long), f"the independent {after_profile} profile to rejoin the FIFO")
             (directory / "release-Short").touch()
-            if pair == "context":
-                wait_until(lambda: "start:Long-after" in events(), "the browser profile after the existing waiter")
+            if has_after:
+                wait_until(lambda: "start:Long-after" in events(), f"{after_profile} after the existing waiter")
                 (directory / "release-Long-after").touch()
         else:
             assert "start:Short" in events() and "start:Long-two" not in events(), events()
@@ -407,7 +417,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         if pair:
             expected = ["start:Holder", "end:Holder", "start:Long", "end:Long",
                         "start:Long-two", "end:Long-two", "start:Short", "end:Short"]
-            if pair == "context":
+            if has_after:
                 expected += ["start:Long-after", "end:Long-after"]
             assert events() == expected, events()
         else:
@@ -415,11 +425,12 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
                                 "start:Short", "end:Short", "start:Long-two", "end:Long-two"], events()
         receipt = json.loads((directory / "Long/receipt.json").read_text())
         expected_profiles = {"preflight", first, followup}
-        if pair == "context":
+        if has_after:
             expected_profiles.add(after_profile)
         assert set(receipt["checks"]) == expected_profiles, receipt
-        if pair == "context":
-            assert receipt["plan"]["local_checks"] == ["preflight", first, after_profile, followup], receipt
+        if has_after:
+            declared = [after_profile, followup] if pair == "context" else [followup, after_profile]
+            assert receipt["plan"]["local_checks"] == ["preflight", first, *declared], receipt
             log = (directory / "Long.log").read_text(encoding="utf-8")
             scope = json.loads(next(line.split("=", 1)[1] for line in log.splitlines()
                                     if line.startswith("LOCAL_ACCEPTANCE_RESOURCE_SCOPE=")))
@@ -435,7 +446,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         expected_acquisitions = [first]
         if pair:
             assert acquisitions[0]["profiles"] == [first, followup], attempt
-            if pair == "context":
+            if has_after:
                 expected_acquisitions.append(after_profile)
         else:
             expected_acquisitions.append(followup)

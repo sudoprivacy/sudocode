@@ -2194,10 +2194,10 @@ def benchmark_locked(name, root, output, base, command, target, source_mount, co
     inputs = root.parent
     work, targets = benchmark_storage(name)
     work.mkdir(parents=True, exist_ok=True)
-    for label in ["candidate", "baseline", "trusted"]:
+    candidate, baseline, trusted = (work / label for label in ("candidate", "baseline", "rendering-driver"))
+    for label, destination in (("candidate", candidate), ("baseline", baseline), ("trusted", trusted)):
         # Sources are disposable copies from this invocation's exact Git archive.
-        replace_checkout(inputs / label, work / label)
-    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+        replace_checkout(inputs / label, destination)
     terminal = trusted / "e2e/terminal-resize"
     plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", rendering_profile(),
                        "--policy", str(terminal / "performance-policy.json"))
@@ -2217,7 +2217,7 @@ def benchmark_locked(name, root, output, base, command, target, source_mount, co
         package, prefix = benchmark_driver_targets(trusted)
         driver = f"{prefix}_render_performance"
         log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
-                      "--target-dir", str(targets / "driver"), "-p", package,
+                      "--target-dir", str(targets / "rendering-driver"), "-p", package,
                       "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
@@ -2266,8 +2266,8 @@ def browser_smoke(source, output, command, reused, compiler_scope):
 
     work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
-    # Rendering has finished with this mutable checkout. Synchronize the actual
-    # candidate, then let normal Cargo dependency tracking validate every input.
+    # Keep the existing browser cache path for paired runs so its artifacts
+    # stay warm. Rendering's policy source and target now live separately.
     candidate = work / ("trusted" if reused is not None else "candidate")
     replace_checkout(source, candidate)
     terminal = candidate / "e2e/terminal-resize"
@@ -2285,7 +2285,7 @@ def browser_smoke(source, output, command, reused, compiler_scope):
         else:
             shutil.copy2(reused, binary)
             print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-                  "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+                  "native drivers build from the candidate in their paired release Cargo cache.", flush=True)
         expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         package, prefix = benchmark_driver_targets(candidate)
         links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"

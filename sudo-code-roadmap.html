@@ -2128,6 +2128,25 @@ at the audit snapshot. Any additional cache would need measurement of its
 publication cost, restore time and effect on other cache entries.
 See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44864376045/job/136724775488">original complement</a>
 and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original periodic Windows job</a>.</p>
+<p><strong>Windows dependency cache scope.</strong> The 29 Windows
+complements in the fixed sample recorded eight exact restores, 20
+prefix restores and one miss. The cache action occupied 1,772 seconds
+across those jobs. Among the 18 runs using the aligned <code>worktree</code>
+layout, all eight with unchanged logged cache input files relative to their
+execution base restored an exact match. All ten with changed input files
+included a changed Cargo lockfile. Nine restored a prefix and one missed.</p>
+<p>The publisher of the later Windows job's restored archive occupied 260
+runner seconds. That included 49 seconds of restore, 137 seconds of workspace
+dependency compilation and 39 seconds of cache cleanup and upload. Cargo's
+locked Windows dependency tree includes 28 package labels in the native
+cohost graph that the current publisher graph lacks, including
+<code>nexus-cluster</code>, <code>raft-proto</code> and
+<code>protobuf-build</code>. Adding cohost features to the existing workspace
+command changes the resolved feature sets of 16 labels already present. Retain
+the ordinary cache graph for a separate cohost comparison. Cargo tree records
+dependency resolution. Compiler object reuse, added archive bytes and net
+runner time still require matched runs. See the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45218960852/job/137847669992">original Windows publisher</a>.</p>
 <p><strong>Same-repository acceptance ref fetch.</strong> The signature gate
 and publisher fetch the pull ref and both notes namespaces in one atomic
 Git transaction when all three refs are available. A missing optional

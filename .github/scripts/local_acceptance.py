@@ -612,6 +612,10 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "1c43d4e04b808880a8f1d5b001f44ae372578afe90eb185bee9201d9610c2522",
+        "b270e25b648c51f5305b8e720aab28aa5f3da6199727e4d7c44c579a80da7b27",
+        "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
+        "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
         "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
         "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
@@ -1701,7 +1705,8 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if (not isinstance(planned_policy, str) or not re.fullmatch(r"[a-f0-9]{40}", planned_policy)
             or git("merge-base", "--is-ancestor", planned_policy, protected, check=False).returncode):
         raise RuntimeError("Execution plan policy is not an ancestor of the protected policy")
-    if (receipt.get("contract_sha256") != contract_hash(planned_policy)
+    planned_contract = contract_hash(planned_policy)
+    if (receipt.get("contract_sha256") != planned_contract
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
@@ -1721,7 +1726,7 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if receipt["plan"] != plan:
         print("LOCAL_ACCEPTANCE_FULL_WORKSPACE_PLAN_REUSED: original signed full complementary plan retained; "
               "no checks executed or signatures changed by this responsibility proof.", flush=True)
-    if contract_hash(planned_policy) != contract_hash(protected):
+    if planned_policy != protected and planned_contract != contract_hash(protected):
         before_inputs = execution_inputs(planned_policy)
         current_inputs = execution_inputs(protected)
         before = reachable_profile_commands_hashes(planned_policy, names, inputs=before_inputs)
@@ -1767,19 +1772,29 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     return receipt
 
 
-def read_execution_plan(head, base, policy_ref, signers_ref=None):
-    """Read only a separately signed scheduling note; never a completion proof."""
+def verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref=None):
+    """Return the selected receipt and the exact envelope that authenticated it."""
     errors, valid = [], []
-    for envelope in read_note(head, PLAN_NOTE_REF)["attestations"].values():
+    for envelope in attestations.values():
         try:
-            valid.append(verify_execution_plan(envelope, head, base, policy_ref, signers_ref))
+            receipt = verify_execution_plan(envelope, head, base, policy_ref, signers_ref)
         except (RuntimeError, ValueError, KeyError) as error:
             errors.append(str(error))
+        else:
+            valid.append((receipt, envelope))
     if valid:
-        if any(receipt["plan"] != valid[0]["plan"] for receipt in valid):
+        selected_receipt, selected_envelope = valid[0]
+        if any(receipt["plan"] != selected_receipt["plan"] for receipt, _envelope in valid[1:]):
             raise RuntimeError("Frozen source has conflicting signed author plans; keep the original author responsibility or publish a new head")
-        return valid[0]
+        return selected_receipt, selected_envelope
     raise RuntimeError("No current valid execution plan: " + ("; ".join(errors) or "signed plan missing"))
+
+
+def read_execution_plan(head, base, policy_ref, signers_ref=None):
+    """Read only a separately signed scheduling note; never a completion proof."""
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    receipt, _envelope = verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref)
+    return receipt
 
 
 def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store=None, depth=0, trail=(),
@@ -1795,11 +1810,12 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head), base=receipt["base"], head=head)
+    policy = load_policy(policy_ref)
+    required = selected(policy, changed_paths(receipt["base"], head), base=receipt["base"], head=head)
     if not required:
         raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
-    if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
+    if completed_only and (not checks or not set(checks).issubset(policy["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
     profiles = list(checks) if completed_only else required
     if {"commands_sha256", "profile_commands_sha256", "reachable_profile_commands_sha256"} & receipt.keys():
@@ -1860,13 +1876,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         for command in commands:
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
-    plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
-    legacy_names = [name for name in load_policy(policy_ref)["checks"] if name in checks]
-    original_plan = receipt.get("plan", acceptance_plan(load_policy(policy_ref), legacy_names, receipt["host"]))
+    plan = acceptance_plan(policy, required, receipt["host"])
+    legacy_names = [name for name in policy["checks"] if name in checks]
+    original_plan = receipt.get("plan", acceptance_plan(policy, legacy_names, receipt["host"]))
     declared = original_plan.get("local_checks") if isinstance(original_plan, dict) else None
-    ordered = [name for name in load_policy(policy_ref)["checks"] if isinstance(declared, list) and name in declared]
+    ordered = [name for name in policy["checks"] if isinstance(declared, list) and name in declared]
     if (declared != ordered or not set(checks).issubset(declared)
-            or not compatible_acceptance_plan(load_policy(policy_ref), declared, receipt["host"], original_plan)):
+            or not compatible_acceptance_plan(policy, declared, receipt["host"], original_plan)):
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
     if original_plan != plan:
         print("Reusing unchanged completed execution from an earlier scope; current protected checks "
@@ -2474,8 +2490,9 @@ def host_acceptance_lease(attempt, head):
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. Workspace and compile-only examples can share a reservation.
-    Native services and compiler context can share one, as can adjacent fresh
+    a memory kill. Adjacent fresh workspace and compile-only examples can share a
+    reservation with an immediately following fresh resize check. Native services
+    and compiler context can share one, as can adjacent fresh
     rendering and browser checks. Between reservations, fresh work rejoins
     the FIFO behind existing waiters. Processes started under
     the holder inherit its acquisition claim. A nested check
@@ -2511,7 +2528,7 @@ def host_acceptance_lease(attempt, head):
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
                       "this invocation rejoins the FIFO between fresh reservations; "
-                      "eligible workspace/examples, services/context and rendering/browser pairs share a reservation.",
+                      "eligible workspace/examples/resize, services/context and rendering/browser groups share a reservation.",
                       flush=True)
                 reported = time.monotonic()
             time.sleep(1)
@@ -2617,6 +2634,12 @@ def profile_reservations(ordered, pending):
     }
     reservations, index = [], 0
     while index < len(ordered):
+        workspace = ordered[index:index + 3]
+        if (workspace == ["native-workspace", "native-examples", "native-resize"]
+                and pending.issuperset(workspace)):
+            reservations.append(workspace)
+            index += len(workspace)
+            continue
         pair = ordered[index:index + 2]
         if tuple(pair) in shared_pairs and set(pair) <= pending:
             reservations.append(pair)
@@ -2712,12 +2735,14 @@ def perform_check(args, attempt):
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
     execution_plan = getattr(args, "execution_plan", None)
-    if execution_plan is None and read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, base_ref, policy_ref, signers_ref)
-        execution_plan = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                              if json.loads(base64.b64decode(item["payload"])) == prior)
+    launch = None
     if execution_plan is not None:
         launch = verify_execution_plan(execution_plan, head, base_ref, policy_ref, signers_ref)
+    else:
+        attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+        if attestations:
+            launch, execution_plan = verify_execution_plan_attestations(attestations, head, base_ref, policy_ref, signers_ref)
+    if launch is not None:
         if launch["host"] != host():
             raise RuntimeError("Use the original author host for this frozen execution plan")
         plan = launch["plan"]
@@ -2804,6 +2829,7 @@ def perform_check(args, attempt):
         # Count only completed acquisitions made by this invocation. A resumed
         # receipt can retain an earlier start without inheriting its wait time.
         timing["invocation_host_lease_wait_seconds"] = attempt["host_lease_wait_seconds"]
+        timing["invocation_host_lease_acquisitions"] = list(attempt["host_lease_acquisitions"])
 
     def perform_profile(name):
         if name in reusable:
@@ -2836,7 +2862,7 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "fresh_workspace_examples_services_context_and_rendering_browser_pairs_share_one_each;_others_requeue",
+        "reservation": "fresh_workspace_examples_with_optional_resize_services_context_and_rendering_browser_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
     try:
@@ -3396,19 +3422,19 @@ def plan_pre_push(args):
 def publish_plan(head, trusted, remote, output):
     """Sign and publish this head's execution plan, or reuse the one already
     published from this host. The plan schedules native CI; it proves no test."""
-    repository = load_policy(trusted)["repository"]
+    policy = load_policy(trusted)
+    repository = policy["repository"]
     contract_remote(remote, repository)
     base = value("merge-base", trusted, head)
-    policy = load_policy(trusted)
     names = selected(policy, changed_paths(base, head), base=base, head=head)
     plan = acceptance_plan(policy, names, host())
     for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
         fetched = git("fetch", "--no-tags", remote, f"+{note_ref}:{note_ref}", check=False)
         if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
             raise RuntimeError(fetched.stderr.decode(errors="replace"))
-    prior = None
-    if read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, trusted, trusted)
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    if attestations:
+        prior, envelope = verify_execution_plan_attestations(attestations, head, trusted, trusted)
         if prior["host"] != host():
             raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
         plan = prior["plan"]
@@ -3416,16 +3442,12 @@ def publish_plan(head, trusted, remote, output):
         raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
-    receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
-               "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
-               "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-    if prior is None:
+    if not attestations:
+        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
         envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
-    else:
-        envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                        if json.loads(base64.b64decode(item["payload"])) == prior)
-    verify_execution_plan(envelope, head, trusted, trusted)
-    if prior is None:
+        verify_execution_plan(envelope, head, trusted, trusted)
         publish(head, envelope, remote, note_ref=PLAN_NOTE_REF)
     git("fetch", "--no-tags", remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
     return plan, envelope

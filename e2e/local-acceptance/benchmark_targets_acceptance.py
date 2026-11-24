@@ -652,9 +652,26 @@ out=Path(a.output);out.mkdir()
     assert driver_build[driver_build.index("--target-dir") + 1] == str(output / "state/target/rendering/driver")
     paired_driver_log = output / "commands" / f"{before + 1:03d}.log"
     artifacts = [json.loads(line) for line in paired_driver_log.read_text().splitlines() if line.startswith("{")]
-    support = [row for row in artifacts if row.get("reason") == "compiler-artifact" and row["target"]["name"] == "shared_support"]
-    assert len(support) == 1 and support[0]["fresh"], "Browser repeated the unchanged rendering driver dependency build"
     assert not any(row.get("target", {}).get("name") == "scode" for row in artifacts)
+    # A paired browser used to overwrite the rendering checkout and invalidate
+    # its native driver for the next invocation, even with identical sources.
+    for profile, source, names in [("rendering", inputs / "candidate", ["benchmark_render_performance"]),
+                                   ("browser", unpacked_candidate, ["benchmark_hyperlinks", "benchmark_prompt_viewport"])]:
+        repeated = output / f"warm-{profile}"
+        repeated.mkdir()
+        before = len(commands)
+        with checks.exclusive_benchmark_state(locks):
+            checks.benchmark_locked(profile, source, repeated, "fixture-base", command,
+                                    output / "unused-target", source_mount=inputs, compiler_scope=None)
+        [index] = [index for index, row in enumerate(commands[before:], before) if "--no-run" in row["command"]]
+        log = output / "commands" / f"{index:03d}.log"
+        records = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+        artifacts = [row for row in records if row.get("reason") == "compiler-artifact"]
+        checks.compiled_drivers(log, names)
+        support = [row for row in artifacts if row["target"]["name"] == "shared_support"]
+        assert len(support) == 1 and support[0]["fresh"]
+        rebuilt = [row["target"]["name"] for row in artifacts if not row["fresh"]]
+        assert not rebuilt, f"{profile} rebuilt unchanged driver inputs after the other profile: {rebuilt}"
     # Omitting a required case must execute a real zero-test native process
     # and fail, rather than accepting a successful exit from a missing test.
     viewport_source = inputs / "candidate/rust/tests/pty_prompt_viewport.rs"
@@ -822,7 +839,8 @@ out=Path(a.output);out.mkdir()
     matrix = rendering_matrix(output / "matrix", checks, command)
     result = {"status": "PASS", "commands": commands, "candidate_sha256": digest,
               "cross_profile_normal_release_reused": True, "promotion_identity_refusals": refusals,
-              "paired_driver_dependencies_cargo_fresh": True, "candidate_driver_and_dependency_changes_exercised": True,
+              "paired_driver_dependencies_cargo_fresh": True, "both_driver_caches_fresh_after_profile_switch": True,
+              "candidate_driver_and_dependency_changes_exercised": True,
               "missing_viewport_lifecycle_refused_after_real_zero_test_execution": True,
               "wrong_driver_digest_refused_before_native_measurement_and_gui": True,
               "wrong_expected_gui_binary_refused_before_driver": True, "linked_measurement_policy_refused": True,

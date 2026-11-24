@@ -951,7 +951,27 @@ def native_compiler_run(name, root, output, base, execute):
           "source/features/environment keys. Explicit user wrappers/configuration remain authoritative; "
           "busy storage adds no wait. This is not a source-freshness attestation.", flush=True)
     with module.session(tool, output / "compiler-cache", execute) as active:
-        selected = active.execute
+        def cached_command(argv, cwd, log, env):
+            nonlocal selected
+            try:
+                return active.execute(argv, cwd, log, env)
+            except RuntimeError as error:
+                # The original Cargo executor can discover the Windows SDK.
+                # Keep its command when only the optional standalone wrapper
+                # failed to find the linker, before any cache server started.
+                wrapper_log = active.directory / "wrapper-build.log"
+                if (os.name != "nt" or os.environ.get("LIB") or active.environment is not None
+                        or active.wrapper is not None or not str(error).endswith(f"; evidence: {wrapper_log}")
+                        or not wrapper_log.is_file()
+                        or b"error: linker `link.exe` not found" not in wrapper_log.read_bytes().splitlines()):
+                    raise
+                active.close()
+                selected = execute
+                print("COMPILER_CACHE: wrapper could not find the MSVC linker; running the original native commands.",
+                      flush=True)
+                return selected(argv, cwd, log, env)
+
+        selected = cached_command
         return run(name, root, output, base, command)
 
 
@@ -1255,21 +1275,23 @@ def native_guard_files():
         "e2e/local-acceptance/nextest_failure_stop.py": "f93bab9b27af2513fb7a3d0e02e52c321494c047b67d525432d61f0bcbf20c3d",
         "e2e/local-acceptance/compiler-objects.Cargo.toml": "03837bb466ab1efb3445df6c8f320676e5e88230d3b00bbdc62b3e150269da02",
         "e2e/local-acceptance/compiler-objects.Cargo.lock": "c88ac7c8fa05c6a2779bc8a9d3399b903807914ef87bc3172ec3d1e9a39c0755",
-        "e2e/local-acceptance/compiler_objects_acceptance.py": "defdc7cfadbed750574419a7305940b2a2f4ff5c8640db3f0647070f14633a1c",
+        "e2e/local-acceptance/compiler_objects_acceptance.py": "1308faa13a6a40c55d26a30da2d8f3b706550e5e352b5336c4356355575e86d6",
         ".github/local-acceptance/compiler_cache.py": "dbc0b69e9a8fa93e3cc369eba5729353f42e9b4bf49cf3e5e0b9dbaafcd860b1",
         "e2e/nexus-a2a/lib.sh": "44bd7d3f6a857c6397ebdece41a396825c43d6d1b8382a3d8279089ca3d90073",
         "e2e/local-acceptance/github_asset_credentials.py": "c448a1ddaa1b38890092251ab8a2e6a47b654fae89a12f0fefca174b41f58a4d",
         ".github/local-acceptance/prepare_tools.py": "de97e4ded288d9b5f6eb5df668663f9628dcf58f5ab15046ac1146ac2b6ae2fb",
         ".github/actions/rust-toolchain/action.yml": "f4df1878c64a86d2c4258bc2fd572680739f64f5934eea3b703b01ae81cdb73f",
         ".github/actions/rust-toolchain/cache-command.mjs": "f1d47b1b8a55b967b59123ce14f06be652299d9a50a9ac3b4ad12c4d8f12720d",
+        ".github/actions/rust-toolchain/preinstalled-cache-command.mjs": "ebdef68ac956fcdacb54ec2810fb54b61bdfdcdc408a691aa7d72a976dcb5e40",
+        ".github/actions/rust-toolchain/preinstalled-cache.py": "928c288914e1a780af4dd93d83ed532cea4e5d67ce56af5b2114dec953911e3b",
         ".github/actions/release-artifact/action.yml": "7e7739f00a01541af7f51be3cf403639e8a3d7cc58a19c766577beb904e6eefa",
         ".github/actions/release-artifact/msvc.ps1": "d2f1f373582b2dfaced39e5661dce1beb15e0a7086f552cb2ed4762196a4d447",
         ".github/scripts/release_artifact_acceptance.py": "aab9028c35ebed14bcddc18cadb7385e328395617ff478ed4ccd53f810ac01e0",
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "52a37d07dd7c8be4ed975e8723dec251f67a066e9b54f98800a0ea4a91576302",
-        ".github/workflows/rust-ci.yml": "d6d944737447ed25dd0ffcf262c36258fe130ae1afbecedaffd313335a96bca5",
+        ".github/scripts/ci_input_scope.py": "8fb21edaa8e2620647f7fda779bc8cdf5d97e85bd8b4230dec69f4225150f693",
+        ".github/workflows/rust-ci.yml": "80166c0219f6157d908643b3c431e432e18f7f7fc19e982782f573b977c5512d",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
         ".github/ci/cohost-plugin-crypto.toml": "50136efa17796f552251774f6b02fadd4b82ebc9add28022def5eab6872d0415",
@@ -1277,16 +1299,16 @@ def native_guard_files():
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
         ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
-        ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
+        ".github/local-acceptance/gate.py": "12df22d6f6467dedf08d83492c615ead950ea541904a66753a2915f6bbe91d40",
         ".github/local-acceptance/native_guard.py": "ac7016f16686a2c8b50353c30f3d2914d7e3e5efbdf0588a40d0c274c280878c",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "389555491f5cc82e08b78732092c4d22703e8dc4f6a16b83f1421ce66d0ab883",
+        ".github/scripts/local_acceptance.py": "033d5b32e24033b19d87ed5d2c2826138cbcae43b9aef7ff9ca4bdab8715135c",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
-        ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
+        ".github/workflows/ci-dependency-cache.yml": "5eaa704184461bbdc67a47bb43d24c457ce5d447019cb9d1bdefe24e0197799e",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "4c68140aae586b40ce0cb61217e77359f3c273f92eebbc4974bcacb67c8a4808",
         ".github/workflows/local-acceptance-workspace.yml": "ef46222e71c38e472b6ca53a86792efb50dd4ba40b96369ded9afba19b1d3a1b",
@@ -1294,15 +1316,15 @@ def native_guard_files():
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "0334d86aff40b82a03fc7dd1c668b2f15ab5606e252096819a05d72059c8ebf1",
         "e2e/local-acceptance/deferred_push_acceptance.py": "ddede2e2c02275e0559d9bd2aed5614c92488f3a43c4a636cf74324e908c1b7d",
-        "e2e/local-acceptance/dependency_scope_acceptance.py": "7233d3b740be3ea1b0d5875c859c9c188553553fa7722100eef47803ff875db5",
+        "e2e/local-acceptance/dependency_scope_acceptance.py": "30ccf72757e1938a067d0af5c53e295f7d7e014997366b4028fd416ea3aed01c",
         "e2e/local-acceptance/docker_health_acceptance.py": "2d03be855f74aeeabe04db9fd2aceccaf2b68936eb6e7d5c2e212e100397e99a",
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d28aee206a7538b334ff1143916cf44a1c512f8d7118cfcd9f0c40e55425a385",
-        "e2e/local-acceptance/host_lease_acceptance.py": "04e8ad7f62dd6e0045b6e5ca6c3fd770dbe802e611c604bd0a533334cfa7ad51",
+        "e2e/local-acceptance/host_lease_acceptance.py": "dc1f5f67e88e5cb9d55eed4c7032b71b222d223f6ce13935d4a944c7636e4969",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
-        "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
+        "e2e/local-acceptance/native_cache_acceptance.py": "b71091dec05e5a44e372037e0fd73a1a75244c914c0c4d67024694165a268042",
         "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
         "e2e/local-acceptance/parallel_acceptance.py": "bac9a257cb0daac0bfe91920dd8f23552bfc98567ded9aa2fd6e340de704fd9a",
         "e2e/local-acceptance/policy_guard_acceptance.py": "242045ab62ef54ce11c1d5424e824ddfe94460569133e7c651795aa2e5427b29",
@@ -1370,7 +1392,7 @@ def stage_profile_executor(root, policy_ref, name, policy_root):
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     helper.ROOT = root
-    expected = {'native-release': 'e8f48f465d0cc74dfd46f7a9ad97f0903f7fd263a617f7dc0d710fc5b865db97', 'native-context': 'd0b9ff35df23ce5cd89c82bb220c7a9062f9a9b9f053723789b05ca1f7d1162d', 'native-services': 'a1eadb74842db37d1814936aef8066215f2d1a051f05d4028c8982084851b576'}
+    expected = {'native-release': 'e90ec06c9399d80f2e12b1eca8c06bd46ba8169401f5dcd3b9a3c493d22b9a1c', 'native-context': '2d23cbb5403b5f150f994cee1df36a4897ea4a58d5176bb518beae7196f9077e', 'native-services': '8c5889626bd07542997bd5723ebe45adb2c13eaddd6f722a1b16871216e8394c'}
     observed = helper.reachable_profile_commands_hashes(policy_ref, list(expected))
     for name, digest in expected.items():
         if observed[name] != digest:
@@ -2172,10 +2194,10 @@ def benchmark_locked(name, root, output, base, command, target, source_mount, co
     inputs = root.parent
     work, targets = benchmark_storage(name)
     work.mkdir(parents=True, exist_ok=True)
-    for label in ["candidate", "baseline", "trusted"]:
+    candidate, baseline, trusted = (work / label for label in ("candidate", "baseline", "rendering-driver"))
+    for label, destination in (("candidate", candidate), ("baseline", baseline), ("trusted", trusted)):
         # Sources are disposable copies from this invocation's exact Git archive.
-        replace_checkout(inputs / label, work / label)
-    candidate, baseline, trusted = (work / label for label in ["candidate", "baseline", "trusted"])
+        replace_checkout(inputs / label, destination)
     terminal = trusted / "e2e/terminal-resize"
     plan_log = command(sys.executable, str(terminal / "benchmark.py"), "--describe-policy", "--profile", rendering_profile(),
                        "--policy", str(terminal / "performance-policy.json"))
@@ -2195,7 +2217,7 @@ def benchmark_locked(name, root, output, base, command, target, source_mount, co
         package, prefix = benchmark_driver_targets(trusted)
         driver = f"{prefix}_render_performance"
         log = command("cargo", "test", "--locked", "--release", "--manifest-path", str(trusted / "rust/Cargo.toml"),
-                      "--target-dir", str(targets / "driver"), "-p", package,
+                      "--target-dir", str(targets / "rendering-driver"), "-p", package,
                       "--test", driver, "--no-run", "--message-format=json-render-diagnostics")
     drivers = compiled_drivers(log, [driver])
     args = [sys.executable, str(terminal / "benchmark.py"), "--driver", drivers[driver],
@@ -2244,8 +2266,8 @@ def browser_smoke(source, output, command, reused, compiler_scope):
 
     work, targets = benchmark_storage("rendering" if reused is not None else "browser")
     work.mkdir(parents=True, exist_ok=True)
-    # Rendering has finished with this mutable checkout. Synchronize the actual
-    # candidate, then let normal Cargo dependency tracking validate every input.
+    # Keep the existing browser cache path for paired runs so its artifacts
+    # stay warm. Rendering's policy source and target now live separately.
     candidate = work / ("trusted" if reused is not None else "candidate")
     replace_checkout(source, candidate)
     terminal = candidate / "e2e/terminal-resize"
@@ -2263,7 +2285,7 @@ def browser_smoke(source, output, command, reused, compiler_scope):
         else:
             shutil.copy2(reused, binary)
             print("Browser smoke launches the hash-verified normal release from this rendering invocation; "
-                  "native drivers share rendering's release Cargo cache and still build from the candidate.", flush=True)
+                  "native drivers build from the candidate in their paired release Cargo cache.", flush=True)
         expected_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         package, prefix = benchmark_driver_targets(candidate)
         links, viewport = f"{prefix}_hyperlinks", f"{prefix}_prompt_viewport"

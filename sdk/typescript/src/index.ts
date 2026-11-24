@@ -12,6 +12,8 @@ export type { CodexMailboxAdmission } from './codexMailboxOwner';
 export { CodexMailboxPresentation } from './codexMailboxPresentation';
 export * from './codexMcp';
 export * from './codexSetup';
+export * from './a2aSetup';
+export * from './claudeSetup';
 export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles, type ProfileRefresh } from './codexEnrollment';
 export * from './lifecycle';
 export * from './receiverOwner';

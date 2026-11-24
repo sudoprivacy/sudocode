@@ -488,10 +488,12 @@ pending checks. Any pending test, build or container profile holds
 workspace and compile-only examples share one reservation. When native services
 and compiler context both need fresh execution and only rendering or browser
 checks intervene, compiler context runs immediately after native services
-within the same reservation. Each profile saves its own signed checkpoint.
-Between reservations, fresh profiles rejoin the FIFO behind existing waiters.
-A running reservation keeps the
-lease through its execution and checkpoints. Waiters start in arrival order
+within the same reservation. Adjacent rendering and browser checks also share
+one reservation when both need fresh execution. The browser can use the
+verified release built by that invocation's rendering check. Each profile saves
+its own signed checkpoint. Between reservations, fresh profiles rejoin the FIFO
+behind existing waiters. A running reservation keeps the lease through its
+execution and checkpoints. Waiters start in arrival order
 when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
@@ -999,8 +1001,12 @@ an example failure preserves it for verified resume. Native services and
 compiler context also share a reservation when both need fresh execution and
 no profile besides rendering or browser intervenes. Both Cargo commands remain
 required. If compiler context fails, the signed services checkpoint can still
-be restored. Reused profiles need no reservation. The mandatory
-`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups.
+be restored. A fresh rendering check and its immediately following fresh
+browser check also share one reservation. A browser failure leaves the
+signed rendering checkpoint available for resume. A later invocation still
+requires its own browser execution and verifies any binary it uses. Reused
+profiles need no reservation. The mandatory `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`
+output lists the actual reservation groups.
 Acquisition timing lists both profiles and counts their common wait once.
 This removes an additional queue admission, not the example build. Hosted
 complementary profiles and all native cases remain unchanged. Real private

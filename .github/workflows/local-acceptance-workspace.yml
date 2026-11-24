@@ -64,7 +64,11 @@ jobs:
           shared-key: ci-dependencies
           env-vars: ImageOS
           cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
-          save-if: false
+          # A successful full build on main can seed a new Windows runner key
+          # using the dependencies it already compiled.
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.os == 'windows-latest' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+          cache-on-failure: false
+          cache-workspace-crates: false
       - name: Install acceptance observer dependencies
         run: python -m pip install psutil jsonschema
       - name: Verify real native host-lease inheritance before compilation

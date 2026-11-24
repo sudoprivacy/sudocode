@@ -29,6 +29,7 @@ def git(*args):
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
 REVIEWED_VERIFIER_LAYOUTS = {
+    "0472be55c5cfa53f9269140a6909f6baa7a6f5e3f9af135c9cb4463167297cc8",
     "af64ac6f658704650841120be08d66a9c88a6f36bc804bf8c7ceeb0dbaeb399e",
     "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
@@ -561,7 +562,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "53a103d5a883934695bfc0c35247c116ca4e1dfb"
+        "2b74fe8afa66227a3b87c79ea39ea7cddfb49880"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",

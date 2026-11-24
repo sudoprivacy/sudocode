@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "b270e25b648c51f5305b8e720aab28aa5f3da6199727e4d7c44c579a80da7b27",
         "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
         "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
         "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
@@ -1797,11 +1798,12 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head), base=receipt["base"], head=head)
+    policy = load_policy(policy_ref)
+    required = selected(policy, changed_paths(receipt["base"], head), base=receipt["base"], head=head)
     if not required:
         raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
-    if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
+    if completed_only and (not checks or not set(checks).issubset(policy["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
     profiles = list(checks) if completed_only else required
     if {"commands_sha256", "profile_commands_sha256", "reachable_profile_commands_sha256"} & receipt.keys():
@@ -1862,13 +1864,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         for command in commands:
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
-    plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
-    legacy_names = [name for name in load_policy(policy_ref)["checks"] if name in checks]
-    original_plan = receipt.get("plan", acceptance_plan(load_policy(policy_ref), legacy_names, receipt["host"]))
+    plan = acceptance_plan(policy, required, receipt["host"])
+    legacy_names = [name for name in policy["checks"] if name in checks]
+    original_plan = receipt.get("plan", acceptance_plan(policy, legacy_names, receipt["host"]))
     declared = original_plan.get("local_checks") if isinstance(original_plan, dict) else None
-    ordered = [name for name in load_policy(policy_ref)["checks"] if isinstance(declared, list) and name in declared]
+    ordered = [name for name in policy["checks"] if isinstance(declared, list) and name in declared]
     if (declared != ordered or not set(checks).issubset(declared)
-            or not compatible_acceptance_plan(load_policy(policy_ref), declared, receipt["host"], original_plan)):
+            or not compatible_acceptance_plan(policy, declared, receipt["host"], original_plan)):
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
     if original_plan != plan:
         print("Reusing unchanged completed execution from an earlier scope; current protected checks "

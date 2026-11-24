@@ -75,6 +75,8 @@ assert packed==expected['packed_sources'], 'unexpected source transport'
 observed={'image_policy':image,'packed_sources':packed}
 def workload(name,root,output,base,command,target,*,source_mount,compiler_scope):
     assert callable(compiler_scope),'production dispatcher did not supply the compiler scope'
+    assert (Path.home()/'.cache/sudocode-local-acceptance').samefile('/state'), 'compiler tools are not on the leased volume'
+    assert Path(checks.__file__).with_name('compiler_cache.py').is_file(), 'compiler tool loader was not staged'
     # Keep the real main(), run(), output creation and command executor. Only
     # replace the expensive product workload; it must use the supplied output.
     frozen=root.parent
@@ -130,7 +132,6 @@ print('FROZEN_CONTAINER_INPUTS_PASS',flush=True)
         files = {
             "marker.txt": label,
             "probe.py": probe,
-            ".github/local-acceptance/checks.py": (SOURCE / ".github/local-acceptance/checks.py").read_text(encoding="utf-8"),
             ".github/local-acceptance/compiler_cache.py": (SOURCE / ".github/local-acceptance/compiler_cache.py").read_text(encoding="utf-8"),
             ".github/local-acceptance/Dockerfile": f'FROM {base_image}\n'
                 'RUN pip install --no-cache-dir psutil==7.2.2\n'

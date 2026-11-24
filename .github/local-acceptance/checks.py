@@ -1776,21 +1776,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     context_hash = hashlib.sha256()
     for source, destination in [
         (".github/local-acceptance/Dockerfile", "Dockerfile"),
-        (".github/local-acceptance/compiler_cache.py", "compiler_cache.py"),
         ("e2e/terminal-resize/package.json", "e2e/terminal-resize/package.json"),
         ("e2e/terminal-resize/package-lock.json", "e2e/terminal-resize/package-lock.json"),
     ]:
         path = context / destination
         path.parent.mkdir(parents=True, exist_ok=True)
         contents = subprocess.check_output(["git", "show", f"{protected}:{source}"], cwd=root)
-        if destination == "Dockerfile":
-            contents += (b"\nCOPY compiler_seed.py compiler_cache.py /opt/\n"
-                         b"RUN nice -n 10 python3 /opt/compiler_seed.py\n")
         path.write_bytes(contents)
         context_hash.update(destination.encode() + b"\0" + contents + b"\0")
-    compiler_seed = guard_tool_variant_source(root, protected, True)
-    (context / "compiler_seed.py").write_bytes(compiler_seed)
-    context_hash.update(b"compiler_seed.py\0" + compiler_seed + b"\0")
     image_receipt = output / "image-id.txt"
     # Only a successful rendering call in this process can authorize reuse.
     try:
@@ -1835,7 +1828,8 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
     (runner / "local-acceptance").mkdir(parents=True)
     (runner / "scripts").mkdir()
     shutil.copyfile(__file__, runner / "local-acceptance/checks.py")
-    shutil.copyfile(context / "compiler_cache.py", runner / "local-acceptance/compiler_cache.py")
+    (runner / "local-acceptance/compiler_cache.py").write_bytes(subprocess.check_output(
+        ["git", "show", f"{protected}:.github/local-acceptance/compiler_cache.py"], cwd=root))
     shutil.copyfile(execute.__code__.co_filename, runner / "scripts/local_acceptance.py")
     if name == "browser":
         # The executor owns this harness, including for candidates that predate
@@ -1854,10 +1848,14 @@ def container(name, root, output, base, command, execute, policy_ref, candidate_
               "This isolates render measurements from host disk flushes and does not qualify "
               "persistent-storage performance. Other profiles retain their storage; "
               "exit assertions, deadlines and performance budgets are unchanged.", flush=True)
+    cache_volume = lease_volume + "-cache-v1"
+    # The pinned tool loader uses the default root cache. Give it the existing
+    # leased volume so a new image/context never has to provision the tool again.
     command("docker", "run", "--rm", "--init", "--cpus", "2", "--memory", "8g", "--pids-limit", "2048", *scratch,
             "--mount", f"type=bind,source={sources},target=/inputs,readonly",
             "--mount", f"type=bind,source={output},target=/evidence",
-            "--mount", f"type=volume,source={lease_volume}-cache-v1,target=/state",
+            "--mount", f"type=volume,source={cache_volume},target=/state",
+            "--mount", f"type=volume,source={cache_volume},target=/root/.cache/sudocode-local-acceptance,volume-nocopy",
             "--mount", f"type=bind,source={state},target=/legacy-state,readonly",
             "--mount", f"type=volume,source={lease_volume},target=/locks",
             "--env", "SCODE_ACCEPTANCE_CONTAINER=1", "--env", "CARGO_HOME=/state/cargo",

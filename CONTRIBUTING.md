@@ -676,9 +676,10 @@ or invalid scenario stops the matrix. Drivers build in the binary-free
 The matrix is mandatory on the author's local Docker before push for CLI,
 engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
 Cargo/dependency metadata and unrelated crate source do not select it per PR.
-The browser functional smoke remains separate. The Docker image provisions the
-same checksum-pinned compiler tool as the native guard. Rendering and browser
-can reuse compiler objects on the leased Linux volume. Each profile runs its
+The browser functional smoke remains separate. Rendering and browser prepare
+the same checksum-pinned compiler tool as the native guard on the existing
+leased Linux volume. They can reuse the verified tool and compiler objects
+across invocations and images. Each profile runs its
 original Cargo commands, and the per-profile cache server stops before any
 rendering sample or browser journey. Cargo still checks current sources,
 features and artifacts. Required plan output and signed evidence attribute

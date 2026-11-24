@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "1c43d4e04b808880a8f1d5b001f44ae372578afe90eb185bee9201d9610c2522",
         "b270e25b648c51f5305b8e720aab28aa5f3da6199727e4d7c44c579a80da7b27",
         "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
         "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
@@ -1704,7 +1705,8 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if (not isinstance(planned_policy, str) or not re.fullmatch(r"[a-f0-9]{40}", planned_policy)
             or git("merge-base", "--is-ancestor", planned_policy, protected, check=False).returncode):
         raise RuntimeError("Execution plan policy is not an ancestor of the protected policy")
-    if (receipt.get("contract_sha256") != contract_hash(planned_policy)
+    planned_contract = contract_hash(planned_policy)
+    if (receipt.get("contract_sha256") != planned_contract
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
@@ -1724,7 +1726,7 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if receipt["plan"] != plan:
         print("LOCAL_ACCEPTANCE_FULL_WORKSPACE_PLAN_REUSED: original signed full complementary plan retained; "
               "no checks executed or signatures changed by this responsibility proof.", flush=True)
-    if contract_hash(planned_policy) != contract_hash(protected):
+    if planned_policy != protected and planned_contract != contract_hash(protected):
         before_inputs = execution_inputs(planned_policy)
         current_inputs = execution_inputs(protected)
         before = reachable_profile_commands_hashes(planned_policy, names, inputs=before_inputs)
@@ -1770,19 +1772,29 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     return receipt
 
 
-def read_execution_plan(head, base, policy_ref, signers_ref=None):
-    """Read only a separately signed scheduling note; never a completion proof."""
+def verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref=None):
+    """Return the selected receipt and the exact envelope that authenticated it."""
     errors, valid = [], []
-    for envelope in read_note(head, PLAN_NOTE_REF)["attestations"].values():
+    for envelope in attestations.values():
         try:
-            valid.append(verify_execution_plan(envelope, head, base, policy_ref, signers_ref))
+            receipt = verify_execution_plan(envelope, head, base, policy_ref, signers_ref)
         except (RuntimeError, ValueError, KeyError) as error:
             errors.append(str(error))
+        else:
+            valid.append((receipt, envelope))
     if valid:
-        if any(receipt["plan"] != valid[0]["plan"] for receipt in valid):
+        selected_receipt, selected_envelope = valid[0]
+        if any(receipt["plan"] != selected_receipt["plan"] for receipt, _envelope in valid[1:]):
             raise RuntimeError("Frozen source has conflicting signed author plans; keep the original author responsibility or publish a new head")
-        return valid[0]
+        return selected_receipt, selected_envelope
     raise RuntimeError("No current valid execution plan: " + ("; ".join(errors) or "signed plan missing"))
+
+
+def read_execution_plan(head, base, policy_ref, signers_ref=None):
+    """Read only a separately signed scheduling note; never a completion proof."""
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    receipt, _envelope = verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref)
+    return receipt
 
 
 def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store=None, depth=0, trail=(),
@@ -2723,12 +2735,14 @@ def perform_check(args, attempt):
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
     execution_plan = getattr(args, "execution_plan", None)
-    if execution_plan is None and read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, base_ref, policy_ref, signers_ref)
-        execution_plan = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                              if json.loads(base64.b64decode(item["payload"])) == prior)
+    launch = None
     if execution_plan is not None:
         launch = verify_execution_plan(execution_plan, head, base_ref, policy_ref, signers_ref)
+    else:
+        attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+        if attestations:
+            launch, execution_plan = verify_execution_plan_attestations(attestations, head, base_ref, policy_ref, signers_ref)
+    if launch is not None:
         if launch["host"] != host():
             raise RuntimeError("Use the original author host for this frozen execution plan")
         plan = launch["plan"]
@@ -3408,19 +3422,19 @@ def plan_pre_push(args):
 def publish_plan(head, trusted, remote, output):
     """Sign and publish this head's execution plan, or reuse the one already
     published from this host. The plan schedules native CI; it proves no test."""
-    repository = load_policy(trusted)["repository"]
+    policy = load_policy(trusted)
+    repository = policy["repository"]
     contract_remote(remote, repository)
     base = value("merge-base", trusted, head)
-    policy = load_policy(trusted)
     names = selected(policy, changed_paths(base, head), base=base, head=head)
     plan = acceptance_plan(policy, names, host())
     for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
         fetched = git("fetch", "--no-tags", remote, f"+{note_ref}:{note_ref}", check=False)
         if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
             raise RuntimeError(fetched.stderr.decode(errors="replace"))
-    prior = None
-    if read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, trusted, trusted)
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    if attestations:
+        prior, envelope = verify_execution_plan_attestations(attestations, head, trusted, trusted)
         if prior["host"] != host():
             raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
         plan = prior["plan"]
@@ -3428,16 +3442,12 @@ def publish_plan(head, trusted, remote, output):
         raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
-    receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
-               "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
-               "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-    if prior is None:
+    if not attestations:
+        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
         envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
-    else:
-        envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                        if json.loads(base64.b64decode(item["payload"])) == prior)
-    verify_execution_plan(envelope, head, trusted, trusted)
-    if prior is None:
+        verify_execution_plan(envelope, head, trusted, trusted)
         publish(head, envelope, remote, note_ref=PLAN_NOTE_REF)
     git("fetch", "--no-tags", remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
     return plan, envelope

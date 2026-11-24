@@ -2080,6 +2080,32 @@ of the 1,160.317 known hosted runner-minutes. Complementary native jobs account
 for 325.283 of those minutes, with 197.800 starting after the policy merge.
 Job start time records when occupancy occurred. An already frozen plan may
 still select checks under an earlier policy.</p>
+<p>The same 15 PRs spent 534.783 known runner-minutes across 68 assigned
+native complement jobs, or 46.1% of the recorded hosted total. This includes
+recorded successful, failed and cancelled work and excludes the SDK jobs.</p>
+<table aria-label="Native complement runner cost in the fixed 15-PR sample">
+  <thead><tr><th scope="col">Host</th><th scope="col">Timed jobs</th>
+  <th scope="col">Runner minutes</th><th scope="col">Native command minutes</th>
+  <th scope="col">Cache step minutes</th></tr></thead>
+  <tbody>
+    <tr><th scope="row">Windows</th><td>29</td><td>245.333</td><td>184.083</td><td>29.533</td></tr>
+    <tr><th scope="row">Linux</th><td>34</td><td>187.433</td><td>152.667</td><td>14.550</td></tr>
+    <tr><th scope="row">macOS</th><td>5</td><td>102.017</td><td>92.217</td><td>5.783</td></tr>
+  </tbody>
+</table>
+<p>Step minutes count published start and completion timestamps. The native
+step includes builds and tests. The cache step includes lookup and restore.
+Some of the jobs also appear in the build-or-manifest subtotal above.
+These times measure work already recorded. The effect of later changes on
+the full lifecycle still needs a comparable sample.</p>
+<p>A later PR-triggered run of the periodic workflow passed its Linux and macOS jobs.
+On Windows, the complementary steps passed in 605s. The full workspace step
+then took 513s and stopped after the resumed-card continuation assertion left
+<code>END</code> at column zero. Nextest reported 614 passes, one failing
+assertion, 80 skips and seven in-flight aborts. Windows full-workspace
+qualification is pending for this change. The workflow-only PR head
+falls outside the Rust-source
+cohort. See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original Windows job</a>.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its

@@ -36,6 +36,11 @@ ENDPOINT="https://127.0.0.1:${AUTHON_PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 CARGO_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
+# A failed compile cannot become writable on the next daemon retry. Surface the
+# original Cargo diagnostics before downloading or starting a daemon.
+echo "== build the mailbox readiness test before daemon startup =="
+"${CARGO_TEST[@]}" --no-run
+
 # A downloaded binary needs no image built by hand, which is what kept this
 # harness off CI: building `nexusd-cluster` is a nexus-repo job and wants a
 # GitHub token. `fetch-daemon.sh` resolves the version from this checkout's
@@ -88,9 +93,8 @@ echo "== waiting for a writable single-voter leader =="
 # founder needs a moment to become writable, so every early failure is expected
 # and printing each one is noise - but the LAST one is the diagnosis, and
 # `2>/dev/null` threw it away. Everything that can go wrong before the daemon is
-# reachable lands in this loop and used to read as "daemon never became
-# writable": a panic on a missing `NEXUS_A2A_TEST_CERT_DIR`, and a build that
-# never produced the test binary at all (`failed to find tool "cl.exe"`).
+# reachable can look like "daemon never became writable", including a panic on
+# a missing `NEXUS_A2A_TEST_CERT_DIR`. The initial build already ran above.
 wait_for_writable_leader() {
   local ready= probe= i
   for i in $(seq 1 30); do

@@ -2090,6 +2090,26 @@ matched across those three runs. A cache-enabled run with zero hits took
 78.224 seconds. The command clocks include cache setup and shutdown where
 applicable. The sequence measures driver compilation and leaves the isolated
 effect of cache hits, browser journey time, and PR lifecycle savings open.</p>
+<p><strong>Original author rendering and workspace clocks.</strong> The original
+<a href="https://github.com/sudoprivacy/sudocode/pull/1469">PR #1469</a> and
+<a href="https://github.com/sudoprivacy/sudocode/pull/1513">PR #1513</a> Windows
+author runs each passed all 36 rendering observations. The timed workload drivers
+accounted for 452.760 of 457.715 seconds and 462.580 of 467.960 seconds in their
+respective scenario commands. The fixed baseline builds took 1.526 and 1.630
+seconds. The candidate release builds took 266.727 and 274.568 seconds. Both runs
+predate the current archive transport and rendering compiler cache.</p>
+<p>For PR #1513, the read-only Docker volume still held the measured release
+binary. Its SHA-256 matched the original report and its Cargo build-unit output.
+The final <code>scode</code> unit marker preceded that output's mtime by 182.242
+seconds. This filesystem interval covers the final unit and does not isolate
+linking or cache savings. See the
+<a href="https://doc.rust-lang.org/stable/nightly-rustc/cargo/compiler/fingerprint/index.html">Cargo fingerprint documentation</a>.</p>
+<p>The two original workspace runs executed 1,208 and 1,209 nextest cases on
+eight workers. Test execution took 311.976 and 340.789 seconds. Dividing the
+recorded case durations across the same eight slots gives lower bounds of
+299.286 and 329.577 seconds. The full nextest commands took 315.428 and 625.518
+seconds. Only PR #1469 is in the fixed merged cohort. These historical component
+clocks leave both present-day savings and the lifecycle target unmeasured.</p>
 <p>Within the fixed 15-PR cohort, five build or manifest changes spent 631.583
 of the 1,160.317 known hosted runner-minutes. Complementary native jobs account
 for 325.283 of those minutes, with 197.800 starting after the policy merge.

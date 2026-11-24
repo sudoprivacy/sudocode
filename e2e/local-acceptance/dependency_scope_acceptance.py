@@ -106,8 +106,55 @@ esac
     result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
                             env=fixture, capture_output=True)
     assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+    preinstalled = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache-command.mjs"
+    host = "x86_64-unknown-linux-gnu"
+    assert subprocess.check_output([node, preinstalled, host, "rustup", "toolchain", "list", "--quiet"],
+                                   env=fixture, timeout=10).decode().strip() == f"stable-{host}"
+    call = [node, preinstalled, host, node, "-e", "process.stdout.write(process.env.RUSTUP_TOOLCHAIN);process.exitCode=17"]
+    result = subprocess.run(call, capture_output=True, timeout=10)
+    assert result.returncode == 17 and result.stdout.decode() == f"stable-{host}"
     print("PASS: the cache command binds the active pin, preserves conservative inventory, and forwards command results",
           flush=True)
+
+
+def preinstalled_cache_probe(output):
+    from unittest.mock import patch
+
+    output.mkdir()
+    probe = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache.py"
+    spec = importlib.util.spec_from_file_location("preinstalled_cache", probe)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    host = "x86_64-pc-windows-msvc"
+    commit = "a" * 40
+    compiler = f"release: 1.100.0\nhost: {host}\ncommit-hash: {commit}\n"
+    installed = "\n".join(f"{name}-{host}" for name in ("rustc", "cargo", "rust-std", "clippy", "rustfmt"))
+    (output / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.100.0"\nprofile = "minimal"\ncomponents = ["clippy", "rustfmt"]\n', encoding="utf-8")
+    environment = {"GITHUB_WORKSPACE": str(output), "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+                   "USERPROFILE": r"C:\Users\runneradmin"}
+    with patch.object(module.subprocess, "check_output", side_effect=[compiler, installed]) as metadata, \
+            patch.object(module, "verified_release", return_value={"git_commit_hash": commit}):
+        values = module.lookup_inputs(environment)
+        assert values["cargo-home"] == r"C:\Users\runneradmin\.cargo"
+        assert values["dependency-cache-command"].endswith(f'preinstalled-cache-command.mjs" {host} {{0}}')
+        assert all(call.kwargs["env"]["RUSTUP_AUTO_INSTALL"] == "0" for call in metadata.call_args_list)
+    for observed, components, expected in (
+        (compiler.replace("1.100.0", "1.99.0"), installed, commit),
+        (compiler.replace(host, "aarch64-pc-windows-msvc"), installed, commit),
+        (compiler, installed.replace(f"clippy-{host}", ""), commit),
+        (compiler, installed, "b" * 40),
+    ):
+        with patch.object(module.subprocess, "check_output", side_effect=[observed, components]), \
+                patch.object(module, "verified_release", return_value={"git_commit_hash": expected}):
+            try:
+                module.lookup_inputs(environment)
+            except ValueError:
+                continue
+            raise AssertionError("An inexact preinstalled Rust qualified for a cache lookup")
+    with patch.dict(os.environ, {**environment, "RUSTUP_TOOLCHAIN": "stable", "GITHUB_OUTPUT": str(output / "outputs")}):
+        module.main()
+    assert not (output / "outputs").exists()
 
 
 def workflow_scope(output, environment):
@@ -129,6 +176,14 @@ def workflow_scope(output, environment):
     assert "echo 'dependency-cache-command={0}'" in toolchain
     publisher = (SOURCE / ".github/workflows/ci-dependency-cache.yml").read_text(encoding="utf-8")
     assert publisher.count(cache_command) == 2
+    early = publisher.split("        id: preinstalled_lookup\n", 1)[1].split("      - uses: ./.github/actions/rust-toolchain", 1)[0]
+    assert "          lookup-only: true\n          save-if: false\n" in early
+    assert "          cmd-format: ${{ steps.preinstalled.outputs.dependency-cache-command }}" in early
+    assert "        if: steps.preinstalled_lookup.outcome != 'success' || steps.preinstalled_lookup.outputs.cache-hit != 'true'" in publisher
+    assert "        if: steps.rust_toolchain.outcome == 'success'\n        id: lookup" in publisher
+    missing_key = "steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'"
+    assert publisher.count(missing_key) == 3
+    preinstalled_cache_probe(output / "preinstalled-cache-probe")
     cache_test = lines.index("      - name: Exercise the pinned dependency cache command")
     assert lines[cache_test + 1] == "        if: github.event_name == 'pull_request' && steps.scope.outputs.policy_fixtures_required == 'true'"
     assert "--pinned-cache-command-only" in lines[cache_test + 2]
@@ -179,12 +234,19 @@ def workflow_scope(output, environment):
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
     assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
-    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
-                 "Auth-on A2A — the node decides who a message is from"]:
+    journeys = ["Install native durability fault injector", "A2A round-trip against the pinned daemon",
+                "Cross-node A2A against two nodes", "Auth-on A2A — the node decides who a message is from"]
+    for name in journeys:
         assert [line for line in step(name) if line.startswith("        if:")] == [
             "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    mailbox_upload = "Retain mailbox fault inventory and exact case results"
+    syscall_upload = "Retain native syscall fault evidence"
+    order = [lines.index(step(name)[0]) for name in [*journeys, mailbox_upload, syscall_upload]]
+    assert order == sorted(order), "A2A checks must run before the evidence uploads"
+    assert "        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(mailbox_upload)
     assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
-        "Retain native syscall fault evidence")
+        syscall_upload)
+    assert not any("continue-on-error:" in line for name in (mailbox_upload, syscall_upload) for line in step(name))
     for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
         assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
         assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)
@@ -354,6 +416,14 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
         return "".join(lines)
 
+    def runner_pin(source):
+        blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
+        modified, count = re.subn(
+            r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+            lambda match: match[1] + blob + match[2], sources[selector])
+        assert count == 1
+        return modified
+
     def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None, overrides=None):
         for event_name in events or ["pull_request", "push", "merge_group"]:
             if event_name == "pull_request":
@@ -459,14 +529,6 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         registration = "    reviewed_sources = {\n"
         assert pure.count(registration) == 1
         registered = pure.replace(registration, registration + f'        "{layout}",\n', 1)
-
-        def runner_pin(source):
-            blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
-            modified, count = re.subn(
-                r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
-                lambda match: match[1] + blob + match[2], sources[selector])
-            assert count == 1
-            return modified
 
         base_selector = runner_pin(sources[runner])
         # Bind the fixture baseline to the actual tracked runner bytes too.
@@ -580,6 +642,38 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         observe("metadata-" + label, base, git("rev-parse", "HEAD"), expected,
                 kind="metadata", rust=label == "product", clippy=label in {"product", "workflow"},
                 events=None if label in {"single-verifier", "forged-fingerprint-and-command"} else ["merge_group"])
+    git("switch", "--detach", base)
+    write(selector, runner_pin(sources[runner]))
+    if git("status", "--porcelain"):
+        git("add", ".")
+        git("commit", "-m", "Register original verifier Git blob")
+    registered_base = git("rev-parse", "HEAD")
+    registered_selector = runner_pin(metadata_source)
+    other_pin, count = re.subn(
+        r'("scripts/publish_release_mirror\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+        lambda match: match[1] + "0" * 40 + match[2], registered_selector)
+    assert count == 1 and other_pin != registered_selector
+    for label, selector_source, expected, extra in [
+        ("registered-verifier", registered_selector, True, {}),
+        ("wrong-verifier-blob", runner_pin(pure), False, {}),
+        ("selector-code", insert_body(registered_selector, "main"), False, {}),
+        ("other-registry-entry", other_pin, False, {}),
+        ("registered-mixed-product", registered_selector, False,
+         {"rust/crates/runtime/src/metadata_registration.rs": "// Product input\n"}),
+    ]:
+        git("switch", "--detach", registered_base)
+        write(runner, metadata_source)
+        write(selector, selector_source)
+        for name, contents in extra.items():
+            write(name, contents)
+        git("add", ".")
+        git("commit", "-m", "Verifier registration scope " + label)
+        observe("metadata-" + label, registered_base, git("rev-parse", "HEAD"), expected,
+                kind="metadata", rust=bool(extra), events=None if expected else ["merge_group"])
+        if expected:
+            for row in records[-3:]:
+                assert row["actual"]["acceptance_metadata_scope"]["selector_registration"] == "matches_committed_runner"
+                assert row["actual"]["policy_fixtures_required"] == "true"
     for label, body in [("static-observer", "return verify_envelope"),
                         ("dynamic-observer", 'return globals().get("verify_" + "envelope")'),
                         ("frame-observer", "return RUNNER_CODE")]:

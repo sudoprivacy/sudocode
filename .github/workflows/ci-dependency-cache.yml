@@ -52,12 +52,33 @@ jobs:
         os: ${{ fromJSON(inputs.linux_only && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/rust-toolchain
-        id: rust_toolchain
       - name: Resolve the shared native cache paths
         id: cache_layout
         run: python ../.github/local-acceptance/cache_layout.py --source rust --github-output
+      - name: Verify image Rust for a lookup before installation
+        if: runner.environment == 'github-hosted'
+        id: preinstalled
+        continue-on-error: true
+        run: python ../.github/actions/rust-toolchain/preinstalled-cache.py
+      - name: Look up the dependency key with verified image Rust
+        if: steps.preinstalled.outcome == 'success' && steps.preinstalled.outputs.dependency-cache-command != ''
+        id: preinstalled_lookup
+        continue-on-error: true
+        uses: Swatinem/rust-cache@v2
+        env:
+          CARGO_HOME: ${{ steps.preinstalled.outputs.cargo-home }}
+        with:
+          workspaces: ${{ steps.cache_layout.outputs.workspaces }}
+          shared-key: ci-dependencies
+          env-vars: ImageOS
+          cmd-format: ${{ steps.preinstalled.outputs.dependency-cache-command }}
+          lookup-only: true
+          save-if: false
+      - uses: ./.github/actions/rust-toolchain
+        if: steps.preinstalled_lookup.outcome != 'success' || steps.preinstalled_lookup.outputs.cache-hit != 'true'
+        id: rust_toolchain
       - name: Check the dependency key without downloading a hit
+        if: steps.rust_toolchain.outcome == 'success'
         id: lookup
         uses: Swatinem/rust-cache@v2
         with:
@@ -68,7 +89,7 @@ jobs:
           lookup-only: true
           save-if: false
       - name: Restore dependencies for a missing key
-        if: steps.lookup.outputs.cache-hit != 'true'
+        if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ steps.cache_layout.outputs.workspaces }}
@@ -76,7 +97,7 @@ jobs:
           env-vars: ImageOS
           cmd-format: ${{ steps.rust_toolchain.outputs.dependency-cache-command }}
       - name: Compile workspace dependencies without running tests
-        if: steps.lookup.outputs.cache-hit != 'true'
+        if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'
         # Library/bin test builds include dev dependencies, including those used
         # only by integration tests. The cache discards workspace executables,
         # so linking every integration journey here warms nothing additional.
@@ -84,7 +105,7 @@ jobs:
         run: cargo test --workspace --lib --bins --locked --features engine-acp/mailbox --no-run
 
       - name: Compile production release dependencies into the same cache
-        if: github.event_name == 'workflow_dispatch' && steps.lookup.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'
         # Cache-only dispatch retains both profiles on a miss. Automatic main
         # publication warms dev/test on the standard CI images. Tagged builds
         # keep their own runner, target and original release build commands.

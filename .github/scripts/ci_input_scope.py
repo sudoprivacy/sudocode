@@ -29,6 +29,7 @@ def git(*args):
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
 REVIEWED_VERIFIER_LAYOUTS = {
+    "0472be55c5cfa53f9269140a6909f6baa7a6f5e3f9af135c9cb4463167297cc8",
     "af64ac6f658704650841120be08d66a9c88a6f36bc804bf8c7ceeb0dbaeb399e",
     "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
@@ -96,7 +97,8 @@ def unchanged_profile_execution(base, head, *, resource_registration=None):
 def metadata_only_inputs(paths, base, head, details):
     """Omit generic daemon smoke only for bounded verifier-body edits."""
     runner = ".github/scripts/local_acceptance.py"
-    allowed = {runner, ".github/local-acceptance/checks.py",
+    selector = ".github/scripts/ci_input_scope.py"
+    allowed = {runner, selector, ".github/local-acceptance/checks.py",
                "e2e/local-acceptance/profile_compat_acceptance.py",
                "e2e/local-acceptance/parallel_acceptance.py",
                "e2e/local-acceptance/resource_scheduling_acceptance.py"}
@@ -171,6 +173,10 @@ def metadata_only_inputs(paths, base, head, details):
         details.update(reviewed_layouts=sorted(REVIEWED_VERIFIER_LAYOUTS), observed_layout=current[3])
         if current[3] not in REVIEWED_VERIFIER_LAYOUTS:
             raise ValueError("Runner imports, declarations or consumers are outside the reviewed layout; full daemon checks continue")
+        if selector in paths:
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
+                raise ValueError("Selector changed outside the exact runner blob registration")
+            details["selector_registration"] = "matches_committed_runner"
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),
                        consumer_functions=current[2], profiles=names,
@@ -205,11 +211,11 @@ def verify_scheduling_resource_registration(protected, head, registration):
         raise ValueError("The added resource registration does not match the committed executor")
 
 
-def scheduling_selector_identity(ref, selector, runner):
+def selector_registration_identity(ref, selector, runner):
     """Permit the exact runner blob registration and compare all other selector code."""
     row = git("ls-tree", ref, "--", selector).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
-        raise ValueError("Scheduling registration requires a regular committed selector")
+        raise ValueError("Runner registration requires a regular committed selector")
     tree = ast.parse(git("show", f"{ref}:{selector}"))
     registrations = [
         node for node in tree.body
@@ -311,7 +317,7 @@ def scheduling_only_inputs(paths, base, head, details):
             raise ValueError("Code outside author scheduling or its declaration changed")
         registration = None
         if registered:
-            if scheduling_selector_identity(base, selector, runner) != scheduling_selector_identity(head, selector, runner):
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
                 raise ValueError("Code outside the runner input registration changed in the selector")
             if previous_reviews is None or current_reviews is None or previous_reviews - current_reviews:
                 raise ValueError("The committed resource registration removed an existing reviewed layout")
@@ -556,7 +562,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "37dec1896ed66579d7fb822c3a29f566516f2ebf"
+        "2b74fe8afa66227a3b87c79ea39ea7cddfb49880"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",
@@ -566,7 +572,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "a88273cd2d997bd2072786b5b4ecdca26cc89d63"
+        "d9d074e3bd8f422d8ec01c8a0a0c141ede1718cf"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",
@@ -593,10 +599,20 @@ POLICY_FIXTURE_INPUTS = {
         "blob",
         "973592bd8bdc233854295869e87dc24ae00fd6d7"
     ],
+    ".github/actions/rust-toolchain/preinstalled-cache-command.mjs": [
+        "100644",
+        "blob",
+        "9374e1cb636173ca9dc265b23747f044835b5ca3"
+    ],
+    ".github/actions/rust-toolchain/preinstalled-cache.py": [
+        "100644",
+        "blob",
+        "185777a1aa3939e92202403dca4065ad56386f4e"
+    ],
     ".github/workflows/ci-dependency-cache.yml": [
         "100644",
         "blob",
-        "c774bfc820c05df59d3c161dd6c252ff4829e551"
+        "f49ca6dab500ebe0d8f7a34f9dd44aa4ec6200ff"
     ],
     ".gitignore": [
         "100644",

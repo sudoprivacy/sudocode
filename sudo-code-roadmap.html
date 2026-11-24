@@ -2163,6 +2163,30 @@ attempt 2 job in one rerun. The distinct direct logs confirm both failures
 and the prior 29 Windows cache and profile-order results. See
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135441523265">attempt 2</a>
 and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135610094106">attempt 3</a>.</p>
+<p><strong>Linux real-daemon queue timing.</strong> In the same fixed cohort,
+18 A2A and 13 co-host jobs occupied 202.917 hosted runner-minutes. Among
+11 successful A2A jobs with the current managed harness and original stage
+archives, the remote-context command took a median 44.628 seconds to
+start its test. The test itself took a median 0.550 seconds. The managed
+binary freshness check after the join took a median 0.284 seconds.</p>
+<p>In nine of those 11 jobs, the native lane finished after the fault lane.
+The other two jobs had 13.707 seconds of spare native-lane wall time
+combined. Moving the full remote-context command to the end of that lane
+would exceed the observed spare time in every job if durations held.
+The locked Linux dependency graph also changes feature sets when the
+remote-context package is combined with the CLI test packages. Keep the
+existing package selections and the real post-join test while measuring
+compiler work separately. See the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/job/137843368203">original queue job</a>
+and its
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/artifacts/14837714645">mailbox fault archive</a>.</p>
+<p><strong>Author FIFO reservation for workspace, examples and resize.</strong>
+The three checks share one reservation when all need fresh execution and
+appear consecutively. Each completion still gets its own signed checkpoint.
+Five original published execution plans had the same verification results
+before and after this change. Measured delivery impact awaits a new
+matching source run. See
+<a href="https://github.com/sudoprivacy/sudocode/pull/1584">the merged reservation change</a>.</p>
 <p><strong>Same-repository acceptance ref fetch.</strong> The signature gate
 and publisher fetch the pull ref and both notes namespaces in one atomic
 Git transaction when all three refs are available. A missing optional

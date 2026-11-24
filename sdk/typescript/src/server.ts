@@ -10,6 +10,7 @@ import { runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles } from
 import { installCodexMcp, checkCodexNative } from './codexSetup';
 import { captureReceiverOwner } from './receiverOwner';
 import { claudeDeliver, claudeWatch, runClaudeMcp } from './claudeAutojoin';
+import { setupClaude } from './claudeSetup';
 
 interface Manifest {
   sourceCommit: string;
@@ -60,6 +61,9 @@ async function main(): Promise<void> {
     'enroll-codex': {type:'boolean'}, 'refresh-codex-profiles': {type:'boolean'},
     'claude-watch': {type:'boolean'}, 'claude-deliver': {type:'boolean'}, claude: {type:'boolean'},
     'init-codex-operator': {type:'boolean'}, 'nexus-operator': {type:'string'}, 'scode-argv': {type:'string'}, 'scode-env': {type:'string'},
+    'setup-claude': {type:'boolean'}, issuer: {type:'string'}, 'node-data-dir': {type:'string'}, 'nexus-enroll': {type:'string'},
+    'nexus-enroll-argv': {type:'string'}, 'config-root': {type:'string'}, 'claude-command': {type:'string'}, 'claude-argv': {type:'string'},
+    'caller-argv': {type:'string'},
   } });
   if (values['registration-id'] !== undefined && (!values.codex
       || Object.keys(values).some(key => !['config','codex','registration-id'].includes(key)))) {
@@ -67,7 +71,10 @@ async function main(): Promise<void> {
   }
   if(positionals.length&&!values['launch-codex'])throw new Error('Native arguments require --launch-codex and --');
   if (values.help) {
-    console.log('scode-acp-bridge --config /absolute/private/runtime.json\n'
+    console.log('scode-acp-bridge --setup-claude [--issuer https://HOST:2126]  (attach Claude Code to the agent network: one command, safe to run again)\n'
+      + '  Discovers the Nexus node, the enrollment tool, scode and claude; override with --node-data-dir, --nexus-enroll, --scode, --claude-command, --config-root.\n'
+      + '  Prints one JSON object: ok, state, changed, verified, instructions (what to do next, in order) and next (exact commands).\n'
+      + 'scode-acp-bridge --config /absolute/private/runtime.json\n'
       + 'scode-acp-bridge --codex --config FILE [--registration-id UUID]  (MCP stdio client)\n'
       + 'scode-acp-bridge --capture-receiver-owner PID  (read-only Windows identity; place once in private config receiverOwner)\n'
       + 'scode-acp-bridge --verify | --version\n'
@@ -101,6 +108,20 @@ async function main(): Promise<void> {
   if (values['capture-receiver-owner'] !== undefined) {
     if (Object.keys(values).some(key => key !== 'capture-receiver-owner')) throw new Error('Select one capture mode');
     console.log(JSON.stringify(await captureReceiverOwner(Number(values['capture-receiver-owner']))));
+    return;
+  }
+  if (values['setup-claude']) {
+    const allowed = ['setup-claude','issuer','node-data-dir','nexus-enroll','nexus-enroll-argv','scode','config-root','claude-command','claude-argv','caller-argv'];
+    if (Object.entries(values).some(([key, value]) => value !== undefined && !allowed.includes(key))) throw new Error('--setup-claude takes only its own options; see --help');
+    const list = (name: 'nexus-enroll-argv' | 'claude-argv' | 'caller-argv'): string[] | undefined =>
+      values[name] === undefined ? undefined : JSON.parse(values[name]!) as string[];
+    const result = await setupClaude({ entry: __filename, issuer: values.issuer, nodeDataDir: values['node-data-dir'],
+      nexusEnroll: values['nexus-enroll'], nexusEnrollArgv: list('nexus-enroll-argv'), scode: values.scode,
+      configRoot: values['config-root'], claudeCommand: values['claude-command'], claudeArgv: list('claude-argv'),
+      // What the caller typed, so `next` can repeat it with one flag added.
+      callerArgv: list('caller-argv') ?? [process.execPath, __filename, ...process.argv.slice(2)] });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return;
   }
   if (!values.config || !path.isAbsolute(values.config)) throw new Error('--config must be an absolute path');

@@ -36,7 +36,10 @@ export interface ClaudeAutojoinConfig {
 }
 
 export function readClaudeAutojoinConfig(file: string): ClaudeAutojoinConfig {
-  const config = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8')) as ClaudeAutojoinConfig;
+  return validateClaudeAutojoinConfig(JSON.parse(fs.readFileSync(path.resolve(file), 'utf8')) as ClaudeAutojoinConfig);
+}
+
+export function validateClaudeAutojoinConfig(config: ClaudeAutojoinConfig): ClaudeAutojoinConfig {
   if (!config || config.version !== 1 || config.mode !== 'claude-autojoin'
       || typeof config.stateDirectory !== 'string' || !path.isAbsolute(config.stateDirectory)
       || typeof config.auditLog !== 'string' || !path.isAbsolute(config.auditLog)

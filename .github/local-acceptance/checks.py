@@ -1305,7 +1305,7 @@ def native_guard_files():
         "e2e/local-acceptance/native_cache_acceptance.py": "9ba95a010a18fefbd94e5a212dddc0d587cae39a6c8d98f88d1a409f6b862de0",
         "e2e/local-acceptance/native_lint_acceptance.py": "8a0815afe7f5de2e3f4d5831bae8f9bf020fd6e91bd7a0954fc7ccd037dd011a",
         "e2e/local-acceptance/parallel_acceptance.py": "bac9a257cb0daac0bfe91920dd8f23552bfc98567ded9aa2fd6e340de704fd9a",
-        "e2e/local-acceptance/policy_guard_acceptance.py": "8402735937f6ecc5309db283de3dcf11d61e388bd3d20ff04b501445e9e2665d",
+        "e2e/local-acceptance/policy_guard_acceptance.py": "242045ab62ef54ce11c1d5424e824ddfe94460569133e7c651795aa2e5427b29",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "97bbd63bcd0739daa689def0b48f41fb1aba466d40df109b45636df90b839408",
         "e2e/local-acceptance/publication_acceptance.py": "597998d9fe8cd3bffb9491839d367c85528b6f5638a77258811209ef8382d392",

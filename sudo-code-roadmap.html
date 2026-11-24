@@ -2106,6 +2106,28 @@ assertion, 80 skips and seven in-flight aborts. Windows full-workspace
 qualification is pending for this change. The workflow-only PR head
 falls outside the Rust-source
 cohort. See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original Windows job</a>.</p>
+<p><strong>Windows native command clocks.</strong> The original archives for
+the #1547 Windows complement and #1578 Windows periodic complement record
+563.219 of 837 seconds and 323.843 of 605 seconds, respectively, in the
+examples and cohost Cargo commands. The context and services profiles
+issued byte-identical Cargo argv within each job. The later invocation
+took 0.922 and 1.000 seconds, respectively, with zero Cargo compile lines.
+Both profiles still ran their separate acceptance cases.</p>
+<p>The #1547 job missed the hosted dependency cache. The later job restored
+its exact 2,518,522,496-byte dependency cache key in a 59-second action
+step. Its cohost build still took 199.171 seconds and recorded 132 sccache
+misses and zero hits. The earlier cohost build took 181.578 seconds with
+131 misses and zero hits. The current cache publisher builds the workspace
+library and binary test graph with mailbox support. The cohost daemon target
+also needs its nondefault daemon feature, and native acceptance builds it
+with the model and egress features enabled. These observations come from
+different heads and runner jobs. They show where the jobs spent time and
+leave the effect of a cohost-specific cache to a comparable measurement.
+GitHub reported a 10 GB cache setting and 10,393,505,612 active cache bytes
+at the audit snapshot. Any additional cache would need measurement of its
+publication cost, restore time and effect on other cache entries.
+See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44864376045/job/136724775488">original complement</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original periodic Windows job</a>.</p>
 <p><strong>Same-repository acceptance ref fetch.</strong> The signature gate
 and publisher fetch the pull ref and both notes namespaces in one atomic
 Git transaction when all three refs are available. A missing optional

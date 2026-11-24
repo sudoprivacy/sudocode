@@ -2030,6 +2030,21 @@ leave a mean of at least 85.329 minutes across the full cohort. The reference
 uses historical hosted-only timings. The matched historical author-inclusive
 mean is still unavailable, and missing earlier failures prevent an equivalent
 bound on actual first-failure times.</p>
+<p><strong>November author-inclusive comparison.</strong> The October window
+ended before <a href="https://github.com/sudoprivacy/sudocode/pull/1120">signed
+author acceptance landed on main</a>. A separate, previously selected group
+of 20 Rust-source PRs merged on November 10&ndash;16 has authenticated author
+clocks for every final head. From the earlier of recorded author start and
+the first retained exact-head hosted trigger to merge, its mean was 147.4
+minutes and its median was 71.5. The first 15 Rust-source merges after
+<a href="https://github.com/sudoprivacy/sudocode/pull/1473">the policy change</a>
+had a mean of 113.8 minutes and a median of 71.6.</p>
+<p>The mean interval after the signed author finish fell from 51.8 to 22.7
+minutes. The recorded author interval had a median of 40.7 minutes before
+and 51.8 after. These cohorts had different changes and host loads. The
+intervals can include waiting and overlap with hosted jobs. The November
+comparison leaves the original October reference and fixed cohort intact.
+The end-to-end one-tenth target remains unproven.</p>
 <p>For <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45136487423">PR #1558</a>,
 the hosted publisher reported the native complement passed 498.370 minutes
 before the signed author checks finished. The available signed author interval

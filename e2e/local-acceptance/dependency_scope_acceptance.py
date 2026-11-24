@@ -234,12 +234,19 @@ def workflow_scope(output, environment):
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
     assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
-    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
-                 "Auth-on A2A — the node decides who a message is from"]:
+    journeys = ["Install native durability fault injector", "A2A round-trip against the pinned daemon",
+                "Cross-node A2A against two nodes", "Auth-on A2A — the node decides who a message is from"]
+    for name in journeys:
         assert [line for line in step(name) if line.startswith("        if:")] == [
             "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    mailbox_upload = "Retain mailbox fault inventory and exact case results"
+    syscall_upload = "Retain native syscall fault evidence"
+    order = [lines.index(step(name)[0]) for name in [*journeys, mailbox_upload, syscall_upload]]
+    assert order == sorted(order), "A2A checks must run before the evidence uploads"
+    assert "        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(mailbox_upload)
     assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
-        "Retain native syscall fault evidence")
+        syscall_upload)
+    assert not any("continue-on-error:" in line for name in (mailbox_upload, syscall_upload) for line in step(name))
     for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
         assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
         assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)

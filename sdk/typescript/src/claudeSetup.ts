@@ -238,7 +238,8 @@ export async function setupClaude(options: ClaudeSetupOptions): Promise<SetupRes
       }
       atomicWrite(files.settings, JSON.stringify(settings, null, indent) + (text === undefined || /\n$/.test(text) ? '\n' : ''),
         latest ? lstatSync(files.settings).mode & 0o777 : 0o600);
-      changed.push(`${latest ? 'added the three A2A hooks to' : 'created'} ${files.settings}` + (backup ? ` (previous copy: ${backup})` : ''));
+      changed.push(`${stale.length ? 'moved the three A2A hooks in' : latest ? 'added the three A2A hooks to' : 'created'} ${files.settings}`
+        + (backup ? ` (previous copy: ${backup})` : ''));
     }
     const hooksAfter = bridgeHooks(readJson<Settings>(files.settings)?.value ?? {}, node, options.entry, configFile);
     if (HOOK_EVENTS.some(event => !hooksAfter.some(hook => hook.event === event && hook.standing === 'current'))

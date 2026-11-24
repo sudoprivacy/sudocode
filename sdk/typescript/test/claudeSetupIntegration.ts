@@ -153,6 +153,7 @@ async function main(): Promise<void> {
     const newerServer = path.join(newer, 'server.cjs');
     const moved = await setup(fresh, [], { entry: newerServer });
     assert.equal(moved.result.state, 'moved_to_this_sdk', JSON.stringify(moved.result));
+    assert.match(moved.result.changed.join('\n'), /moved the "nexus_scode" MCP entry[^\n]*\nmoved the three A2A hooks in /, 'a move is not reported as an addition');
     assertInstalled(fresh, newerServer);
     assert.deepEqual(calls(fresh).slice(1).map(call => call.slice(0, 2)), [['mcp', 'remove'], ['mcp', 'add-json']]);
     assert.equal((await setup(fresh, [], { entry: newerServer })).result.state, 'already_installed');

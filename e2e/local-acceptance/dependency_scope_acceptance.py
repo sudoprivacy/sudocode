@@ -106,8 +106,55 @@ esac
     result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
                             env=fixture, capture_output=True)
     assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+    preinstalled = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache-command.mjs"
+    host = "x86_64-unknown-linux-gnu"
+    assert subprocess.check_output([node, preinstalled, host, "rustup", "toolchain", "list", "--quiet"],
+                                   env=fixture, timeout=10).decode().strip() == f"stable-{host}"
+    call = [node, preinstalled, host, node, "-e", "process.stdout.write(process.env.RUSTUP_TOOLCHAIN);process.exitCode=17"]
+    result = subprocess.run(call, capture_output=True, timeout=10)
+    assert result.returncode == 17 and result.stdout.decode() == f"stable-{host}"
     print("PASS: the cache command binds the active pin, preserves conservative inventory, and forwards command results",
           flush=True)
+
+
+def preinstalled_cache_probe(output):
+    from unittest.mock import patch
+
+    output.mkdir()
+    probe = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache.py"
+    spec = importlib.util.spec_from_file_location("preinstalled_cache", probe)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    host = "x86_64-pc-windows-msvc"
+    commit = "a" * 40
+    compiler = f"release: 1.100.0\nhost: {host}\ncommit-hash: {commit}\n"
+    installed = "\n".join(f"{name}-{host}" for name in ("rustc", "cargo", "rust-std", "clippy", "rustfmt"))
+    (output / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.100.0"\nprofile = "minimal"\ncomponents = ["clippy", "rustfmt"]\n', encoding="utf-8")
+    environment = {"GITHUB_WORKSPACE": str(output), "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+                   "USERPROFILE": r"C:\Users\runneradmin"}
+    with patch.object(module.subprocess, "check_output", side_effect=[compiler, installed]) as metadata, \
+            patch.object(module, "verified_release", return_value={"git_commit_hash": commit}):
+        values = module.lookup_inputs(environment)
+        assert values["cargo-home"] == r"C:\Users\runneradmin\.cargo"
+        assert values["dependency-cache-command"].endswith(f'preinstalled-cache-command.mjs" {host} {{0}}')
+        assert all(call.kwargs["env"]["RUSTUP_AUTO_INSTALL"] == "0" for call in metadata.call_args_list)
+    for observed, components, expected in (
+        (compiler.replace("1.100.0", "1.99.0"), installed, commit),
+        (compiler.replace(host, "aarch64-pc-windows-msvc"), installed, commit),
+        (compiler, installed.replace(f"clippy-{host}", ""), commit),
+        (compiler, installed, "b" * 40),
+    ):
+        with patch.object(module.subprocess, "check_output", side_effect=[observed, components]), \
+                patch.object(module, "verified_release", return_value={"git_commit_hash": expected}):
+            try:
+                module.lookup_inputs(environment)
+            except ValueError:
+                continue
+            raise AssertionError("An inexact preinstalled Rust qualified for a cache lookup")
+    with patch.dict(os.environ, {**environment, "RUSTUP_TOOLCHAIN": "stable", "GITHUB_OUTPUT": str(output / "outputs")}):
+        module.main()
+    assert not (output / "outputs").exists()
 
 
 def workflow_scope(output, environment):
@@ -129,6 +176,14 @@ def workflow_scope(output, environment):
     assert "echo 'dependency-cache-command={0}'" in toolchain
     publisher = (SOURCE / ".github/workflows/ci-dependency-cache.yml").read_text(encoding="utf-8")
     assert publisher.count(cache_command) == 2
+    early = publisher.split("        id: preinstalled_lookup\n", 1)[1].split("      - uses: ./.github/actions/rust-toolchain", 1)[0]
+    assert "          lookup-only: true\n          save-if: false\n" in early
+    assert "          cmd-format: ${{ steps.preinstalled.outputs.dependency-cache-command }}" in early
+    assert "        if: steps.preinstalled_lookup.outcome != 'success' || steps.preinstalled_lookup.outputs.cache-hit != 'true'" in publisher
+    assert "        if: steps.rust_toolchain.outcome == 'success'\n        id: lookup" in publisher
+    missing_key = "steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'"
+    assert publisher.count(missing_key) == 3
+    preinstalled_cache_probe(output / "preinstalled-cache-probe")
     cache_test = lines.index("      - name: Exercise the pinned dependency cache command")
     assert lines[cache_test + 1] == "        if: github.event_name == 'pull_request' && steps.scope.outputs.policy_fixtures_required == 'true'"
     assert "--pinned-cache-command-only" in lines[cache_test + 2]

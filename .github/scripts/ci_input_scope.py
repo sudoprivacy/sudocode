@@ -593,10 +593,20 @@ POLICY_FIXTURE_INPUTS = {
         "blob",
         "973592bd8bdc233854295869e87dc24ae00fd6d7"
     ],
+    ".github/actions/rust-toolchain/preinstalled-cache-command.mjs": [
+        "100644",
+        "blob",
+        "9374e1cb636173ca9dc265b23747f044835b5ca3"
+    ],
+    ".github/actions/rust-toolchain/preinstalled-cache.py": [
+        "100644",
+        "blob",
+        "185777a1aa3939e92202403dca4065ad56386f4e"
+    ],
     ".github/workflows/ci-dependency-cache.yml": [
         "100644",
         "blob",
-        "c774bfc820c05df59d3c161dd6c252ff4829e551"
+        "f49ca6dab500ebe0d8f7a34f9dd44aa4ec6200ff"
     ],
     ".gitignore": [
         "100644",

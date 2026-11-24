@@ -1277,7 +1277,7 @@ def native_guard_files():
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
         ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
-        ".github/local-acceptance/gate.py": "d7630a0956482fd93ab45c8b27e8371241f98c5ec64b15f339d39080a87fe412",
+        ".github/local-acceptance/gate.py": "12df22d6f6467dedf08d83492c615ead950ea541904a66753a2915f6bbe91d40",
         ".github/local-acceptance/native_guard.py": "ac7016f16686a2c8b50353c30f3d2914d7e3e5efbdf0588a40d0c274c280878c",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",

@@ -2111,8 +2111,8 @@ and publisher fetch the pull ref and both notes namespaces in one atomic
 Git transaction when all three refs are available. A missing optional
 namespace uses the existing per-ref fetches. Fork notes come from the fork.
 Four sequential trials with the same public pull ref, two matching notes
-and warm object stores measured 9.110 seconds for separate fetches and
-5.505 seconds for the combined fetch, using the two-run median for each.
+and warm object stores measured 5.407 seconds for separate fetches and
+3.203 seconds for the combined fetch, using the two-run median for each.
 This measures Git ref retrieval. Original source, signature, plan and test
 checks remain required.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>

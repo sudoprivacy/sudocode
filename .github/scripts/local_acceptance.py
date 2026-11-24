@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "1120cdce34054d4ce0fd514677f12ca59ac70cf5897d7d4114c4858357243038",
         "1c43d4e04b808880a8f1d5b001f44ae372578afe90eb185bee9201d9610c2522",
         "b270e25b648c51f5305b8e720aab28aa5f3da6199727e4d7c44c579a80da7b27",
         "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
@@ -2582,8 +2583,10 @@ def host_acceptance_lease(attempt, head):
 
 def check(args):
     """Record failed and successful local attempts, including time before CI."""
-    started = getattr(args, "outer_monotonic_started_at", time.monotonic())
-    attempt = {"version": 1, "started_at": getattr(args, "outer_started_at", time.time()), "outcome": "running"}
+    invocation_started = time.monotonic()
+    started = getattr(args, "outer_monotonic_started_at", invocation_started)
+    attempt = {"version": 1, "started_at": getattr(args, "outer_started_at", time.time()), "outcome": "running",
+               "setup_seconds": {"before_check": round(invocation_started - started, 3)}}
     try:
         perform_check(args, attempt)
         attempt["outcome"] = "success"
@@ -2717,6 +2720,15 @@ print("LOCAL_ACCEPTANCE_PLAN_PARSER="+json.dumps({"supported":supported}))
 
 
 def perform_check(args, attempt):
+    setup_seconds = attempt.setdefault("setup_seconds", {})
+    phase_started = time.monotonic()
+
+    def record_setup(name):
+        nonlocal phase_started
+        now = time.monotonic()
+        setup_seconds[name] = round(now - phase_started, 3)
+        phase_started = now
+
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
@@ -2748,6 +2760,7 @@ def perform_check(args, attempt):
         plan = launch["plan"]
     report_plan(plan, current_environment=True)
     preflight_plan_compatibility(plan, needed, host(), policy_ref, signers_ref)
+    record_setup("source_and_plan")
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -2777,6 +2790,7 @@ def perform_check(args, attempt):
         reusable, resumed, groups, store = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
     else:
         reusable, resumed, groups, store = resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref)
+    record_setup("output_and_resume")
     # Earlier heads of this branch lend profiles that later changes do not select.
     carried, new_groups, store = carry_checks(head, base, base_ref, policy_ref, output,
                                               [name for name in needed if name not in reusable], signers_ref, store)
@@ -2826,6 +2840,7 @@ def perform_check(args, attempt):
 
     def record_check_time():
         timing["checks_finished_at"] = time.time()
+        timing["invocation_setup_seconds"] = dict(setup_seconds)
         # Count only completed acquisitions made by this invocation. A resumed
         # receipt can retain an earlier start without inheriting its wait time.
         timing["invocation_host_lease_wait_seconds"] = attempt["host_lease_wait_seconds"]
@@ -2842,6 +2857,8 @@ def perform_check(args, attempt):
         else:
             print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
             results[name] = module.run(name, ROOT, output / name, base, run_command)
+        if name == "preflight":
+            record_setup("metadata_preflight")
         record_check_time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
@@ -2865,12 +2882,15 @@ def perform_check(args, attempt):
         "reservation": "fresh_workspace_examples_with_optional_resize_services_context_and_rendering_browser_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
+    record_setup("carry_and_receipt")
     try:
         if "preflight" in needed:
             perform_profile("preflight")
+            record_setup("preflight_checkpoint")
         validate = getattr(module, "validate_before_host_lease", None)
         if validate and pending:
             validate(pending, ROOT, output)
+            record_setup("host_prerequisites")
         prepared = False
         if lint_pending:
             attempt["active_profile"] = "native-workspace-lint-preparation"

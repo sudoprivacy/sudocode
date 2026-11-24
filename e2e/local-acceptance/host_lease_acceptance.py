@@ -139,6 +139,16 @@ def verify_host_lease(directory, source, command, environment):
     def waiting(process):
         return "Waiting for this host's local acceptance lease" in process.log.read_text()
 
+    setup_stages = {"before_check", "source_and_plan", "output_and_resume", "carry_and_receipt",
+                    "metadata_preflight", "preflight_checkpoint"}
+
+    def check_setup_timing(attempt, receipt):
+        durations = attempt["setup_seconds"]
+        assert set(durations) == setup_stages, attempt
+        assert durations["before_check"] == 0 and all(value >= 0 for value in durations.values()), attempt
+        assert sum(durations.values()) + attempt["host_lease_wait_seconds"] <= attempt["elapsed_seconds"] + .01, attempt
+        assert receipt["timing"]["invocation_setup_seconds"] == durations, receipt
+
     try:
         # Later checks wait for the holder, never interleave its profile, and take
         # the host in the order they arrived rather than in polling order.
@@ -163,6 +173,7 @@ def verify_host_lease(directory, source, command, environment):
         meta_receipt = json.loads((fixture / "Metadata/receipt.json").read_bytes())
         assert meta_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, meta_receipt
         assert meta_receipt["timing"]["invocation_host_lease_acquisitions"] == [], meta_receipt
+        check_setup_timing(meta_attempt, meta_receipt)
         assert not waiting(processes[-1]), processes[-1].log.read_text()
         assert (fixture / "Metadata/envelope.json").is_file()
         assert events() == ["start:A"], events()
@@ -173,6 +184,8 @@ def verify_host_lease(directory, source, command, environment):
         assert not (fixture / "Bad/envelope.json").exists()
         assert not (fixture / "Bad/native-workspace").exists()
         assert not waiting(failure), failure.log.read_text()
+        failed_timing = json.loads((fixture / "Bad/attempt.json").read_bytes())
+        assert set(failed_timing["setup_seconds"]) == setup_stages - {"metadata_preflight", "preflight_checkpoint"}
         assert events() == ["start:A"], events()
         # A sibling with an invented claim is not a nested child of the holder.
         rejected_claim = start("C", claim="enclosing-acceptance")
@@ -192,10 +205,12 @@ def verify_host_lease(directory, source, command, environment):
         receipt = json.loads((fixture / "B/receipt.json").read_bytes())
         assert receipt["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], receipt
         assert receipt["timing"]["invocation_host_lease_acquisitions"] == timing["host_lease_acquisitions"], receipt
+        check_setup_timing(timing, receipt)
         index = json.loads((fixture / "B/checkpoint.json").read_bytes())
         checkpoint = json.loads((fixture / "B/checkpoints" / index["generation"] / "receipt.json").read_bytes())
         assert checkpoint["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], checkpoint
         assert checkpoint["timing"]["invocation_host_lease_acquisitions"] == timing["host_lease_acquisitions"], checkpoint
+        check_setup_timing(timing, checkpoint)
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
 
         # A waiter killed in the queue does not block those behind it.
@@ -228,6 +243,7 @@ def verify_host_lease(directory, source, command, environment):
         assert restored_timing["host_lease_wait_seconds"] == 0, restored_timing
         restored_receipt = json.loads((fixture / "Reused/receipt.json").read_bytes())
         assert restored_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, restored_receipt
+        check_setup_timing(restored_timing, restored_receipt)
         assert not waiting(restored), restored.log.read_text()
         assert events() == ["start:G"], events()
         # A later commit retains the original signed native result when only

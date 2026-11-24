@@ -566,7 +566,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "a88273cd2d997bd2072786b5b4ecdca26cc89d63"
+        "d9d074e3bd8f422d8ec01c8a0a0c141ede1718cf"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",

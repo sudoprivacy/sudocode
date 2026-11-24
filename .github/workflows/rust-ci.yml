@@ -320,23 +320,6 @@ jobs:
           NEXUS_A2A_FAULT_OUTPUT: ${{ runner.temp }}/mailbox-faults
           NEXUS_A2A_EARLY_MANAGED_BUILD: '1'
         run: e2e/nexus-a2a/run.sh
-      - name: Retain mailbox fault inventory and exact case results
-        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mailbox-fault-cases
-          path: ${{ runner.temp }}/mailbox-faults
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Retain native syscall fault evidence
-        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-session-durability
-          path: |
-            /tmp/scode-shared-records-*
-            /tmp/scode-shared-runtime-*
-          if-no-files-found: ignore
 
       # One daemon can only show that a client and a server agree. What A2A
       # actually rests on is a mechanism that does not exist until there are
@@ -363,6 +346,25 @@ jobs:
       - name: Auth-on A2A — the node decides who a message is from
         if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
         run: e2e/nexus-a2a/run-auth-on.sh
+      # Run the selected journeys before publishing evidence. Upload failures
+      # still fail the job and the required integrated acceptance check.
+      - name: Retain mailbox fault inventory and exact case results
+        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailbox-fault-cases
+          path: ${{ runner.temp }}/mailbox-faults
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Retain native syscall fault evidence
+        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-session-durability
+          path: |
+            /tmp/scode-shared-records-*
+            /tmp/scode-shared-runtime-*
+          if-no-files-found: ignore
 
 
   cohost-live:

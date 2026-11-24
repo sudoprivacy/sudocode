@@ -162,6 +162,7 @@ def verify_host_lease(directory, source, command, environment):
         assert meta_attempt["host_lease_wait_seconds"] == 0, meta_attempt
         meta_receipt = json.loads((fixture / "Metadata/receipt.json").read_bytes())
         assert meta_receipt["timing"]["invocation_host_lease_wait_seconds"] == 0, meta_receipt
+        assert meta_receipt["timing"]["invocation_host_lease_acquisitions"] == [], meta_receipt
         assert not waiting(processes[-1]), processes[-1].log.read_text()
         assert (fixture / "Metadata/envelope.json").is_file()
         assert events() == ["start:A"], events()
@@ -190,9 +191,11 @@ def verify_host_lease(directory, source, command, environment):
         assert timing["host_lease_wait_seconds"] > 0, timing
         receipt = json.loads((fixture / "B/receipt.json").read_bytes())
         assert receipt["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], receipt
+        assert receipt["timing"]["invocation_host_lease_acquisitions"] == timing["host_lease_acquisitions"], receipt
         index = json.loads((fixture / "B/checkpoint.json").read_bytes())
         checkpoint = json.loads((fixture / "B/checkpoints" / index["generation"] / "receipt.json").read_bytes())
         assert checkpoint["timing"]["invocation_host_lease_wait_seconds"] == timing["host_lease_wait_seconds"], checkpoint
+        assert checkpoint["timing"]["invocation_host_lease_acquisitions"] == timing["host_lease_acquisitions"], checkpoint
         assert not list((home / ".nexus/local-acceptance/queue").glob("*.ticket"))
 
         # A waiter killed in the queue does not block those behind it.
@@ -462,6 +465,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
         assert (directory / "Long/envelope.json").is_file()
         attempt = json.loads((directory / "Long/attempt.json").read_text())
         acquisitions = attempt["host_lease_acquisitions"]
+        assert receipt["timing"]["invocation_host_lease_acquisitions"] == acquisitions, receipt
         expected_acquisitions = [first]
         if pair:
             assert acquisitions[0]["profiles"] == shared, attempt
@@ -490,6 +494,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             assert events() == before_resume
             assert resumed["checks"] == receipt["checks"], resumed
             assert restored_attempt["host_lease_acquisitions"] == [], restored_attempt
+            assert resumed["timing"]["invocation_host_lease_acquisitions"] == [], resumed
             (directory / "release-Broken").touch()
             (directory / "release-Broken-two").write_text("fail")
             broken = start("Broken", second=True, after=True)
@@ -512,6 +517,7 @@ def verify_profile_handoff(fixture, authority, run, environment, pair=None):
             expected_order = [after_profile, followup] if pair == "context" else [followup, after_profile]
             assert [row["profile"] for row in continued_attempt["host_lease_acquisitions"]] == expected_order, continued_attempt
             assert all("profiles" not in row for row in continued_attempt["host_lease_acquisitions"]), continued_attempt
+            assert continued["timing"]["invocation_host_lease_acquisitions"] == continued_attempt["host_lease_acquisitions"], continued
             (directory / "result.json").write_text(json.dumps({
                 "status": "PASS", "original_receipt": receipt,
                 "one_shared_acquisition": acquisitions, "full_resume_without_execution": restored_attempt,

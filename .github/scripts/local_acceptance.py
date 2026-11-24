@@ -612,6 +612,7 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
         "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
         "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
         "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
@@ -2812,6 +2813,7 @@ def perform_check(args, attempt):
         # Count only completed acquisitions made by this invocation. A resumed
         # receipt can retain an earlier start without inheriting its wait time.
         timing["invocation_host_lease_wait_seconds"] = attempt["host_lease_wait_seconds"]
+        timing["invocation_host_lease_acquisitions"] = list(attempt["host_lease_acquisitions"])
 
     def perform_profile(name):
         if name in reusable:

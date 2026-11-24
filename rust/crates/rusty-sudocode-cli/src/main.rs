@@ -4438,8 +4438,25 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             for (idx, option) in field.options.iter().enumerate() {
                 println!("  [{}] {}", idx + 1, option.label);
             }
-            let trimmed = prompt_choice_line("Your choice: ")?;
+            let multi_select = field.kind == runtime::QuestionKind::MultiSelect;
+            let trimmed = prompt_choice_line(match (multi_select, field.allow_custom_input) {
+                (true, true) => "Your choices (e.g. 1,3), or type your own: ",
+                (true, false) => "Your choices (e.g. 1,3): ",
+                (false, _) => "Your choice: ",
+            })?;
             let trimmed = trimmed.as_str();
+            if let Some(chosen) = field.numbered_choices(trimmed).filter(|_| multi_select) {
+                answers.extend(
+                    chosen
+                        .into_iter()
+                        .map(|option| runtime::QuestionPromptAnswer {
+                            id: field.id.clone(),
+                            value: option.value.clone(),
+                            label: Some(option.label.clone()),
+                        }),
+                );
+                continue;
+            }
             // A 1-indexed digit picks the option's value; otherwise the raw text
             // (custom-input fields).
             let value = trimmed

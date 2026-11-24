@@ -1290,7 +1290,7 @@ def native_guard_files():
         ".github/workflows/release.yml": "15e49f5e939a0da2799a136db79ca3690dfc531ed5f8beb5027d7fd577a8e300",
         "e2e/local-acceptance/release_artifact_acceptance.py": "88aec2bbaaf500d3acdbbd5a6edd28d85ad55a689e66dd1b9646831199b9d4dc",
         "rust/crates/rusty-sudocode-cli/build.rs": "774e7c17a31b6840673de565fe80c03e5809995e4481a9dc04606f711c23bb40",
-        ".github/scripts/ci_input_scope.py": "8fb21edaa8e2620647f7fda779bc8cdf5d97e85bd8b4230dec69f4225150f693",
+        ".github/scripts/ci_input_scope.py": "b904476e45ba1b79bc6a59a12a8940987422fb8fb5a88bf15e8e6a7e6a57594b",
         ".github/workflows/rust-ci.yml": "80166c0219f6157d908643b3c431e432e18f7f7fc19e982782f573b977c5512d",
         "e2e/terminal-resize/setup_windows.py": "f10420a57c46d3c673c8120316a5a5dc4cc1a234cbbac94c96831fb85ee4bf4e",
         ".github/actions/vfs-search-cache/functional.toml": "b18466ab7343e44325977e3eb4cf49e8abb744a758aadd9bd1c91519ad871f42",
@@ -1305,7 +1305,7 @@ def native_guard_files():
         ".github/local-acceptance/parallel_guard.py": "c13f6bcd37333d6f09fe7076530764b5aa668e2ef95bc26fb26fd5adab32c1b2",
         ".github/local-acceptance/nextest_guard.py": "27a0b28c7e09a465f068d1e816fc5cbb5c9f8c9f915dd9065053cf64bdc72c61",
         ".github/local-acceptance/publish.py": "c35807caae9dd5ec1aea1f7af15d6201a9e1df99e50b5d9a771a774e6e3e925d",
-        ".github/scripts/local_acceptance.py": "033d5b32e24033b19d87ed5d2c2826138cbcae43b9aef7ff9ca4bdab8715135c",
+        ".github/scripts/local_acceptance.py": "76de867ec676fbdf676f03fec6f77fdb35364c18cec5f789a286703d6423cf79",
         ".github/scripts/vfs_search_publication.py": "70d4c329078b83d56d54fd16db25971c71f58f04774c2dccede882601f705c94",
         ".github/scripts/vfs_search_cache.py": "e7c69ed5afd1462892ba3f5472a480ca0d8917c94edfe0fe73a632aedff9aab5",
         ".github/workflows/ci-dependency-cache.yml": "5eaa704184461bbdc67a47bb43d24c457ce5d447019cb9d1bdefe24e0197799e",
@@ -1321,7 +1321,7 @@ def native_guard_files():
         "e2e/local-acceptance/examples_acceptance.py": "0c681b8cde0f60c773cfb0eee82f6b0262dd3f7f79d437591cca0daaaae7f581",
         "e2e/local-acceptance/fixture_environment.py": "8b6985281d33187318caa091aea0947f8f6b45ac1c66de65f85f7893a8a444a1",
         "e2e/local-acceptance/grouped_targets_acceptance.py": "d28aee206a7538b334ff1143916cf44a1c512f8d7118cfcd9f0c40e55425a385",
-        "e2e/local-acceptance/host_lease_acceptance.py": "dc1f5f67e88e5cb9d55eed4c7032b71b222d223f6ce13935d4a944c7636e4969",
+        "e2e/local-acceptance/host_lease_acceptance.py": "8b0ac7c41262bd7e74ea68f690073ccfbcf341529525a78b316f865d27b90b3e",
         "e2e/local-acceptance/inherited_lease_acceptance.py": "cd984f8945d635f0ca7d70f6e0435f84bfb919ab466dc5fc24ca70d98e2d8857",
         "e2e/local-acceptance/native.py": "cbc0c624b225a7ccd35139f677b337081f8c770747945b2133a32d036fcad552",
         "e2e/local-acceptance/native_cache_acceptance.py": "b71091dec05e5a44e372037e0fd73a1a75244c914c0c4d67024694165a268042",
@@ -1560,15 +1560,20 @@ def guard_image_context(root, policy_ref, context):
 
 
 def verify_guard_image(image, command):
-    """Recheck the image's verified tool offline before the decision matrix."""
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
-            image, "/opt/nextest_seed.py")
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "python3",
-            image, "/opt/compiler_seed.py")
-    print("GUARD_COMPILER_DEPENDENCIES: verify the protected manifest/lock dependencies offline "
-          "before either guard matrix; original compiler and PTY controls remain required.", flush=True)
-    command("docker", "run", "--rm", "--init", "--network", "none", "--entrypoint", "cargo",
-            image, "fetch", "--offline", "--locked", "--manifest-path", "/opt/compiler-objects/Cargo.toml")
+    """Run all three offline preflight checks on the same immutable image."""
+    program = """
+echo 'GUARD_OFFLINE_CHECK: nextest archive and executable'
+python3 /opt/nextest_seed.py
+echo 'GUARD_OFFLINE_CHECK: compiler cache archive and executable'
+python3 /opt/compiler_seed.py
+echo 'GUARD_OFFLINE_CHECK: locked compiler fixture dependencies'
+exec cargo fetch --offline --locked --manifest-path /opt/compiler-objects/Cargo.toml
+"""
+    # Both seeds verify distinct cached tools. Their receipts and Cargo's
+    # registry metadata use separate paths in this disposable container.
+    # Forward interrupts to the running tool while the shell is waiting.
+    command("docker", "run", "--rm", "--init", "--network", "none",
+            "--env", "TINI_KILL_PROCESS_GROUP=1", "--entrypoint", "sh", image, "-ec", program)
 
 
 def prepare_contract_container(root, output, command):

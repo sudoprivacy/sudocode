@@ -96,7 +96,8 @@ def unchanged_profile_execution(base, head, *, resource_registration=None):
 def metadata_only_inputs(paths, base, head, details):
     """Omit generic daemon smoke only for bounded verifier-body edits."""
     runner = ".github/scripts/local_acceptance.py"
-    allowed = {runner, ".github/local-acceptance/checks.py",
+    selector = ".github/scripts/ci_input_scope.py"
+    allowed = {runner, selector, ".github/local-acceptance/checks.py",
                "e2e/local-acceptance/profile_compat_acceptance.py",
                "e2e/local-acceptance/parallel_acceptance.py",
                "e2e/local-acceptance/resource_scheduling_acceptance.py"}
@@ -171,6 +172,10 @@ def metadata_only_inputs(paths, base, head, details):
         details.update(reviewed_layouts=sorted(REVIEWED_VERIFIER_LAYOUTS), observed_layout=current[3])
         if current[3] not in REVIEWED_VERIFIER_LAYOUTS:
             raise ValueError("Runner imports, declarations or consumers are outside the reviewed layout; full daemon checks continue")
+        if selector in paths:
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
+                raise ValueError("Selector changed outside the exact runner blob registration")
+            details["selector_registration"] = "matches_committed_runner"
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),
                        consumer_functions=current[2], profiles=names,
@@ -205,11 +210,11 @@ def verify_scheduling_resource_registration(protected, head, registration):
         raise ValueError("The added resource registration does not match the committed executor")
 
 
-def scheduling_selector_identity(ref, selector, runner):
+def selector_registration_identity(ref, selector, runner):
     """Permit the exact runner blob registration and compare all other selector code."""
     row = git("ls-tree", ref, "--", selector).split("\t", 1)[0].split()
     if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
-        raise ValueError("Scheduling registration requires a regular committed selector")
+        raise ValueError("Runner registration requires a regular committed selector")
     tree = ast.parse(git("show", f"{ref}:{selector}"))
     registrations = [
         node for node in tree.body
@@ -311,7 +316,7 @@ def scheduling_only_inputs(paths, base, head, details):
             raise ValueError("Code outside author scheduling or its declaration changed")
         registration = None
         if registered:
-            if scheduling_selector_identity(base, selector, runner) != scheduling_selector_identity(head, selector, runner):
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
                 raise ValueError("Code outside the runner input registration changed in the selector")
             if previous_reviews is None or current_reviews is None or previous_reviews - current_reviews:
                 raise ValueError("The committed resource registration removed an existing reviewed layout")

@@ -36,11 +36,6 @@ ENDPOINT="https://127.0.0.1:${AUTHON_PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 CARGO_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
-# A failed compile cannot become writable on the next daemon retry. Surface the
-# original Cargo diagnostics before downloading or starting a daemon.
-echo "== build the mailbox readiness test before daemon startup =="
-"${CARGO_TEST[@]}" --no-run
-
 # A downloaded binary needs no image built by hand, which is what kept this
 # harness off CI: building `nexusd-cluster` is a nexus-repo job and wants a
 # GitHub token. `fetch-daemon.sh` resolves the version from this checkout's
@@ -87,6 +82,11 @@ DIRECT_RECEIVER_BUNDLE="$(authon_mint "direct-receiver")" || { daemon_logs; exit
 echo "== 4. restart TLS-on =="
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+
+# Compile at the original probe boundary so Cargo can still overlap the
+# daemon's readiness work. A failed build must not enter the retry loop.
+echo "== build the mailbox readiness test before probing writability =="
+"${CARGO_TEST[@]}" --no-run
 
 echo "== waiting for a writable single-voter leader =="
 # The probe's output is KEPT, not discarded. This loop retries because a fresh

@@ -2064,8 +2064,22 @@ without network access on the second invocation and checked that each cache
 server exited before the compiled program ran. The signed Windows and Docker
 guard, hosted executor fixtures and final main workflows passed. The change
 spent 80 seconds from entry in the merge queue to merge. That clock covers
-this infrastructure PR. The timing benefit for product compiler commands
-remains unmeasured.</p>
+this infrastructure PR.</p>
+<p><strong>Browser driver compilation replay.</strong> The original
+<a href="https://github.com/sudoprivacy/sudocode/pull/1469">PR #1469</a>
+sources and Linux image were replayed with the same Cargo target paths in a
+private volume. The browser command took 118.898 seconds without sccache before
+the cache runs, 76.662 seconds with three cache hits, and 119.464 seconds on a
+later run without sccache. The two driver executables and their test listings
+matched across those three runs. A cache-enabled run with zero hits took
+78.224 seconds. The command clocks include cache setup and shutdown where
+applicable. The sequence measures driver compilation and leaves the isolated
+effect of cache hits, browser journey time, and PR lifecycle savings open.</p>
+<p>Within the fixed 15-PR cohort, five build or manifest changes spent 631.583
+of the 1,160.317 known hosted runner-minutes. Complementary native jobs account
+for 325.283 of those minutes, with 197.800 starting after the policy merge.
+Job start time records when occupancy occurred. An already frozen plan may
+still select checks under an earlier policy.</p>
 <p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its

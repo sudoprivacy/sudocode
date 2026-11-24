@@ -1895,6 +1895,12 @@ original release builds and acceptance. For a nested native complement, the
 cache layout mirrors the candidate's exact root toolchain file into the action's
 outer workspace. An existing mismatched file refuses before cache use.
 
+The dependency publisher can check the exact key before installing Rust when
+the GitHub-hosted image has the official pinned compiler and its required
+components. That lookup selects the image toolchain only in its subprocesses.
+A prefix hit, miss or failed probe keeps the ordinary numeric installation and
+publisher path. All compilation uses that original path.
+
 `rust-toolchain.toml` pins one exact Rust release with `clippy` and
 `rustfmt`. Local builds, every CI job and both local acceptance images
 compile with it. CI installs it through `.github/actions/rust-toolchain`,

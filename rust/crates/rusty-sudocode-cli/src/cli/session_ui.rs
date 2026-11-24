@@ -54,6 +54,7 @@ pub(crate) fn select_session(
             force_fuzzy_select: true,
             back_value: None,
             initial_value: None,
+            multi_select: false,
         },
         move |target, cli, out| {
             if target == current {
@@ -119,6 +120,7 @@ pub(crate) fn confirm_delete(
             force_fuzzy_select: false,
             back_value: None,
             initial_value: None,
+            multi_select: false,
         },
         move |answer, cli, out| {
             if answer == "delete" {

@@ -1875,7 +1875,11 @@ tests, and lints run without them.
 ## Rust toolchain
 
 The shared dependency cache warms dev/test inputs on automatic main pushes on
-the existing Linux, Windows and macOS hosts. A cache-only manual dispatch on a
+the existing Linux, Windows and macOS hosts. Successful scheduled and manual
+full Windows workspace runs on main also publish a missing exact cache key
+using their already compiled dependencies. Workspace crates are excluded.
+PR jobs and the other periodic hosts use restore-only access.
+A cache-only manual dispatch on a
 missing key also warms optimized release dependencies. Tags retain their
 original release builds and acceptance. For a nested native complement, the
 cache layout mirrors the candidate's exact root toolchain file into the action's

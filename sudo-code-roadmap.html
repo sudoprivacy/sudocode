@@ -2154,6 +2154,20 @@ nextest log identifies one assertion failure and seven immediately terminated
 peers. The previous successful periodic run took 737s on Ubuntu and 1,557s on
 macOS. Different source revisions and assignments limit this comparison to
 the observed durations. Windows full-workspace timing remains open.</p>
+<p><strong>Publish dependencies from the existing Windows workspace run.</strong>
+Scheduled and manual Windows workspace jobs on main can save a missing exact
+cache key after their full checks succeed. They use the same dependency cache
+layout, toolchain and environment inputs as the main publisher and exclude
+workspace crates. This can prepare a key for a new runner image before the
+next Rust push. In the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44864376045/job/136724775488">original Windows complement</a>,
+the runner image prefix differed from the previous publisher's prefix.
+The subsequent
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44866581831/job/136731490208">main publisher</a>
+prepared the new key, and a
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44921271414/job/136897725192">later complement</a>
+restored it as a compatible prefix hit. These clocks and key records describe
+the original jobs. The periodic publication's net effect remains to be measured.</p>
 <p><strong>Hosted service-journey scheduling.</strong>
 <a href="https://github.com/sudoprivacy/sudocode/pull/1535">PR #1535</a>
 starts the two independent service journeys concurrently after the original

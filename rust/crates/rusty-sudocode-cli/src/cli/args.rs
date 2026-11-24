@@ -218,6 +218,11 @@ enum Cmd {
         #[command(subcommand)]
         action: ServiceSub,
     },
+    /// Attach other agent programs on this machine to the agent network
+    A2a {
+        #[command(subcommand)]
+        action: A2aSub,
+    },
     /// Export a session transcript
     Export {
         /// Session reference (defaults to latest)
@@ -313,6 +318,13 @@ enum AcpSub {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub(crate) enum A2aSub {
+    /// Attach Claude Code: one command, safe to run again. Prints one JSON
+    /// object whose "instructions" say what to do next
+    Setup(super::a2a::A2aSetupArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub(crate) enum ServiceSub {
     /// Serve capabilities on a newline-delimited process channel
     Stdio,
@@ -356,6 +368,7 @@ pub(crate) enum CliAction {
     Service {
         action: ServiceSub,
     },
+    A2aSetup(super::a2a::A2aSetupArgs),
     Headless(super::headless::HeadlessOptions),
     DumpManifests {
         output_format: CliOutputFormat,
@@ -758,6 +771,9 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 output_format,
             }),
             Cmd::Service { action } => Ok(CliAction::Service { action }),
+            Cmd::A2a {
+                action: A2aSub::Setup(args),
+            } => Ok(CliAction::A2aSetup(args)),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,
                 output_path: output,

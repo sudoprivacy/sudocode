@@ -8,19 +8,26 @@ exchange messages with other agents. Each step says who does it.
 | 1 | A Nexus node running on the machine and joined to the cluster | The Nexus installation. Not covered here. |
 | 2 | `scode`, configured with an account | The scode installation |
 | 3 | Node.js 20 or newer | The machine's owner |
-| 4 | The bridge package (`@sudocode/acp`) in a versioned folder | `npm install` of the archive, see `sdk/typescript/README.md` |
-| 5 | The frontend attached | One command per frontend, below |
+| 4 | The frontend attached | One scode command per frontend, below |
 
-scode sessions need only steps 1 and 2. Steps 3 to 5 are for Codex and Claude
-Code, whose sessions join through the bridge; each attached agent still runs an
-`scode` process underneath.
+scode sessions need only steps 1 and 2. Steps 3 and 4 are for Codex and Claude
+Code, whose sessions join through the bridge, a Node.js program; each attached
+agent still runs an `scode` process underneath.
+
+A release build of scode carries the bridge package (`@sudocode/acp`) and
+writes it to `~/.local/share/sudocode/acp/versions/<commit>/` the first time
+the command runs, so nothing else has to be transferred to the machine and the
+two versions always match. A build made without it asks for `--sdk` with the
+folder of a package installed by hand (see `sdk/typescript/README.md`).
 
 ## Claude Code
 
 ```sh
-node <install>/node_modules/@sudocode/acp/dist/server.cjs --setup-claude --issuer https://HOST:2126
+scode a2a setup claude --issuer https://HOST:2126
 ```
 
+- The command starts no session and calls no model, so a person or any agent
+  can run it from a shell.
 - `--issuer` names the node that issues agent names (the cluster founder). The
   node on this machine was started with a `--peers` argument naming the same
   host and port. It is needed once; later runs need no flags.
@@ -34,10 +41,10 @@ node <install>/node_modules/@sudocode/acp/dist/server.cjs --setup-claude --issue
 
 ## After an SDK update
 
-Install the new archive into its own versioned folder and run the same command
-from it. It moves the registration and hooks to the new SDK and keeps every
-session's identity. Sessions that are already open keep the old SDK until they
-are restarted, so keep the old folder until then.
+Run the same command with the new scode. It writes the new package beside the
+old one, moves the registration and hooks to it, and keeps every session's
+identity. Sessions that are already open keep the old package until they are
+restarted, so the old version folder is left in place.
 
 ## Undo
 

@@ -5,6 +5,9 @@
     reason = "Original test modules keep their own helper namespaces."
 )]
 
+#[path = "../a2a_setup.rs"]
+mod a2a_setup;
+
 #[path = "../interrupt_e2e.rs"]
 mod interrupt_e2e;
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -46,7 +47,72 @@ fn git_inputs() -> BTreeSet<PathBuf> {
     paths
 }
 
+/// Embed the A2A bridge package when the build names a built one.
+///
+/// `SCODE_A2A_SDK_DIR` is the `sdk/typescript` folder after `npm run build`, or
+/// an installed `@sudocode/acp` package. Without it nothing is embedded, so an
+/// ordinary `cargo build` needs no Node.js; `scode a2a setup` then asks for
+/// `--sdk`.
+fn bundle_a2a_sdk() {
+    println!("cargo:rerun-if-env-changed=SCODE_A2A_SDK_DIR");
+    let mut source = String::from("pub(crate) static BUNDLED_SDK: &[(&str, &[u8])] = &[\n");
+    if let Some(directory) = env::var_os("SCODE_A2A_SDK_DIR").filter(|value| !value.is_empty()) {
+        let directory = PathBuf::from(directory);
+        assert!(
+            directory.is_absolute(),
+            "SCODE_A2A_SDK_DIR must be an absolute path"
+        );
+        let manifest_path = directory.join("manifest.json");
+        println!("cargo:rerun-if-changed={}", manifest_path.display());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display())),
+        )
+        .unwrap_or_else(|e| panic!("parse {}: {e}", manifest_path.display()));
+        // The package installs under its source commit, so one commit must
+        // always mean the same bytes.
+        assert!(
+            manifest.get("dirty").and_then(serde_json::Value::as_bool) != Some(true),
+            "SCODE_A2A_SDK_DIR was built from uncommitted sources; build it from a clean commit"
+        );
+        let files = manifest
+            .get("files")
+            .and_then(serde_json::Value::as_object)
+            .expect("the bridge package manifest lists its files");
+        for name in files.keys().map(String::as_str).chain(["manifest.json"]) {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+                    && name
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != ".."),
+                "unexpected file name in the bridge package manifest: {name}"
+            );
+            let file = directory.join(name);
+            assert!(
+                file.is_file(),
+                "{} is listed in the manifest but missing",
+                file.display()
+            );
+            println!("cargo:rerun-if-changed={}", file.display());
+            // Debug formatting writes both as Rust string literals, which
+            // escapes the backslashes of a Windows path.
+            let path = file
+                .to_str()
+                .expect("the bridge package path is valid UTF-8");
+            writeln!(source, "    ({name:?}, include_bytes!({path:?})),")
+                .expect("writing to a String cannot fail");
+        }
+    }
+    source.push_str("];\n");
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("a2a_sdk.rs");
+    std::fs::write(&out, source).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+}
+
 fn main() {
+    bundle_a2a_sdk();
     // Get git SHA (short hash)
     let git_sha = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

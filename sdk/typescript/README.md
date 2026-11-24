@@ -67,7 +67,9 @@ native/ConPTY acceptance. Socket callbacks remain the default.
 
 ## Claude Code attachment
 
-Set it up with one command, run from the SDK that should be installed:
+Set it up with `scode a2a setup claude --issuer https://HOST:2126`, which runs
+the command below from the package scode carries. Run directly, from the SDK
+that should be installed, it is:
 
 ```sh
 node /absolute/versioned/install/node_modules/@sudocode/acp/dist/server.cjs --setup-claude --issuer https://HOST:2126

@@ -9,6 +9,9 @@ publish.workspace = true
 name = "scode"
 path = "src/main.rs"
 
+[build-dependencies]
+serde_json.workspace = true
+
 [dependencies]
 codex-mermaid.workspace = true
 process-text = { path = "../process-text" }

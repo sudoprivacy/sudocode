@@ -1,3 +1,4 @@
+pub(crate) mod a2a;
 pub(crate) mod args;
 pub(crate) mod config_ui;
 pub(crate) mod cron;

@@ -21,7 +21,15 @@ permissions:
 jobs:
   live:
     if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            evidence: vault-live-evidence
+          - os: macos-15
+            evidence: vault-live-macos-arm64-evidence
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -36,6 +44,7 @@ jobs:
           shared-key: ci-dependencies
           save-if: false
       - name: Run SudoCode against the pinned daemon and signed Vault plugin
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -47,14 +56,41 @@ jobs:
           artifact_versions "$CACHE/$tag" > "$out/versions.env"
           (cd rust && cargo fetch --locked)
           run_live_test "$CACHE/$tag" "$out"
+      - name: Build and run the portable Vault suite on Apple silicon
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VAULT_LIVE_OUT: ${{ runner.temp }}/vault-evidence
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          dist="$RUNNER_TEMP/vault-arm64"
+          bash e2e/vault-live/run-native.sh bundle aarch64-apple-darwin "$dist"
+          cd "$dist"
+          set -- vault-live-*-aarch64-apple-darwin.tar.gz
+          test "$#" = 1 && test -s "$1"
+          shasum -a 256 "$1" > SHA256SUMS
+          bash "$GITHUB_WORKSPACE/e2e/vault-live/run-native.sh" run "$dist/$1" "$(awk '{print $1}' SHA256SUMS)"
+      - name: Require live daemon and PTY reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/vault-evidence"
           for report in b_list_and_use c_other_owner c_owner_as_agent d_service_missing e_replaced_bundle h_restart; do
             test -s "$out/$report.json"
           done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: vault-live-evidence
+          name: ${{ matrix.evidence }}
           path: |
             ${{ runner.temp }}/vault-evidence/versions.env
             ${{ runner.temp }}/vault-evidence/*.json
           if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: success() && runner.os == 'macOS'
+        with:
+          name: vault-live-macos-arm64-suite
+          path: ${{ runner.temp }}/vault-arm64/
+          retention-days: 7
+          if-no-files-found: error

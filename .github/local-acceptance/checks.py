@@ -1289,7 +1289,7 @@ def native_guard_files():
         ".github/workflows/ci-dependency-cache.yml": "178808e837b1def2872b5d4df13ac18e0c9686059c4ee786136d6743d8118512",
         ".github/workflows/local-acceptance-publish.yml": "f787bb8ed1c1e2da68d25d3e2e2c3a9c7d83639c474b4f5388f02c31c1983194",
         ".github/workflows/local-acceptance.yml": "4c68140aae586b40ce0cb61217e77359f3c273f92eebbc4974bcacb67c8a4808",
-        ".github/workflows/local-acceptance-workspace.yml": "ef46222e71c38e472b6ca53a86792efb50dd4ba40b96369ded9afba19b1d3a1b",
+        ".github/workflows/local-acceptance-workspace.yml": "8d532e114234dbdff60cb6cea63d049eabcb7fca9d522f71b2b0af6d3aa6d0de",
         "e2e/local-acceptance/carryover_acceptance.py": "2845304e382b512b7ab775f50e27a80d765c41eadb240aa7260ed2dfccdb1767",
         "e2e/local-acceptance/cohost_acceptance.py": "39cd3a272fdcc7aab3d1434911238924edd208fd247db80ae7cb90e6abb80dc0",
         "e2e/local-acceptance/contract_reads_acceptance.py": "0334d86aff40b82a03fc7dd1c668b2f15ab5606e252096819a05d72059c8ebf1",

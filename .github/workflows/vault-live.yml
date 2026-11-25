@@ -47,7 +47,7 @@ jobs:
           artifact_versions "$CACHE/$tag" > "$out/versions.env"
           (cd rust && cargo fetch --locked)
           run_live_test "$CACHE/$tag" "$out"
-          for report in b_list_and_use c_other_owner c_owner_as_agent d_service_missing e_replaced_bundle h_restart; do
+          for report in b_list_and_use c_other_owner c_owner_as_agent d_service_missing e_replaced_bundle h_restart i_revoked_agent; do
             test -s "$out/$report.json"
           done
       - uses: actions/upload-artifact@v4

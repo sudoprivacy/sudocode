@@ -990,6 +990,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // drop; the renderer keeps none, so there is nothing to shut down
             // here.
         }
+        CliAction::A2aSetup(args) => {
+            // The command as typed, so the "next" steps it prints can be run as they are.
+            let typed: Vec<String> = env::args().collect();
+            let code = cli::a2a::run_setup(&args, &typed);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         CliAction::Doctor { fix, output_format } => {
             // Repair before reporting, so the report a user reads is the state
             // they are actually left in rather than the one just replaced.
@@ -4586,8 +4594,25 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             for (idx, option) in field.options.iter().enumerate() {
                 println!("  [{}] {}", idx + 1, option.label);
             }
-            let trimmed = prompt_choice_line("Your choice: ")?;
+            let multi_select = field.kind == runtime::QuestionKind::MultiSelect;
+            let trimmed = prompt_choice_line(match (multi_select, field.allow_custom_input) {
+                (true, true) => "Your choices (e.g. 1,3), or type your own: ",
+                (true, false) => "Your choices (e.g. 1,3): ",
+                (false, _) => "Your choice: ",
+            })?;
             let trimmed = trimmed.as_str();
+            if let Some(chosen) = field.numbered_choices(trimmed).filter(|_| multi_select) {
+                answers.extend(
+                    chosen
+                        .into_iter()
+                        .map(|option| runtime::QuestionPromptAnswer {
+                            id: field.id.clone(),
+                            value: option.value.clone(),
+                            label: Some(option.label.clone()),
+                        }),
+                );
+                continue;
+            }
             // A 1-indexed digit picks the option's value; otherwise the raw text
             // (custom-input fields).
             let value = trimmed

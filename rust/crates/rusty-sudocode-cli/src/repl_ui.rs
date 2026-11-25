@@ -32,7 +32,9 @@
 //! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
+use crate::render::layout_policy::{HistoryPart, LayoutPolicy};
 use crate::render::TextRole;
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -126,10 +128,31 @@ pub struct QuestionPromptView {
     /// An earlier answer to restore when the user comes back to this
     /// question: the option the cursor starts on, or typed text to refill.
     pub initial_value: Option<String>,
+    /// Several options may be chosen: Space or a digit toggles one, and Enter
+    /// sends every chosen option, or the highlighted one when none is chosen.
+    pub multi_select: bool,
 }
 
 /// The answer a question sends when the user goes back from it.
 pub const QUESTION_BACK: &str = "\x00__back__";
+
+/// Marks the one answer string a multi-select dialog sends for all its chosen
+/// values. It never leaves the CLI: the prompter turns it back into one answer
+/// per value, and typed text can't collide with it.
+const MULTI_SELECT_ANSWER: &str = "\x00__multi__";
+
+/// The answer a multi-select dialog sends for `values`.
+pub fn multi_select_answer(values: &[String]) -> String {
+    format!(
+        "{MULTI_SELECT_ANSWER}{}",
+        serde_json::to_string(values).unwrap_or_default()
+    )
+}
+
+/// The values a multi-select answer carries, or `None` for any other answer.
+pub fn multi_select_values(answer: &str) -> Option<Vec<String>> {
+    serde_json::from_str(answer.strip_prefix(MULTI_SELECT_ANSWER)?).ok()
+}
 
 impl QuestionPromptView {
     /// The earlier answer's option when there is one, else the recommended one.
@@ -145,10 +168,78 @@ impl QuestionPromptView {
     }
 
     /// An earlier answer that was typed rather than picked from the options.
-    fn initial_text(&self) -> Option<&str> {
+    fn initial_text(&self) -> Option<String> {
+        if self.multi_select {
+            // A typed answer sent with the chosen options: the value no option has.
+            let values = self
+                .initial_value
+                .as_deref()
+                .and_then(multi_select_values)?;
+            return values
+                .into_iter()
+                .find(|value| !self.options.iter().any(|option| &option.value == value));
+        }
         self.initial_value
-            .as_deref()
+            .clone()
             .filter(|_| self.initial_option().is_none())
+    }
+
+    /// The options an earlier multi-select answer chose.
+    fn initial_checked(&self) -> BTreeSet<usize> {
+        let values = self
+            .initial_value
+            .as_deref()
+            .and_then(multi_select_values)
+            .unwrap_or_default();
+        self.options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| values.contains(&option.value))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// What a multi-select Enter sends: the chosen options, else `fallback`,
+    /// plus any typed answer. `None` when that is nothing at all.
+    fn multi_answer(
+        &self,
+        checked: &BTreeSet<usize>,
+        fallback: Option<usize>,
+        typed: &str,
+    ) -> Option<String> {
+        let mut values: Vec<String> = checked
+            .iter()
+            .filter_map(|&index| self.options.get(index))
+            .map(|option| option.value.clone())
+            .collect();
+        if values.is_empty() {
+            values.extend(
+                fallback
+                    .and_then(|index| self.options.get(index))
+                    .map(|option| option.value.clone()),
+            );
+        }
+        let typed = typed.trim();
+        if !typed.is_empty() {
+            values.push(typed.to_string());
+        }
+        (!values.is_empty()).then(|| multi_select_answer(&values))
+    }
+}
+
+/// Add `index` to the chosen options, or take it out again.
+fn toggle_choice(checked: &mut BTreeSet<usize>, index: usize) {
+    if !checked.remove(&index) {
+        checked.insert(index);
+    }
+}
+
+/// A multi-select row's mark: filled when chosen.
+fn choice_mark(chosen: bool) -> &'static str {
+    if chosen {
+        "\u{25c9} "
+    } else {
+        "\u{25cb} "
     }
 }
 
@@ -176,24 +267,27 @@ struct FuzzySelectState {
     cursor: usize,
     /// Scroll offset — first visible row in the filtered list.
     scroll: usize,
+    /// Options chosen so far in a multi-select question.
+    checked: BTreeSet<usize>,
 }
 
 impl FuzzySelectState {
     fn new(question: QuestionPromptView) -> Self {
         let filtered: Vec<usize> = (0..question.options.len()).collect();
         let cursor = question.initial_cursor();
+        let checked = question.initial_checked();
         let scroll = cursor.saturating_sub(FUZZY_WINDOW_SIZE / 2);
         let filter = question
             .initial_text()
             .filter(|_| question.allow_custom_input)
-            .unwrap_or_default()
-            .to_string();
+            .unwrap_or_default();
         let mut state = Self {
             question,
             filter,
             filtered,
             cursor,
             scroll,
+            checked,
         };
         if !state.filter.is_empty() {
             state.apply_filter();
@@ -235,6 +329,33 @@ impl FuzzySelectState {
         self.selected_option().map(|option| option.value.clone())
     }
 
+    /// Choose or unchoose the highlighted option.
+    fn toggle(&mut self) {
+        if let Some(&index) = self.filtered.get(self.cursor) {
+            toggle_choice(&mut self.checked, index);
+        }
+    }
+
+    /// What Enter sends: the highlighted option, or the typed filter when it
+    /// matches nothing and the question takes typed answers. A multi-select
+    /// question sends its chosen options instead, when it has any.
+    fn answer(&self) -> Option<String> {
+        let typed = self.filter.trim();
+        let typed = if self.question.allow_custom_input && self.filtered.is_empty() {
+            typed
+        } else {
+            ""
+        };
+        if self.question.multi_select {
+            let highlighted = self.filtered.get(self.cursor).copied();
+            return self
+                .question
+                .multi_answer(&self.checked, highlighted, typed);
+        }
+        self.selected_value()
+            .or_else(|| (!typed.is_empty()).then(|| typed.to_string()))
+    }
+
     fn selected_option(&self) -> Option<&QuestionOptionView> {
         self.filtered
             .get(self.cursor)
@@ -274,14 +395,25 @@ impl FuzzySelectState {
             } else {
                 String::new()
             };
+            let mark = if self.question.multi_select {
+                choice_mark(self.checked.contains(&oi))
+            } else {
+                ""
+            };
             lines.push(format!(
                 "{}{}{marker}",
-                choice.prefix(&format!("{selector} ")),
+                choice.prefix(&format!("{selector} {mark}")),
                 choice.body(&option.label)
             ));
         }
         if end < self.filtered.len() {
             lines.push(caption.muted(&format!("  … {} more", self.filtered.len() - end)));
+        }
+        if self.question.multi_select {
+            lines.push(caption.muted(&format!(
+                "  Space choose \u{00b7} Enter confirm ({} chosen)",
+                self.checked.len()
+            )));
         }
         if self.question.allow_custom_input && !self.filter.is_empty() && self.filtered.is_empty() {
             let hint = self
@@ -734,6 +866,7 @@ fn format_question_panel(
     question: &QuestionPromptView,
     selected_index: usize,
     custom_input: &str,
+    checked: &BTreeSet<usize>,
 ) -> String {
     let mut lines = Vec::new();
     let theme = crate::render::theme();
@@ -761,9 +894,14 @@ fn format_question_panel(
             .as_deref()
             .filter(|description| !description.is_empty())
             .map_or(String::new(), |description| format!(" - {description}"));
+        let mark = if question.multi_select {
+            choice_mark(checked.contains(&index))
+        } else {
+            ""
+        };
         lines.push(format!(
             "{}{}{}",
-            choice.prefix(&format!("{selector} [{}] ", index + 1)),
+            choice.prefix(&format!("{selector} [{}] {mark}", index + 1)),
             choice.body(&option.label),
             choice.muted(&format!("{marker}{description}")),
         ));
@@ -811,13 +949,25 @@ fn format_question_panel(
     } else {
         ""
     };
-    let digit_hint = if max_digit >= 2 {
+    let digit_hint = if question.multi_select {
+        let digits = if max_digit >= 2 {
+            format!("/1-{max_digit}")
+        } else {
+            String::new()
+        };
+        format!(" \u{00b7} Space{digits} choose")
+    } else if max_digit >= 2 {
         format!(" \u{00b7} 1-{max_digit} quick select")
     } else {
         String::new()
     };
+    let chosen = if question.multi_select {
+        format!(" ({} chosen)", checked.len())
+    } else {
+        String::new()
+    };
     lines.push(caption.muted(&format!(
-        "  {arrow_hint}\u{2191}\u{2193} navigate{digit_hint}{custom_hint} \u{00b7} Enter confirm",
+        "  {arrow_hint}\u{2191}\u{2193} navigate{digit_hint}{custom_hint} \u{00b7} Enter confirm{chosen}",
     )));
     lines.join("\n")
 }
@@ -829,12 +979,12 @@ enum OutputMsg {
     /// User echo formatted identically for live output and session replay.
     UserPrompt(runtime::turn_input::InputEcho),
     /// One event's stable history and replacement live prose, in order.
-    AssistantUpdate {
-        committed: String,
+    TranscriptUpdate {
+        committed: Vec<HistoryPart>,
         preview: PreviewUpdate,
     },
-    /// Complete line — `StdoutHandle::println` will append `\n`.
-    Line(String),
+    /// An independent message, such as a slash command report or notice.
+    Block(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
     Raw(String),
     /// Replace the transient tool summary without committing it to history.
@@ -913,14 +1063,14 @@ impl OutputSender {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
     }
 
-    pub(crate) fn assistant_update(&self, committed: String, preview: PreviewUpdate) {
+    pub(crate) fn transcript_update(&self, committed: Vec<HistoryPart>, preview: PreviewUpdate) {
         let _ = self
             .tx
-            .send(OutputMsg::AssistantUpdate { committed, preview });
+            .send(OutputMsg::TranscriptUpdate { committed, preview });
     }
 
     pub fn println(&self, text: &str) {
-        let _ = self.tx.send(OutputMsg::Line(text.to_string()));
+        let _ = self.tx.send(OutputMsg::Block(text.to_string()));
     }
 
     pub fn suspend(&self) -> io::Result<TerminalSuspension> {
@@ -1215,6 +1365,7 @@ fn render_pending_overlay(
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
     prose_preview: Arc<Mutex<ProsePreview>>,
+    initial_history: LayoutPolicy,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
@@ -1259,6 +1410,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
     let prose_preview = ctx.prose_preview.clone();
     let prose_preview_for_future = ctx.prose_preview.clone();
+    let initial_history = ctx.initial_history;
     let output_rx = Arc::clone(&ctx.output_rx);
     let terminal_handoff = Arc::clone(&ctx.terminal_handoff);
     let terminal_handoff_for_future = Arc::clone(&ctx.terminal_handoff);
@@ -1317,6 +1469,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // typing appends here in-place — no slot switch, no component-mount race —
     // mirroring how FuzzySelect owns its `filter`. Cleared when a question opens.
     let mut dialpad_input = hooks.use_state(String::new);
+    // Options chosen so far in a multi-select DialPad; reset when a question opens.
+    let mut dialpad_checked = hooks.use_state(BTreeSet::<usize>::new);
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
@@ -1490,8 +1644,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     // sent in full (same as TextInput submit).
                                     let raw = dialpad_input.read().clone();
                                     let store_snap = paste_store.read().clone();
-                                    let answer =
+                                    let typed =
                                         expand_paste_placeholders(&raw, &store_snap).0.trim().to_string();
+                                    let answer = if question.multi_select {
+                                        question
+                                            .multi_answer(&dialpad_checked.read(), None, &typed)
+                                            .unwrap_or_default()
+                                    } else {
+                                        typed
+                                    };
                                     if !answer.is_empty() {
                                         if !*has_submitted.read() {
                                             has_submitted.set(true);
@@ -1506,7 +1667,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         }
                                     }
                                 } else {
-                                    submit_dialpad_selection(question, selected, &input_tx_for_events, interaction.clone());
+                                    if question.multi_select {
+                                        let raw = dialpad_input.read().clone();
+                                        let typed = expand_paste_placeholders(&raw, &paste_store.read()).0;
+                                        if let Some(answer) =
+                                            question.multi_answer(&dialpad_checked.read(), Some(selected), &typed)
+                                        {
+                                            send_question_answer(&input_tx_for_events, answer, interaction.clone());
+                                        }
+                                    } else {
+                                        submit_dialpad_selection(question, selected, &input_tx_for_events, interaction.clone());
+                                    }
                                     if !*has_submitted.read() { has_submitted.set(true); }
                                     if interaction.is_none() {
                                         input_value.set(String::new());
@@ -1523,14 +1694,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 let answer = {
                                     let slot = input_slot.read();
                                     if let InputSlot::FuzzySelect(fs) = &*slot {
-                                        fs.selected_value().or_else(|| {
-                                            let custom = fs.filter.trim();
-                                            if fs.question.allow_custom_input && !custom.is_empty() {
-                                                Some(custom.to_string())
-                                            } else {
-                                                None
-                                            }
-                                        })
+                                        fs.answer()
                                     } else {
                                         None
                                     }
@@ -1650,7 +1814,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         };
                         if digit >= 1 && digit <= option_count {
                             dialpad_cursor.set(digit - 1);
-                            if let InputSlot::DialPad(ref question) = current_slot {
+                            if matches!(current_slot, InputSlot::DialPad(ref q) if q.multi_select) {
+                                toggle_choice(&mut dialpad_checked.write(), digit - 1);
+                            } else if let InputSlot::DialPad(ref question) = current_slot {
                                 submit_dialpad_selection(question, digit - 1, &input_tx_for_events, interaction.clone());
                                 if !*has_submitted.read() { has_submitted.set(true); }
                                 if interaction.is_none() {
@@ -1658,6 +1824,28 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     input_slot.set(InputSlot::TextInput);
                                 }
                             }
+                        }
+                    }
+                    // ── Space — choose an option in a multi-select question ──
+                    // Only on an option row with nothing typed yet; once the
+                    // `[+]` row has text, a space is part of that answer.
+                    KeyCode::Char(' ')
+                        if matches!(current_slot, InputSlot::DialPad(ref q)
+                            if q.multi_select
+                                && dialpad_input.read().is_empty()
+                                && dialpad_cursor.get() < q.options.len())
+                            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        toggle_choice(&mut dialpad_checked.write(), dialpad_cursor.get());
+                    }
+                    KeyCode::Char(' ')
+                        if matches!(current_slot, InputSlot::FuzzySelect(ref fs)
+                            if fs.question.multi_select && !fs.filtered.is_empty())
+                            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.toggle();
                         }
                     }
                     // ── Typing a free-form answer — DialPad custom-input row ──
@@ -1832,10 +2020,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_future(async move {
         let mut todo_hide_deadline: Option<Instant> = None;
         let mut stderr_text = Utf8Stream::default();
+        let mut history = initial_history;
         let mut task_clock_tick = Instant::now();
         let mut background_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
+            let previous_history = history;
             let mut is_preview_changed = false;
 
             // Drain stderr redirect — route captured text through stdout
@@ -1844,11 +2034,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(guard) = stderr_redir_for_future.lock() {
                 if let Some(ref redir) = *guard {
                     if let Some(captured) = redir.drain() {
-                        write_iocraft_output(
-                            &stdout_for_future,
-                            &stderr_text.push(&captured),
-                            false,
-                        );
+                        let text = stderr_text.push(&captured);
+                        history.observe_external(&text);
+                        write_iocraft_output(&stdout_for_future, &text, false);
                     }
                 }
             }
@@ -1856,13 +2044,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Drain output channel.
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
-                    let (text, terminated) = match rx.try_recv() {
+                    match rx.try_recv() {
                         Ok(OutputMsg::UserPrompt(input)) => {
-                            let mut text = crate::cli::received::echo(&input, crate::render::query_terminal_width(), &crate::render::TerminalRenderer::new());
-                            crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
-                            (text, false)
+                            let text = crate::cli::received::echo(&input, crate::render::query_terminal_width(), &crate::render::TerminalRenderer::new());
+                            write_history(&stdout_for_future, &mut history, [
+                                HistoryPart::Block(text), HistoryPart::Finish,
+                            ]);
                         }
-                        Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
+                        Ok(OutputMsg::TranscriptUpdate { committed, preview }) => {
+                            write_history(&stdout_for_future, &mut history, committed);
                             prose_preview_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1870,15 +2060,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             is_preview_changed = true;
                             // use_output queues history for the same presentation
                             // as the newly rendered preview, never an empty frame.
-                            (committed, false)
                         }
-                        Ok(OutputMsg::Line(text)) => (text, true),
-                        Ok(OutputMsg::Raw(text)) => (text, false),
+                        Ok(OutputMsg::Block(text)) if text.is_empty() => {
+                            history.observe_external("\n");
+                            write_iocraft_output(&stdout_for_future, "", true);
+                        }
+                        Ok(OutputMsg::Block(text)) => {
+                            write_history(&stdout_for_future, &mut history, [HistoryPart::Block(text)]);
+                        }
+                        Ok(OutputMsg::Raw(text)) => {
+                            history.observe_external(&text);
+                            write_iocraft_output(&stdout_for_future, &text, false);
+                        }
                         Ok(OutputMsg::ToolProgress(text)) => {
                             if *tool_progress.read() != text {
                                 tool_progress.set(text);
                             }
-                            continue;
                         }
                         Ok(OutputMsg::Suspend(request)) => {
                             *terminal_handoff_for_future
@@ -1888,8 +2085,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             break;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                    };
-                    write_iocraft_output(&stdout_for_future, &text, terminated);
+                    }
                 }
             }
 
@@ -1966,7 +2162,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         &question.presentation,
                                         crate::render::query_terminal_width(),
                                     );
-                                    write_iocraft_output(&stdout_for_future, &document, true);
+                                    write_history(&stdout_for_future, &mut history, [HistoryPart::Block(document)]);
                                 }
                             }
                             tasks_for_future
@@ -1984,7 +2180,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     question.initial_cursor()
                                 };
                                 dialpad_cursor.set(cursor);
-                                dialpad_input.set(question.initial_text().unwrap_or_default().to_string());
+                                dialpad_input.set(question.initial_text().unwrap_or_default());
+                                dialpad_checked.set(question.initial_checked());
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -2167,6 +2364,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 background_tick = Instant::now();
             }
+            if is_preview_changed || history != previous_history {
+                is_preview_changed |= prose_preview_for_future
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .position_after_history(&history);
+            }
             if state == EngineState::Running || is_preview_changed {
                 frame.set(idx.wrapping_add(1));
             }
@@ -2281,6 +2484,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 q,
                 dialpad_cursor.get(),
                 &dialpad_input.read(),
+                &dialpad_checked.read(),
             )),
             "\u{2753} ",
         ),
@@ -2779,6 +2983,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 }
 
+/// Compose the ordered parts before serializing whole physical lines to iocraft.
+fn write_history(
+    stdout: &StdoutHandle,
+    layout: &mut LayoutPolicy,
+    parts: impl IntoIterator<Item = HistoryPart>,
+) {
+    let mut batch = String::new();
+    for part in parts {
+        layout.write(part, |text| batch.push_str(text));
+    }
+    if !batch.is_empty() {
+        write_iocraft_output(stdout, &batch, false);
+    }
+}
+
 /// Adapt the shared line framing to iocraft for every captured/output stream.
 fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
     split_lines(
@@ -2815,6 +3034,9 @@ pub fn spawn_repl_ui(
     let stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>> =
         Arc::new(Mutex::new(None));
 
+    let mut initial_history = LayoutPolicy::default();
+    initial_history.observe_external(startup_banner);
+    initial_history.observe_external("\n");
     let ctx = ReplContext {
         tasks: Arc::new(Mutex::new({
             let mut browser = TaskBrowser::default();
@@ -2822,6 +3044,7 @@ pub fn spawn_repl_ui(
             browser
         })),
         prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
+        initial_history,
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),
@@ -3008,6 +3231,7 @@ mod tests {
             force_fuzzy_select: false,
             back_value: None,
             initial_value: None,
+            multi_select: false,
         }
     }
 
@@ -3025,8 +3249,13 @@ mod tests {
 
     #[test]
     fn question_panel_marks_selected_option() {
-        let panel =
-            StyledText::from_ansi(&format_question_panel(&question_with_options(), 1, "")).text;
+        let panel = StyledText::from_ansi(&format_question_panel(
+            &question_with_options(),
+            1,
+            "",
+            &BTreeSet::new(),
+        ))
+        .text;
 
         assert!(panel.contains(" [1] Project (recommended)"));
         assert!(panel.contains("> [2] User"));
@@ -3035,10 +3264,12 @@ mod tests {
     #[test]
     fn question_hints_only_offer_active_digit_shortcuts() {
         let mut question = question_with_options();
-        let panel = StyledText::from_ansi(&format_question_panel(&question, 0, "")).text;
+        let panel =
+            StyledText::from_ansi(&format_question_panel(&question, 0, "", &BTreeSet::new())).text;
         assert!(panel.contains("1-2 quick select"));
         question.options.truncate(1);
-        let panel = StyledText::from_ansi(&format_question_panel(&question, 0, "")).text;
+        let panel =
+            StyledText::from_ansi(&format_question_panel(&question, 0, "", &BTreeSet::new())).text;
         assert!(!panel.contains("quick select"));
         assert!(panel.contains("Enter confirm"));
     }
@@ -3056,12 +3287,115 @@ mod tests {
             &question,
             question.options.len(),
             "",
+            &BTreeSet::new(),
         ))
         .text;
         assert!(panel.contains("> [+]"));
         assert!(panel.contains("type a comment"));
         assert!(panel.contains("  [1] Project"));
         assert!(panel.contains("  [2] User"));
+    }
+
+    fn multi_select_question() -> QuestionPromptView {
+        let mut question = question_with_options();
+        question.multi_select = true;
+        question
+    }
+
+    #[test]
+    fn multi_select_panel_marks_every_chosen_option_and_counts_them() {
+        let question = multi_select_question();
+        let chosen = BTreeSet::from([1]);
+        let panel = StyledText::from_ansi(&format_question_panel(&question, 0, "", &chosen)).text;
+        assert!(panel.contains("> [1] \u{25cb} Project"), "{panel}");
+        assert!(panel.contains("  [2] \u{25c9} User"), "{panel}");
+        assert!(panel.contains("Space/1-2 choose"), "{panel}");
+        assert!(panel.contains("Enter confirm (1 chosen)"), "{panel}");
+        assert!(!panel.contains("quick select"), "{panel}");
+        // A single-choice question keeps its rows and hints unchanged.
+        let single = StyledText::from_ansi(&format_question_panel(
+            &question_with_options(),
+            0,
+            "",
+            &chosen,
+        ))
+        .text;
+        assert!(
+            single.contains("> [1] Project") && single.contains("quick select"),
+            "{single}"
+        );
+    }
+
+    #[test]
+    fn multi_select_sends_the_chosen_options_or_else_the_highlighted_one() {
+        let question = multi_select_question();
+        let values =
+            |answer: Option<String>| answer.and_then(|answer| multi_select_values(&answer));
+        assert_eq!(
+            values(question.multi_answer(&BTreeSet::from([1, 0]), Some(1), "")),
+            Some(vec!["project".to_string(), "user".to_string()])
+        );
+        assert_eq!(
+            values(question.multi_answer(&BTreeSet::new(), Some(1), "")),
+            Some(vec!["user".to_string()])
+        );
+        assert_eq!(
+            values(question.multi_answer(&BTreeSet::from([0]), None, " typed ")),
+            Some(vec!["project".to_string(), "typed".to_string()])
+        );
+        assert_eq!(question.multi_answer(&BTreeSet::new(), None, "  "), None);
+    }
+
+    #[test]
+    fn a_multi_select_answer_is_never_confused_with_typed_text() {
+        let values = vec!["a".to_string(), "b, c".to_string()];
+        assert_eq!(
+            multi_select_values(&multi_select_answer(&values)),
+            Some(values)
+        );
+        assert_eq!(multi_select_values(r#"["a","b"]"#), None);
+        assert_eq!(multi_select_values("project"), None);
+    }
+
+    #[test]
+    fn going_back_restores_a_typed_answer_sent_with_the_choices() {
+        let mut question = multi_select_question();
+        question.allow_custom_input = true;
+        question.initial_value = Some(multi_select_answer(&[
+            "user".to_string(),
+            "typed text".to_string(),
+        ]));
+        assert_eq!(question.initial_checked(), BTreeSet::from([1]));
+        assert_eq!(question.initial_text().as_deref(), Some("typed text"));
+    }
+
+    #[test]
+    fn going_back_to_a_multi_select_question_restores_its_choices() {
+        let mut question = multi_select_question();
+        question.initial_value = Some(multi_select_answer(&["user".to_string()]));
+        assert_eq!(question.initial_checked(), BTreeSet::from([1]));
+        assert_eq!(
+            question.initial_text(),
+            None,
+            "the encoded answer is not typed text"
+        );
+        let mut fuzzy = FuzzySelectState::new(question);
+        assert_eq!(fuzzy.checked, BTreeSet::from([1]));
+        fuzzy.toggle();
+        fuzzy.move_down();
+        fuzzy.toggle();
+        assert_eq!(fuzzy.checked, BTreeSet::from([0]));
+        assert_eq!(
+            fuzzy
+                .answer()
+                .and_then(|answer| multi_select_values(&answer)),
+            Some(vec!["project".to_string()])
+        );
+        let panel = StyledText::from_ansi(&fuzzy.format_panel()).text;
+        assert!(
+            panel.contains("\u{25c9} Project") && panel.contains("(1 chosen)"),
+            "{panel}"
+        );
     }
 
     #[test]
@@ -3075,10 +3409,17 @@ mod tests {
             &question,
             question.options.len(),
             "hi there",
+            &BTreeSet::new(),
         ))
         .text;
         assert!(on_row.contains("> [+] hi there"));
-        let off_row = StyledText::from_ansi(&format_question_panel(&question, 0, "hi there")).text;
+        let off_row = StyledText::from_ansi(&format_question_panel(
+            &question,
+            0,
+            "hi there",
+            &BTreeSet::new(),
+        ))
+        .text;
         assert!(off_row.contains("[+] hi there"));
         assert!(!off_row.contains("type your own answer"));
     }

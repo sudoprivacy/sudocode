@@ -2001,13 +2001,237 @@ sizes and job clocks describe those runs. The cache inventory at this
 observation listed 11,771,056,003 bytes against the configured 10 GB limit.
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44400653652/job/135142421684">older Windows job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44463895355/job/135356918863">current Windows job</a>.</p>
-<p><strong>Post-policy source cohort, 7 of 20.</strong> The first seven eligible
-merges account for 634.450 known GitHub runner-minutes, with one unassigned
-interval still unresolved. The median last queue-entry-to-merge span is
-581s and includes validation and dispatch. The first scheduled workspace
-run, remaining source cohort, and author-side time are measured separately.
-The whole-lifecycle one-tenth target remains unproven.</p>
-<p><strong>Author-side clocks for the seven tracked merges.</strong>
+<p><strong>Post-policy source cohort, 15 of 20.</strong> The first fifteen
+eligible Rust-source merges account for 1,160.317 known GitHub runner-minutes.
+The eight added PRs after the first seven are #1531, #1547, #1548, #1551,
+#1552, #1553, #1556 and #1558. The selection continues to require Rust source
+files and complete changed-file lists. Runner occupancy is a lower bound;
+one job's allocation remains unknown.</p>
+<p>Across these 15 sources, the mean from the final revision's earliest
+available validation to merge is 113.772 minutes. Seven PRs have a confirmed
+executed failure, with a mean of 168.290 minutes from the earliest known
+validation to the first retained execution failure. The first retained
+checks may start after unpublished work. In
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/job/137843369274">PR #1558's final macOS Clippy job</a>,
+GitHub assigned its runner after 10 minutes 5 seconds, and assigned execution
+lasted 3 minutes 34 seconds. This is one observed job on the critical path.
+The measured records still leave the end-to-end one-tenth target unproven.</p>
+<p>Including earlier retained revisions, the observed interval to the first
+confirmed executed failure or accepted merge averages 151.811 minutes across
+the same 15 PRs, with a median of 77.255 minutes. An admission refusal before
+any check executes does not end this interval. Missing earlier starts can
+increase the actual duration, and missing earlier failures can move its end
+earlier. Compare these wall-clock intervals separately from the sum of GitHub
+runner occupancy.</p>
+<p>The first fixed cohort cannot reach the published conservative merge
+reference of 18.526 minutes. The 15 recorded final-source intervals already
+sum to 1,706.580 minutes. Even five more intervals of zero minutes would
+leave a mean of at least 85.329 minutes across the full cohort. The reference
+uses historical hosted-only timings. The matched historical author-inclusive
+mean is still unavailable, and missing earlier failures prevent an equivalent
+bound on actual first-failure times.</p>
+<p><strong>November author-inclusive comparison.</strong> The October window
+ended before <a href="https://github.com/sudoprivacy/sudocode/pull/1120">signed
+author acceptance landed on main</a>. A separate, previously selected group
+of 20 Rust-source PRs merged on November 10&ndash;16 has authenticated author
+clocks for every final head. From the earlier of recorded author start and
+the first retained exact-head hosted trigger to merge, its mean was 147.4
+minutes and its median was 71.5. The first 15 Rust-source merges after
+<a href="https://github.com/sudoprivacy/sudocode/pull/1473">the policy change</a>
+had a mean of 113.8 minutes and a median of 71.6.</p>
+<p>The mean interval after the signed author finish fell from 51.8 to 22.7
+minutes. The recorded author interval had a median of 40.7 minutes before
+and 51.8 after. These cohorts had different changes and host loads. The
+intervals can include waiting and overlap with hosted jobs. The November
+comparison leaves the original October reference and fixed cohort intact.
+The end-to-end one-tenth target remains unproven.</p>
+<p>For <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45136487423">PR #1558</a>,
+the hosted publisher reported the native complement passed 498.370 minutes
+before the signed author checks finished. The available signed author interval
+was 506.447 minutes, with 42.453 minutes summed across the recorded commands.
+The original author-attempt and lease timeline is unavailable, so these
+records cannot classify the other time as queueing or execution.</p>
+<p>Across the same 15 PRs, the exact-head Local acceptance success to merge
+averaged 10.976 minutes. The final recorded queue entry to merge averaged
+9.801 minutes, including checks on the queue commit. For
+<a href="https://github.com/sudoprivacy/sudocode/pull/1547">PR #1547</a>,
+40 minutes 4 seconds elapsed between the signed author finish and PR creation.
+The exact-head hosted acceptance run was created three seconds after the PR.</p>
+<p><strong>Windows browser input and receipt verification.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1563">PR #1563</a>
+merged after the signed Windows and Docker guard and both merge-group workflows
+passed. A matched 1,146-file Windows Docker fixture spent 17.573 and 17.653
+seconds on mounted-file synchronization and 1.053 and 1.044 seconds on the
+archive route. The measurement covers source preparation. The accepted change
+also reuses committed file reads during receipt verification, signs the host
+wait for each invocation, and checks Docker Engine before entering the host
+queue. These measurements leave the full lifecycle target unproven.</p>
+<p><strong>Local reservations and benchmark compilation.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1569">PR #1569</a>
+shares one host reservation for fresh native services and context.
+<a href="https://github.com/sudoprivacy/sudocode/pull/1571">PR #1571</a>
+does the same for fresh rendering and browser checks. Checkpoints retain
+individual profile outcomes and permit the normal resume. In
+<a href="https://github.com/sudoprivacy/sudocode/pull/1572">PR #1572</a>,
+rendering and browser use a checksum-pinned compiler cache during their
+existing Cargo commands. Independent Linux containers verified tool reuse
+without network access on the second invocation and checked that each cache
+server exited before the compiled program ran. The signed Windows and Docker
+guard, hosted executor fixtures and final main workflows passed. The change
+spent 80 seconds from entry in the merge queue to merge. That clock covers
+this infrastructure PR.</p>
+<p><strong>Browser driver compilation replay.</strong> The original
+<a href="https://github.com/sudoprivacy/sudocode/pull/1469">PR #1469</a>
+sources and Linux image were replayed with the same Cargo target paths in a
+private volume. The browser command took 118.898 seconds without sccache before
+the cache runs, 76.662 seconds with three cache hits, and 119.464 seconds on a
+later run without sccache. The two driver executables and their test listings
+matched across those three runs. A cache-enabled run with zero hits took
+78.224 seconds. The command clocks include cache setup and shutdown where
+applicable. The sequence measures driver compilation and leaves the isolated
+effect of cache hits, browser journey time, and PR lifecycle savings open.</p>
+<p><strong>Original author rendering and workspace clocks.</strong> The original
+<a href="https://github.com/sudoprivacy/sudocode/pull/1469">PR #1469</a> and
+<a href="https://github.com/sudoprivacy/sudocode/pull/1513">PR #1513</a> Windows
+author runs each passed all 36 rendering observations. The timed workload drivers
+accounted for 452.760 of 457.715 seconds and 462.580 of 467.960 seconds in their
+respective scenario commands. The fixed baseline builds took 1.526 and 1.630
+seconds. The candidate release builds took 266.727 and 274.568 seconds. Both runs
+predate the current archive transport and rendering compiler cache.</p>
+<p>For PR #1513, the read-only Docker volume still held the measured release
+binary. Its SHA-256 matched the original report and its Cargo build-unit output.
+The final <code>scode</code> unit marker preceded that output's mtime by 182.242
+seconds. This filesystem interval covers the final unit and does not isolate
+linking or cache savings. See the
+<a href="https://doc.rust-lang.org/stable/nightly-rustc/cargo/compiler/fingerprint/index.html">Cargo fingerprint documentation</a>.</p>
+<p>The two original workspace runs executed 1,208 and 1,209 nextest cases on
+eight workers. Test execution took 311.976 and 340.789 seconds. Dividing the
+recorded case durations across the same eight slots gives lower bounds of
+299.286 and 329.577 seconds. The full nextest commands took 315.428 and 625.518
+seconds. Only PR #1469 is in the fixed merged cohort. These historical component
+clocks leave both present-day savings and the lifecycle target unmeasured.</p>
+<p>Within the fixed 15-PR cohort, five build or manifest changes spent 631.583
+of the 1,160.317 known hosted runner-minutes. Complementary native jobs account
+for 325.283 of those minutes, with 197.800 starting after the policy merge.
+Job start time records when occupancy occurred. An already frozen plan may
+still select checks under an earlier policy.</p>
+<p>The same 15 PRs spent 534.783 known runner-minutes across 68 assigned
+native complement jobs, or 46.1% of the recorded hosted total. This includes
+recorded successful, failed and cancelled work and excludes the SDK jobs.</p>
+<table aria-label="Native complement runner cost in the fixed 15-PR sample">
+  <thead><tr><th scope="col">Host</th><th scope="col">Timed jobs</th>
+  <th scope="col">Runner minutes</th><th scope="col">Native command minutes</th>
+  <th scope="col">Cache step minutes</th></tr></thead>
+  <tbody>
+    <tr><th scope="row">Windows</th><td>29</td><td>245.333</td><td>184.083</td><td>29.533</td></tr>
+    <tr><th scope="row">Linux</th><td>34</td><td>187.433</td><td>152.667</td><td>14.550</td></tr>
+    <tr><th scope="row">macOS</th><td>5</td><td>102.017</td><td>92.217</td><td>5.783</td></tr>
+  </tbody>
+</table>
+<p>Step minutes count published start and completion timestamps. The native
+step includes builds and tests. The cache step includes lookup and restore.
+Some of the jobs also appear in the build-or-manifest subtotal above.
+These times measure work already recorded. The effect of later changes on
+the full lifecycle still needs a comparable sample.</p>
+<p>A later PR-triggered run of the periodic workflow passed its Linux and macOS jobs.
+On Windows, the complementary steps passed in 605s. The full workspace step
+then took 513s and stopped after the resumed-card continuation assertion left
+<code>END</code> at column zero. Nextest reported 614 passes, one failing
+assertion, 80 skips and seven in-flight aborts. Windows full-workspace
+qualification is pending for this change. The workflow-only PR head
+falls outside the Rust-source
+cohort. See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original Windows job</a>.</p>
+<p><strong>Windows native command clocks.</strong> The original archives for
+the #1547 Windows complement and #1578 Windows periodic complement record
+563.219 of 837 seconds and 323.843 of 605 seconds, respectively, in the
+examples and cohost Cargo commands. The context and services profiles
+issued byte-identical Cargo argv within each job. The later invocation
+took 0.922 and 1.000 seconds, respectively, with zero Cargo compile lines.
+Both profiles still ran their separate acceptance cases.</p>
+<p>The #1547 job missed the hosted dependency cache. The later job restored
+its exact 2,518,522,496-byte dependency cache key in a 59-second action
+step. Its cohost build still took 199.171 seconds and recorded 132 sccache
+misses and zero hits. The earlier cohost build took 181.578 seconds with
+131 misses and zero hits. The current cache publisher builds the workspace
+library and binary test graph with mailbox support. The cohost daemon target
+also needs its nondefault daemon feature, and native acceptance builds it
+with the model and egress features enabled. These observations come from
+different heads and runner jobs. They show where the jobs spent time and
+leave the effect of a cohost-specific cache to a comparable measurement.
+GitHub reported a 10 GB cache setting and 10,393,505,612 active cache bytes
+at the audit snapshot. Any additional cache would need measurement of its
+publication cost, restore time and effect on other cache entries.
+See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44864376045/job/136724775488">original complement</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45326809815/job/138218284454">original periodic Windows job</a>.</p>
+<p><strong>Windows dependency cache scope.</strong> The 29 Windows
+complements in the fixed sample recorded eight exact restores, 20
+prefix restores and one miss. The cache action occupied 1,772 seconds
+across those jobs. Among the 18 runs using the aligned <code>worktree</code>
+layout, all eight with unchanged logged cache input files relative to their
+execution base restored an exact match. All ten with changed input files
+included a changed Cargo lockfile. Nine restored a prefix and one missed.</p>
+<p>The publisher of the later Windows job's restored archive occupied 260
+runner seconds. That included 49 seconds of restore, 137 seconds of workspace
+dependency compilation and 39 seconds of cache cleanup and upload. Cargo's
+locked Windows dependency tree includes 28 package labels in the native
+cohost graph that the current publisher graph lacks, including
+<code>nexus-cluster</code>, <code>raft-proto</code> and
+<code>protobuf-build</code>. Adding cohost features to the existing workspace
+command changes the resolved feature sets of 16 labels already present. Retain
+the ordinary cache graph for a separate cohost comparison. Cargo tree records
+dependency resolution. Compiler object reuse, added archive bytes and net
+runner time still require matched runs. See the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45218960852/job/137847669992">original Windows publisher</a>.</p>
+<p><strong>Native failure timestamps and runner occupancy.</strong> The
+68 original complements include 49 successful jobs with 25,433 runner
+seconds, eight failed jobs with 3,117 seconds and 11 cancelled jobs with
+3,537 seconds. Successful jobs account for 79.3% of known complement
+occupancy. Both same-head Windows grpcurl extraction failures ended before
+product Cargo execution, after spending 107 seconds combined in the cache
+step. Three original Windows resize failures followed 338.128 seconds
+combined between their examples Cargo launches and cache bookkeeping
+markers. That is observed work. Changing the order can also change what
+Cargo reuses on successful and failed runs.</p>
+<p>Job-level REST downloads verified all 68 logs against their original
+job intervals. An earlier CLI fetch returned attempt 3's log for the
+attempt 2 job in one rerun. The distinct direct logs confirm both failures
+and the prior 29 Windows cache and profile-order results. See
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135441523265">attempt 2</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466721029/job/135610094106">attempt 3</a>.</p>
+<p><strong>Linux real-daemon queue timing.</strong> In the same fixed cohort,
+18 A2A and 13 co-host jobs occupied 202.917 hosted runner-minutes. Among
+11 successful A2A jobs with the current managed harness and original stage
+archives, the remote-context command took a median 44.628 seconds to
+start its test. The test itself took a median 0.550 seconds. The managed
+binary freshness check after the join took a median 0.284 seconds.</p>
+<p>In nine of those 11 jobs, the native lane finished after the fault lane.
+The other two jobs had 13.707 seconds of spare native-lane wall time
+combined. Moving the full remote-context command to the end of that lane
+would exceed the observed spare time in every job if durations held.
+The locked Linux dependency graph also changes feature sets when the
+remote-context package is combined with the CLI test packages. Keep the
+existing package selections and the real post-join test while measuring
+compiler work separately. See the
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/job/137843368203">original queue job</a>
+and its
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/45217555143/artifacts/14837714645">mailbox fault archive</a>.</p>
+<p><strong>Author FIFO reservation for workspace, examples and resize.</strong>
+The three checks share one reservation when all need fresh execution and
+appear consecutively. Each completion still gets its own signed checkpoint.
+Five original published execution plans had the same verification results
+before and after this change. Measured delivery impact awaits a new
+matching source run. See
+<a href="https://github.com/sudoprivacy/sudocode/pull/1584">the merged reservation change</a>.</p>
+<p><strong>Same-repository acceptance ref fetch.</strong> The signature gate
+and publisher fetch the pull ref and both notes namespaces in one atomic
+Git transaction when all three refs are available. A missing optional
+namespace uses the existing per-ref fetches. Fork notes come from the fork.
+Four sequential trials with the same public pull ref, two matching notes
+and warm object stores measured 5.407 seconds for separate fetches and
+3.203 seconds for the combined fetch, using the two-run median for each.
+This measures Git ref retrieval. Original source, signature, plan and test
+checks remain required.</p>
+<p><strong>Author-side clocks for the first seven tracked merges.</strong>
 The public Git acceptance notes provide 14 verified original receipts across
 the seven PRs. Joining each PR's earliest available signed author start to its
 merge gives a median observed span of 248.672 minutes. The median signed author
@@ -2017,7 +2241,7 @@ intervals and cannot be added. Two of the available author starts predate the
 policy activation. Earlier unpublished attempts and the first-failure clock
 are still incomplete. These observations give lower bounds on the recorded
 successful spans, with no whole-lifecycle one-tenth conclusion.</p>
-<p><strong>Observed failure and final-source clocks.</strong> On the same
+<p><strong>Observed failure and final-source clocks.</strong> On the first
 seven-PR sample, the average interval from the earliest available validation
 of the final source head to merge was 109.131 minutes. Across all known
 revisions of those PRs, it was 763.322 minutes. The earlier revision, local
@@ -2027,6 +2251,16 @@ earliest known validation to the first retained execution failure was 204.557
 minutes, separating a missing signed-receipt admission result from the later
 failed tool preparation. These partial observed clocks leave the one-tenth
 target unproven.</p>
+<p>For those first seven final heads, the mean interval from the earliest
+recorded author start to the final invocation was 38.263 minutes. The
+final invocation to the signed check finish averaged 51.012 minutes.
+Signed finish to final queue entry averaged 10.022 minutes, of which
+7.671 minutes fell before the last required complementary check finished.
+In four of the seven PRs those complementary checks started after the
+signed author checks finished. The final queue-entry-to-merge interval,
+including integrated checks, averaged 9.833 minutes. The signed spans
+include unallocated time, so the cohort-wide share of host waiting or
+compiler work is still unknown.</p>
 <p><strong>Native dependency cache lookup.</strong> The Windows complement
 for <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44572600526/job/135731795383">PR #1520</a>
 restored a 2,458,357,241-byte fallback in 74s. Its requested suffix differed
@@ -2036,6 +2270,35 @@ raw toolchain pin and Cargo configuration in path order. The old nested
 checkout reversed that order. A source-layout change aligns the exact key;
 the observed fallback already contained the publisher's bytes, so this
 comparison establishes the mismatch without measuring a time saving.</p>
+<p><strong>Check the dependency cache before installing Rust.</strong>
+<a href="https://github.com/sudoprivacy/sudocode/pull/1587">PR #1587</a> lets
+the dependency publisher query the exact key with the image toolchain after
+verifying the official compiler commit, host, and components. Toolchain
+selection stays inside the lookup command processes. A prefix hit, miss, or
+failed probe runs the original numeric installation and publisher path.</p>
+<p>The <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45220406620">previous publisher run</a>
+and <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45367813218">first main run after merge</a>
+used the same runner image and exact archive key on each platform. The
+new run skipped installation on all three. Assigned runner time changed
+from 14s to 9s on Ubuntu, 20s to 15s on macOS, and 36s to 27s on Windows.
+The paired run totals were 70s and 51s, a 27.1% observed reduction for
+these publisher jobs. Hosted assignment and whole-PR clocks remain separate.</p>
+<p><strong>Protected acceptance publication clocks.</strong> In the fixed
+15 Rust-source merges, the median time from the final proof to the exact
+source's green status was 35s. Publisher creation to runner assignment
+took a median 3s and at most 5s. Checkout took a median 11s, and the final
+verification step took a median 12s up to the status write. These are
+separate medians. The five sources with signed parallel plans had a median
+27.694s from the final proof to publisher creation, while the ten ordinary
+receipts recorded 4s. Those intervals include different author and completion
+handoffs.</p>
+<p>The same sample has 68 publisher job records across 67 runs. Seven assigned
+jobs ran without posting a status and occupied 148s. Five skipped jobs had
+no runner assignment. An older publisher attempt reported an incomplete run
+during a concurrent native rerun. The protected publisher still writes the
+required <code>Local acceptance</code> status for the integrated queue head.
+See the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44466779212/job/135441297116">original incomplete publication</a>
+and the <a href="https://github.com/sudoprivacy/sudocode/actions/runs/45367655842">successful integrated-head publication</a>.</p>
 <p>The <a href="https://github.com/sudoprivacy/sudocode/pull/1528">shared daemon
 tool change</a> also triggered the normal <a href="https://github.com/sudoprivacy/sudocode/actions/runs/44581106560">VFS publisher</a>.
 The job found the exact key in 29 assigned runner seconds. It skipped compiler
@@ -2467,8 +2730,11 @@ reported outcomes, evidence hashes and the non-additive calculation rules.</p>
       Paired runs reuse the measured normal release and immutable image; browser-only
       runs retain the dev build. Paired drivers share the leased release Cargo cache,
       synchronized to the candidate and rebuilt normally; standalone drivers retain
-      the dev profile/cache. Both drivers still execute, and native harnesses refuse
-      an unexpected driver digest before execution.</td>
+      the dev profile/cache. When both profiles need to run, they share one
+      host reservation. Their Cargo commands can reuse checksum-pinned objects
+      on the existing Linux volume. The cache server exits before any measured
+      sample or browser journey. Both drivers still execute, and native
+      harnesses refuse an unexpected driver digest before execution.</td>
       <td>No; their drivers back no Feature inventory row.</td>
       <td><code>rendering</code> / <code>browser</code>, <code>e2e/terminal-resize/</code></td>
     </tr>

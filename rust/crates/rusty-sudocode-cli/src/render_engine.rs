@@ -10,7 +10,6 @@
 //! sends back as an `EngineCommand`) and when the turn is finished.
 
 use std::collections::HashSet;
-use std::io::Write;
 
 use engine_events::{
     EngineEvent, HookProgressEvent, PermissionRequest, QuestionPromptRequest, RequestId,
@@ -23,8 +22,9 @@ use crate::cli::format::{
 };
 use crate::render::styled_text::StyledText;
 use crate::render::{
-    layout_policy::LayoutPolicy, query_terminal_width, theme, MarkdownStreamState,
-    ResponseGlyphState, SpinnerRef, TerminalRenderer, TextRole, DIM, RESET,
+    layout_policy::{HistoryPart, LayoutPolicy},
+    query_terminal_width, theme, MarkdownStreamState, ResponseGlyphState, SpinnerRef,
+    TerminalRenderer, TextRole, DIM, RESET,
 };
 use crate::repl_ui::prose_preview::{
     PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
@@ -69,7 +69,7 @@ pub(crate) struct EngineEventRenderer {
     output_writer: Option<OutputSender>,
     tool_result_view: ToolResultView,
     /// Collect one event's history writes for a single history/preview handoff.
-    preview_output: Option<String>,
+    preview_output: Option<Vec<HistoryPart>>,
     /// Keep everything drawn, for [`replay`]: a saved transcript goes through
     /// this same renderer instead of a second one.
     capture: Option<String>,
@@ -119,7 +119,7 @@ impl EngineEventRenderer {
             spinner,
             output_writer,
             tool_result_view,
-            preview_output: is_preview_enabled.then(String::new),
+            preview_output: is_preview_enabled.then(Vec::new),
             capture: None,
             thinking_active: false,
             thinking_printed: false,
@@ -134,37 +134,37 @@ impl EngineEventRenderer {
         self.glyph.apply(text)
     }
 
-    fn write_out(&mut self, text: &str) {
+    fn write_history(&mut self, part: HistoryPart) {
         self.clear_activity();
-        if text.is_empty() {
-            return;
-        }
-        self.layout.observe(text);
         if let Some(capture) = self.capture.as_mut() {
-            capture.push_str(text);
+            self.layout.write(part, |text| capture.push_str(text));
         } else if let Some(output) = self.preview_output.as_mut() {
-            output.push_str(text);
-        } else if let Some(writer) = self.output_writer.as_mut() {
-            let _ = write!(writer, "{text}").and_then(|()| writer.flush());
+            output.push(part);
         } else {
-            let _ = crate::render::output::write_stdout(text);
+            let mut output = String::new();
+            self.layout.write(part, |text| output.push_str(text));
+            if !output.is_empty() {
+                let _ = crate::render::output::write_stdout(&output);
+            }
         }
     }
 
     #[inline]
-    fn start_block(&mut self, block: OutputBlock) {
-        if self.block != Some(block) || matches!(block, OutputBlock::Tool | OutputBlock::Notice) {
-            self.write_out(self.layout.before_block());
+    fn start_block(&mut self, block: OutputBlock) -> bool {
+        let starts_block =
+            self.block != Some(block) || matches!(block, OutputBlock::Tool | OutputBlock::Notice);
+        if starts_block {
             self.glyph.visible_col = 0;
         }
         self.block = Some(block);
+        starts_block
     }
 
     fn write_response(&mut self, text: &StyledText, block: OutputBlock) {
         if !text.text.is_empty() {
-            self.start_block(block);
-            let prefixed = self.apply_response(text);
-            self.write_out(&prefixed);
+            let starts_block = self.start_block(block);
+            let text = self.apply_response(text);
+            self.write_history(HistoryPart::Stream { text, starts_block });
         }
     }
 
@@ -174,8 +174,11 @@ impl EngineEventRenderer {
             // Asynchronous tool/hook/notice events can arrive inside a text
             // block. They do not end the provider's Markdown or reasoning.
             self.pause_spinner();
-            self.start_block(block);
-            self.write_out(&format!("{text}\n"));
+            let starts_block = self.start_block(block);
+            self.write_history(HistoryPart::Stream {
+                text: format!("{text}\n"),
+                starts_block,
+            });
         }
     }
 
@@ -222,7 +225,7 @@ impl EngineEventRenderer {
 
     fn finish_turn(&mut self) {
         self.finish_response();
-        self.write_out(self.layout.before_block());
+        self.write_history(HistoryPart::Finish);
     }
 
     /// Close buffered content at a provider content boundary or turn end.
@@ -348,7 +351,7 @@ impl EngineEventRenderer {
             // Close partial lines before a legacy spinner pause clears its
             // current row. The next block observes this gap instead of adding
             // a second one.
-            self.write_out(self.layout.before_block());
+            self.write_history(HistoryPart::Finish);
             self.glyph.visible_col = 0;
         }
     }
@@ -379,11 +382,7 @@ impl EngineEventRenderer {
         let is_new_block = self.block != Some(OutputBlock::Assistant);
         let position = PreviewPosition {
             response: self.glyph.position(is_new_block),
-            gap: if is_new_block {
-                self.layout.before_block()
-            } else {
-                ""
-            },
+            starts_block: is_new_block,
         };
         let preview = if self.markdown.pending_source().is_empty() {
             PreviewUpdate::Clear
@@ -408,7 +407,7 @@ impl EngineEventRenderer {
             }
         };
         if let Some(writer) = &self.output_writer {
-            writer.assistant_update(committed, preview);
+            writer.transcript_update(committed, preview);
         }
     }
 
@@ -524,7 +523,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::HookProgress(ev) => {
                 // Same pause/write/resume as every other event: writing through
-                // `write_out` keeps this on stdout, behind the same lock the
+                // `write_history` keeps this on stdout, behind the same lock the
                 // spinner uses, so a hook line can no longer be torn in half
                 // by a spinner frame.
                 self.write_block(&format_hook_progress(&ev), OutputBlock::Activity);
@@ -642,7 +641,7 @@ impl Drop for EngineEventRenderer {
         if self.preview_output.is_some() && !self.markdown.pending_source().is_empty() {
             self.end_thinking();
             self.flush_markdown();
-            self.write_out(self.layout.before_block());
+            self.write_history(HistoryPart::Finish);
             self.publish_preview(None);
         }
     }
@@ -716,7 +715,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
 /// ⠙ 🦀 Working... [claude-sonnet-4-6] (0.4s)           ] bash: echo hook-observed
 /// ```
 ///
-/// Every other event in this renderer already went through `write_out`, which
+/// Every other event in this renderer already goes through `write_history`, which
 /// writes to `io::stdout()` and so shares the spinner's lock; hook progress was
 /// the one exception, and the only one that tore. Returning a `String` lets the
 /// caller emit it the same way as the rest.
@@ -940,7 +939,7 @@ mod tests {
     }
 
     /// The formatter returns a line with no trailing newline: the caller adds
-    /// it when writing through `write_out`. Returning it pre-terminated would
+    /// it when writing through `write_history`. Returning it pre-terminated would
     /// double-space the terminal.
     #[test]
     fn the_formatted_line_carries_no_trailing_newline() {

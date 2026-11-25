@@ -274,7 +274,11 @@ outside `host_acceptance_lease` and `perform_check` bodies and the plain
 `profile_reservations(ordered, pending)` declaration. The required policy and
 every non-guard reachable execution fingerprint must still match. Companion
 edits are limited to dispatcher changes with those same non-guard fingerprints,
-the host-lease enforcement fixture and documentation. Changed command runners,
+the host-lease enforcement fixture and documentation. When a scheduling edit
+updates the selector, both commits must register their actual runner Git blobs
+and every other selector statement must match. An added resource layout must
+match the committed runner as computed by the comparison base's verifier.
+Changed command runners,
 imports, globals, runner declarations,
 product code, workflows, unknown inputs or execution fingerprints retain the
 original daemon scope. `acceptance_scheduling_scope` in the mandatory CI JSON
@@ -300,7 +304,10 @@ protected base; PRs use the target merge base, and push records name their prior
 branch commit. The required JSON identifies that source commit and its kind;
 final acceptance continues through the protected gate. An edited candidate
 algorithm cannot bless a changed command. Companion paths are limited to
-those metadata enforcement fixtures and protected pins. New declarations,
+the metadata enforcement fixtures, protected pins and the selector's exact
+runner blob registration. Both selector revisions must name their committed
+runner blob and all other selector statements and registrations must match.
+New declarations,
 function signatures, command effects, policy, signer, workflow, product and
 unknown mixed inputs keep the original daemon checks. The mandatory CI JSON
 prints `acceptance_metadata_scope` with its proof or conservative fallback.
@@ -308,6 +315,8 @@ Preflight and the complete native/Docker contract guard still run. This removes
 general daemon smoke coverage for qualifying verifier-body changes; selected
 journeys keep every case, assertion and deadline. Real private Git PR/push/queue
 controls retain the original 66 scheduling events and 28 bounded metadata events.
+Seven additional metadata events cover the verified registration and require
+full scope for the wrong blob, other selector changes or mixed product input.
 Three old-behavior mutation controls and six actual helper-launched children
 prove that eager module/default/decorator observers can change command
 environments, and that unknown layouts refuse before executing the callback.
@@ -481,10 +490,19 @@ command prints `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`, including the selected and
 pending checks. Any pending test, build or container profile holds
 `~/.nexus/local-acceptance/host.lock`; a later invocation prints the holder from
 `host-lease.json`, its active profile and the queue position. Adjacent fresh
-workspace and compile-only examples share one reservation, with a separate
-checkpoint for each. Other fresh profiles rejoin the FIFO, so existing waiters
-run before this invocation's next reservation. A running reservation keeps the
-lease through its execution and checkpoints. Waiters start in arrival order
+workspace and compile-only examples share one reservation. An immediately
+following terminal resize check joins that reservation when all three need
+fresh execution. The profiles keep their original order and separate signed
+checkpoints. An existing waiter starts after the group finishes or a profile
+fails. When native services
+and compiler context both need fresh execution and only rendering or browser
+checks intervene, compiler context runs immediately after native services
+within the same reservation. Adjacent rendering and browser checks also share
+one reservation when both need fresh execution. The browser can use the
+verified release built by that invocation's rendering check. Each profile saves
+its own signed checkpoint. Between reservations, fresh profiles rejoin the FIFO
+behind existing waiters. A running reservation keeps the lease through its
+execution and checkpoints. Waiters start in arrival order
 when it releases the host, including an abrupt exit; each holds a ticket under
 `~/.nexus/local-acceptance/queue/`, and a waiter that exits leaves the queue.
 `e2e/local-acceptance/run.py` fixture checks never take the real lease.
@@ -503,8 +521,12 @@ The native author guard and complementary native jobs run the same real-process
 inheritance controls, including Windows byte-range locks, before long compilation.
 `LOCAL_ACCEPTANCE_RESOURCE_SCOPE` reports the reservation boundary. `attempt.json`
 records the total wait across acquisitions as `host_lease_wait_seconds` and each
-reservation's wait under `host_lease_acquisitions`; shared acquisitions list both
-profiles and count their common wait once. The signed receipt format is unchanged.
+reservation's wait under `host_lease_acquisitions`; shared acquisitions list
+their profiles and count their common wait once. Signed receipts and checkpoints also
+record `timing.invocation_host_lease_wait_seconds` for that invocation's completed
+acquisitions. Resume preserves the earlier signed start separately. A run that
+only reuses prior results records zero newly acquired lease wait. Older signed
+receipts may omit this timing field.
 
 A fresh `guard-contract` also validates its protected input pins, selection
 digest, release recipe and native fixture inventory before joining the host queue. The required
@@ -518,6 +540,16 @@ its argv placeholders do not prepare tools or execute tests. A correctly pinned
 but malformed inventory still refuses while another private workflow holds the
 host, without a ticket or completed guard credit. A valid inventory still waits
 for that holder and executes its required profile.
+When the candidate is the frozen contract being qualified, static admission also
+checks the existing resource executor layout, policy fixture inputs and CI
+verifier layout against that commit. A registration mismatch stops before the
+Docker probe and reports the original refusal. The complete guard still runs
+its original positive and negative controls under the lease.
+After those static checks pass, a fresh guard checks the Docker Engine's server
+version before joining the FIFO, using the same bounded probe as execution.
+An unavailable Engine leaves signed preflight progress and the original client
+error. The guard verifies Docker again after acquiring the lease and publishes
+results only after running every required check.
 Execution stages and validates a separate copy from the protected Git ref again;
 the preliminary snapshot grants no acceptance or execution credit. Already
 verified results and policies without this optional early validator keep their
@@ -653,8 +685,14 @@ or invalid scenario stops the matrix. Drivers build in the binary-free
 The matrix is mandatory on the author's local Docker before push for CLI,
 engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
 Cargo/dependency metadata and unrelated crate source do not select it per PR.
-The browser functional smoke remains separate. Required plan output and signed
-evidence attribute both checks to the exact PR head. Foreground/background task
+The browser functional smoke remains separate. Rendering and browser prepare
+the same checksum-pinned compiler tool as the native guard on the existing
+leased Linux volume. They can reuse the verified tool and compiler objects
+across invocations and images. Each profile runs its
+original Cargo commands, and the per-profile cache server stops before any
+rendering sample or browser journey. Cargo still checks current sources,
+features and artifacts. Required plan output and signed evidence attribute
+both checks to the exact PR head. Foreground/background task
 and repeated-turn comparisons run in the `stress` profile on every release
 candidate, which also judges dependency-only changes; see
 [Release acceptance coverage](#release-acceptance-coverage). Their functional
@@ -710,12 +748,12 @@ Other candidates, policies and invocations use their own builds. Browser-only
 acceptance keeps its normal dev build. Native browser drivers and every existing
 interaction still run. When reused, GUI behaviour is checked on the production
 release configuration; that run no longer adds a separate dev-GUI variant.
-Paired browser drivers use the rendering driver's leased release Cargo cache.
-Before Cargo runs, its mutable checkout is synchronized to the exact candidate,
-replacing the earlier policy snapshot. Normal Cargo builds both browser drivers
-and rebuilds changed inputs; no earlier test result is reused. Standalone browser
-drivers keep their dev profile and separate cache. This changes only the paired
-test driver's optimization profile; the product, steps and assertions stay fixed.
+Paired browser drivers keep their existing release Cargo cache. The rendering
+driver uses a separate checkout and Cargo target on the same leased volume, so
+building either driver cannot invalidate the other driver's unchanged inputs.
+Each checkout is synchronized to its exact source. Cargo rebuilds changed
+inputs, and every driver and its required journeys still run. Standalone
+browser drivers keep their dev profile and separate cache.
 Both measurement harnesses verify the expected driver digest before execution.
 The GUI report records its expected and actual candidate digest, and the wrapper
 checks the candidate again after viewport interaction. Corrupt or mismatched
@@ -974,10 +1012,17 @@ On the author's machine, a fresh `native-workspace` and its immediately
 following fresh `native-examples` share one existing FIFO reservation. Their
 order, commands, separate signed results and original command fingerprints
 remain unchanged. Workspace success is checkpointed before examples begin;
-an example failure preserves it for verified resume. All other fresh profiles
-rejoin the FIFO, and reused profiles need no reservation. The mandatory
-`LOCAL_ACCEPTANCE_RESOURCE_SCOPE` output lists the actual reservation groups;
-acquisition timing lists both profiles and counts their common wait once.
+an example failure preserves it for verified resume. Native services and
+compiler context also share a reservation when both need fresh execution and
+no profile besides rendering or browser intervenes. Both Cargo commands remain
+required. If compiler context fails, the signed services checkpoint can still
+be restored. A fresh rendering check and its immediately following fresh
+browser check also share one reservation. A browser failure leaves the
+signed rendering checkpoint available for resume. A later invocation still
+requires its own browser execution and verifies any binary it uses. Reused
+profiles need no reservation. The mandatory `LOCAL_ACCEPTANCE_RESOURCE_SCOPE`
+output lists the actual reservation groups.
+Acquisition timing lists both profiles and counts their common wait once.
 This removes an additional queue admission, not the example build. Hosted
 complementary profiles and all native cases remain unchanged. Real private
 Git/SSH/process controls verify the shared acquisition, the existing waiter's
@@ -1233,8 +1278,10 @@ computed maps; no global cache changes later reads. Legacy whole-hash/bootstrap
 receipts retain their original verification path. Signatures, source/base,
 current required checks, equivalence rules and refusal conditions remain.
 Both fingerprint formats share one AST projection helper. It copies the module
-shell and the dispatcher that projection mutates; other nodes remain read-only.
-Each profile and later invocation keeps its own dispatch projection. Fingerprint
+shell and the dispatcher that projection mutates. Other statements remain
+read-only, so projections of the same source can reuse their semantic values
+and referenced names within one fingerprint calculation. Each profile and
+later invocation keeps its own dispatch projection. Fingerprint
 bytes and conservative reflection/import behavior remain unchanged, so this
 computation change requires no new equivalence rule or repeated product run.
 Provider tests require explicit local execution or manual provider dispatch;
@@ -1414,6 +1461,11 @@ raw UTF-8 event metadata with UTF-8 mode disabled and the POSIX C locale. The
 controls record the child process's actual default file encoding. The gate
 and publisher share one event-file decoder;
 PR text and workflow metadata do not depend on the runner's locale.
+The acceptance gate fetches the pull ref and two notes namespaces together
+when the pull request belongs to the workflow repository. One atomic fetch
+updates the refs before verification. If Git reports an optional namespace
+missing, the same per-ref fetches used for forks supply the available
+evidence. Signature, signer, source and execution-plan checks still run.
 In the queue, independent failure-only callers stop unfinished jobs in the same
 Rust CI run after Clippy, CLI daemon or cohost acceptance fails. Each caller
 waits only for its own failing dependency. The shared cancellation job has the
@@ -1504,6 +1556,14 @@ Protected metadata can advance while a plan is running. Its original SSH
 signature and contract hash must still authenticate an ancestor of current
 main, and the source contract must remain unchanged. The current responsibility
 plan, every selected command identity, native workflow and dispatcher must match.
+The comparison binds the extracted Git environment filter and its declared
+inputs from the original and current committed executors. Previously signed
+fingerprints retain their format, and legacy receipts use the same filter
+check. The exact inline-to-extracted filter transition retained six native
+journeys plus the SDK, release and preflight recipe approvals in protected
+policy. These approvals apply to the listed fingerprints. Changes to the
+filter, selected profiles or other execution inputs still require current
+evidence.
 The required output prints `LOCAL_ACCEPTANCE_PLAN_REUSED` when these conditions
 permit reuse. Changed commands/assertions, images, native dispatch/workflow,
 required profiles or revoked signers still reject the old plan. Real Git/SSH/HTTP
@@ -1683,6 +1743,11 @@ compiler name. A profile's cache session (tool, wrapper, server, statistics,
 priorities and tool commands) is recorded once, on its first cached command; the others
 name it by SHA-256. Busy disk-cache
 storage uses the original Cargo command immediately, without another wait.
+On Windows without a loaded SDK, the optional cache wrapper can fail to find
+the linker before Cargo starts. That exact diagnostic leaves the wrapper log
+and returns to the original Cargo executor, which can load the installed SDK.
+The profile still runs its full commands. Compiler errors from those commands
+still fail the profile.
 The early workspace-lint handoff keeps its existing exact command recipe.
 `compiler_objects_acceptance.py` runs actual Cargo, nextest, nested Cargo and PTY
 processes with independent outputs, changed features/compile-time environment,
@@ -1834,6 +1899,12 @@ missing key also warms optimized release dependencies. Tags retain their
 original release builds and acceptance. For a nested native complement, the
 cache layout mirrors the candidate's exact root toolchain file into the action's
 outer workspace. An existing mismatched file refuses before cache use.
+
+The dependency publisher can check the exact key before installing Rust when
+the GitHub-hosted image has the official pinned compiler and its required
+components. That lookup selects the image toolchain only in its subprocesses.
+A prefix hit, miss or failed probe keeps the ordinary numeric installation and
+publisher path. All compilation uses that original path.
 
 `rust-toolchain.toml` pins one exact Rust release with `clippy` and
 `rustfmt`. Local builds, every CI job and both local acceptance images

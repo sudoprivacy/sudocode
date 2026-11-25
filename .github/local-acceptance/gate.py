@@ -37,15 +37,28 @@ def pages(path, field=None):
     raise RuntimeError("GitHub pagination exceeded its bound")
 
 
-def fetch_head(pull):
+def fetch_head(pull, event_repository):
     repository = pull["head"]["repo"]["full_name"]
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise RuntimeError("Invalid head repository")
     head = pull["head"]["sha"]
     if not re.fullmatch(r"[a-f0-9]{40}", head):
         raise RuntimeError("Invalid head SHA")
-    acceptance.git("fetch", "--no-tags", "origin", f"refs/pull/{pull['number']}/head")
-    for note_ref in [acceptance.NOTE_REF, acceptance.PLAN_NOTE_REF]:
+    pull_ref = f"refs/pull/{pull['number']}/head"
+    note_refs = (acceptance.NOTE_REF, acceptance.PLAN_NOTE_REF)
+    if repository == event_repository:
+        specs = [f"+{note_ref}:{note_ref}" for note_ref in note_refs]
+        combined = acceptance.git("fetch", "--atomic", "--no-tags", "origin", pull_ref, *specs, check=False)
+        if combined.returncode == 0:
+            return head
+        error = combined.stderr.decode(errors="replace")
+        # A repository can lack either optional namespace. The atomic failure
+        # leaves all refs untouched for the original per-ref fetches below.
+        missing = {f"fatal: couldn't find remote ref {note_ref}" for note_ref in note_refs}
+        if missing.isdisjoint(line.strip() for line in error.splitlines()):
+            raise RuntimeError(error.strip())
+    acceptance.git("fetch", "--no-tags", "origin", pull_ref)
+    for note_ref in note_refs:
         fetched = acceptance.git("fetch", "--no-tags", f"https://github.com/{repository}.git",
                                  f"+{note_ref}:{note_ref}", check=False)
         if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
@@ -115,7 +128,7 @@ def main():
         pull = api(f"repos/{repository}/pulls/{event['pull_request']['number']}")
         if pull["head"]["sha"] != event["pull_request"]["head"]["sha"]:
             raise RuntimeError("PR advanced while verification was starting")
-        head = fetch_head(pull)
+        head = fetch_head(pull, repository)
         # The API/event base SHA can lag main even on a new ready event. The
         # checked-out protected commit owns both trust and the comparison base.
         execution_ref = acceptance.authorized_policy(head, policy_ref, policy_ref, api)
@@ -157,7 +170,7 @@ def main():
         if not pulls:
             raise RuntimeError("Cannot attribute this merge group to current PR heads")
         for pull in pulls:
-            head = fetch_head(pull)
+            head = fetch_head(pull, repository)
             authorized = acceptance.authorized_policy(head, group["base_sha"], policy_ref, api)
             receipt = acceptance.verify(head, group["base_sha"], authorized, signers_ref=policy_ref)
             statuses = pages(f"repos/{repository}/commits/{head}/statuses")

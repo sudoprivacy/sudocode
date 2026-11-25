@@ -67,6 +67,38 @@ native/ConPTY acceptance. Socket callbacks remain the default.
 
 ## Claude Code attachment
 
+Set it up with `scode a2a setup claude --issuer https://HOST:2126`, which runs
+the command below from the package scode carries. Run directly, from the SDK
+that should be installed, it is:
+
+```sh
+node /absolute/versioned/install/node_modules/@sudocode/acp/dist/server.cjs --setup-claude --issuer https://HOST:2126
+```
+
+`--issuer` is the node that issues agent names (the cluster founder). It is
+needed once per machine; later runs read it from the enrollment grant. The
+command finds the Nexus node record, `nexus-agent-enroll`, `scode` and `claude`
+by itself (`--node-data-dir`, `--nexus-enroll`, `--scode`, `--claude-command`
+and `--config-root` override). It creates the enrollment grant and operator
+record if they are absent, writes the bridge config, registers the user-scope
+`nexus_scode` entry through `claude mcp add-json`, merges the three hooks into
+Claude Code's `settings.json`, and reads each of them back. It issues no agent
+name and starts no session.
+
+It prints one JSON object: `ok`, `state`, `changed`, `verified`,
+`notVerified`, `instructions` (plain sentences, in the order to follow them)
+and `next` (exact commands). When an input is missing, `next` repeats the
+command with the flag to fill, and nothing has been written. Running the same
+command again is the check: it reports `already_installed` and changes nothing.
+Run from a newer SDK, it moves its own earlier install to that SDK and keeps
+the folder that holds each session's identity. An attachment made by hand or
+by other tooling is refused with the steps to remove it; the command never
+edits one. Everything it writes lives under the config root (default
+`~/.config/sudocode/acp/a2a`), with a `setup.jsonl` journal and a copy of
+`settings.json` as it was before the hooks were added.
+
+The rest of this section describes what the command installs.
+
 `--claude --config FILE` is a user-scope MCP entry that needs no launch flag.
 Claude Code starts one MCP server per session and names it in
 `CLAUDE_CODE_SESSION_ID`, which `--continue`/`--resume` keep, so an interactive
@@ -125,7 +157,7 @@ newest on stderr and exits 2, which hands it to Claude within the current turn
 or wakes an idle session. Each entry is the whole offer at its time, so the
 newest supersedes the others and stays within Claude Code's 10,000-character
 hook output cap. A change to any other path, a removal, or a change with
-no new entry exits 0. Register the entry with
+no new entry exits 0. `--setup-claude` registers the entry; by hand it is
 `claude mcp add -s user nexus_scode -- node /abs/server.cjs --claude --config FILE`.
 The operator's `scode` must support client-owned peer input version 3.
 
@@ -241,6 +273,24 @@ review and verify resolution in the actual existing terminal, including shell
 functions and cached paths. Rehashing cannot move an entry ahead of another
 directory in that terminal's PATH. A plain native command remains available by its original
 absolute path. Its incompatible CLI overrides still select native private mode.
+
+### One command (macOS and Linux)
+
+`scode a2a setup codex --issuer https://HOST:2126`, or directly
+`node dist/server.cjs --setup-codex --issuer https://HOST:2126`, does the whole
+attachment: the enrollment grant and operator record if they are absent, the
+runtime config (v3 mailbox, `node-namespace`, no pinned environment), Codex's
+background server, and the global MCP entry, each read back. It prints the
+same JSON result as `--setup-claude`. `--approve-tools` allows the bridge's
+four tools in Codex's `config.toml`; `--command-entry PATH` writes the
+launcher described above; `--port N` selects the owner's port. A move to a
+newer package keeps the port, the token and existing tool approvals (which
+`codex mcp add` would otherwise drop), and is refused while an owner is
+listening. Codex starts an MCP server without `CODEX_HOME`, so a home
+selected that way is stored in the registration (`--env CODEX_HOME=…`), and
+setup refuses to register unless `codex app-server daemon version` names the
+same server socket in the environment the bridge will get. An attachment it did not make is refused with the steps to remove
+it. The steps below remain the way to set up Windows or a pinned environment.
 
 ### One installation command for a prepared machine
 

@@ -57,8 +57,8 @@ MSVC_ENV = None
 RUNNER_CODE = sys._getframe().f_code
 
 
-def git(*args, root=None, data=None, check=True):
-    result = subprocess.run(["git", *args], cwd=root or ROOT, input=data,
+def git(*args, root=None, data=None, check=True, env=None):
+    result = subprocess.run(["git", *args], cwd=root or ROOT, input=data, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
@@ -67,6 +67,22 @@ def git(*args, root=None, data=None, check=True):
 
 def value(*args, root=None):
     return git(*args, root=root).stdout.decode().strip()
+
+
+# Git's repository selectors, mirroring `git rev-parse --local-env-vars`
+# without requiring Git in minimal execution containers. The native guard
+# injects the installed Git's full list, so an added selector requires an
+# explicit update. Git exports them to a hook for the checkout running it.
+GIT_LOCAL_ENV = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR"})
+
+
+def without_git_selectors(environment):
+    return {key: setting for key, setting in environment.items() if key not in GIT_LOCAL_ENV
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
 
 
 def canonical(obj):
@@ -109,15 +125,10 @@ def committed_blob_bytes(blobs):
     return documents
 
 
-def contract_hash(ref):
-    paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
-             ".github/workflows/local-acceptance-publish.yml"]
+def committed_files(ref, paths, *extra):
     # Resolve the complete tree once, then read by immutable object ID. Mutable
     # refs are never memoized and archive attributes cannot omit protected data.
-    # The periodic workflow did not exist in older authentic plans. Bind it
-    # when present without changing those original contract hashes.
-    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, ".github/local-acceptance",
-               ".github/workflows/local-acceptance-workspace.yml").stdout
+    rows = git("ls-tree", "-r", "-z", ref, "--", *paths, *extra).stdout
     blobs = {}
     for row in rows.split(b"\0"):
         if not row:
@@ -130,23 +141,82 @@ def contract_hash(ref):
     missing = sorted(set(paths) - blobs.keys())
     if missing:
         raise RuntimeError(f"Acceptance contract is missing committed files: {missing}")
-    return sha(canonical({path: sha(data) for path, data in sorted(committed_blob_bytes(blobs).items())}))
+    return committed_blob_bytes(blobs)
 
 
-def executor_source(ref):
-    source = tracked(ref, ".github/scripts/local_acceptance.py").decode("utf-8")
-    function = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+def contract_hash(ref):
+    paths = [POLICY, SIGNERS, ".github/scripts/local_acceptance.py", ".github/workflows/local-acceptance.yml",
+             ".github/workflows/local-acceptance-publish.yml"]
+    # The periodic workflow did not exist in older authentic plans. Bind it
+    # when present without changing those original contract hashes.
+    files = committed_files(ref, paths, ".github/local-acceptance", ".github/workflows/local-acceptance-workspace.yml")
+    return sha(canonical({path: sha(data) for path, data in sorted(files.items())}))
+
+
+def run_command_source(source, *, function=None):
+    if function is None:
+        function = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "run_command")
     return "\n".join(source.splitlines()[function.lineno - 1:function.end_lineno])
 
 
-def commands_hash(ref):
+def command_git_selector_inputs(module, function):
+    """Bind the extracted environment filter without rewriting existing signed hashes."""
+    names = {"without_git_selectors", "GIT_LOCAL_ENV", "frozenset"}
+    if not any(isinstance(node, ast.Name) and node.id == "without_git_selectors"
+               for node in ast.walk(function)):
+        return None
+    bindings = []
+    for statement in module.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if statement.name in names:
+                bindings.append(statement)
+        elif any((isinstance(node, ast.Name) and node.id in names)
+                 or (isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) in names)
+                 for node in ast.walk(statement)):
+            bindings.append(statement)
+    return sha(canonical(profile_ast_value(bindings)))
+
+
+def compatible_git_selector_inputs(before, current):
+    """Allow the reviewed extraction only; keep every later input change bound."""
+    if before is None:
+        return current[3] is None
+    if before[3] == current[3]:
+        return True
+    # Before #1516 the literal names and filter lived in run_command.
+    # This one-way bridge proves the filter shape only. Commands with
+    # different fingerprints still need exact per-profile approval.
+    return (before[3] is None
+            and before[0] == "6f987d75cd9e3472946c39861729d8b503905b9db3845027dd884395f0ebd51d"
+            and current[0] == "ab7ac34c8cbdf5f87025d92f345993c07334c4ae2c33deabdac187a7b1556323"
+            and current[3] == "3b5bed1200aa1b8b1b5d5064a647f1851bd5d1d4bb3c7143b32dc69739b8e7a5")
+
+
+def execution_inputs(ref, *, executor_identity=None):
+    checks = ".github/local-acceptance/checks.py"
+    image = ".github/local-acceptance/Dockerfile"
+    executor = ".github/scripts/local_acceptance.py"
+    paths = [checks, image] if executor_identity is not None else [checks, image, executor]
+    files = committed_files(ref, paths)
+    selector_inputs = None
+    if executor_identity is None:
+        source = files[executor].decode("utf-8")
+        module = ast.parse(source)
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+        executor_identity = run_command_source(source, function=function)
+        selector_inputs = command_git_selector_inputs(module, function)
+    return sha(executor_identity.encode()), files[checks], sha(files[image]), selector_inputs
+
+
+def commands_hash(ref, *, inputs=None):
     # Scheduling, publication and selection edits do not change a completed
     # command's evidence. Bind actual executors/images, then require the current
     # selected check set to be covered. New commands still require a real run.
-    paths = [".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"]
-    return sha(canonical({"executor": sha(executor_source(ref).encode()),
-                          **{p: sha(tracked(ref, p)) for p in paths}}))
+    executor, checks, image, _ = execution_inputs(ref) if inputs is None else inputs
+    return sha(canonical({"executor": executor, ".github/local-acceptance/checks.py": sha(checks),
+                          ".github/local-acceptance/Dockerfile": image}))
 
 
 def referenced_globals(table):
@@ -179,25 +249,50 @@ def profile_ast_value(value):
     raise RuntimeError(f"Unsupported acceptance AST value: {type(value).__name__}")
 
 
-def copy_profile_module(module):
-    """Copy the dispatcher we mutate; keep other read-only nodes shared."""
+def copy_profile_module(module, dispatcher):
+    """Share read-only statements while projecting a fresh dispatcher body."""
     projected = copy.copy(module)
-    projected.body = [copy.deepcopy(node) if isinstance(node, ast.FunctionDef) and node.name == "run"
-                      else node for node in module.body]
-    return projected
+    dispatch = copy.copy(dispatcher)
+    projected.body = [dispatch if node is dispatcher else node for node in module.body]
+    return projected, dispatch
 
 
-def profile_commands_hashes(ref, names):
+def profile_module_value(module, statements):
+    """Keep the existing JSON shape without serializing shared statements again."""
+    def statement_value(statement):
+        if statement not in statements:
+            statements[statement] = profile_ast_value(statement)
+        return statements[statement]
+
+    return {"node": type(module).__name__, "fields": {
+        name: ([statement_value(statement) for statement in field]
+               if name == "body" else profile_ast_value(field))
+        for name, field in ast.iter_fields(module)
+        if field is not None and not (isinstance(field, list) and not field)
+    }}
+
+
+def profile_dispatcher(module):
+    dispatcher = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    parameter = dispatcher.args.args[0].arg
+    # Reassigning the profile parameter can make dispatch branches overlap.
+    reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
+                     for node in ast.walk(dispatcher))
+    return dispatcher, parameter, reassigned
+
+
+def profile_commands_hashes(ref, names, *, inputs=None):
     """Bind each literal dispatch branch and all common code without importing it."""
-    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha(executor_source(ref).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    executor, checks, image, _ = execution_inputs(ref) if inputs is None else inputs
+    module = ast.parse(checks)
+    names = tuple(names)
+    if not names:
+        return {}
+    original_dispatcher, parameter, reassigned = profile_dispatcher(module)
+    statements = {}
     result = {}
     for name in names:
-        projected = copy_profile_module(module)
-        dispatcher = next(node for node in projected.body
-                          if isinstance(node, ast.FunctionDef) and node.name == "run")
-        parameter = dispatcher.args.args[0].arg
+        projected, dispatcher = copy_profile_module(module, original_dispatcher)
 
         def project(node):
             test = node.test if isinstance(node, ast.If) else None
@@ -209,25 +304,27 @@ def profile_commands_hashes(ref, names):
             tail = project(node.orelse[0]) if len(node.orelse) == 1 else node.orelse
             if test.comparators[0].value != name:
                 return tail
-            node.orelse = tail
-            return [node]
+            selected = copy.copy(node)
+            selected.orelse = tail
+            return [selected]
 
-        # If the dispatcher rewrites its profile parameter, its branches may
-        # cease to be disjoint. Keep the whole module in that conservative case.
-        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
-                         for node in ast.walk(dispatcher))
         if not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
         result[name] = sha(canonical({"version": 1, "executor": executor, "image": image,
-                                     "profile": profile_ast_value(projected)}))
+                                     "profile": profile_module_value(projected, statements)}))
     return result
 
 
-def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
+def reachable_profile_commands_hashes(ref, names, *, executor_identity=None, inputs=None):
     """Keep import effects and bind helpers reachable from each selected dispatch."""
-    module = ast.parse(tracked(ref, ".github/local-acceptance/checks.py"))
-    executor = sha((executor_source(ref) if executor_identity is None else executor_identity).encode())
-    image = sha(tracked(ref, ".github/local-acceptance/Dockerfile"))
+    executor, checks, image, _ = (execution_inputs(ref, executor_identity=executor_identity)
+                               if inputs is None else inputs)
+    module = ast.parse(checks)
+    names = tuple(names)
+    if not names:
+        return {}
+    original_dispatcher, parameter, reassigned = profile_dispatcher(module)
+    statements, references = {}, {}
     result = {}
     # Reflection can find a function without a static Name reference. Retain
     # the complete module rather than guessing which code it might execute.
@@ -237,10 +334,7 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
                         | {"__dict__", "__globals__", "modules", "f_globals", "f_locals", "_getframe", "get_objects"})
                     for node in ast.walk(module))
     for name in names:
-        projected = copy_profile_module(module)
-        dispatcher = next(node for node in projected.body
-                          if isinstance(node, ast.FunctionDef) and node.name == "run")
-        parameter = dispatcher.args.args[0].arg
+        projected, dispatcher = copy_profile_module(module, original_dispatcher)
 
         def project(node):
             test = node.test if isinstance(node, ast.If) else None
@@ -266,8 +360,6 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
                 matched = not matched
             return [child for item in (node.body if matched else node.orelse) for child in project(item)]
 
-        reassigned = any(isinstance(node, ast.Name) and node.id == parameter and isinstance(node.ctx, ast.Store)
-                         for node in ast.walk(dispatcher))
         if not reflected and not reassigned:
             dispatcher.body = [child for node in dispatcher.body for child in project(node)]
             functions = {node.name: node for node in projected.body if isinstance(node, ast.FunctionDef)}
@@ -282,19 +374,21 @@ def reachable_profile_commands_hashes(ref, names, *, executor_identity=None):
             pending = roots[:]
             retained = {node.name for node in roots if isinstance(node, ast.FunctionDef)}
             while pending:
-                references = {node.id for node in ast.walk(pending.pop())
-                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
-                for reference in references & functions.keys() - retained:
+                definition = pending.pop()
+                if definition not in references:
+                    references[definition] = {node.id for node in ast.walk(definition)
+                                              if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+                for reference in references[definition] & functions.keys() - retained:
                     retained.add(reference)
                     pending.append(functions[reference])
             projected.body = [node for node in projected.body
                               if not isinstance(node, ast.FunctionDef) or node.name in retained]
         result[name] = sha(canonical({"version": 2, "executor": executor, "image": image,
-                                     "profile": profile_ast_value(projected)}))
+                                     "profile": profile_module_value(projected, statements)}))
     return result
 
 
-def attested_commands_ref(receipt):
+def attested_commands_ref(receipt, read_inputs):
     """Find immutable source that matches the signed complete execution hash."""
     candidates = ([receipt["commands_ref"]] if "commands_ref" in receipt
                   else [receipt["head"], receipt["base"]])
@@ -302,7 +396,7 @@ def attested_commands_ref(receipt):
         if not isinstance(candidate, str) or not re.fullmatch(r"[a-f0-9]{40}", candidate):
             continue
         try:
-            if receipt.get("commands_sha256") == commands_hash(candidate):
+            if receipt.get("commands_sha256") == commands_hash(candidate, inputs=read_inputs(candidate)):
                 return candidate
         except (RuntimeError, subprocess.CalledProcessError, StopIteration):
             continue
@@ -489,7 +583,7 @@ except subprocess.TimeoutExpired:
         used = referenced_globals(symbols.lookup(name).get_namespace())
         pending.extend(used & definitions.keys() - consumers.keys())
     layout = sha(canonical({"mode": row[0], "context": profile_ast_value(contexts), "consumers": consumers}))
-    reviewed = "70b0ba75cdebf76162e16f9a8bfab48f479c597265f6161c1c2aa837e072a644"
+    reviewed = "83c7116f8d7e143dda12e23ef9458b1b98a7dbc3b30c7230f73ce8351af533c9"
     if layout != reviewed:
         print("LOCAL_ACCEPTANCE_RESOURCE_LAYOUT_REFUSED=" + canonical({
             "ref": ref, "reviewed_layout": reviewed, "observed_layout": layout,
@@ -518,6 +612,13 @@ except subprocess.TimeoutExpired:
                 declaration.value = ast.Constant(value="reviewed-resource-source-layouts")
     source_layout = sha(canonical(profile_ast_value(program)))
     reviewed_sources = {
+        "1120cdce34054d4ce0fd514677f12ca59ac70cf5897d7d4114c4858357243038",
+        "1c43d4e04b808880a8f1d5b001f44ae372578afe90eb185bee9201d9610c2522",
+        "b270e25b648c51f5305b8e720aab28aa5f3da6199727e4d7c44c579a80da7b27",
+        "9655f97ff9d100f00c534afca56a5fbbea2cca548323f0fd4c8ae8740f8a69c9",
+        "f2a0e6d04188540e13d970c3de9fe91d1c835bb01b2bf61226023d6e89d89043",
+        "451f0720da61bb64c724d44019faeb0b79d0e4047986ebccfc0b1da14efd206a",
+        "25b7f4ae7b0b9495d03828050b9b00821e7e7afd265280d666bae7864f4af082",
         "69e1e350a7a41034e1b73df10a4c80d00398fab33e2d79b908b0944509c49b2e",
         "b880640251c06c7bcc9ae05bf12f78ecfd7371af6c97abd47741c8bc00c693be",
         "df83d44536a720efc03d1c026136c079d62405129b945f87f899a1e6bd289585",
@@ -528,6 +629,11 @@ except subprocess.TimeoutExpired:
         "f9c4f0cd610f4f9f6c954360b0b6364fce4dc4f962dac42236b7cc833f64c71b",
         "74ba17d2949bd3d630a49da8b4948443b6ba469464554ef012300611d4dc6712",
         "fb7a7547e1b39fdf316e3f98af6c26fc6e2690e294a5b9b6ccba1f465b0a503a",
+        "01ea6891f69b892dae1389bbdd9fdce887038e7cb1cce302e4215614f6face0e",
+        "2ddedba1c6f5bdaee370752430cb40c802af8f10c2c552f76808380051dc2d91",
+        "968aed4934bc9a4c0db73fe4387a38886204d4fe9a74ad5ad511eaedb7c4b13a",
+        "6283722865444555127b62148aea36ae74b7e002d6cfe24540afd39fe61f2380",
+        "e9be3603ef2402aa7ed98b62b2ad7729418d4f8ebacacafc01401e1aa542d825",
     }
     if source_layout not in reviewed_sources:
         print("LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED=" + canonical({
@@ -671,21 +777,36 @@ def approved_equivalent_profiles(before, current, policy_ref, names, head):
 
 def compatible_profile_commands(receipt, policy_ref, required):
     recorded = receipt.get("profile_commands_sha256")
+    inputs = {}
+
+    def read_inputs(ref):
+        if ref not in inputs:
+            inputs[ref] = execution_inputs(ref)
+        return inputs[ref]
+
     try:
-        previous = attested_commands_ref(receipt)
+        if not re.fullmatch(r"[a-f0-9]{40}", policy_ref):
+            # The signed predecessor is an object ID. Read a named policy once
+            # so an alias of that same object shares its recipe calculation.
+            policy_ref = value("rev-parse", "--verify", "--end-of-options", policy_ref)
+        previous = attested_commands_ref(receipt, read_inputs)
         if "commands_ref" in receipt and previous is None:
             return False
+        if previous != policy_ref:
+            previous_inputs = read_inputs(previous) if previous is not None else None
+            if not compatible_git_selector_inputs(previous_inputs, read_inputs(policy_ref)):
+                return False
         if "profile_commands_sha256" not in receipt:
             if previous is None:
                 return False
-            recorded = profile_commands_hashes(previous, required)
+            recorded = profile_commands_hashes(previous, required, inputs=read_inputs(previous))
         if not isinstance(recorded, dict) or not all(isinstance(recorded.get(name), str) for name in required):
             return False
         # Modern receipts validate both maps against their original source;
         # only the reachable map is compared with the current policy.
         current = None
         if "reachable_profile_commands_sha256" not in receipt:
-            current = profile_commands_hashes(policy_ref, required)
+            current = profile_commands_hashes(policy_ref, required, inputs=read_inputs(policy_ref))
             if all(recorded.get(name) == current[name] for name in required):
                 return True
         # A changed recipe is recovered from attested source, never from a
@@ -693,18 +814,20 @@ def compatible_profile_commands(receipt, policy_ref, required):
         if previous is None:
             return False
         original = (current if previous == policy_ref and current is not None
-                    else profile_commands_hashes(previous, required))
+                    else profile_commands_hashes(previous, required, inputs=read_inputs(previous)))
         if not all(recorded.get(name) == original[name] for name in required):
             return False
-        original_reachable = reachable_profile_commands_hashes(previous, required)
+        original_reachable = reachable_profile_commands_hashes(previous, required, inputs=read_inputs(previous))
         if "reachable_profile_commands_sha256" in receipt:
             reachable = receipt["reachable_profile_commands_sha256"]
             if not isinstance(reachable, dict) or any(
                     reachable.get(name) != original_reachable[name] for name in required):
                 return False
         expected = (original_reachable if previous == policy_ref
-                    else reachable_profile_commands_hashes(policy_ref, required))
+                    else reachable_profile_commands_hashes(policy_ref, required, inputs=read_inputs(policy_ref)))
         differences = [name for name in required if original_reachable[name] != expected[name]]
+        if not differences:
+            return True
         resources = resource_equivalent_profiles(previous, policy_ref, differences)
         if resources:
             print("LOCAL_ACCEPTANCE_RESOURCE_EQUIVALENCE=" + canonical({
@@ -726,7 +849,7 @@ def compatible_profile_commands(receipt, policy_ref, required):
             print(f"Preserving exact-head {name} evidence: trusted policy approves this previous "
                   "execution recipe as equivalent. Required checks and signed source remain verified.", flush=True)
         return True
-    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError):
+    except (RuntimeError, subprocess.CalledProcessError, SyntaxError, StopIteration, IndexError, KeyError, ValueError):
         return False
 
 
@@ -1371,15 +1494,7 @@ def run_command(command, cwd, log, env=None):
     # SDK discovery also captures hook-exported repository selectors. Fixtures
     # run Git in their own repositories, so clear inherited selectors after
     # setup and before applying explicit per-command settings.
-    # Mirror Git's local environment contract without requiring Git in minimal
-    # execution containers. The native guard injects the installed Git's full
-    # --local-env-vars list, so an added selector requires an explicit update.
-    local_git = {"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-                 "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
-                 "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
-                 "GIT_SHALLOW_FILE", "GIT_COMMON_DIR"}
-    environment = {key: setting for key, setting in environment.items() if key not in local_git
-                   and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    environment = without_git_selectors(environment)
     # Explicit fixture values below still select NoColor, including when the
     # SDK environment is cached; the launcher's log preference stays outside.
     environment.pop("NO_COLOR", None)
@@ -1591,7 +1706,8 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if (not isinstance(planned_policy, str) or not re.fullmatch(r"[a-f0-9]{40}", planned_policy)
             or git("merge-base", "--is-ancestor", planned_policy, protected, check=False).returncode):
         raise RuntimeError("Execution plan policy is not an ancestor of the protected policy")
-    if (receipt.get("contract_sha256") != contract_hash(planned_policy)
+    planned_contract = contract_hash(planned_policy)
+    if (receipt.get("contract_sha256") != planned_contract
             or changed_contract_files(head, base)):
         raise RuntimeError("Execution plan requires its original protected rules and unchanged source contract; use contract-update for rule changes")
     workflow = ".github/workflows/local-acceptance.yml"
@@ -1611,19 +1727,23 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     if receipt["plan"] != plan:
         print("LOCAL_ACCEPTANCE_FULL_WORKSPACE_PLAN_REUSED: original signed full complementary plan retained; "
               "no checks executed or signatures changed by this responsibility proof.", flush=True)
-    if contract_hash(planned_policy) != contract_hash(protected):
-        before = reachable_profile_commands_hashes(planned_policy, names)
-        current = reachable_profile_commands_hashes(protected, names)
+    if planned_policy != protected and planned_contract != contract_hash(protected):
+        before_inputs = execution_inputs(planned_policy)
+        current_inputs = execution_inputs(protected)
+        before = reachable_profile_commands_hashes(planned_policy, names, inputs=before_inputs)
+        current = reachable_profile_commands_hashes(protected, names, inputs=current_inputs)
+        selector_inputs_changed = not compatible_git_selector_inputs(before_inputs, current_inputs)
         changed = [name for name in names if before[name] != current[name]]
         resources = resource_equivalent_profiles(planned_policy, protected, changed)
         approved = approved_equivalent_profiles(before, current, protected, changed, head)
         dispatcher_matches = compatible_native_dispatcher(planned_policy, protected)
-        if set(changed) - resources - approved.keys() or not dispatcher_matches:
+        if selector_inputs_changed or set(changed) - resources - approved.keys() or not dispatcher_matches:
             print("LOCAL_ACCEPTANCE_PLAN_RECOVERY=" + canonical({
                 "version": 1, "run_on": "original author native host", "head": head,
                 "original_policy": planned_policy, "current_policy": protected,
-                "changed_profiles": sorted(set(changed) - resources - approved.keys()),
+                "changed_profiles": sorted(names if selector_inputs_changed else set(changed) - resources - approved.keys()),
                 "native_dispatcher_changed": not dispatcher_matches,
+                "executor_git_selector_inputs_changed": selector_inputs_changed,
                 "same_head_start_pr_renewal_supported": False,
                 "next": "Preserve completed signed progress. Inspect actual changed profiles/dispatcher; "
                         "use the supported fresh-source plan route when required. Do not overwrite or re-sign the old plan.",
@@ -1653,19 +1773,29 @@ def verify_execution_plan(envelope, head, base, policy_ref, signers_ref=None):
     return receipt
 
 
-def read_execution_plan(head, base, policy_ref, signers_ref=None):
-    """Read only a separately signed scheduling note; never a completion proof."""
+def verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref=None):
+    """Return the selected receipt and the exact envelope that authenticated it."""
     errors, valid = [], []
-    for envelope in read_note(head, PLAN_NOTE_REF)["attestations"].values():
+    for envelope in attestations.values():
         try:
-            valid.append(verify_execution_plan(envelope, head, base, policy_ref, signers_ref))
+            receipt = verify_execution_plan(envelope, head, base, policy_ref, signers_ref)
         except (RuntimeError, ValueError, KeyError) as error:
             errors.append(str(error))
+        else:
+            valid.append((receipt, envelope))
     if valid:
-        if any(receipt["plan"] != valid[0]["plan"] for receipt in valid):
+        selected_receipt, selected_envelope = valid[0]
+        if any(receipt["plan"] != selected_receipt["plan"] for receipt, _envelope in valid[1:]):
             raise RuntimeError("Frozen source has conflicting signed author plans; keep the original author responsibility or publish a new head")
-        return valid[0]
+        return selected_receipt, selected_envelope
     raise RuntimeError("No current valid execution plan: " + ("; ".join(errors) or "signed plan missing"))
+
+
+def read_execution_plan(head, base, policy_ref, signers_ref=None):
+    """Read only a separately signed scheduling note; never a completion proof."""
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    receipt, _envelope = verify_execution_plan_attestations(attestations, head, base, policy_ref, signers_ref)
+    return receipt
 
 
 def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store=None, depth=0, trail=(),
@@ -1681,26 +1811,27 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         raise RuntimeError("Acceptance is for another commit or tree")
     if receipt.get("base") != value("merge-base", base, head):
         raise RuntimeError("Acceptance used a different PR base")
-    required = selected(load_policy(policy_ref), changed_paths(receipt["base"], head), base=receipt["base"], head=head)
+    policy = load_policy(policy_ref)
+    required = selected(policy, changed_paths(receipt["base"], head), base=receipt["base"], head=head)
     if not required:
         raise RuntimeError("Acceptance selected no actual checks; an empty contract cannot authorize a passing receipt")
     checks = receipt.get("checks", {})
-    if completed_only and (not checks or not set(checks).issubset(load_policy(policy_ref)["checks"])):
+    if completed_only and (not checks or not set(checks).issubset(policy["checks"])):
         raise RuntimeError("Checkpoint must contain nonempty known completed profiles from its protected plan")
     profiles = list(checks) if completed_only else required
-    if "profile_commands_sha256" in receipt or "reachable_profile_commands_sha256" in receipt:
+    if {"commands_sha256", "profile_commands_sha256", "reachable_profile_commands_sha256"} & receipt.keys():
         compatible = compatible_profile_commands(receipt, policy_ref, profiles)
     else:
-        compatible = receipt.get("commands_sha256") == commands_hash(policy_ref)
-        if not compatible and "commands_sha256" in receipt:
-            compatible = compatible_profile_commands(receipt, policy_ref, profiles)
-    if not compatible and "commands_sha256" not in receipt:
-        # Bootstrap receipts used the whole protected contract. Accept them
-        # only when that signed hash matches their actual protected base and
-        # the commands are byte-identical to today's executor/profile/image.
+        # Bootstrap receipts bind the original protected base, including the
+        # command environment helper. A match on the old command hash alone
+        # cannot preserve evidence after one of those inputs changes.
         try:
+            original_inputs = execution_inputs(receipt["base"])
+            current_inputs = execution_inputs(policy_ref)
             compatible = (receipt.get("contract_sha256") == contract_hash(receipt["base"])
-                          and commands_hash(receipt["base"]) == commands_hash(policy_ref))
+                          and commands_hash(receipt["base"], inputs=original_inputs)
+                          == commands_hash(policy_ref, inputs=current_inputs)
+                          and compatible_git_selector_inputs(original_inputs, current_inputs))
         except RuntimeError:
             compatible = False
     if not compatible:
@@ -1746,13 +1877,13 @@ def verify_envelope(envelope, head, base, policy_ref, signers_ref=None, *, store
         for command in commands:
             if command.get("exit_code") != 0 or not command.get("command") or len(command.get("log_sha256", "")) != 64:
                 raise RuntimeError(f"Incomplete/failed command in {name}")
-    plan = acceptance_plan(load_policy(policy_ref), required, receipt["host"])
-    legacy_names = [name for name in load_policy(policy_ref)["checks"] if name in checks]
-    original_plan = receipt.get("plan", acceptance_plan(load_policy(policy_ref), legacy_names, receipt["host"]))
+    plan = acceptance_plan(policy, required, receipt["host"])
+    legacy_names = [name for name in policy["checks"] if name in checks]
+    original_plan = receipt.get("plan", acceptance_plan(policy, legacy_names, receipt["host"]))
     declared = original_plan.get("local_checks") if isinstance(original_plan, dict) else None
-    ordered = [name for name in load_policy(policy_ref)["checks"] if isinstance(declared, list) and name in declared]
+    ordered = [name for name in policy["checks"] if isinstance(declared, list) and name in declared]
     if (declared != ordered or not set(checks).issubset(declared)
-            or not compatible_acceptance_plan(load_policy(policy_ref), declared, receipt["host"], original_plan)):
+            or not compatible_acceptance_plan(policy, declared, receipt["host"], original_plan)):
         raise RuntimeError("Signed acceptance plan does not match the protected policy/author host")
     if original_plan != plan:
         print("Reusing unchanged completed execution from an earlier scope; current protected checks "
@@ -2360,10 +2491,12 @@ def host_acceptance_lease(attempt, head):
     Concurrent suites contend for CPU, memory and temporary paths, which turns
     timing budgets into failures that cost whole profile reruns. The operating
     system releases the lock when its holder exits, including after a crash or
-    a memory kill. A complete workspace and its immediately following compile-only
-    examples can share one reservation. All other fresh work rejoins the FIFO,
-    so already waiting work runs before this invocation's next reservation. Processes
-    started under the holder inherit its acquisition claim. A nested check
+    a memory kill. Adjacent fresh workspace and compile-only examples can share a
+    reservation with an immediately following fresh resize check. Native services
+    and compiler context can share one, as can adjacent fresh
+    rendering and browser checks. Between reservations, fresh work rejoins
+    the FIFO behind existing waiters. Processes started under
+    the holder inherit its acquisition claim. A nested check
     validates the real locked record and process incarnation before proceeding.
     """
     directory = Path.home() / ".nexus/local-acceptance"
@@ -2396,7 +2529,8 @@ def host_acceptance_lease(attempt, head):
                 print(f"Waiting for this host's local acceptance lease ({lock}), held by {current}. "
                       f"Queue position {tickets.index(ticket) + 1} of {len(tickets)}; "
                       "this invocation rejoins the FIFO between fresh reservations; "
-                      "only a workspace and its following compile-only examples may share one.", flush=True)
+                      "eligible workspace/examples/resize, services/context and rendering/browser groups share a reservation.",
+                      flush=True)
                 reported = time.monotonic()
             time.sleep(1)
         waited = round(time.monotonic() - started, 3)
@@ -2449,8 +2583,10 @@ def host_acceptance_lease(attempt, head):
 
 def check(args):
     """Record failed and successful local attempts, including time before CI."""
-    started = getattr(args, "outer_monotonic_started_at", time.monotonic())
-    attempt = {"version": 1, "started_at": getattr(args, "outer_started_at", time.time()), "outcome": "running"}
+    invocation_started = time.monotonic()
+    started = getattr(args, "outer_monotonic_started_at", invocation_started)
+    attempt = {"version": 1, "started_at": getattr(args, "outer_started_at", time.time()), "outcome": "running",
+               "setup_seconds": {"before_check": round(invocation_started - started, 3)}}
     try:
         perform_check(args, attempt)
         attempt["outcome"] = "success"
@@ -2484,12 +2620,31 @@ def scheduled_checks(needed):
 
 
 def profile_reservations(ordered, pending):
-    """Share only adjacent fresh workspace/example work; keep order and logical receipts."""
+    """Group eligible fresh profiles while preserving their separate signed results."""
     ordered, pending = list(ordered), set(pending)
+    if {"native-services", "native-context"} <= pending:
+        # Both build the same native target. Keep the original commands and
+        # move only past the independent container benchmark profiles.
+        service = ordered.index("native-services")
+        context = ordered.index("native-context")
+        if service < context and set(ordered[service + 1:context]) <= {"rendering", "browser"}:
+            ordered.insert(service + 1, ordered.pop(context))
+
+    shared_pairs = {
+        ("native-workspace", "native-examples"),
+        ("native-services", "native-context"),
+        ("rendering", "browser"),
+    }
     reservations, index = [], 0
     while index < len(ordered):
+        workspace = ordered[index:index + 3]
+        if (workspace == ["native-workspace", "native-examples", "native-resize"]
+                and pending.issuperset(workspace)):
+            reservations.append(workspace)
+            index += len(workspace)
+            continue
         pair = ordered[index:index + 2]
-        if pair == ["native-workspace", "native-examples"] and set(pair) <= pending:
+        if tuple(pair) in shared_pairs and set(pair) <= pending:
             reservations.append(pair)
             index += 2
         else:
@@ -2565,6 +2720,15 @@ print("LOCAL_ACCEPTANCE_PLAN_PARSER="+json.dumps({"supported":supported}))
 
 
 def perform_check(args, attempt):
+    setup_seconds = attempt.setdefault("setup_seconds", {})
+    phase_started = time.monotonic()
+
+    def record_setup(name):
+        nonlocal phase_started
+        now = time.monotonic()
+        setup_seconds[name] = round(now - phase_started, 3)
+        phase_started = now
+
     head = value("rev-parse", args.head or "HEAD")
     clean(head)
     policy_ref = value("rev-parse", args.policy_ref)
@@ -2583,17 +2747,20 @@ def perform_check(args, attempt):
         raise RuntimeError("Acceptance selected no actual checks; keep at least one real command before contract-update")
     plan = acceptance_plan(load_policy(policy_ref), needed, host())
     execution_plan = getattr(args, "execution_plan", None)
-    if execution_plan is None and read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, base_ref, policy_ref, signers_ref)
-        execution_plan = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                              if json.loads(base64.b64decode(item["payload"])) == prior)
+    launch = None
     if execution_plan is not None:
         launch = verify_execution_plan(execution_plan, head, base_ref, policy_ref, signers_ref)
+    else:
+        attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+        if attestations:
+            launch, execution_plan = verify_execution_plan_attestations(attestations, head, base_ref, policy_ref, signers_ref)
+    if launch is not None:
         if launch["host"] != host():
             raise RuntimeError("Use the original author host for this frozen execution plan")
         plan = launch["plan"]
     report_plan(plan, current_environment=True)
     preflight_plan_compatibility(plan, needed, host(), policy_ref, signers_ref)
+    record_setup("source_and_plan")
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
     registry = json.loads(tracked(policy_ref, SIGNERS))["signers"]
@@ -2623,6 +2790,7 @@ def perform_check(args, attempt):
         reusable, resumed, groups, store = resume_checks(previous, head, base_ref, policy_ref, output, needed, signers_ref)
     else:
         reusable, resumed, groups, store = resume_local_outputs(head, base, base_ref, policy_ref, output, needed, signers_ref)
+    record_setup("output_and_resume")
     # Earlier heads of this branch lend profiles that later changes do not select.
     carried, new_groups, store = carry_checks(head, base, base_ref, policy_ref, output,
                                               [name for name in needed if name not in reusable], signers_ref, store)
@@ -2644,13 +2812,14 @@ def perform_check(args, attempt):
               "prior_timing_available": known_start}
     attempt["first_recorded_started_at"] = timing["first_recorded_started_at"]
     results = {}
+    inputs = execution_inputs(policy_ref)
     receipt = {"version": 1, "repository": load_policy(policy_ref)["repository"],
                "head": head, "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base,
                "contract_sha256": contract_hash(policy_ref), "host": host(),
-               "commands_sha256": commands_hash(policy_ref),
+               "commands_sha256": commands_hash(policy_ref, inputs=inputs),
                "commands_ref": value("rev-parse", policy_ref),
-               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed),
-               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed),
+               "profile_commands_sha256": profile_commands_hashes(policy_ref, needed, inputs=inputs),
+               "reachable_profile_commands_sha256": reachable_profile_commands_hashes(policy_ref, needed, inputs=inputs),
                "finished_at": int(time.time()), "checks": results, "plan": plan, "timing": timing}
     if execution_plan is not None:
         receipt["execution_plan"] = execution_plan
@@ -2669,6 +2838,14 @@ def perform_check(args, attempt):
             receipt["version"] = 1
         return referenced_store(current, store)
 
+    def record_check_time():
+        timing["checks_finished_at"] = time.time()
+        timing["invocation_setup_seconds"] = dict(setup_seconds)
+        # Count only completed acquisitions made by this invocation. A resumed
+        # receipt can retain an earlier start without inheriting its wait time.
+        timing["invocation_host_lease_wait_seconds"] = attempt["host_lease_wait_seconds"]
+        timing["invocation_host_lease_acquisitions"] = list(attempt["host_lease_acquisitions"])
+
     def perform_profile(name):
         if name in reusable:
             print(f"Reusing signed {name} for {head[:12]}; original logs: {resumed['directory']}", flush=True)
@@ -2680,14 +2857,18 @@ def perform_check(args, attempt):
         else:
             print(f"Running {name} on {host()['system']}; logs: {output}", flush=True)
             results[name] = module.run(name, ROOT, output / name, base, run_command)
-        timing["checks_finished_at"] = time.time()
+        if name == "preflight":
+            record_setup("metadata_preflight")
+        record_check_time()
         save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref, sign_carried())
         print(f"Saved completed profiles ({len(results)}/{len(needed)}); unfinished profiles remain required. "
               f"If this process exits, resume with: {resume_command}", flush=True)
 
     serialized = scheduled_checks(name for name in needed if name != "preflight")
-    pending = [name for name in serialized if name not in reusable and name not in carried]
-    reservations = profile_reservations(serialized, pending)
+    fresh_profiles = set(serialized) - reusable.keys() - carried.keys()
+    reservations = profile_reservations(serialized, fresh_profiles)
+    serialized = [name for members in reservations for name in members]
+    pending = [name for name in serialized if name in fresh_profiles]
     prepare_lint = getattr(module, "prepare_native_workspace_lint", None)
     lint_pending = bool(prepare_lint and "guard-contract" in pending and "native-workspace" in pending
                         and serialized.index("guard-contract") < serialized.index("native-workspace"))
@@ -2698,15 +2879,18 @@ def perform_check(args, attempt):
         "serialized_checks": serialized,
         "pending_serialized_checks": pending,
         "workspace_lint_before_guard": lint_pending,
-        "reservation": "adjacent_fresh_workspace_and_compile_only_examples_share_one;_others_requeue",
+        "reservation": "fresh_workspace_examples_with_optional_resize_services_context_and_rendering_browser_share_one_each;_others_requeue",
         "pending_reservations": [members for members in reservations if any(name in pending for name in members)],
     }).decode(), flush=True)
+    record_setup("carry_and_receipt")
     try:
         if "preflight" in needed:
             perform_profile("preflight")
+            record_setup("preflight_checkpoint")
         validate = getattr(module, "validate_before_host_lease", None)
         if validate and pending:
             validate(pending, ROOT, output)
+            record_setup("host_prerequisites")
         prepared = False
         if lint_pending:
             attempt["active_profile"] = "native-workspace-lint-preparation"
@@ -2738,7 +2922,7 @@ def perform_check(args, attempt):
         attempt.pop("active_profile", None)
         clean(head)
     except BaseException:
-        timing["checks_finished_at"] = time.time()
+        record_check_time()
         if results:
             try:
                 save_completed_profiles(receipt, output, identity, key, head, base_ref, policy_ref, signers_ref,
@@ -2748,7 +2932,7 @@ def perform_check(args, attempt):
             except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
                 print(f"Could not save completed profiles: {error}; original failure remains.", file=sys.stderr, flush=True)
         raise
-    timing["checks_finished_at"] = time.time()
+    record_check_time()
     receipt["finished_at"] = int(time.time())
     referenced = sign_carried()
     envelope = sign_receipt(receipt, output, identity, key)
@@ -2857,7 +3041,9 @@ def deferred_state(branch):
     """This clone's per-branch state for deferred checks, outside every checkout.
     The name is short: Windows linkers refuse paths over 260 characters, and the
     branch worktree under it builds the whole workspace."""
-    common = Path(value("rev-parse", "--git-common-dir")).resolve()
+    # Git may name the common directory relative to the checkout, which is not
+    # always this process's working directory.
+    common = (ROOT / value("rev-parse", "--git-common-dir")).resolve()
     return Path.home() / ".nexus/local-acceptance/deferred" / sha(f"{common}\0{branch}".encode())[:12]
 
 
@@ -2913,12 +3099,17 @@ def defer_check(head, remote, pull, trusted):
         print(f"LOCAL_ACCEPTANCE_DEFERRED: the check for {head[:12]} is already running; "
               f"see {state / 'deferred.json'}", flush=True)
         return
+    # Git runs pre-push with selectors for the pushing checkout: from a linked
+    # worktree, GIT_DIR names it. The acceptance worktree and its check find
+    # their own repository, or they would check out into the author's HEAD and
+    # index and judge cleanliness against them.
+    own = without_git_selectors(os.environ)
     worktree = state / "w"
     if (worktree / ".git").exists():
-        git("checkout", "--detach", "--force", head, root=worktree)
-        git("clean", "-ffd", root=worktree)
+        git("checkout", "--detach", "--force", head, root=worktree, env=own)
+        git("clean", "-ffd", root=worktree, env=own)
     else:
-        git("worktree", "add", "--detach", str(worktree), head)
+        git("worktree", "add", "--detach", str(worktree), head, env=own)
     command = [sys.executable, str(Path(__file__).resolve()), "check", "--head", head, "--base", "origin/main",
                "--policy-ref", "origin/main", "--publish", "--remote", remote,
                "--output", str(output), "--dispatch-publish", str(pull["number"])]
@@ -2929,10 +3120,10 @@ def defer_check(head, remote, pull, trusted):
         try:
             # Outlive a terminal or agent job that kills its tree on exit.
             breakaway = {"creationflags": detached["creationflags"] | 0x01000000} if os.name == "nt" else detached
-            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+            process = subprocess.Popen(command, cwd=worktree, env=own, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, **breakaway)
         except OSError:
-            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.DEVNULL, stdout=stream,
+            process = subprocess.Popen(command, cwd=worktree, env=own, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, **detached)
     import psutil
 
@@ -3251,19 +3442,19 @@ def plan_pre_push(args):
 def publish_plan(head, trusted, remote, output):
     """Sign and publish this head's execution plan, or reuse the one already
     published from this host. The plan schedules native CI; it proves no test."""
-    repository = load_policy(trusted)["repository"]
+    policy = load_policy(trusted)
+    repository = policy["repository"]
     contract_remote(remote, repository)
     base = value("merge-base", trusted, head)
-    policy = load_policy(trusted)
     names = selected(policy, changed_paths(base, head), base=base, head=head)
     plan = acceptance_plan(policy, names, host())
     for note_ref in [NOTE_REF, PLAN_NOTE_REF]:
         fetched = git("fetch", "--no-tags", remote, f"+{note_ref}:{note_ref}", check=False)
         if fetched.returncode and "couldn't find remote ref" not in fetched.stderr.decode(errors="replace"):
             raise RuntimeError(fetched.stderr.decode(errors="replace"))
-    prior = None
-    if read_note(head, PLAN_NOTE_REF)["attestations"]:
-        prior = read_execution_plan(head, trusted, trusted)
+    attestations = read_note(head, PLAN_NOTE_REF)["attestations"]
+    if attestations:
+        prior, envelope = verify_execution_plan_attestations(attestations, head, trusted, trusted)
         if prior["host"] != host():
             raise RuntimeError("Use the original author host for this frozen plan, or publish a new source head")
         plan = prior["plan"]
@@ -3271,16 +3462,12 @@ def publish_plan(head, trusted, remote, output):
         raise RuntimeError("No complementary native hosts are selected; use normal git push for this source")
     identity = value("config", "localAcceptance.signer")
     key = Path(value("config", "localAcceptance.key")).expanduser()
-    receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
-               "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
-               "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
-    if prior is None:
+    if not attestations:
+        receipt = {"version": 1, "kind": "execution-plan", "repository": repository, "head": head,
+                   "tree": value("rev-parse", f"{head}^{{tree}}"), "base": base, "policy": trusted,
+                   "contract_sha256": contract_hash(trusted), "host": host(), "plan": plan, "checks": {}}
         envelope = sign_receipt(receipt, output / "execution-plan", identity, key, namespace=NAMESPACE + "-plan")
-    else:
-        envelope = next(item for item in read_note(head, PLAN_NOTE_REF)["attestations"].values()
-                        if json.loads(base64.b64decode(item["payload"])) == prior)
-    verify_execution_plan(envelope, head, trusted, trusted)
-    if prior is None:
+        verify_execution_plan(envelope, head, trusted, trusted)
         publish(head, envelope, remote, note_ref=PLAN_NOTE_REF)
     git("fetch", "--no-tags", remote, f"+{PLAN_NOTE_REF}:{PLAN_NOTE_REF}")
     return plan, envelope

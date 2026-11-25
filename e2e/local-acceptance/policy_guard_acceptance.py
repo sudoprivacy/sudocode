@@ -211,7 +211,7 @@ def main():
         if relative == ".github/local-acceptance/compiler_cache.py":
             expected_affected.update({
                 "native-workspace", "native-examples", "native-resize", "native-release",
-                "native-context", "native-services", "native-cohost",
+                "native-context", "native-services", "native-cohost", "rendering", "browser",
             })
         assert affected == expected_affected, (relative, affected)
         if relative == ".github/local-acceptance/native_guard.py":

@@ -3,9 +3,11 @@
 
 import ast
 import builtins
+from contextlib import redirect_stdout
 import fnmatch
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -27,6 +29,7 @@ def git(*args):
 
 # Unknown import/declaration/consumer layouts retain the generic daemon jobs.
 REVIEWED_VERIFIER_LAYOUTS = {
+    "0472be55c5cfa53f9269140a6909f6baa7a6f5e3f9af135c9cb4463167297cc8",
     "af64ac6f658704650841120be08d66a9c88a6f36bc804bf8c7ceeb0dbaeb399e",
     "08cc01e8f8fd0d9195d953204c9e152bd8146d6d444374deafa72816660dc766",
     "fca56dddf2f8f74df039a1008f5a26c1a1cca118b09fa650dae642b1705b6e45",
@@ -35,6 +38,11 @@ REVIEWED_VERIFIER_LAYOUTS = {
     "ee11ddac8a14ea9a0d79355589c50fff2bac9f76f0c3dadce1ead90d4292000f",
     "e34b53b967976f01755ce30d77584a5e8465d73075c7e0f97de15eac5279f8f4",
     "72f50d88ff07c17f53a740a571dede377dc52f03139f298dc11d72e17ef39c81",
+    "61fd35df0aa09ff0bfa4d24f2b38bd367efba0258b48d5c1ce2f01352e6ef2a5",
+    "fe8add5fb52c5cd24c472fae3d64195b14fd2484a24908c3dbfd31d962713220",
+    "0c9d04fe226d3537743afbf9eb11ca1fa731ddf53b130dd4bcc81e449d1103b4",
+    "c406c993a86ccf4e9e84b37733836593c12089d0e89584c3d33c18aaff294cee",
+    "153985d8725e35ae5abb9b09fe776671d7f337f8bb6a265337bc4810cd3e3232",
 }
 
 
@@ -60,7 +68,7 @@ def verifier_layout_digest(source, mode, consumers):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def unchanged_profile_execution(base, head):
+def unchanged_profile_execution(base, head, *, resource_registration=None):
     """Use comparison-base code; the merge queue supplies its protected base."""
     previous = json.loads(git("show", f"{base}:{POLICY}"))
     current = json.loads(git("show", f"{head}:{POLICY}"))
@@ -76,6 +84,8 @@ def unchanged_profile_execution(base, head):
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         helper.ROOT = Path.cwd()
+        if resource_registration is not None:
+            verify_scheduling_resource_registration(helper, head, resource_registration)
         before = helper.reachable_profile_commands_hashes(base, names)
         after = helper.reachable_profile_commands_hashes(head, names)
     changed = [name for name in names if before[name] != after[name]]
@@ -87,7 +97,8 @@ def unchanged_profile_execution(base, head):
 def metadata_only_inputs(paths, base, head, details):
     """Omit generic daemon smoke only for bounded verifier-body edits."""
     runner = ".github/scripts/local_acceptance.py"
-    allowed = {runner, ".github/local-acceptance/checks.py",
+    selector = ".github/scripts/ci_input_scope.py"
+    allowed = {runner, selector, ".github/local-acceptance/checks.py",
                "e2e/local-acceptance/profile_compat_acceptance.py",
                "e2e/local-acceptance/parallel_acceptance.py",
                "e2e/local-acceptance/resource_scheduling_acceptance.py"}
@@ -162,6 +173,10 @@ def metadata_only_inputs(paths, base, head, details):
         details.update(reviewed_layouts=sorted(REVIEWED_VERIFIER_LAYOUTS), observed_layout=current[3])
         if current[3] not in REVIEWED_VERIFIER_LAYOUTS:
             raise ValueError("Runner imports, declarations or consumers are outside the reviewed layout; full daemon checks continue")
+        if selector in paths:
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
+                raise ValueError("Selector changed outside the exact runner blob registration")
+            details["selector_registration"] = "matches_committed_runner"
         names = unchanged_profile_execution(base, head)
         details.update(decision="unchanged_queue_executors", verifier_functions=sorted(metadata),
                        consumer_functions=current[2], profiles=names,
@@ -174,15 +189,66 @@ def metadata_only_inputs(paths, base, head, details):
         return False
 
 
+def verify_scheduling_resource_registration(protected, head, registration):
+    """Read the exact new resource layout from the protected verifier."""
+    output = io.StringIO()
+    diagnostic = "LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED="
+    with redirect_stdout(output):
+        try:
+            protected.resource_executor_identity(head)
+        except ValueError as error:
+            if str(error) != "Unreviewed complete executor program; full current checks remain required":
+                raise
+        else:
+            if registration:
+                raise ValueError("An already reviewed executor requires no new resource registration")
+            return
+    rows = output.getvalue().splitlines()
+    if len(rows) != 1 or not rows[0].startswith(diagnostic):
+        raise ValueError("Unknown protected resource registration diagnostic")
+    refusal = json.loads(rows[0][len(diagnostic):])
+    if refusal.get("ref") != head or (refusal.get("observed_source_layout"),) != registration:
+        raise ValueError("The added resource registration does not match the committed executor")
+
+
+def selector_registration_identity(ref, selector, runner):
+    """Permit the exact runner blob registration and compare all other selector code."""
+    row = git("ls-tree", ref, "--", selector).split("\t", 1)[0].split()
+    if len(row) != 3 or row[0] not in {"100644", "100755"} or row[1] != "blob":
+        raise ValueError("Runner registration requires a regular committed selector")
+    tree = ast.parse(git("show", f"{ref}:{selector}"))
+    registrations = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "POLICY_FIXTURE_INPUTS"
+                for target in node.targets)
+    ]
+    if len(registrations) != 1 or not isinstance(registrations[0].value, ast.Dict):
+        raise ValueError("Unknown policy fixture registration declaration")
+    registry = registrations[0].value
+    indices = [index for index, key in enumerate(registry.keys)
+               if isinstance(key, ast.Constant) and key.value == runner]
+    if len(indices) != 1:
+        raise ValueError("Expected one runner input in the policy fixture registration")
+    index = indices[0]
+    runner_row = git("ls-tree", ref, "--", runner).split("\t", 1)[0].split()
+    if ast.literal_eval(registry.values[index]) != runner_row:
+        raise ValueError("Policy fixture registration does not match the committed runner")
+    registry.values[index] = ast.Constant(value=None)
+    return row[0], ast.dump(tree, include_attributes=False)
+
+
 def scheduling_only_inputs(paths, base, head, details):
     """Keep unchanged queue executors out of author-scheduling-only acceptance."""
     runner = ".github/scripts/local_acceptance.py"
-    allowed = {runner, ".github/local-acceptance/checks.py",
+    selector = ".github/scripts/ci_input_scope.py"
+    allowed = {runner, selector, ".github/local-acceptance/checks.py",
                "e2e/local-acceptance/host_lease_acceptance.py"}
     if runner not in paths or not set(paths) <= allowed:
         details.update(decision="not_applicable")
         return False
     functions = {"host_acceptance_lease", "perform_check"}
+    registered = selector in paths
 
     def identity(ref):
         row = git("ls-tree", ref, "--", runner)
@@ -191,7 +257,22 @@ def scheduling_only_inputs(paths, base, head, details):
             raise ValueError("Scheduling proof requires a regular committed executor")
         tree = ast.parse(git("show", f"{ref}:{runner}"))
         projected, seen = [], set()
+        reviewed = None
         for node in tree.body:
+            if registered and isinstance(node, ast.FunctionDef) and node.name == "resource_executor_identity":
+                declarations = [
+                    item for item in node.body if isinstance(item, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "reviewed_sources"
+                            for target in item.targets)
+                ]
+                if reviewed is not None or len(declarations) != 1:
+                    raise ValueError("Expected one reviewed resource registration")
+                declaration = declarations[0]
+                reviewed = ast.literal_eval(declaration.value)
+                if not isinstance(reviewed, set) or not reviewed or any(
+                        not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in reviewed):
+                    raise ValueError("Unknown reviewed resource registration")
+                declaration.value = ast.Constant(value=None)
             if isinstance(node, ast.FunctionDef) and node.name == "profile_reservations":
                 args = node.args
                 if (node.name in seen or node.decorator_list or node.returns
@@ -227,12 +308,24 @@ def scheduling_only_inputs(paths, base, head, details):
                     if (not isinstance(top, ast.FunctionDef) or top.name != "start_pr"
                             or ast.dump(node, include_attributes=False) != refresh):
                         raise ValueError("Unknown dynamic executor namespace")
-        return mode, ast.dump(tree, include_attributes=False)
+        return (mode, ast.dump(tree, include_attributes=False)), reviewed
 
     try:
-        if identity(base) != identity(head):
+        before, previous_reviews = identity(base)
+        after, current_reviews = identity(head)
+        if before != after:
             raise ValueError("Code outside author scheduling or its declaration changed")
-        names = unchanged_profile_execution(base, head)
+        registration = None
+        if registered:
+            if selector_registration_identity(base, selector, runner) != selector_registration_identity(head, selector, runner):
+                raise ValueError("Code outside the runner input registration changed in the selector")
+            if previous_reviews is None or current_reviews is None or previous_reviews - current_reviews:
+                raise ValueError("The committed resource registration removed an existing reviewed layout")
+            added = current_reviews - previous_reviews
+            if len(added) > 1:
+                raise ValueError("Scheduling may register only its own new resource layout")
+            registration = tuple(added)
+        names = unchanged_profile_execution(base, head, resource_registration=registration)
         details.update(decision="unchanged_queue_executors", profiles=names,
                        author_scheduling_functions=sorted(functions | {"profile_reservations"}),
                        contract_guard_required=True)
@@ -469,7 +562,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/scripts/local_acceptance.py": [
         "100644",
         "blob",
-        "5603a33d2e0bace9e742dbb87cff9253114579d3"
+        "c1be1dcb22bf365609e4b67d68f0e7ef5fb96e1c"
     ],
     ".github/scripts/nexus_pin_workflow_e2e.py": [
         "100644",
@@ -479,7 +572,7 @@ POLICY_FIXTURE_INPUTS = {
     ".github/workflows/rust-ci.yml": [
         "100644",
         "blob",
-        "0005e1e46f890ed4b2656ad9827db80fea27f851"
+        "d9d074e3bd8f422d8ec01c8a0a0c141ede1718cf"
     ],
     ".github/workflows/model-compat.yml": [
         "100644",
@@ -506,10 +599,20 @@ POLICY_FIXTURE_INPUTS = {
         "blob",
         "973592bd8bdc233854295869e87dc24ae00fd6d7"
     ],
+    ".github/actions/rust-toolchain/preinstalled-cache-command.mjs": [
+        "100644",
+        "blob",
+        "9374e1cb636173ca9dc265b23747f044835b5ca3"
+    ],
+    ".github/actions/rust-toolchain/preinstalled-cache.py": [
+        "100644",
+        "blob",
+        "185777a1aa3939e92202403dca4065ad56386f4e"
+    ],
     ".github/workflows/ci-dependency-cache.yml": [
         "100644",
         "blob",
-        "c774bfc820c05df59d3c161dd6c252ff4829e551"
+        "f49ca6dab500ebe0d8f7a34f9dd44aa4ec6200ff"
     ],
     ".gitignore": [
         "100644",
@@ -522,6 +625,39 @@ POLICY_FIXTURE_INPUTS = {
         "ec1ffa81eddd7e5b06813a1e017cdb89eb2c9fab"
     ]
 }
+
+
+def reviewed_policy_inputs(ref, extra=()):
+    """Match the committed inputs of the ordinary-source policy fixture."""
+    if not POLICY_FIXTURE_INPUTS:
+        raise ValueError("No reviewed policy-fixture input registry")
+    rows = subprocess.check_output(["git", "ls-tree", "-r", "-z", ref, "--", *POLICY_FIXTURE_INPUTS, *extra])
+    observed = {}
+    for row in rows.split(b"\0"):
+        if not row:
+            continue
+        entry, path = row.split(b"\t", 1)
+        fields = entry.decode("ascii").split()
+        if len(fields) != 3:
+            raise ValueError("Unknown committed policy-fixture input")
+        observed[path.decode("utf-8")] = fields
+    for path, expected in POLICY_FIXTURE_INPUTS.items():
+        if observed.get(path) != expected:
+            raise ValueError(f"Unreviewed policy-fixture input: {path}. "
+                             f"Registered {expected}; committed {observed.get(path)}.")
+    return observed
+
+
+def check_guard_registrations(ref):
+    """Exercise existing required positive controls on a frozen updated contract."""
+    from local_acceptance import resource_executor_identity
+
+    resource_executor_identity(ref)
+    reviewed_policy_inputs(ref)
+    details = {}
+    if not metadata_only_inputs([".github/scripts/local_acceptance.py"], ref, ref, details):
+        raise ValueError(f"Verifier scope registration failed: {details.get('reason')}. "
+                         f"Observed layout: {details.get('observed_layout')}.")
 
 
 def policy_fixture_scope(paths, event_name, details):
@@ -539,28 +675,13 @@ def policy_fixture_scope(paths, event_name, details):
         details.update(decision="full", reason="changed_or_unknown_policy_inputs")
         return True
     try:
-        if not POLICY_FIXTURE_INPUTS:
-            raise ValueError("No reviewed policy-fixture input registry")
         checkout = git("rev-parse", "HEAD")
         declared = os.environ.get("GITHUB_SHA")
         if declared is not None and declared != checkout:
             raise ValueError("The workflow checkout differs from its declared source")
         if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"]).strip():
             raise ValueError("The workflow source has uncommitted inputs")
-        rows = subprocess.check_output(["git", "ls-tree", "-r", "-z", checkout, "--",
-                                        *POLICY_FIXTURE_INPUTS, *paths])
-        observed = {}
-        for row in rows.split(b"\0"):
-            if not row:
-                continue
-            entry, path = row.split(b"\t", 1)
-            fields = entry.decode("ascii").split()
-            if len(fields) != 3:
-                raise ValueError("Unknown committed policy-fixture input")
-            observed[path.decode("utf-8")] = fields
-        for path, expected in POLICY_FIXTURE_INPUTS.items():
-            if observed.get(path) != expected:
-                raise ValueError("Unreviewed policy-fixture input: " + path)
+        observed = reviewed_policy_inputs(checkout, paths)
         for path in paths:
             entry = observed.get(path)
             if entry is None or entry[0] not in {"100644", "100755"} or entry[1] != "blob":

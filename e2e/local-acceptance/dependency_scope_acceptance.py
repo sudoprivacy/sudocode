@@ -2,8 +2,10 @@
 
 import argparse
 import ast
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,44 @@ def git_for_windows_bash(path=None):
             if candidate.is_file():
                 return str(candidate)
     return None
+
+
+def check_compiler_priority(executor, rustc, output, environment, expected):
+    """Hold a real metadata compile on its source pipe until it is observed."""
+    driver = output / "compiler-priority-probe.py"
+    driver.write_text('''import subprocess
+import sys
+import time
+
+import psutil
+
+rustc, artifact, expected = sys.argv[1:]
+with subprocess.Popen([rustc, "--crate-name", "scope_priority_probe", "--crate-type", "lib",
+                       "--emit", "metadata", "-o", artifact, "-"], stdin=subprocess.PIPE) as compiler:
+    process = psutil.Process(compiler.pid)
+    started = time.monotonic()
+    deadline = started + 10
+    try:
+        # A surrounding executor can lower the same child first. Leave time
+        # for this executor's own 150 ms observer to record it as well.
+        while time.monotonic() - started < 0.5 or process.nice() != int(expected):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The active compiler did not reach the expected priority")
+            time.sleep(0.025)
+        compiler.communicate(b"pub fn value() -> u8 { 42 }\\n", timeout=10)
+        if compiler.returncode != 0:
+            raise RuntimeError(f"The observed metadata compile exited {compiler.returncode}")
+    finally:
+        if compiler.poll() is None:
+            compiler.kill()
+            compiler.wait()
+''', encoding="utf-8")
+    artifact = output / "compiler-priority-probe.rmeta"
+    result = executor.run_command([sys.executable, driver, rustc, artifact, expected],
+                                  executor.ROOT, output / "compiler-priority-probe.log", environment)
+    assert artifact.stat().st_size > 0
+    assert result["compiler_priorities"].get(rustc.name, {}).get(str(expected), 0) > 0, result
+    return result
 
 
 def pinned_cache_command(output, environment):
@@ -66,8 +106,55 @@ esac
     result = subprocess.run([node, script, pin, "rustup", "run", active, "rustc", "-vV"],
                             env=fixture, capture_output=True)
     assert result.returncode == 17 and result.stdout.decode().splitlines() == ["run", active, "rustc", "-vV"]
+    preinstalled = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache-command.mjs"
+    host = "x86_64-unknown-linux-gnu"
+    assert subprocess.check_output([node, preinstalled, host, "rustup", "toolchain", "list", "--quiet"],
+                                   env=fixture, timeout=10).decode().strip() == f"stable-{host}"
+    call = [node, preinstalled, host, node, "-e", "process.stdout.write(process.env.RUSTUP_TOOLCHAIN);process.exitCode=17"]
+    result = subprocess.run(call, capture_output=True, timeout=10)
+    assert result.returncode == 17 and result.stdout.decode() == f"stable-{host}"
     print("PASS: the cache command binds the active pin, preserves conservative inventory, and forwards command results",
           flush=True)
+
+
+def preinstalled_cache_probe(output):
+    from unittest.mock import patch
+
+    output.mkdir()
+    probe = SOURCE / ".github/actions/rust-toolchain/preinstalled-cache.py"
+    spec = importlib.util.spec_from_file_location("preinstalled_cache", probe)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    host = "x86_64-pc-windows-msvc"
+    commit = "a" * 40
+    compiler = f"release: 1.100.0\nhost: {host}\ncommit-hash: {commit}\n"
+    installed = "\n".join(f"{name}-{host}" for name in ("rustc", "cargo", "rust-std", "clippy", "rustfmt"))
+    (output / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.100.0"\nprofile = "minimal"\ncomponents = ["clippy", "rustfmt"]\n', encoding="utf-8")
+    environment = {"GITHUB_WORKSPACE": str(output), "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+                   "USERPROFILE": r"C:\Users\runneradmin"}
+    with patch.object(module.subprocess, "check_output", side_effect=[compiler, installed]) as metadata, \
+            patch.object(module, "verified_release", return_value={"git_commit_hash": commit}):
+        values = module.lookup_inputs(environment)
+        assert values["cargo-home"] == r"C:\Users\runneradmin\.cargo"
+        assert values["dependency-cache-command"].endswith(f'preinstalled-cache-command.mjs" {host} {{0}}')
+        assert all(call.kwargs["env"]["RUSTUP_AUTO_INSTALL"] == "0" for call in metadata.call_args_list)
+    for observed, components, expected in (
+        (compiler.replace("1.100.0", "1.99.0"), installed, commit),
+        (compiler.replace(host, "aarch64-pc-windows-msvc"), installed, commit),
+        (compiler, installed.replace(f"clippy-{host}", ""), commit),
+        (compiler, installed, "b" * 40),
+    ):
+        with patch.object(module.subprocess, "check_output", side_effect=[observed, components]), \
+                patch.object(module, "verified_release", return_value={"git_commit_hash": expected}):
+            try:
+                module.lookup_inputs(environment)
+            except ValueError:
+                continue
+            raise AssertionError("An inexact preinstalled Rust qualified for a cache lookup")
+    with patch.dict(os.environ, {**environment, "RUSTUP_TOOLCHAIN": "stable", "GITHUB_OUTPUT": str(output / "outputs")}):
+        module.main()
+    assert not (output / "outputs").exists()
 
 
 def workflow_scope(output, environment):
@@ -89,6 +176,14 @@ def workflow_scope(output, environment):
     assert "echo 'dependency-cache-command={0}'" in toolchain
     publisher = (SOURCE / ".github/workflows/ci-dependency-cache.yml").read_text(encoding="utf-8")
     assert publisher.count(cache_command) == 2
+    early = publisher.split("        id: preinstalled_lookup\n", 1)[1].split("      - uses: ./.github/actions/rust-toolchain", 1)[0]
+    assert "          lookup-only: true\n          save-if: false\n" in early
+    assert "          cmd-format: ${{ steps.preinstalled.outputs.dependency-cache-command }}" in early
+    assert "        if: steps.preinstalled_lookup.outcome != 'success' || steps.preinstalled_lookup.outputs.cache-hit != 'true'" in publisher
+    assert "        if: steps.rust_toolchain.outcome == 'success'\n        id: lookup" in publisher
+    missing_key = "steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'"
+    assert publisher.count(missing_key) == 3
+    preinstalled_cache_probe(output / "preinstalled-cache-probe")
     cache_test = lines.index("      - name: Exercise the pinned dependency cache command")
     assert lines[cache_test + 1] == "        if: github.event_name == 'pull_request' && steps.scope.outputs.policy_fixtures_required == 'true'"
     assert "--pinned-cache-command-only" in lines[cache_test + 2]
@@ -139,12 +234,19 @@ def workflow_scope(output, environment):
         assert [line for line in step(name) if line.startswith("        if:")] == [condition], name
     assert "      cohost_required: ${{ steps.scope.outputs.cohost_required }}" in lines
     assert "      a2a_required: ${{ steps.scope.outputs.a2a_required }}" in lines
-    for name in ["Install native durability fault injector", "A2A round-trip against the pinned daemon", "Cross-node A2A against two nodes",
-                 "Auth-on A2A — the node decides who a message is from"]:
+    journeys = ["Install native durability fault injector", "A2A round-trip against the pinned daemon",
+                "Cross-node A2A against two nodes", "Auth-on A2A — the node decides who a message is from"]
+    for name in journeys:
         assert [line for line in step(name) if line.startswith("        if:")] == [
             "        if: needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'"], name
+    mailbox_upload = "Retain mailbox fault inventory and exact case results"
+    syscall_upload = "Retain native syscall fault evidence"
+    order = [lines.index(step(name)[0]) for name in [*journeys, mailbox_upload, syscall_upload]]
+    assert order == sorted(order), "A2A checks must run before the evidence uploads"
+    assert "        if: always() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(mailbox_upload)
     assert "        if: failure() && needs.one-nexus-vfs-pin.outputs.a2a_required == 'true'" in step(
-        "Retain native syscall fault evidence")
+        syscall_upload)
+    assert not any("continue-on-error:" in line for name in (mailbox_upload, syscall_upload) for line in step(name))
     for name in ["Explain selected daemon acceptance", "Require native daemon acceptance and zero workspace warnings"]:
         assert "          A2A_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.a2a_required }}" in step(name)
         assert "          COHOST_REQUIRED: ${{ needs.one-nexus-vfs-pin.outputs.cohost_required }}" in step(name)
@@ -285,11 +387,12 @@ def scheduling_scope(output, environment, *, metadata_only=False):
     def write(name, contents):
         path = repository / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents, encoding="utf-8")
+        path.write_text(contents, encoding="utf-8", newline="\n")
 
     runner = ".github/scripts/local_acceptance.py"
+    selector = ".github/scripts/ci_input_scope.py"
     profiles = ".github/local-acceptance/checks.py"
-    names = [runner, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
+    names = [runner, selector, profiles, ".github/local-acceptance/Dockerfile", "spec/local_acceptance.json",
              "e2e/local-acceptance/resource_scheduling_acceptance.py",
              "e2e/local-acceptance/host_lease_acceptance.py"]
     sources = {name: (SOURCE / name).read_text(encoding="utf-8") for name in names}
@@ -312,6 +415,14 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         lines = source.splitlines(keepends=True)
         lines.insert(node.body[0].lineno - 1, "    " + statement + "\n")
         return "".join(lines)
+
+    def runner_pin(source):
+        blob = git("hash-object", "--stdin", data=source.encode("utf-8"))
+        modified, count = re.subn(
+            r'("\.github/scripts/local_acceptance\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+            lambda match: match[1] + blob + match[2], sources[selector])
+        assert count == 1
+        return modified
 
     def observe(label, first, head, expected, *, rust=False, kind="scheduling", clippy=None, events=None, overrides=None):
         for event_name in events or ["pull_request", "push", "merge_group"]:
@@ -393,6 +504,61 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         ("unknown-profile-source", {runner: pure, profiles: "def broken(\n"}, False),
     ]
     if not metadata_only:
+        # Derive the required new review with the original verifier, before
+        # changing either registry. The selector later sees only Git objects.
+        write(runner, pure)
+        git("add", ".")
+        git("commit", "-m", "Scheduling control before registration")
+        unregistered = git("rev-parse", "HEAD")
+        spec = importlib.util.spec_from_file_location("original_registration_verifier", SOURCE / runner)
+        protected = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protected)
+        protected.ROOT = repository
+        diagnostic = io.StringIO()
+        with redirect_stdout(diagnostic):
+            try:
+                protected.resource_executor_identity(unregistered)
+            except ValueError as error:
+                assert str(error) == "Unreviewed complete executor program; full current checks remain required"
+            else:
+                raise AssertionError("New scheduling source requires a fresh layout registration")
+        prefix = "LOCAL_ACCEPTANCE_RESOURCE_SOURCE_REFUSED="
+        line, = diagnostic.getvalue().splitlines()
+        assert line.startswith(prefix)
+        layout = json.loads(line[len(prefix):])["observed_source_layout"]
+        registration = "    reviewed_sources = {\n"
+        assert pure.count(registration) == 1
+        registered = pure.replace(registration, registration + f'        "{layout}",\n', 1)
+
+        base_selector = runner_pin(sources[runner])
+        # Bind the fixture baseline to the actual tracked runner bytes too.
+        git("switch", "--detach", base)
+        write(selector, base_selector)
+        if git("status", "--porcelain"):
+            git("add", ".")
+            git("commit", "-m", "Register original private runner Git blob")
+        original = git("rev-parse", "HEAD")
+        wrong_layout = registered.replace(layout, "1" * 64, 1)
+        runner_changed = insert_body(registered, "run_command")
+        extra_layout = registered.replace(registration, registration + '        "' + "2" * 64 + '",\n', 1)
+        for label, source, selector_source, expected in [
+            ("registered-scheduling-edit", registered, runner_pin(registered), True),
+            ("stale-selector-registration", registered, runner_pin(pure), False),
+            ("selector-code-changed", registered,
+             insert_body(runner_pin(registered), "main"), False),
+            ("missing-resource-registration", pure, runner_pin(pure), False),
+            ("wrong-resource-registration", wrong_layout, runner_pin(wrong_layout), False),
+            ("runner-code-changed", runner_changed, runner_pin(runner_changed), False),
+            ("extra-resource-registration", extra_layout, runner_pin(extra_layout), False),
+        ]:
+            git("switch", "--detach", original)
+            write(runner, source)
+            write(selector, selector_source)
+            git("add", ".")
+            git("commit", "-m", "Registered scheduling scope " + label)
+            observe(label, original, git("rev-parse", "HEAD"), expected,
+                    events=None if expected else ["merge_group"])
+
         for label, edits, expected in cases:
             git("switch", "--detach", base)
             for name, contents in edits.items():
@@ -476,6 +642,38 @@ def scheduling_scope(output, environment, *, metadata_only=False):
         observe("metadata-" + label, base, git("rev-parse", "HEAD"), expected,
                 kind="metadata", rust=label == "product", clippy=label in {"product", "workflow"},
                 events=None if label in {"single-verifier", "forged-fingerprint-and-command"} else ["merge_group"])
+    git("switch", "--detach", base)
+    write(selector, runner_pin(sources[runner]))
+    if git("status", "--porcelain"):
+        git("add", ".")
+        git("commit", "-m", "Register original verifier Git blob")
+    registered_base = git("rev-parse", "HEAD")
+    registered_selector = runner_pin(metadata_source)
+    other_pin, count = re.subn(
+        r'("scripts/publish_release_mirror\.py":\s*\[\s*"100644",\s*"blob",\s*")[a-f0-9]{40}("\s*\])',
+        lambda match: match[1] + "0" * 40 + match[2], registered_selector)
+    assert count == 1 and other_pin != registered_selector
+    for label, selector_source, expected, extra in [
+        ("registered-verifier", registered_selector, True, {}),
+        ("wrong-verifier-blob", runner_pin(pure), False, {}),
+        ("selector-code", insert_body(registered_selector, "main"), False, {}),
+        ("other-registry-entry", other_pin, False, {}),
+        ("registered-mixed-product", registered_selector, False,
+         {"rust/crates/runtime/src/metadata_registration.rs": "// Product input\n"}),
+    ]:
+        git("switch", "--detach", registered_base)
+        write(runner, metadata_source)
+        write(selector, selector_source)
+        for name, contents in extra.items():
+            write(name, contents)
+        git("add", ".")
+        git("commit", "-m", "Verifier registration scope " + label)
+        observe("metadata-" + label, registered_base, git("rev-parse", "HEAD"), expected,
+                kind="metadata", rust=bool(extra), events=None if expected else ["merge_group"])
+        if expected:
+            for row in records[-3:]:
+                assert row["actual"]["acceptance_metadata_scope"]["selector_registration"] == "matches_committed_runner"
+                assert row["actual"]["policy_fixtures_required"] == "true"
     for label, body in [("static-observer", "return verify_envelope"),
                         ("dynamic-observer", 'return globals().get("verify_" + "envelope")'),
                         ("frame-observer", "return RUNNER_CODE")]:
@@ -621,7 +819,8 @@ def policy_fixture_scope(output, environment):
                                  for target in node.targets))
     registry = ast.literal_eval(registry_node.value)
     sources = {name: (SOURCE / name).read_text(encoding="utf-8")
-               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock"}}
+               for name in {*registry, selector, "spec/local_acceptance.json", "rust/Cargo.toml", "rust/Cargo.lock",
+                            ".github/local-acceptance/checks.py", ".github/local-acceptance/Dockerfile"}}
 
     def write(name, contents):
         path = repository / name
@@ -650,6 +849,41 @@ def policy_fixture_scope(output, environment):
         git("add", "--", name)
         git("commit", "-m", "Private policy scope input")
         return git("rev-parse", "HEAD")
+
+    # Exercise the committed registration predicates independently of the
+    # workflow event. Only the complete guard grants acceptance credit.
+    validate = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import local_acceptance
+from ci_input_scope import check_guard_registrations
+local_acceptance.ROOT = Path.cwd()
+check_guard_registrations(sys.argv[2])
+'''
+
+    def amended_registration(name, key):
+        text = sources[name]
+        declaration, = [node for node in ast.walk(ast.parse(text)) if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == key for target in node.targets)]
+        original = ast.get_source_segment(text, declaration.value)
+        assert original and text.count(original) == 1
+        return text.replace(original, repr({"0" * 64}), 1)
+
+    runner = ".github/scripts/local_acceptance.py"
+    fixture_input = "scripts/publish_release_mirror.py"
+    controls = [("valid-registrations", base, None),
+                ("unreviewed-resource-layout", commit(runner, amended_registration(runner, "reviewed_sources")),
+                 "Unreviewed complete executor program"),
+                ("stale-policy-input", commit(fixture_input, sources[fixture_input] + "\n# Changed input\n"),
+                 "Unreviewed policy-fixture input: " + fixture_input),
+                ("stale-verifier-layout", commit(selector, amended_registration(selector, "REVIEWED_VERIFIER_LAYOUTS")),
+                 "Verifier scope registration failed")]
+    for label, ref, diagnostic in controls:
+        git("switch", "--detach", ref)
+        result = command(label, [sys.executable, "-I", "-B", "-c", validate, repository / ".github/scripts", ref],
+                         expected=1 if diagnostic else 0)
+        if diagnostic:
+            assert diagnostic.encode() in result.stderr, (label, result.stderr)
 
     def observe(label, first, head, expected, *, checkout=None, events=None, declared=None):
         git("switch", "--detach", checkout or head)
@@ -777,6 +1011,8 @@ def policy_fixture_scope(output, environment):
     assert lines.index("      - name: Canonical Nexus contract and daemon resolve one published pin") < lines.index(
         "      - name: Exercise real Git histories")
     result = {"status": "PASS", "cases": cases, "commands": commands,
+              "committed_registration_controls": [{"case": label, "accepted": diagnostic is None}
+                                                   for label, _, diagnostic in controls],
               "actual_broken_scanner_fixture_refused": True,
               "unsafe_selector_omits_that_required_fixture": True,
               "original_actual_current_source_checks_ungated": True,
@@ -1313,10 +1549,14 @@ def run(output):
     assert "Local acceptance failed (9)" in failure, failure
     environment.pop("FAIL_SCOPE_PROFILE")
     print("PASS: an actual normal-input change still reruns and fails its required profile", flush=True)
+    # Small Rust or cached builds can finish between process samples. Keep the
+    # original observations and require a real, observable compile as well.
+    expected_priority = 16384 if os.name == "nt" else 10
+    rustc = Path(command("rustc", "--print", "sysroot")) / "bin" / ("rustc.exe" if os.name == "nt" else "rustc")
+    commands.append(check_compiler_priority(executor, rustc, output, build_environment, expected_priority))
     # Each row signs {compiler name: {priority: distinct children}}.
     observed = [(priority, count) for row in commands for counts in row.get("compiler_priorities", {}).values()
                 for priority, count in counts.items()]
-    expected_priority = 16384 if os.name == "nt" else 10
     assert observed and all(priority == str(expected_priority) and count > 0 for priority, count in observed), observed
     result = {"status": "PASS", "cases": cases, "commands": commands,
               "unchanged_normal_binary_sha256": original_binary,

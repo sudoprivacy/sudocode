@@ -6,6 +6,8 @@ const setupAndOwner = [
   ['test/codexMcpReconnect.cjs'],
   ['dist/testing/codexLaunchIntegration.cjs'],
   ['dist/testing/codexSetupIntegration.cjs'],
+  ['dist/testing/claudeSetupIntegration.cjs'],
+  ['dist/testing/codexA2aSetupIntegration.cjs'],
   ['dist/testing/mailboxAdmission.cjs'],
   ['dist/testing/codexMailboxMcpIntegration.cjs'],
   ['dist/testing/mailboxIntegration.cjs'],

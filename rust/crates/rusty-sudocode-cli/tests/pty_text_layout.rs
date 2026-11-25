@@ -8,16 +8,29 @@ use common::TestEnv;
 use pty_expect::PtySession;
 use unicode_width::UnicodeWidthStr;
 
+/// The test's terminal (`pty-expect`'s screen) lays out each code point of an
+/// emoji cluster, as VS Code's terminal does. scode asks the terminal for its
+/// cursor to learn that on Unix, but never asks on Windows, where `ConPTY`
+/// answers for the console host instead. There the environment names the
+/// kind, or scode lays out `👩🏽‍💻` as 2 columns that this screen draws as 6.
+fn terminal_hints<'a>(hints: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut hints = hints.to_vec();
+    if cfg!(windows) {
+        hints.push(("TERM_PROGRAM", "vscode"));
+    }
+    hints
+}
+
 fn start(env: &TestEnv, background: &str) -> PtySession {
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
-        &[
+        &terminal_hints(&[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
             ("COLORFGBG", background),
             ("NO_COLOR", ""),
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
-        ],
+        ]),
     );
     sess.resize(60, 40).expect("resize");
     common::expect_input_line_cleared(&sess, env.timeout(), "layout input ready");
@@ -150,7 +163,29 @@ fn showcase(background: &str) {
 
 fn assert_list_continuations(sess: &PtySession, margin: usize) {
     sess.render(|screen| {
-        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let cols = screen.raw().size().1;
+        let rows: Vec<_> = screen.raw().rows(0, cols).collect();
+        // ConPTY's move, not a row scode broke early: in the row above, the
+        // cell ending in the ZWJ is followed by exactly as many blank cells
+        // as the moved code point needs, so it would have filled the row.
+        let moved_out_of_last_column = |row: usize, moved: &str| {
+            let row = u16::try_from(row).unwrap();
+            let cell = |col| screen.raw().cell(row, col);
+            let Some(joined) = (0..cols)
+                .rfind(|&col| cell(col).is_some_and(|cell| cell.contents().ends_with('\u{200d}')))
+            else {
+                return false;
+            };
+            let end = joined
+                + if cell(joined).unwrap().is_wide() {
+                    2
+                } else {
+                    1
+                };
+            usize::from(cols - end) == moved.width()
+                && (end..cols)
+                    .all(|col| cell(col).is_none_or(|cell| cell.contents().trim().is_empty()))
+        };
         for (marker, content_col, expected) in [
             (
                 "9. ListWrap:",
@@ -178,9 +213,22 @@ fn assert_list_continuations(sess: &PtySession, margin: usize) {
             let mut text = rows[start][label_start..].to_string();
             let padding = " ".repeat(content_col + margin);
             let mut count = 0;
-            for row in &rows[start + 1..] {
+            for (index, row) in rows.iter().enumerate().skip(start + 1) {
                 if text.ends_with("END") {
                     break;
+                }
+                // ConPTY never lets a code point joined by a ZWJ end in the
+                // last column: it leaves that cell blank and draws the code
+                // point at the start of the next row, whatever the program
+                // wrote; plain output wraps the same way. Only that one code
+                // point may start a continuation at column 0.
+                if cfg!(windows)
+                    && text.ends_with('\u{200d}')
+                    && row.trim_end().chars().count() == 1
+                    && moved_out_of_last_column(index - 1, row.trim_end())
+                {
+                    text.push_str(row.trim_end());
+                    continue;
                 }
                 assert!(
                     row.starts_with(&padding),
@@ -253,12 +301,12 @@ fn resumed_card_layout(is_error: bool) {
     saved.save_to_path(&path).unwrap();
     let mut sess = env.spawn_with_env(
         &["--resume", path.to_str().unwrap()],
-        &[
+        &terminal_hints(&[
             ("NO_COLOR", ""),
             ("COLORFGBG", "15;0"),
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
-        ],
+        ]),
     );
     sess.resize(80, 40).unwrap();
     sess.expect("❯").unwrap();

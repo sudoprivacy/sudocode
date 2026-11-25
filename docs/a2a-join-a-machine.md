@@ -50,6 +50,10 @@ macOS and Linux. On Windows use the documented manual steps
 (`sdk/typescript/README.md`, "Global native Codex attachment").
 
 - Codex must have been started and signed in once on the machine.
+- All sessions of one Codex home share one bridge. If Codex runs with a home
+  selected through `CODEX_HOME`, run setup with the same `CODEX_HOME`: Codex
+  does not pass it to the bridge, so setup stores it in the registration and
+  refuses to register unless the bridge would reach the same Codex server.
 - The command writes the bridge config, starts Codex's own background server
   if it is not running (`codex app-server daemon start`), and registers the
   `nexus_scode` entry through `codex mcp add`. `--issuer` is not needed again

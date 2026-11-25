@@ -89,9 +89,13 @@ async function main(): Promise<void> {
   const calls = (target: Home): string[] => fs.existsSync(path.join(target.codexHome, 'codex-cli.log'))
     ? fs.readFileSync(path.join(target.codexHome, 'codex-cli.log'), 'utf8').trim().split('\n').map(line => (JSON.parse(line) as string[]).slice(0, 3).join(' ')) : [];
   const approved = (target: Home): string[] => [...toml(target).matchAll(/^\[mcp_servers\.nexus_scode\.tools\.(\w+)\]\napproval_mode = "approve"$/gm)].map(match => match[1]).sort();
-  const assertRegistered = (target: Home, entry: string): void => {
+  /** The entry, and the Codex home it carries for the bridge (none for the default home). */
+  const assertRegistered = (target: Home, entry: string, carriesHome = true): void => {
     const args = JSON.stringify([entry, '--codex', '--config', target.config]);
     assert(toml(target).includes(`[mcp_servers.nexus_scode]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${args}\n`), toml(target));
+    const carried = `[mcp_servers.nexus_scode.env]\nCODEX_HOME = ${JSON.stringify(target.codexHome)}\n`;
+    assert.equal(toml(target).includes(carried), carriesHome, toml(target));
+    if (!carriesHome) assert(!toml(target).includes('[mcp_servers.nexus_scode.env]'), toml(target));
   };
 
   try {
@@ -136,6 +140,7 @@ async function main(): Promise<void> {
     assert.equal(first.next[0].argv.at(-1), '--approve-tools');
     assert.match(first.instructions.join(' '), /approvals_reviewer=user/);
     assert.match(first.notVerified.join(' '), /No Codex session was started/);
+    assert(first.verified.some(line => line.includes(path.join(fresh.codexHome, 'app-server-control'))), 'the server the bridge will reach is named');
 
     // Running it again is the check.
     const before = toml(fresh);
@@ -200,6 +205,30 @@ async function main(): Promise<void> {
     assert.equal(relaunched.state, 'moved_to_this_sdk', JSON.stringify(relaunched));
     assert.equal(splitShellWords(fs.readFileSync(path.join(launching.bin, 'codex'), 'utf8').split('\n')[1].slice(5))[1], newerServer,
       'a launcher found on PATH moves without being named again');
+
+    // The default Codex home needs nothing carried: a bridge started by Codex reads it anyway.
+    const plain = await home('default-home');
+    plain.codexHome = path.join(plain.home, '.codex');
+    plain.toml = path.join(plain.codexHome, 'config.toml');
+    fs.mkdirSync(plain.codexHome);
+    delete plain.env.CODEX_HOME;
+    const defaulted = await setup(plain, ['--issuer', 'https://founder.example:2126']);
+    assert.equal(defaulted.state, 'installed', JSON.stringify(defaulted));
+    assertRegistered(plain, server, false);
+    assert.equal((await setup(plain)).state, 'already_installed');
+
+    // Codex selected in a way a bridge started by Codex cannot follow: the bridge would read
+    // another server, and enroll agents for that server's sessions. Refused before registering.
+    const elsewhere = await home('unreachable-home');
+    const otherHome = path.join(elsewhere.home, 'other codex home');
+    fs.mkdirSync(otherHome);
+    elsewhere.toml = path.join(otherHome, 'config.toml');
+    const stray = await setup(elsewhere, ['--issuer', 'https://founder.example:2126'], { env: { CODEX_FIXTURE_OTHER_HOME: otherHome } });
+    assert.equal(stray.state, 'refused', JSON.stringify(stray));
+    assert.match(stray.error!, /would not reach the Codex server this command set up/);
+    assert.match(stray.instructions.join(' '), /Nothing was registered with Codex/);
+    assert.equal(toml(elsewhere), '', 'no entry in the home the command used');
+    assert(!fs.existsSync(path.join(elsewhere.codexHome, 'config.toml')), 'and none in the home the bridge would have read');
 
     // A real program is never replaced by a launcher.
     const program = await home('program');

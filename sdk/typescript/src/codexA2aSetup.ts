@@ -136,6 +136,14 @@ export async function setupCodex(options: CodexSetupOptions): Promise<SetupResul
       [{ why: 'Then run setup again', argv: callerArgv }]);
     }
     const codexConfig = path.join(codexHome, 'config.toml');
+    // Codex starts an MCP server without CODEX_HOME, so the bridge would read
+    // the default home. A home selected through CODEX_HOME is therefore carried
+    // in the registration itself.
+    const pinnedHome = environment.CODEX_HOME ? path.resolve(codexHome) : undefined;
+    const bridgeEnvironment: NodeJS.ProcessEnv = { ...(pinnedHome ? { CODEX_HOME: pinnedHome } : {}) };
+    for (const name of ['PATH', 'Path', 'HOME', 'USERPROFILE', 'SystemRoot', 'TMPDIR', 'TEMP', 'TMP']) {
+      if (environment[name] !== undefined) bridgeEnvironment[name] = environment[name];
+    }
 
     // Look before writing anything: an attachment this command did not make is never edited.
     const registration = async (): Promise<Standing> => {
@@ -149,8 +157,9 @@ export async function setupCodex(options: CodexSetupOptions): Promise<SetupResul
       const transport = entry.transport;
       const args = Array.isArray(transport?.args) ? transport.args as unknown[] : [];
       if (transport?.type !== 'stdio' || args.length !== 4 || args[1] !== '--codex' || args[2] !== '--config' || args[3] !== configFile) return 'foreign';
-      const plain = (transport.env == null || !Object.keys(transport.env as object).length) && transport.cwd == null && entry.enabled !== false;
-      return transport.command === node && args[0] === options.entry && plain ? 'current' : 'ours_other_sdk';
+      const carried = JSON.stringify(transport.env ?? {}) === JSON.stringify(pinnedHome ? { CODEX_HOME: pinnedHome } : {});
+      return transport.command === node && args[0] === options.entry && carried && transport.cwd == null && entry.enabled !== false
+        ? 'current' : 'ours_other_sdk';
     };
     const launcherStanding = (file: string | undefined): Standing => {
       const words = file ? launcherWords(file) : undefined;
@@ -231,22 +240,37 @@ export async function setupCodex(options: CodexSetupOptions): Promise<SetupResul
     const commands = codexMcpInstallationCommands(configFile, options.entry);
 
     // Codex's own background server is what the bridge reads the open conversations from.
-    const running = async (): Promise<boolean> => {
-      try { return (JSON.parse((await run([...codex!, 'app-server', 'daemon', 'version'], false)).stdout) as { status?: unknown }).status === 'running'; }
-      catch { return false; }
+    const serverSocket = async (env: NodeJS.ProcessEnv): Promise<string | undefined> => {
+      try {
+        const report = JSON.parse((await execute(codex![0], [...codex!.slice(1), 'app-server', 'daemon', 'version'],
+          { env, encoding: 'utf8', timeout: 60000, windowsHide: true })).stdout) as { status?: unknown; socketPath?: unknown };
+        return report.status === 'running' && typeof report.socketPath === 'string' ? report.socketPath : undefined;
+      } catch { return undefined; }
     };
-    if (!await running()) {
+    let socket = await serverSocket(environment);
+    if (socket === undefined) {
       await run(commands.nativePreparationArgv);
-      if (!await running()) throw new Error('Codex reported that its background server did not start ("codex app-server daemon version" is not "running")');
+      socket = await serverSocket(environment);
+      if (socket === undefined) throw new Error('Codex reported that its background server did not start ("codex app-server daemon version" is not "running")');
       changed.push('started Codex\'s background server (codex app-server daemon start)');
     }
     await checkCodexNative(configFile, options.entry);
+    // The bridge must read the same server this command just checked. If it
+    // reached another one, it would enroll agents for that server's sessions.
+    const reached = await serverSocket(bridgeEnvironment);
+    if (reached !== socket) {
+      throw new SetupStop('refused', 'The bridge would not reach the Codex server this command set up', [
+        `This command uses the Codex server at ${socket}. Started by Codex, the bridge would use ${reached ?? 'no running server'}.`,
+        'Nothing was registered with Codex, so no session can attach to the wrong server.',
+        'This happens when Codex is selected in a way the bridge cannot follow. Start Codex with its default home, or set CODEX_HOME to the home it uses, then run this command again.']);
+    }
 
     // The global MCP entry. `codex mcp add` replaces an entry and drops its tool approvals, so those are kept by hand.
     const tomlBefore = existsSync(codexConfig) ? readFileSync(codexConfig, 'utf8') : '';
     const kept = approvedTools(tomlBefore);
     if (registered !== 'current') {
-      await run(commands.registrationArgv);
+      await run([...codex, 'mcp', 'add', SERVER, ...(pinnedHome ? ['--env', 'CODEX_HOME=' + pinnedHome] : []),
+        '--', node, options.entry, '--codex', '--config', configFile]);
       if (await registration() !== 'current') throw new Error(`The "${SERVER}" entry read back from Codex is not the one this command registers`);
       changed.push(`${registered === 'absent' ? 'registered' : 'moved'} the "${SERVER}" MCP entry in ${codexConfig}`);
     }
@@ -301,7 +325,7 @@ export async function setupCodex(options: CodexSetupOptions): Promise<SetupResul
     return {
       ok: true, frontend: 'codex', state, changed,
       verified: [...shared.verified, `bridge config ${configFile} (port ${port})`,
-        `Codex's background server is running and answers the bridge (Codex home ${codexHome})`,
+        `Codex's background server is running, and the bridge will reach the same one (${socket})`,
         `the "${SERVER}" MCP entry, read back through codex mcp get`,
         ...(hasLauncher ? [`the codex launcher at ${launcher}`] : []),
         ...(approved.size ? [`Codex may call ${[...approved].sort().join(', ')} without asking`] : [])],

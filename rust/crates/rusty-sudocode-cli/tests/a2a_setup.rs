@@ -9,7 +9,13 @@ fn temp_home(name: &str) -> PathBuf {
     let home = std::env::temp_dir().join(format!("scode-a2a-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&home);
     fs::create_dir_all(&home).expect("temp home");
-    home.canonicalize().expect("canonical temp home")
+    let home = home.canonicalize().expect("canonical temp home");
+    // On Windows `canonicalize` adds the `\\?\` prefix, and node cannot start a
+    // script named that way; the plain spelling is the same folder.
+    match home.to_str().and_then(|path| path.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => home,
+    }
 }
 
 fn scode(home: &Path) -> Command {

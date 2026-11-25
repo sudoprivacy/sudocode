@@ -163,7 +163,29 @@ fn showcase(background: &str) {
 
 fn assert_list_continuations(sess: &PtySession, margin: usize) {
     sess.render(|screen| {
-        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let cols = screen.raw().size().1;
+        let rows: Vec<_> = screen.raw().rows(0, cols).collect();
+        // ConPTY's move, not a row scode broke early: in the row above, the
+        // cell ending in the ZWJ is followed by exactly as many blank cells
+        // as the moved code point needs, so it would have filled the row.
+        let moved_out_of_last_column = |row: usize, moved: &str| {
+            let row = u16::try_from(row).unwrap();
+            let cell = |col| screen.raw().cell(row, col);
+            let Some(joined) = (0..cols)
+                .rfind(|&col| cell(col).is_some_and(|cell| cell.contents().ends_with('\u{200d}')))
+            else {
+                return false;
+            };
+            let end = joined
+                + if cell(joined).unwrap().is_wide() {
+                    2
+                } else {
+                    1
+                };
+            usize::from(cols - end) == moved.width()
+                && (end..cols)
+                    .all(|col| cell(col).is_none_or(|cell| cell.contents().trim().is_empty()))
+        };
         for (marker, content_col, expected) in [
             (
                 "9. ListWrap:",
@@ -191,7 +213,7 @@ fn assert_list_continuations(sess: &PtySession, margin: usize) {
             let mut text = rows[start][label_start..].to_string();
             let padding = " ".repeat(content_col + margin);
             let mut count = 0;
-            for row in &rows[start + 1..] {
+            for (index, row) in rows.iter().enumerate().skip(start + 1) {
                 if text.ends_with("END") {
                     break;
                 }
@@ -203,6 +225,7 @@ fn assert_list_continuations(sess: &PtySession, margin: usize) {
                 if cfg!(windows)
                     && text.ends_with('\u{200d}')
                     && row.trim_end().chars().count() == 1
+                    && moved_out_of_last_column(index - 1, row.trim_end())
                 {
                     text.push_str(row.trim_end());
                     continue;

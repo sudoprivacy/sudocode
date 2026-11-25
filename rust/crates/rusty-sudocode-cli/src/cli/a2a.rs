@@ -1,4 +1,4 @@
-//! `scode a2a setup <frontend>`: attach Claude Code to the agent network.
+//! `scode a2a setup <frontend>`: attach Claude Code or Codex to the agent network.
 //!
 //! The setup logic lives in the bridge package (`sdk/typescript`), which is
 //! also what the frontend runs afterwards. A release build of scode carries
@@ -19,12 +19,15 @@ include!(concat!(env!("OUT_DIR"), "/a2a_sdk.rs"));
 pub(crate) enum A2aFrontend {
     /// Claude Code
     Claude,
+    /// Codex (macOS and Linux)
+    Codex,
 }
 
 impl A2aFrontend {
     fn name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 }
@@ -46,9 +49,23 @@ pub(crate) struct A2aSetupArgs {
     /// The scode each attached agent runs (default: ~/.nexus/bin/scode, then PATH, then this one)
     #[arg(long, value_name = "FILE")]
     pub(crate) scode: Option<PathBuf>,
-    /// The claude executable (default: PATH)
+    /// The claude executable (default: PATH). Only for `setup claude`
     #[arg(long, value_name = "FILE")]
     pub(crate) claude_command: Option<PathBuf>,
+    /// The real codex executable, not a launcher (default: PATH). Only for `setup codex`
+    #[arg(long, value_name = "FILE")]
+    pub(crate) codex_command: Option<PathBuf>,
+    /// Let Codex call the bridge's four tools without asking, so a message can
+    /// wake an idle session. Only for `setup codex`
+    #[arg(long)]
+    pub(crate) approve_tools: bool,
+    /// Write a codex launcher at this path, for people who start Codex with
+    /// `-c approvals_reviewer=user`. Only for `setup codex`
+    #[arg(long, value_name = "FILE")]
+    pub(crate) command_entry: Option<PathBuf>,
+    /// Local port of the Codex bridge (default 23262). Only for `setup codex`
+    #[arg(long, value_name = "PORT")]
+    pub(crate) port: Option<u16>,
     /// Where setup keeps its files (default: ~/.config/sudocode/acp/a2a)
     #[arg(long, value_name = "DIR")]
     pub(crate) config_root: Option<PathBuf>,
@@ -278,6 +295,28 @@ fn bridge_entry(args: &A2aSetupArgs, typed: &[String]) -> Result<PathBuf, Stop> 
 
 /// Run setup for `args`; the returned value is the process exit code.
 pub(crate) fn run_setup(args: &A2aSetupArgs, typed: &[String]) -> i32 {
+    // An option for the other program is named, instead of being dropped.
+    let misplaced: &[(&str, bool)] = match args.frontend {
+        A2aFrontend::Claude => &[
+            ("--codex-command", args.codex_command.is_some()),
+            ("--approve-tools", args.approve_tools),
+            ("--command-entry", args.command_entry.is_some()),
+            ("--port", args.port.is_some()),
+        ],
+        A2aFrontend::Codex => &[("--claude-command", args.claude_command.is_some())],
+    };
+    if let Some((flag, _)) = misplaced.iter().find(|(_, given)| *given) {
+        Stop {
+            state: "needs_input",
+            error: format!("{flag} does not apply to `setup {}`", args.frontend.name()),
+            instructions: vec![format!(
+                "Remove {flag} and run the command again; nothing was set up."
+            )],
+            next: Vec::new(),
+        }
+        .print(args.frontend);
+        return 1;
+    }
     let (node, entry) =
         match find_node(args, typed).and_then(|node| Ok((node, bridge_entry(args, typed)?))) {
             Ok(found) => found,
@@ -309,13 +348,10 @@ pub(crate) fn run_setup(args: &A2aSetupArgs, typed: &[String]) -> i32 {
         return 1;
     }
 
-    let mut command = Command::new(&node);
-    command
-        .arg(&entry)
-        .arg(format!("--setup-{}", args.frontend.name()));
+    let mut forwarded: Vec<String> = vec![format!("--setup-{}", args.frontend.name())];
     let mut pass = |flag: &str, value: Option<String>| {
         if let Some(value) = value {
-            command.arg(flag).arg(value);
+            forwarded.extend([flag.to_string(), value]);
         }
     };
     let text = |path: &Option<PathBuf>| {
@@ -326,6 +362,9 @@ pub(crate) fn run_setup(args: &A2aSetupArgs, typed: &[String]) -> i32 {
     pass("--node-data-dir", text(&args.node_data_dir));
     pass("--nexus-enroll", text(&args.nexus_enroll));
     pass("--claude-command", text(&args.claude_command));
+    pass("--codex-command", text(&args.codex_command));
+    pass("--command-entry", text(&args.command_entry));
+    pass("--port", args.port.map(|port| port.to_string()));
     pass("--config-root", text(&args.config_root));
     // The package looks for scode in the usual places. Only when it would find
     // none is this executable named, so a shared entry that gets repointed
@@ -353,6 +392,11 @@ pub(crate) fn run_setup(args: &A2aSetupArgs, typed: &[String]) -> i32 {
         "--caller-argv",
         Some(serde_json::to_string(typed).expect("strings serialize")),
     );
+    if args.approve_tools {
+        forwarded.push("--approve-tools".to_string());
+    }
+    let mut command = Command::new(&node);
+    command.arg(&entry).args(&forwarded);
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
@@ -384,6 +428,10 @@ mod tests {
             nexus_enroll: None,
             scode: None,
             claude_command: None,
+            codex_command: None,
+            approve_tools: false,
+            command_entry: None,
+            port: None,
             config_root: None,
             node: None,
             sdk: None,
@@ -480,6 +528,10 @@ mod tests {
             nexus_enroll: None,
             scode: None,
             claude_command: None,
+            codex_command: None,
+            approve_tools: false,
+            command_entry: None,
+            port: None,
             config_root: None,
             node: None,
             sdk: Some(directory.clone()),

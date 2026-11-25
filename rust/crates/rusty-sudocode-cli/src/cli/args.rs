@@ -319,9 +319,9 @@ enum AcpSub {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub(crate) enum A2aSub {
-    /// Attach Claude Code: one command, safe to run again. Prints one JSON
-    /// object whose "instructions" say what to do next
-    Setup(super::a2a::A2aSetupArgs),
+    /// Attach Claude Code or Codex: one command, safe to run again. Prints one
+    /// JSON object whose "instructions" say what to do next
+    Setup(Box<super::a2a::A2aSetupArgs>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -368,7 +368,7 @@ pub(crate) enum CliAction {
     Service {
         action: ServiceSub,
     },
-    A2aSetup(super::a2a::A2aSetupArgs),
+    A2aSetup(Box<super::a2a::A2aSetupArgs>),
     Headless(super::headless::HeadlessOptions),
     DumpManifests {
         output_format: CliOutputFormat,

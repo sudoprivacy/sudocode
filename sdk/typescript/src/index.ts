@@ -14,6 +14,7 @@ export * from './codexMcp';
 export * from './codexSetup';
 export * from './a2aSetup';
 export * from './claudeSetup';
+export * from './codexA2aSetup';
 export { enrollCodexAgent, runCodexEnrollment, prepareCodexEnrollment, refreshCodexProfiles, type ProfileRefresh } from './codexEnrollment';
 export * from './lifecycle';
 export * from './receiverOwner';

@@ -274,6 +274,24 @@ functions and cached paths. Rehashing cannot move an entry ahead of another
 directory in that terminal's PATH. A plain native command remains available by its original
 absolute path. Its incompatible CLI overrides still select native private mode.
 
+### One command (macOS and Linux)
+
+`scode a2a setup codex --issuer https://HOST:2126`, or directly
+`node dist/server.cjs --setup-codex --issuer https://HOST:2126`, does the whole
+attachment: the enrollment grant and operator record if they are absent, the
+runtime config (v3 mailbox, `node-namespace`, no pinned environment), Codex's
+background server, and the global MCP entry, each read back. It prints the
+same JSON result as `--setup-claude`. `--approve-tools` allows the bridge's
+four tools in Codex's `config.toml`; `--command-entry PATH` writes the
+launcher described above; `--port N` selects the owner's port. A move to a
+newer package keeps the port, the token and existing tool approvals (which
+`codex mcp add` would otherwise drop), and is refused while an owner is
+listening. Codex starts an MCP server without `CODEX_HOME`, so a home
+selected that way is stored in the registration (`--env CODEX_HOME=…`), and
+setup refuses to register unless `codex app-server daemon version` names the
+same server socket in the environment the bridge will get. An attachment it did not make is refused with the steps to remove
+it. The steps below remain the way to set up Windows or a pinned environment.
+
 ### One installation command for a prepared machine
 
 An operator first selects the existing Nexus Box, enrollment authority, verified

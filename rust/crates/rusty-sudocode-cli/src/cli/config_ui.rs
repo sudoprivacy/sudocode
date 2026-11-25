@@ -54,6 +54,7 @@ pub(crate) fn build_config_tree_handler(
         force_fuzzy_select: false,
         back_value: None,
         initial_value: None,
+        multi_select: false,
     };
     ui.show_question(question);
 
@@ -147,6 +148,7 @@ fn show_schema_level(
         force_fuzzy_select: visible.len() > 9,
         back_value: Some(crate::repl_ui::QUESTION_BACK.to_string()),
         initial_value: None,
+        multi_select: false,
     };
     ui.show_question(question);
 
@@ -280,6 +282,7 @@ fn handle_leaf_edit(
                 force_fuzzy_select: false,
                 back_value: None,
                 initial_value: None,
+                multi_select: false,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();
@@ -345,6 +348,7 @@ fn handle_leaf_edit(
                 force_fuzzy_select: true,
                 back_value: None,
                 initial_value: None,
+                multi_select: false,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();

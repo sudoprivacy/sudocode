@@ -665,12 +665,16 @@ fn prose_wraps_between_words_with_hanging_indents() {
     let before = body_rows(&session);
     std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
     expect_finalized_with_draft(&session, &marker, "");
-    let rows: Vec<String> = body_rows(&session)
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect();
+    // Compare what the rows show. ConPTY may write a row's blank tail as
+    // spaces when it repaints the preview and leave it unwritten in history.
+    let visible = |rows: Vec<(usize, String)>| -> Vec<String> {
+        rows.into_iter()
+            .map(|(_, row)| row.trim_end().to_string())
+            .collect()
+    };
+    let rows = visible(body_rows(&session));
     assert_eq!(
-        before.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+        visible(before),
         rows,
         "the preview shows the rows history keeps"
     );

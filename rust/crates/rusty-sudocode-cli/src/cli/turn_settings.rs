@@ -198,6 +198,7 @@ pub(crate) fn model_question(models: &[String], current: &str) -> QuestionPrompt
         force_fuzzy_select: false,
         back_value: None,
         initial_value: None,
+        multi_select: false,
     }
 }
 
@@ -235,6 +236,7 @@ pub(crate) fn effort_question(
         force_fuzzy_select: true,
         back_value: None,
         initial_value: None,
+        multi_select: false,
     }
 }
 

@@ -83,14 +83,18 @@ echo "== 4. restart TLS-on =="
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
+# Compile at the original probe boundary so Cargo can still overlap the
+# daemon's readiness work. A failed build must not enter the retry loop.
+echo "== build the mailbox readiness test before probing writability =="
+"${CARGO_TEST[@]}" --no-run
+
 echo "== waiting for a writable single-voter leader =="
 # The probe's output is KEPT, not discarded. This loop retries because a fresh
 # founder needs a moment to become writable, so every early failure is expected
 # and printing each one is noise - but the LAST one is the diagnosis, and
 # `2>/dev/null` threw it away. Everything that can go wrong before the daemon is
-# reachable lands in this loop and used to read as "daemon never became
-# writable": a panic on a missing `NEXUS_A2A_TEST_CERT_DIR`, and a build that
-# never produced the test binary at all (`failed to find tool "cl.exe"`).
+# reachable can look like "daemon never became writable", including a panic on
+# a missing `NEXUS_A2A_TEST_CERT_DIR`. The initial build already ran above.
 wait_for_writable_leader() {
   local ready= probe= i
   for i in $(seq 1 30); do

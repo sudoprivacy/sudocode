@@ -7,6 +7,7 @@ import { Readable, Writable } from 'node:stream';
 const [journal, scenario = 'normal'] = process.argv.slice(2);
 const log = entry => appendFileSync(journal, JSON.stringify({ pid: process.pid, ...entry }) + '\n');
 let sessionId, offered = 0, retired = false;
+let releaseHeldOffer;
 const app = acp.agent({ name: 'mailbox-wire-fixture', version: '1' })
   .onRequest(acp.methods.agent.initialize, ctx => {
     const version = ctx.params.clientCapabilities?._meta?.sudocode?.peerInput?.version;
@@ -21,12 +22,20 @@ const app = acp.agent({ name: 'mailbox-wire-fixture', version: '1' })
     await ctx.client.notify('_sudocode/session/peer_unread', { sessionId: ctx.params.sessionId ?? sessionId, unread: 2 });
     return {};
   })
+  .onRequest('_fixture/release_offer', value => value, () => {
+    if (!releaseHeldOffer) throw new Error('No outstanding offer');
+    releaseHeldOffer();
+    return {};
+  })
   .onRequest('_sudocode/session/peer_offer', value => value, async ctx => {
     log({ method: 'offer-start', params: ctx.params });
     if (ctx.params.sessionId !== sessionId || ctx.params.threadId !== 'root-thread') {
       throw new acp.RequestError(-32602, 'Wrong binding', { reason: 'binding_mismatch' });
     }
     const read = ctx.params.read;
+    if (scenario === 'hold-first-offer' && !releaseHeldOffer) {
+      await new Promise(resolve => { releaseHeldOffer = resolve; });
+    }
     if (read?.frameId === 'error') throw new acp.RequestError(-32602, 'Cannot fit window', { reason: 'max_bytes_too_small', minimum: 12345 });
     if (read?.frameId === 'lost') { process.exit(27); }
     if (read?.frameId === 'timeout') return new Promise(() => {});

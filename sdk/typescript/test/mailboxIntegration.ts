@@ -260,6 +260,41 @@ async function main(): Promise<void> {
     assert.deepEqual(oldFiles.map(bytesHash), originalHashes, 'all original v2 receipt bytes remain untouched');
     assert.ok(!fs.readFileSync(path.join(directory, 'migration.jsonl'), 'utf8').includes('原始'), 'new ledger holds no peer bodies');
 
+    // A late read result releases its single-flight fence. A late ACK keeps
+    // the unknown outcome fenced even if the transport subsequently replies.
+    const lateOffers = await Promise.allSettled([false, true].map(async hasAck => {
+      const log = path.join(directory, hasAck ? 'late-ack.jsonl' : 'late-read.jsonl');
+      const wire = await connectScode({ scodeArgv: [process.execPath, fixture, log, 'hold-first-offer'],
+        workspace: directory, acpSessionId: 'acp-session', peerInputVersion: 3, onPeerUnread() {} });
+      const mailbox = openScodeMailbox(wire, 'root-thread', 8192);
+      try {
+        const expected = hasAck ? /ACK outcome unknown/ : /read timed out/;
+        const original = hasAck ? mailbox.inbox({ ack: ['fixture-ack'] }) : mailbox.inspect();
+        await assert.rejects(original, expected);
+        await assert.rejects(mailbox.inbox({ ack: ['fixture-ack'] }), expected);
+        assert.equal(rows(log).filter(row => row.method === 'offer-start').length, 1);
+        await wire.request('_fixture/release_offer', {});
+        const deadline = performance.now() + 5000;
+        while (!rows(log).some(row => row.method === 'offer-end')) {
+          if (performance.now() >= deadline) throw new Error('The held offer did not finish');
+          await pause(10);
+        }
+        // An ordered ACP round trip ensures the original response reached the SDK.
+        await wire.request('_fixture/unread', {});
+        assert.equal(rows(log).filter(row => row.method === 'offer-start').length, 1);
+        if (hasAck) {
+          await assert.rejects(mailbox.inspect(), expected);
+          assert.equal(rows(log).filter(row => row.method === 'offer-start').length, 1);
+        } else {
+          assert.equal((await mailbox.inspect()).unread, 1);
+          const requests = rows(log).filter(row => row.method === 'offer-start');
+          assert.equal(requests.length, 2);
+          assert.ok(requests.every(row => row.params.ack === undefined));
+        }
+      } finally { await mailbox.close(); await wire.close(); }
+    }));
+    for (const result of lateOffers) if (result.status === 'rejected') throw result.reason;
+
     // A lost ACP reply never causes an automatic replay; a timed-out live
     // transport is poisoned so a second call cannot overlap its unknown ACK.
     for (const failure of ['lost', 'timeout']) {

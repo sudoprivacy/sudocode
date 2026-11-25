@@ -142,6 +142,10 @@ retries a refused commit.
 
 Calls run in sequence per session. A second call before the first call's
 frames are acknowledged offers the same frames, marked `redelivery: true`.
+If a Codex bridge read times out, it rejects subsequent calls until the outstanding
+read settles. A fresh call can then read the authoritative mailbox. A timeout on
+a request carrying ACK tokens keeps that connection blocked until the owner
+closes it. The bridge never resends either request on timeout.
 scode keeps the set of offered frames in memory, so the first offer after a
 scode restart shows `redelivery: false`; the token is the same either way.
 

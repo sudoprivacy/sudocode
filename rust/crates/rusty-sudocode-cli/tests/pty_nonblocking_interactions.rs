@@ -110,6 +110,69 @@ fn questions_command_uses_help_completion_and_explicit_cancellation() {
 }
 
 #[test]
+fn pending_multi_select_restores_choices_and_delivers_each_value() {
+    let env = TestEnv::new_mock("interaction-multi-select");
+    let fields = json!([
+        {"id":"scope", "kind":"multi_select", "prompt":"Choose scopes", "options":[
+            {"value":"cli", "label":"Terminal"}, {"value":"web", "label":"Dashboard"}
+        ]},
+        {"id":"when", "kind":"single_select", "prompt":"Choose timing", "options":[
+            {"value":"now", "label":"Now"}, {"value":"later", "label":"Later"}
+        ]}
+    ]);
+    let prompt = tool_batch(
+        &env,
+        &json!([
+            {"id":"multi", "name":"AskUserQuestion", "input":{"questions":fields}}
+        ]),
+        "",
+    );
+    let mut terminal = env.spawn_with_env(&["--permission-mode", "read-only"], ENABLED);
+    terminal.resize(60, 140).unwrap();
+    common::expect_input_line_cleared(&terminal, env.timeout(), "chat ready");
+    let turn = common::turn_status_marker(&terminal);
+    submit(&mut terminal, &prompt);
+    common::expect_turn_complete_after(&terminal, &turn, env.timeout(), "question deferred");
+    finish_mock_question(&env);
+    submit(&mut terminal, "/questions");
+    let expect_field = |terminal: &pty_expect::PtySession, text: &str| {
+        common::expect_screen(
+            terminal,
+            |screen| common::input_and_footer_of(screen).is_some_and(|area| area.contains(text)),
+            env.timeout(),
+            text,
+        );
+    };
+    expect_field(&terminal, "Choose scopes");
+    terminal.send("12").unwrap();
+    expect_field(&terminal, "(2 chosen)");
+    terminal.send("\r").unwrap();
+    expect_field(&terminal, "Choose timing");
+    terminal.send("\x1b[D").unwrap();
+    expect_field(&terminal, "(2 chosen)");
+    terminal.send("\r").unwrap();
+    expect_field(&terminal, "Choose timing");
+    let turn = common::turn_status_marker(&terminal);
+    terminal.send("2").unwrap();
+    common::expect_turn_complete_after(&terminal, &turn, env.timeout(), "answers delivered");
+    let journals = interaction_journals(&env);
+    assert_eq!(journals.len(), 1);
+    let journal: Value = serde_json::from_slice(&std::fs::read(&journals[0]).unwrap()).unwrap();
+    let record = &journal["records"][0];
+    assert_eq!(record["status"], "delivered");
+    assert_eq!(
+        record["reply"]["answers"],
+        json!([
+            {"id":"scope","value":"cli","label":"Terminal"},
+            {"id":"scope","value":"web","label":"Dashboard"},
+            {"id":"when","value":"later","label":"Later"}
+        ])
+    );
+    submit(&mut terminal, "/exit");
+    assert_eq!(terminal.expect_eof().unwrap(), 0);
+}
+
+#[test]
 fn questions_command_explains_disabled_interactions_without_inference() {
     let env = TestEnv::new_mock("interaction-command-disabled");
     let mut terminal = env.spawn_with_env(

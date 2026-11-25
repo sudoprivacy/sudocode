@@ -1017,7 +1017,11 @@ fn validate_reply(request: &InteractionRequest, reply: &InteractionReply) -> Res
                     .iter()
                     .find(|field| field.id == answer.id)
                     .ok_or("reply names an unknown question field")?;
-                if !ids.insert(&answer.id) || (field.required && answer.value.trim().is_empty()) {
+                let allows_multiple = field.kind == crate::QuestionKind::MultiSelect
+                    && matches!(question.presentation, crate::QuestionPresentation::Question);
+                if (!ids.insert(&answer.id) && !allows_multiple)
+                    || (field.required && answer.value.trim().is_empty())
+                {
                     return Err(
                         "reply contains a repeated field or an empty required answer".into(),
                     );

@@ -61,9 +61,10 @@ fn presentation(request: &InteractionRequest) -> std::borrow::Cow<'_, QuestionPr
 pub(crate) fn question_field(
     request: &QuestionPromptRequest,
     index: usize,
-    earlier: Option<&QuestionPromptAnswer>,
+    earlier: Option<&[QuestionPromptAnswer]>,
 ) -> repl_ui::QuestionPromptView {
     let field = &request.fields[index];
+    let multi_select = field.kind == QuestionKind::MultiSelect;
     repl_ui::QuestionPromptView {
         presentation: request.presentation.clone(),
         title: request.title.clone(),
@@ -86,11 +87,34 @@ pub(crate) fn question_field(
         custom_input_hint: field.custom_input_hint.clone(),
         force_fuzzy_select: false,
         back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
-        initial_value: earlier.map(|answer| answer.value.clone()),
+        initial_value: earlier.and_then(|answers| {
+            if multi_select {
+                let values: Vec<String> =
+                    answers.iter().map(|answer| answer.value.clone()).collect();
+                Some(repl_ui::multi_select_answer(&values))
+            } else {
+                answers.first().map(|answer| answer.value.clone())
+            }
+        }),
+        multi_select,
     }
 }
 
-pub(crate) fn answer_for_field(field: &QuestionField, value: String) -> QuestionPromptAnswer {
+/// One answer per chosen value: a multi-select dialog sends them together.
+pub(crate) fn answers_for_field(
+    field: &QuestionField,
+    raw_answer: String,
+) -> Vec<QuestionPromptAnswer> {
+    match repl_ui::multi_select_values(&raw_answer) {
+        Some(values) => values
+            .into_iter()
+            .map(|value| answer_for_field(field, value))
+            .collect(),
+        None => vec![answer_for_field(field, raw_answer)],
+    }
+}
+
+fn answer_for_field(field: &QuestionField, value: String) -> QuestionPromptAnswer {
     let label = field
         .options
         .iter()
@@ -107,7 +131,7 @@ pub(crate) fn answer_for_field(field: &QuestionField, value: String) -> Question
 struct FocusedQuestion {
     interaction: Interaction,
     index: usize,
-    answers: Vec<Option<QuestionPromptAnswer>>,
+    answers: Vec<Option<Vec<QuestionPromptAnswer>>>,
 }
 
 struct PendingReview {
@@ -303,7 +327,7 @@ impl Questions {
             question_field(
                 &request,
                 focused.index,
-                focused.answers[focused.index].as_ref(),
+                focused.answers[focused.index].as_deref(),
             ),
         );
     }
@@ -368,7 +392,7 @@ impl Questions {
         } else {
             let request = presentation(&focused.interaction.request);
             focused.answers[focused.index] =
-                Some(answer_for_field(&request.fields[focused.index], value));
+                Some(answers_for_field(&request.fields[focused.index], value));
             focused.index += 1;
             if focused.index == request.fields.len() {
                 let action = InteractionAction::Reply {
@@ -376,13 +400,20 @@ impl Questions {
                     revision: focused.interaction.revision,
                     reply: match &focused.interaction.request {
                         InteractionRequest::Question(_) => InteractionReply::Answers {
-                            answers: focused.answers.iter().flatten().cloned().collect(),
+                            answers: focused
+                                .answers
+                                .iter()
+                                .flatten()
+                                .flatten()
+                                .cloned()
+                                .collect(),
                         },
                         InteractionRequest::Permission(_) => InteractionReply::Permission {
                             approved: focused
                                 .answers
                                 .first()
                                 .and_then(Option::as_ref)
+                                .and_then(|answers| answers.first())
                                 .is_some_and(|answer| answer.value == "allow"),
                             reason: None,
                         },

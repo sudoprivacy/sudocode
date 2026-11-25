@@ -986,6 +986,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // drop; the renderer keeps none, so there is nothing to shut down
             // here.
         }
+        CliAction::A2aSetup(args) => {
+            // The command as typed, so the "next" steps it prints can be run as they are.
+            let typed: Vec<String> = env::args().collect();
+            let code = cli::a2a::run_setup(&args, &typed);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         CliAction::Doctor { fix, output_format } => {
             // Repair before reporting, so the report a user reads is the state
             // they are actually left in rather than the one just replaced.

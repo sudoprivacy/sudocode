@@ -238,7 +238,8 @@ export async function setupClaude(options: ClaudeSetupOptions): Promise<SetupRes
       }
       atomicWrite(files.settings, JSON.stringify(settings, null, indent) + (text === undefined || /\n$/.test(text) ? '\n' : ''),
         latest ? lstatSync(files.settings).mode & 0o777 : 0o600);
-      changed.push(`${latest ? 'added the three A2A hooks to' : 'created'} ${files.settings}` + (backup ? ` (previous copy: ${backup})` : ''));
+      changed.push(`${stale.length ? 'moved the three A2A hooks in' : latest ? 'added the three A2A hooks to' : 'created'} ${files.settings}`
+        + (backup ? ` (previous copy: ${backup})` : ''));
     }
     const hooksAfter = bridgeHooks(readJson<Settings>(files.settings)?.value ?? {}, node, options.entry, configFile);
     if (HOOK_EVENTS.some(event => !hooksAfter.some(hook => hook.event === event && hook.standing === 'current'))
@@ -256,9 +257,10 @@ export async function setupClaude(options: ClaudeSetupOptions): Promise<SetupRes
       notVerified: ['No Claude Code session was started and no agent name was issued by this command.'],
       instructions: state === 'already_installed' ? [
         'Claude Code is already attached through this SDK; nothing was changed.',
-        'To check a live session, call the tool scode_status inside Claude Code: it should report connected and an agent name starting with "claude-".'] : [
+        'To check a live session, call the tool scode_agent_list inside Claude Code: a list of agents means that session has joined.'] : [
         'Start a new Claude Code session in any project folder. Sessions that are already open keep what they started with until they are restarted.',
-        'Inside that session, call the tool scode_status. It should report connected and an agent name starting with "claude-".',
+        'Inside that session, call the tool scode_agent_list. A list of agents means the session has joined. An answer of "not_submitted" names what is still missing, and the bridge keeps retrying by itself.',
+        'Other agents then see the session in their agent list as "Claude Code · <machine> · <folder>", under a name starting with "claude-".',
         'Each new session asks the issuer for an agent name the first time it starts (a resumed session keeps its name), so the Nexus node on this machine must be running and able to reach the issuer.',
         'If Claude Code asks whether to allow the scode_ tools, allow them.',
         'Running this same command again is safe and reports the current state.'],

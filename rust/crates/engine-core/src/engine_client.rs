@@ -632,7 +632,7 @@ impl EngineApiClient {
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
             let tools = self.request_tools(&request);
-            let mut message_request = api::session_message_request(
+            let mut message_request = self.client.session_message_request(
                 &self.model,
                 &request,
                 runtime::TextCompletionOptions {

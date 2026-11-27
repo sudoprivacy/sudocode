@@ -1027,3 +1027,57 @@ async fn image_feedback_follows_all_tool_results_on_chat_and_responses_wire() {
         }
     }
 }
+
+#[tokio::test]
+async fn deepseek_tool_continuation_replays_unsigned_session_reasoning() {
+    use runtime::{ApiRequest, ContentBlock, ConversationMessage, TextCompletionOptions};
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let server = spawn_server(captured.clone(), vec![http_response("200 OK", "application/json",
+        r#"{"id":"done","model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#
+    )]).await;
+    let client = ProviderClient::OpenAi(
+        OpenAiCompatClient::new("fixture", OpenAiCompatConfig::openai())
+            .with_base_url(server.base_url()),
+    );
+    let request = ApiRequest {
+        messages: vec![
+            ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "fixture reasoning".into(),
+                    signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_one".into(),
+                    name: "weather".into(),
+                    input: r#"{"city":"test"}"#.into(),
+                    thought_signature: None,
+                },
+            ]),
+            ConversationMessage::tool_result("call_one", "weather", "clear", false),
+        ],
+        system_prompt: runtime::SystemPrompt::default(),
+        trace_id: None,
+        pre_compact_discovered_tools: std::collections::BTreeSet::new(),
+    };
+    let continuation = client.session_message_request(
+        "deepseek-flash",
+        &request,
+        TextCompletionOptions {
+            max_tokens: 100,
+            include_tools: true,
+            cache_prefix: false,
+            thinking_enabled: true,
+        },
+        sample_request(true).tools,
+        api::SessionRequestFields::default(),
+    );
+    client.send_message(&continuation, None).await.unwrap();
+    let requests = captured.lock().await;
+    let payload: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(payload["tools"][0]["function"]["name"], "weather");
+    let messages = &payload["messages"];
+    assert_eq!(messages[0]["reasoning_content"], "fixture reasoning");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call_one");
+    assert_eq!(messages[1]["tool_call_id"], "call_one");
+}

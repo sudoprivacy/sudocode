@@ -1517,7 +1517,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "18e43024b70b296e4e8ae9cf33c4e54ae3e27bd2019ba91eb6743f5cdbf6bada",
+        "Dockerfile.guard": "631a6c94992e669479eb5e6e8f9457031f8dbe3b9fbf22f61f44667c613696e4",
         "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -1563,6 +1563,7 @@ def guard_image_context(root, policy_ref, context):
 def verify_guard_image(image, command):
     """Run all three offline preflight checks on the same immutable image."""
     program = """
+test "$RUSTUP_AUTO_INSTALL" = 0 || { echo 'Guard image must disable Rustup runtime downloads' >&2; exit 1; }
 echo 'GUARD_OFFLINE_CHECK: nextest archive and executable'
 python3 /opt/nextest_seed.py
 echo 'GUARD_OFFLINE_CHECK: compiler cache archive and executable'

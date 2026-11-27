@@ -77,7 +77,7 @@ def main():
     success = False
     pending = False
     error = "Source acceptance failed; inspect the acceptance workflow's jobs and responsibility plan"
-    description = "Carried signed source acceptance; deployment is separate"
+    description = "Verified source acceptance; deployment is separate"
     try:
         # Revalidate even a failed run so the status exposes a missing receipt
         # or the exact failed platform rather than a generic red check.
@@ -86,21 +86,22 @@ def main():
             path.write_text(json.dumps(event))
             os.environ["GITHUB_EVENT_PATH"] = str(path)
             selection = gate.main()
-        jobs = gate.pages(f"repos/{repository}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
-        for name in selection["required_jobs"]:
-            matching = [job for job in jobs if job["name"] == name]
-            if len(matching) != 1 or matching[0]["conclusion"] != "success":
-                raise RuntimeError(f"Required current-attempt job did not pass: {name}")
+        if selection["hosted"]:
+            gate.verify_hosted_run(repository, event["pull_request"], run, selection["plan"])
+        else:
+            gate.verify_jobs(repository, run, selection["required_jobs"])
         if run["conclusion"] != "success":
             raise RuntimeError(error)
-        if selection["plan"]:
+        if selection["hosted"]:
+            description = f"Hosted offline run {run['id']} passed."
+        elif selection["plan"]:
             plan = selection["plan"]
             targets = dict.fromkeys(target for job in plan["ci"] for target in job["targets"])
             description = (f"Local {plan['author']['system']} + CI {','.join(targets) or 'none'} passed; "
                            "source only, deployment separate")
         if run["event"] == "pull_request":
             description = description.replace("source only, deployment separate", "source only")
-            description += f". When ready: gh pr merge {event['pull_request']['number']} --auto"
+            description = description.rstrip(".") + f". When ready: gh pr merge {event['pull_request']['number']} --auto"
         pending = not selection.get("author_complete", True)
         if pending:
             description = "Native CI passed; full author signature still required. Finish the original local check; native jobs are retained."

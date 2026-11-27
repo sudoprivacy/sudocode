@@ -167,9 +167,21 @@ depend on Unix-only mechanisms (SIGINT/ESC signal delivery, `sh -c` /
 `python3` subprocesses, the ACP stdio subprocess handshake) are still
 `#[cfg(unix)]`-gated.
 
-### Mandatory local acceptance and complementary CI
+### Offline acceptance for pull requests
 
-Install the managed pre-push hook once per clone. All worktrees share it:
+Contributors can open a PR from a branch or fork on any supported development machine.
+Mark it ready for review to run offline acceptance. With no local signature or pending
+signed execution plan, GitHub-hosted Linux x64 executes the selected author checks.
+Actions runs the complementary macOS, Windows and Linux ARM64 jobs selected by the
+same source and platform policy. GitHub may require maintainer approval to start
+Actions for a first-time fork contributor. The required status links to the publisher,
+and its description identifies the hosted source run. The merge queue verifies its
+exact source and checks before carrying that result.
+
+### Optional signed local acceptance and complementary CI
+
+Enrolled contributors can supply the author checks locally and have Actions run the
+complement. Install the managed pre-push hook once per clone. All worktrees share it:
 
 ```bash
 python -m pip install psutil jsonschema
@@ -682,8 +694,8 @@ that caught a real RSS regression, and the heavy case uses three and three: 36 j
 observations. A failed, noisy
 or invalid scenario stops the matrix. Drivers build in the binary-free
 `scode-benchmark-drivers` package, so measuring compiles no extra CLI binary.
-The matrix is mandatory on the author's local Docker before push for CLI,
-engine-core, PTY harness/helper, rendering-driver and named native observer inputs.
+CLI, engine-core, PTY harness/helper, rendering-driver and named native observer inputs
+require this Docker matrix. It runs on the hosted Linux worker or the enrolled author's host.
 Cargo/dependency metadata and unrelated crate source do not select it per PR.
 The browser functional smoke remains separate. Rendering and browser prepare
 the same checksum-pinned compiler tool as the native guard on the existing
@@ -1076,8 +1088,8 @@ resumes retain their existing validation; they do not build a new artifact.
 Ordinary product edits retain applicable native functional, resize/service and
 selected Linux release-rendering checks. `native-context` reuses the current
 workspace dev/mailbox binary for the connected compiler-context journey.
-`native-release` remains mandatory locally for changes to optimized acceptance
-drivers and harnesses. **Coverage reduction:** ordinary source acceptance can
+Changes to optimized acceptance drivers and harnesses require `native-release`
+on the author host or its hosted replacement. **Coverage reduction:** ordinary source acceptance can
 miss native optimization-specific failures and startup regressions until release.
 `RELEASE_ACCEPTANCE_SCOPE` and `NATIVE_CONTEXT_SCOPE` explain this at the required
 interface. Real Git plans cover ordinary, retained, mixed, renamed and deleted
@@ -1130,10 +1142,10 @@ commit, tree, diff base, policy and native host. The hook publishes that note
 before the branch. GitHub's read-only metadata job verifies the signature against
 public keys enrolled on main and selects the missing hosts. The SDK profile runs
 the actual `npm ci`, `npm test` and runtime packaging commands locally and in CI;
-an older preflight-only receipt cannot satisfy it. Missing, failed,
-stale or tampered receipts block the Local acceptance required check. A signature
+an older preflight-only receipt cannot satisfy it. A stale or tampered receipt fails verification. A signed launch plan keeps the
+required status pending until its corresponding author checks finish. A signature
 authenticates the enrolled author's statement; it is not remote execution
-attestation. Maintainers may attest a contributor's PR by actually running its
+attestation. Maintainers may also attest a contributor's PR by actually running its
 checks on an enrolled host; forks need not receive repository secrets.
 
 After the protected commands change, `check --resume-from /path/to/previous/output`
@@ -2480,10 +2492,9 @@ relevant) `README.md`. When adding a new crate:
 Before opening a PR:
 
 - [ ] Branch off the latest `main`.
-- [ ] The managed hook ran every check selected by the protected acceptance
-      plan on the author's platform and produced a valid exact-head receipt.
-      Use its printed commands and local/CI responsibilities; do not infer a
-      full Rust build from this checklist for documentation or SDK-only edits.
+- [ ] For hosted acceptance, push the branch or fork and mark the PR ready
+      when it should run. For local acceleration, use the enrolled device's
+      managed hook. Both routes follow the [same offline acceptance policy](#offline-acceptance-for-pull-requests).
 - [ ] Rust-changing PRs pass `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the queue runs it on all three native platforms.
 - [ ] The change does **not** add unit tests (see
       [Test policy](#test-policy)).

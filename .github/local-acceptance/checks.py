@@ -1299,7 +1299,7 @@ def native_guard_files():
         ".github/actions/vfs-search-cache/action.yml": "0143e64fff113e5394365718792e22dcfb88d361634dc57d85306c3ffac3b596",
         ".github/local-acceptance/cache_layout.py": "f1c0495fc61f0c645d204e7aec1991f3a50d67923f1284d1521a9ecd1c5068da",
         ".github/local-acceptance/cross_platform.py": "0293d33054ba9a251e151a626a4c5dff18b7380201ad1da01ba8dfd1056deb4e",
-        ".github/local-acceptance/hosted_profiles.py": "23d7ce8a08d79aa83b07e6fea9f3f60394c30618dd34d05e4524d5a05d610803",
+        ".github/local-acceptance/hosted_profiles.py": "4925d35d94a4340595fd00f69d16eddcc8d36cfcb199094d72dfdbbedab79635",
         ".github/local-acceptance/gate.py": "c317cb695603613a6af3b896a9de9dc697976586e73ee27e8d940d297cad2eb4",
         ".github/local-acceptance/native_guard.py": "ac7016f16686a2c8b50353c30f3d2914d7e3e5efbdf0588a40d0c274c280878c",
         "e2e/local-acceptance/parallel_guards_acceptance.py": "82d58151cae51702e0602852233c730acf6dfa87adcddd8f8fb2da47085afbb6",
@@ -1331,7 +1331,7 @@ def native_guard_files():
         "e2e/local-acceptance/policy_guard_acceptance.py": "242045ab62ef54ce11c1d5424e824ddfe94460569133e7c651795aa2e5427b29",
         "e2e/local-acceptance/power_acceptance.py": "47344bcd5a9d4910d091355629f19f3f8263ec40aa806740fba26354b7d1b945",
         "e2e/local-acceptance/profile_compat_acceptance.py": "97bbd63bcd0739daa689def0b48f41fb1aba466d40df109b45636df90b839408",
-        "e2e/local-acceptance/publication_acceptance.py": "5b8e216cdcef3b54250030189505231ca9ad971bf45396ca853fd6f3c7ddf958",
+        "e2e/local-acceptance/publication_acceptance.py": "90fc1d40c278561b73d02dde102fa661ff093e355b44e7f6afb29b796d8fbb3c",
         "e2e/local-acceptance/release_acceptance.py": "be2826c6e67261e77ccaf7465f9f0e0930de19c84bd069d7ee001f9e7c798d38",
         "e2e/local-acceptance/resource_scheduling_acceptance.py": "5539ff93d2aa9adff6bf7ce93b55cc7f8df440539fcb0cd81e2279bd90c08a1b",
         "e2e/local-acceptance/resume_acceptance.py": "fd8cda7f271679d874c6812c291135d58243aafc37f0a223c46ec5b616aaea43",
@@ -1517,7 +1517,7 @@ def guard_image_context(root, policy_ref, context):
     # Keep image bindings inside the existing executable fingerprint format.
     # A changed image/entrypoint must update its pin before any Docker work.
     pins = {
-        "Dockerfile.guard": "18e43024b70b296e4e8ae9cf33c4e54ae3e27bd2019ba91eb6743f5cdbf6bada",
+        "Dockerfile.guard": "631a6c94992e669479eb5e6e8f9457031f8dbe3b9fbf22f61f44667c613696e4",
         "guard.py": "e53a8247775bae41059513f4a964bd639146cca0468c92531bd0b40699ceb3f4",
     }
     for name, destination in [("Dockerfile.guard", "Dockerfile"), ("guard.py", "guard.py")]:
@@ -1563,6 +1563,7 @@ def guard_image_context(root, policy_ref, context):
 def verify_guard_image(image, command):
     """Run all three offline preflight checks on the same immutable image."""
     program = """
+test "$RUSTUP_AUTO_INSTALL" = 0 || { echo 'Guard image must disable Rustup runtime downloads' >&2; exit 1; }
 echo 'GUARD_OFFLINE_CHECK: nextest archive and executable'
 python3 /opt/nextest_seed.py
 echo 'GUARD_OFFLINE_CHECK: compiler cache archive and executable'

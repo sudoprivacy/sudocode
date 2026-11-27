@@ -107,7 +107,7 @@ compilation. Source snapshots contain only
 Git-tracked inputs. Docker gets no model keys or GitHub token. Full logs remain
 local; the signed Git note carries command and log digests bound to the exact
 commit and protected acceptance contract. See
-[mandatory local acceptance](../../CONTRIBUTING.md#mandatory-local-acceptance-and-complementary-ci).
+[offline PR acceptance](../../CONTRIBUTING.md#offline-acceptance-for-pull-requests).
 
 Edits limited to `benchmark.py`, `gui-smoke.py`, `performance-policy.json` and
 `gui-policy.json` skip the ordinary workspace/resize suites and their

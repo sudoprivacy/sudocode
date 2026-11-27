@@ -46,7 +46,7 @@ def verify_publication(directory, work, clean_environment):
     git("clone", "--quiet", "--branch", "main", origin, verifier, cwd=directory)
     git("config", f"url.{origin}.insteadOf", "https://github.com/acceptance/fixture.git", cwd=verifier)
     # Stage protected code in the verifier; candidate code is fetched/read only.
-    for name in ["gate.py", "publish.py"]:
+    for name in ["gate.py", "publish.py", "hosted_profiles.py"]:
         shutil.copy2(SOURCE / ".github/local-acceptance" / name, verifier / ".github/local-acceptance" / name)
     shutil.copy2(SOURCE / ".github/scripts/check_pr_history.py", verifier / ".github/scripts/check_pr_history.py")
     pull = {"number": 1, "draft": False, "head": {"sha": head, "repo": {"full_name": "acceptance/fixture"}},
@@ -111,7 +111,7 @@ def verify_publication(directory, work, clean_environment):
     def run(identifier, *, title="Local acceptance", conclusion="success", status="completed", attempt=1):
         return {"id": identifier, "path": ".github/workflows/local-acceptance.yml", "status": status,
                 "conclusion": conclusion, "display_title": title, "head_sha": head,
-                "event": "pull_request", "run_attempt": attempt}
+                "event": "pull_request", "run_attempt": attempt, "head_repository": dict(pull["head"]["repo"])}
 
     cases = []
 
@@ -217,6 +217,51 @@ def verify_publication(directory, work, clean_environment):
               refusal="not produced by the trusted publisher")
         queue("queue-first-attempt-failed-refused", run_changes={"run_attempt": 1},
               refusal="not produced by the trusted publisher")
+        # The contributor fork has the candidate but no signing or plan refs.
+        fork = output / "fork.git"
+        git("clone", "--quiet", "--bare", origin, fork, cwd=directory)
+        git("config", f"url.{fork}.insteadOf", "https://github.com/contributor/fork.git", cwd=verifier)
+        for repository in ["acceptance/fixture", "contributor/fork"]:
+            pull["head"]["repo"]["full_name"] = repository
+            git("update-ref", "-d", "refs/notes/local-acceptance", cwd=origin)
+            label = repository.split("/")[0] + "-unsigned"
+            invoke(label, 210, [], gate_only=True, verified_base=trusted)
+            matrix = next(line[7:] for line in (output / (label + ".outputs")).read_text().splitlines()
+                          if line.startswith("matrix="))
+            jobs = json.loads(matrix)["include"]
+            assert len(jobs) == 1 and jobs[0]["checks"] == ["real-process"] and jobs[0]["os"] == "ubuntu-latest"
+            completed = [{"name": "Verify local acceptance", "conclusion": "success"},
+                         {"name": jobs[0]["name"], "conclusion": "success",
+                          "steps": [{"name": "Run the author's selected offline profiles on a hosted worker",
+                                     "conclusion": "success"}]}]
+            invoke(label + "-missing", 210, [run(210)], expected="failure", success=False)
+            invoke(label + "-no-execution", 210, [run(210)], expected="failure", success=False,
+                   publisher_jobs=[completed[0], {**completed[1], "steps": []}])
+            invoke(label + "-passed", 210, [run(210)], expected="success", publisher_jobs=completed)
+            hosted_status = {**published, **state["posts"][0]}
+            bound = {**publisher_run, "run_attempt": 1, "conclusion": "success",
+                     "display_title": "Local acceptance publish " + head}
+            invoke(label + "-queue", 300, [bound, run(210)], merge_group=True,
+                   statuses=[hosted_status], publisher_jobs=completed)
+            invoke(label + "-queue-skipped", 300, [bound, run(210)], merge_group=True, success=False,
+                   statuses=[hosted_status], publisher_jobs=[completed[0], {**completed[1], "conclusion": "skipped"}])
+            invoke(label + "-queue-other-source", 300, [bound, {**run(210), "head_sha": trusted}],
+                   merge_group=True, success=False, statuses=[hosted_status], publisher_jobs=completed)
+            git("update-ref", "refs/notes/local-acceptance", original_note_ref, cwd=origin)
+
+        pull["head"]["repo"]["full_name"] = "acceptance/fixture"
+        worker = verifier / ".github/local-acceptance/hosted_profiles.py"
+        worker_output = output / "hosted-worker"
+        environment = {**clean_environment, "ACCEPTANCE_BASE": trusted, "ACCEPTANCE_CHECKS": "real-process",
+                       "ACCEPTANCE_OUTPUT": str(worker_output)}
+        subprocess.run([sys.executable, str(worker)], cwd=work, env=environment, check=True)
+        commands = json.loads((worker_output / "real-process/commands.json").read_text())
+        assert len(commands) == 2 and all(command["exit_code"] == 0 for command in commands)
+        for changes, diagnostic in [({"GH_TOKEN": "fixture"}, "must not receive GitHub credentials"),
+                                    ({"ACCEPTANCE_CHECKS": ""}, "differs from the protected source plan")]:
+            result = subprocess.run([sys.executable, str(worker)], cwd=work, env={**environment, **changes},
+                                    capture_output=True)
+            assert result.returncode and diagnostic in result.stderr.decode(), result.stderr
         # Model a protected main that has incorporated an ancestor of this PR,
         # while the PR API still reports its old base. Run/sign real commands
         # against that actual new base; do not edit or re-sign an old receipt.

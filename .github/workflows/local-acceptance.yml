@@ -126,7 +126,15 @@ jobs:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
           ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
         run: python ../.trusted-acceptance/.github/local-acceptance/prepare_tools.py
+      - name: Run the author's selected offline profiles on a hosted worker
+        if: matrix.family == 'offline'
+        env:
+          ACCEPTANCE_CHECKS: ${{ join(matrix.checks, ' ') }}
+          ACCEPTANCE_BASE: ${{ needs.proof.outputs.base_sha }}
+          ACCEPTANCE_OUTPUT: ${{ runner.temp }}/local-acceptance
+        run: python ../.trusted-acceptance/.github/local-acceptance/hosted_profiles.py
       - name: Run the same native commands on the missing platform
+        if: matrix.family != 'offline'
         env:
           ACCEPTANCE_NATIVE_CHECKS: ${{ join(matrix.checks, ' ') }}
           ACCEPTANCE_BASE: ${{ needs.proof.outputs.base_sha }}

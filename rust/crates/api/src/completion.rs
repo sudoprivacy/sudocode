@@ -33,6 +33,24 @@ pub fn session_message_request(
     tools: Option<Vec<ToolDefinition>>,
     session: SessionRequestFields,
 ) -> MessageRequest {
+    build_session_request(
+        model,
+        request,
+        options,
+        tools,
+        session,
+        convert_messages(&request.messages),
+    )
+}
+
+fn build_session_request(
+    model: &str,
+    request: &ApiRequest,
+    options: TextCompletionOptions,
+    tools: Option<Vec<ToolDefinition>>,
+    session: SessionRequestFields,
+    messages: Vec<InputMessage>,
+) -> MessageRequest {
     let cache_hints =
         (options.cache_prefix && !request.system_prompt.is_empty()).then(|| CacheHints {
             system_static: Some(request.system_prompt.static_text()),
@@ -42,7 +60,7 @@ pub fn session_message_request(
     MessageRequest {
         model: model.into(),
         max_tokens: options.max_tokens,
-        messages: convert_messages(&request.messages),
+        messages,
         system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
         tools: if options.include_tools {
             tools.filter(|tools| !tools.is_empty())
@@ -59,6 +77,37 @@ pub fn session_message_request(
 }
 
 impl ProviderClient {
+    /// Convert conversation history for the selected model and wire protocol.
+    #[must_use]
+    pub fn conversation_messages(
+        &self,
+        model: &str,
+        history: &[ConversationMessage],
+    ) -> Vec<InputMessage> {
+        let keep_unsigned = matches!(self, Self::OpenAi(client) | Self::Xai(client) if client.replays_unsigned_reasoning(model));
+        convert_history(history, keep_unsigned)
+    }
+
+    /// Build a request using this provider's history replay policy.
+    #[must_use]
+    pub fn session_message_request(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+        options: TextCompletionOptions,
+        tools: Option<Vec<ToolDefinition>>,
+        session: SessionRequestFields,
+    ) -> MessageRequest {
+        build_session_request(
+            model,
+            request,
+            options,
+            tools,
+            session,
+            self.conversation_messages(model, &request.messages),
+        )
+    }
+
     /// Build and send a text-only request with caller-selected model and schemas.
     /// Return completion metadata unchanged so the consumer can validate it.
     ///
@@ -79,7 +128,8 @@ impl ProviderClient {
         tools: Option<Vec<ToolDefinition>>,
         session: SessionRequestFields,
     ) -> Result<TextCompletion, RuntimeError> {
-        let message_request = session_message_request(model, &request, options, tools, session);
+        let message_request =
+            self.session_message_request(model, &request, options, tools, session);
         let response = self
             .send_message_streamed(&message_request, None)
             .await
@@ -154,6 +204,10 @@ impl ProviderClient {
 /// Convert active conversation messages to provider input, preserving tool pairs.
 #[must_use]
 pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+    convert_history(messages, false)
+}
+
+fn convert_history(messages: &[ConversationMessage], keep_unsigned: bool) -> Vec<InputMessage> {
     let history = runtime::model_tool_history(messages);
     let messages = history.as_ref();
     let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
@@ -184,27 +238,26 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 // in place of a read (0.1x), which is where an agentic session's
                 // cache_creation share comes from.
                 //
-                // Unsigned blocks are dropped instead of sent: they are accepted
+                // On Anthropic, unsigned blocks are dropped instead of sent: they are accepted
                 // (no 400) but buy nothing — the same probe measured read 0 with
                 // the signature stripped, because the server cannot validate the
                 // block and does not count it as the turn it issued. A route that
                 // strips signatures therefore degrades to today's behaviour
                 // rather than sending junk the provider has to reason about.
                 //
-                // Providers that have no thinking channel already ignore this
-                // variant (gemini, codex); the OpenAI-compatible provider maps it
-                // to a reasoning item or `reasoning_content` — code that was
-                // written for these blocks and was unreachable until now.
+                // DeepSeek Chat Completions returns plain reasoning without
+                // signatures and requires it verbatim in tool continuations.
                 ContentBlock::Thinking {
                     thinking,
                     signature,
-                } => signature
-                    .as_ref()
-                    .filter(|signature| !signature.is_empty())
-                    .map(|signature| InputContentBlock::Thinking {
+                } => {
+                    let signature = signature.as_ref().filter(|value| !value.is_empty());
+                    (signature.is_some() || keep_unsigned).then(|| InputContentBlock::Thinking {
                         thinking: thinking.clone(),
-                        signature: Some(signature.clone()),
-                    }),
+                        signature: signature.cloned(),
+                    })
+                }
+
                 // Encrypted thinking needs no signature check — the ciphertext
                 // is its own proof — so it goes back unconditionally. Same
                 // probe, trigger string in the prompt: dropped it gave turn 2

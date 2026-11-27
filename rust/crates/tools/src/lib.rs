@@ -7674,7 +7674,7 @@ impl ProviderRuntimeClient {
             .chain
             .first()
             .ok_or_else(|| RuntimeError::new("no completion provider"))?;
-        let mut message_request = api::session_message_request(
+        let mut message_request = first.client.session_message_request(
             &first.model,
             &request,
             runtime::TextCompletionOptions {
@@ -7695,7 +7695,12 @@ impl ProviderRuntimeClient {
         let chain = &self.chain;
         let mut last_error: Option<Box<ApiError>> = None;
         for (index, entry) in chain.iter().enumerate() {
-            // The converted history and session fields survive provider retries.
+            // A fallback can use a different model or wire protocol.
+            if index > 0 {
+                message_request.messages = entry
+                    .client
+                    .conversation_messages(&entry.model, &request.messages);
+            }
             message_request.model.clone_from(&entry.model);
             message_request.max_tokens = max_tokens_for_model(&entry.model);
 

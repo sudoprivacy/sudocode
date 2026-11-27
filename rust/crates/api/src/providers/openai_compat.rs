@@ -109,6 +109,11 @@ pub struct OpenAiCompatClient {
 }
 
 impl OpenAiCompatClient {
+    pub(crate) fn replays_unsigned_reasoning(&self, model: &str) -> bool {
+        self.api_format == ApiFormat::OpenAiCompletions
+            && model_requires_reasoning_content_in_history(model)
+    }
+
     const fn config(&self) -> OpenAiCompatConfig {
         self.config
     }

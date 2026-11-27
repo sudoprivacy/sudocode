@@ -1,6 +1,9 @@
 # Local acceptance migration
 
-Install the managed hook once from a checkout containing main's acceptance
+Ordinary ready PRs, including forks, can use GitHub-hosted offline acceptance without
+installing a hook or enrolling a device. See the [PR acceptance guide](../CONTRIBUTING.md#offline-acceptance-for-pull-requests).
+
+To supply signed local results, install the managed hook once from a checkout containing main's acceptance
 runner. The setting is repository-local and shared by this clone's worktrees:
 
 ```sh
@@ -8,7 +11,7 @@ python -m pip install psutil jsonschema
 python .github/scripts/local_acceptance.py install --signer DEVICE_ID --key /absolute/path/to/private-key
 ```
 
-Each computer enrolls its own public Ed25519 device key through review of
+Each signing computer enrolls its own public Ed25519 device key through review of
 `spec/local_acceptance_signers.json`; keep the private key on that computer.
 No always-on Mac, remote login or local runner service is needed.
 
@@ -32,8 +35,8 @@ runner without a cosmetic merge. If a check fails, retain the original logs;
 the next attempt gets a fresh result directory. Do not amend a receipt, mark
 an unrun profile passed, or use a mock provider result as live-model evidence.
 
-Old PR heads that were pushed before hook installation need a real local
-acceptance run and a new synchronization event. From that PR's clean worktree:
+For an older PR with no signature, a fresh ready-for-review or synchronize event starts
+the hosted route. To use the signed local route instead, run the following from the PR's clean worktree:
 
 ```sh
 python .github/scripts/local_acceptance.py check --publish

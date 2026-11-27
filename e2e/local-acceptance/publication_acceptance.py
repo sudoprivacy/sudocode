@@ -262,6 +262,63 @@ def verify_publication(directory, work, clean_environment):
             result = subprocess.run([sys.executable, str(worker)], cwd=work, env={**environment, **changes},
                                     capture_output=True)
             assert result.returncode and diagnostic in result.stderr.decode(), result.stderr
+        # Exercise upload discovery as a normal recursive artifact reader. The
+        # profile mimics Docker's mounted scratch layout in a private Git clone.
+        artifact_repo = output / "artifact-source"
+        git("clone", "--quiet", verifier, artifact_repo, cwd=directory)
+        git("config", "user.name", "CI fixture", cwd=artifact_repo)
+        git("config", "user.email", "ci@fixture.invalid", cwd=artifact_repo)
+        artifact_worker = artifact_repo / ".github/local-acceptance/hosted_profiles.py"
+        shutil.copyfile(worker, artifact_worker)
+        profiles = artifact_repo / ".github/local-acceptance/checks.py"
+        profiles.write_text(profiles.read_text() + """
+original = run
+def run(name, root, output, base, execute):
+    from pathlib import Path
+    import os, sys
+    original.execution_refs = run.execution_refs
+    location = output / "container" / "rendering"
+    private = location / "compiler-cache" / "argument-files"
+    private.mkdir(parents=True)
+    (private / "compiler.rsp").write_text("private invocation")
+    private.chmod(0)
+    measurements = location / "measurements"
+    measurements.mkdir()
+    (measurements / "report.json").write_text('{"status":"fixture"}')
+    (location / "scode-candidate").write_text("build output")
+    if os.environ.get("HOSTED_FIXTURE_FAIL"):
+        execute([sys.executable, "-c", "raise SystemExit(27)"], root, output / "failed.log")
+    return original(name, root, output, base, execute)
+""", encoding="utf-8")
+        git("add", ".", cwd=artifact_repo)
+        git("commit", "--quiet", "-m", "Hosted artifact fixture", cwd=artifact_repo)
+        for failed in (False, True):
+            artifact = output / ("failed-artifact" if failed else "passed-artifact")
+            result = subprocess.run([sys.executable, str(artifact_worker)], cwd=artifact_repo, capture_output=True,
+                                    env={**environment, "ACCEPTANCE_OUTPUT": str(artifact),
+                                         "HOSTED_FIXTURE_FAIL": "yes" if failed else ""})
+            private = artifact.with_name(artifact.name + "-work") / "real-process/container/rendering/compiler-cache/argument-files"
+            try:
+                assert (result.returncode != 0) == failed, result.stderr.decode()
+                def scan_error(error):
+                    raise error
+
+                files = set()
+                for folder, directories, filenames in os.walk(artifact, onerror=scan_error):
+                    assert "compiler-cache" not in directories, directories
+                    for filename in filenames:
+                        path = Path(folder) / filename
+                        path.read_bytes()
+                        files.add(path.relative_to(artifact).as_posix())
+                assert "real-process/container/rendering/measurements/report.json" in files, files
+                assert not any("compiler-cache" in path or "scode-candidate" in path for path in files), files
+                assert ("real-process/commands.json" in files) != failed, files
+                assert ("real-process/failed.log" in files) == failed, files
+                if os.name != "nt":
+                    assert private.stat().st_mode & 0o777 == 0
+            finally:
+                if private.exists():
+                    private.chmod(0o700)
         # Model a protected main that has incorporated an ancestor of this PR,
         # while the PR API still reports its old base. Run/sign real commands
         # against that actual new base; do not edit or re-sign an old receipt.

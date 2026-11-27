@@ -1834,7 +1834,7 @@ pub fn is_reasoning_model(model: &str) -> bool {
 pub fn model_requires_reasoning_content_in_history(model: &str) -> bool {
     let lowered = model.to_ascii_lowercase();
     let canonical = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
-    canonical.starts_with("deepseek-v4")
+    canonical.starts_with("deepseek-v4") || canonical == "deepseek-flash"
 }
 
 /// Strip routing prefix (e.g., "openai/gpt-4" → "gpt-4") for the wire.
@@ -2899,12 +2899,14 @@ mod tests {
         let positive = [
             "deepseek-v4-flash",
             "deepseek-v4-pro",
+            "deepseek-flash",
             "openai/deepseek-v4-pro",
             "deepseek/deepseek-v4-flash",
         ];
         let negative = [
             "deepseek-reasoner",
             "deepseek-chat",
+            "deepseek-flash-custom",
             "gpt-4o",
             "claude-sonnet-4-6",
         ];
@@ -2927,11 +2929,21 @@ mod tests {
 
     #[test]
     fn deepseek_v4_pro_request_includes_reasoning_content_for_assistant_history() {
-        let request = assistant_history_with_thinking_request("openai/deepseek-v4-pro");
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
-        let assistant = &payload["messages"][0];
-        assert_eq!(assistant["reasoning_content"], json!("prior reasoning"));
-        assert_eq!(assistant["content"], json!("answer"));
+        for model in [
+            "openai/deepseek-v4-pro",
+            "deepseek-flash",
+            "deepseek/deepseek-flash",
+        ] {
+            let request = assistant_history_with_thinking_request(model);
+            let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+            let assistant = &payload["messages"][0];
+            assert_eq!(
+                assistant["reasoning_content"],
+                json!("prior reasoning"),
+                "{model}"
+            );
+            assert_eq!(assistant["content"], json!("answer"), "{model}");
+        }
     }
 
     #[test]

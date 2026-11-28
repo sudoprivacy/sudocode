@@ -278,6 +278,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.record_turn_failed(state.iterations, &error);
             return Err(error);
         }
+        if let Err(error) = self.check_usd_budget() {
+            self.record_turn_failed(state.iterations, &error);
+            return Err(error);
+        }
 
         Ok(final_answer)
     }
@@ -519,6 +523,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         };
         if let Some(usage) = usage {
             self.usage_tracker.record(usage);
+            let model = state
+                .response_model
+                .clone()
+                .unwrap_or_else(|| self.running_model().to_string());
+            self.book_usd_spend(&model, usage);
         }
         state.prompt_cache_events.extend(turn_prompt_cache_events);
         let pending_tool_uses = assistant_message

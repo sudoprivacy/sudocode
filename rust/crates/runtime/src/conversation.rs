@@ -1327,6 +1327,9 @@ pub struct ConversationRuntime<C, T> {
     todo_checked_at: Option<(u32, usize)>,
     max_iterations: usize,
     max_steps: Option<u32>,
+    /// Hard dollar cap across every request this runtime sends. `None` keeps
+    /// the historical behaviour (no spend limit). See [`Self::with_usd_budget`].
+    usd_budget: Option<Arc<llm_budget::AgentBudget>>,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     /// Consecutive turns where `maybe_auto_compact` ran and returned a no-op
@@ -1416,6 +1419,7 @@ where
             todo_checked_at: None,
             max_iterations: usize::MAX,
             max_steps: feature_config.max_steps(),
+            usd_budget: None,
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
             consecutive_auto_compact_noops: 0,
@@ -1514,6 +1518,68 @@ where
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
+    }
+
+    /// Cap what this runtime may spend, in US dollars, across all turns.
+    ///
+    /// Every response's usage is booked on `budget`: the billing backend's
+    /// own `cost_units` when it reports them, otherwise the model's dated
+    /// list price from `llm-budget`. Once booked spend reaches the cap, the
+    /// next request is refused before it is sent. A model with no known
+    /// price also stops the loop rather than running unmetered. Pass a
+    /// shared `Arc` to give several runtimes (a coordinator and its
+    /// sub-agents) one cap.
+    #[must_use]
+    pub fn with_usd_budget(mut self, budget: Arc<llm_budget::AgentBudget>) -> Self {
+        self.usd_budget = Some(budget);
+        self
+    }
+
+    /// The dollar budget this runtime books spend on, if one is set.
+    #[must_use]
+    pub fn usd_budget(&self) -> Option<&Arc<llm_budget::AgentBudget>> {
+        self.usd_budget.as_ref()
+    }
+
+    /// Books one response's usage on the dollar budget, if one is set.
+    fn book_usd_spend(&self, model: &str, usage: TokenUsage) {
+        let Some(budget) = self.usd_budget.as_deref() else {
+            return;
+        };
+        if let Some(real_usd) = usage.real_cost_usd() {
+            budget.charge_usd_force(real_usd, llm_budget::ChargeContext::new().model(model));
+            return;
+        }
+        let priced = llm_budget::Usage::from_parts(
+            u64::from(usage.input_tokens),
+            u64::from(usage.cache_read_input_tokens),
+            u64::from(usage.cache_creation_input_tokens),
+            u64::from(usage.output_tokens),
+        );
+        if let Err(error) = budget.record(model, &priced) {
+            tracing::warn!(%error, model, "USD budget cannot price this usage; stopping the loop");
+            budget.kill(&format!("cannot price usage for model `{model}`: {error}"));
+        }
+    }
+
+    /// Refuses the next request once the dollar budget is spent or killed.
+    fn check_usd_budget(&self) -> Result<(), RuntimeError> {
+        let Some(budget) = self.usd_budget.as_deref() else {
+            return Ok(());
+        };
+        if budget.is_killed() {
+            return Err(RuntimeError::new(
+                "conversation loop stopped: USD budget was killed (unpriced model or external stop)",
+            ));
+        }
+        if budget.is_exhausted() {
+            return Err(RuntimeError::new(format!(
+                "conversation loop exceeded the USD budget (spent ${:.4} of ${:.4})",
+                budget.spent_usd(),
+                budget.limit_usd()
+            )));
+        }
+        Ok(())
     }
 
     /// Tool rounds per user turn before the turn winds down: the next request
@@ -6405,6 +6471,102 @@ mod tests {
         assert!(error
             .to_string()
             .contains("conversation loop exceeded the maximum number of iterations"));
+    }
+
+    struct CostlyLoopingApi;
+
+    #[async_trait]
+    impl ApiClient for CostlyLoopingApi {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            Ok(events_to_stream(vec![
+                AssistantEvent::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "echo".to_string(),
+                    input: "payload".to_string(),
+                    thought_signature: None,
+                },
+                // 100k uncached input tokens on claude-sonnet-4-5 list at $0.30.
+                AssistantEvent::Usage(TokenUsage {
+                    input_tokens: 100_000,
+                    output_tokens: 0,
+                    ..TokenUsage::default()
+                }),
+                AssistantEvent::MessageStop,
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_stops_when_usd_budget_is_spent() {
+        // given: a loop that never ends on its own and a $0.50 cap
+        let budget = Arc::new(
+            llm_budget::AgentBudget::builder("test-agent", 0.5)
+                .build()
+                .expect("valid budget"),
+        );
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CostlyLoopingApi,
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_model("claude-sonnet-4-5")
+        .with_max_iterations(64)
+        .with_usd_budget(Arc::clone(&budget));
+
+        // when
+        let error = runtime
+            .run_turn("loop", None, None)
+            .await
+            .expect_err("the loop should stop once the dollar cap is spent");
+
+        // then: two $0.30 requests went out, the third was never sent
+        assert!(
+            error.to_string().contains("exceeded the USD budget"),
+            "{error}"
+        );
+        assert!(
+            (budget.spent_usd() - 0.6).abs() < 1e-6,
+            "{}",
+            budget.spent_usd()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_turn_stops_when_model_has_no_price() {
+        // given: a model no price catalog knows
+        let budget = Arc::new(
+            llm_budget::AgentBudget::builder("test-agent", 5.0)
+                .build()
+                .expect("valid budget"),
+        );
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CostlyLoopingApi,
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_model("in-house-model-without-a-price")
+        .with_max_iterations(64)
+        .with_usd_budget(Arc::clone(&budget));
+
+        // when
+        let error = runtime
+            .run_turn("loop", None, None)
+            .await
+            .expect_err("an unpriced model must not run unmetered");
+
+        // then
+        assert!(
+            error.to_string().contains("USD budget was killed"),
+            "{error}"
+        );
+        assert!(budget.is_killed());
     }
 
     /// A turn that grows past the window mid-flight must be compacted

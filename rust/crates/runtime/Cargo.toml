@@ -48,6 +48,9 @@ lib = { workspace = true }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"
+# Hard USD cap for the conversation loop: dated, source-cited model prices
+# and an atomic spend counter that refuses the next request once the cap is hit.
+llm-budget = { version = "0.10.0", default-features = false }
 nexus-vfs-client = { path = "../nexus-vfs-client" }
 plugins = { path = "../plugins" }
 regex = "1"

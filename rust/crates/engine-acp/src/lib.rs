@@ -13,6 +13,7 @@ pub mod acp_ws_server;
 mod attention_control;
 mod cron_control;
 mod input_control;
+mod interaction_control;
 pub mod managed;
 #[cfg(feature = "mailbox")]
 pub mod managed_agent;

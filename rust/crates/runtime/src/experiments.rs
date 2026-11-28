@@ -43,6 +43,8 @@ pub enum Experiment {
     McpConfigServers,
     /// Independent runtime continuations over a durable session record log.
     SharedSessionHistory,
+    /// Session-owned question/review/approval lifecycle under acceptance.
+    NonblockingInteractions,
 }
 
 /// Settings keys of experiments that graduated. A settings file that still
@@ -55,6 +57,7 @@ impl Experiment {
         Experiment::CoordinatorMode,
         Experiment::McpConfigServers,
         Experiment::SharedSessionHistory,
+        Experiment::NonblockingInteractions,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -65,6 +68,7 @@ impl Experiment {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
             Experiment::SharedSessionHistory => "sharedSessionHistory",
+            Experiment::NonblockingInteractions => "nonblockingInteractions",
         }
     }
 
@@ -75,6 +79,7 @@ impl Experiment {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
+            Experiment::NonblockingInteractions => "NONBLOCKING_INTERACTIONS",
         }
     }
 
@@ -86,7 +91,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
-            Experiment::SharedSessionHistory => None,
+            Experiment::SharedSessionHistory | Experiment::NonblockingInteractions => None,
         }
     }
 }

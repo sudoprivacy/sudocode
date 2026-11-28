@@ -9,7 +9,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
-    fn dispatch_context(
+    pub(super) fn dispatch_context(
         &self,
         observer: &Option<&mut dyn RuntimeObserver>,
         prompter: &Option<&mut dyn PermissionPrompter>,
@@ -39,7 +39,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
-    fn observe_tool_update(
+    pub(super) fn observe_tool_update(
         &mut self,
         update: tool_execution::ToolUpdate,
         scheduler: &mut tool_execution::ToolScheduler<'_, T>,
@@ -120,7 +120,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         Ok(())
     }
 
-    fn new_response_scheduler<'a>(
+    pub(super) fn new_response_scheduler<'a>(
         &self,
         executor: &'a T,
         abort: crate::HookAbortSignal,
@@ -345,7 +345,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.hook_progress_reporter.clone(),
         );
         scheduler.initialize_context(context);
-        scheduler.enqueue(call.command_id.clone(), name.into(), input.into(), None)?;
+        scheduler.enqueue(
+            call.identity.command_id.clone(),
+            name.into(),
+            input.into(),
+            None,
+        )?;
         let completed = loop {
             tokio::select! {
                 biased;
@@ -363,6 +368,18 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         if abort.is_aborted() {
             return Err(RuntimeError::new(CANCELLED));
         }
+        let pending = scheduler
+            .pending_interaction()
+            .map(|pending| -> Result<_, RuntimeError> {
+                Ok(crate::turn_input::InteractionReceipt {
+                    id: pending
+                        .id
+                        .parse()
+                        .map_err(|_| RuntimeError::new("invalid interaction identity"))?,
+                    revision: pending.revision,
+                })
+            })
+            .transpose()?;
         completed
             .blocks
             .into_iter()
@@ -372,7 +389,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 } => Some((output, is_error)),
                 _ => None,
             })
-            .map(|(output, is_error)| call.report(output, is_error))
+            .map(|(output, is_error)| {
+                let mut result = call.report(output, is_error);
+                result.pending = pending;
+                result
+            })
             .ok_or_else(|| RuntimeError::new("the tool call produced no result"))
     }
 }

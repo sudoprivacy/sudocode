@@ -739,6 +739,15 @@ impl Session {
         if !self.backend().fenced_locks() {
             return Err("completion_storage_exclusion_unavailable".into());
         }
+        self.persisted_writer()
+    }
+
+    /// Sidecars share the transcript's writer lifetime and commit barrier.
+    /// Stream-backed sidecars must additionally use their backend's conditional
+    /// writes; a local mutex does not exclude writers on another host.
+    pub(crate) fn persisted_writer(
+        &self,
+    ) -> Result<Arc<crate::session_writer::SessionWriter>, String> {
         self.ensure_context_persisted()
             .map_err(|error| error.to_string())?;
         let path = self.persistence_path().ok_or("session has no transcript")?;

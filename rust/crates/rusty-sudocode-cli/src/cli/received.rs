@@ -199,7 +199,9 @@ pub(crate) fn echo(
         InputSource::Peer | InputSource::Scheduled => {
             render_prompt(&input.display, width, renderer)
         }
-        InputSource::Subagent | InputSource::Background => input.display.clone(),
+        InputSource::Subagent | InputSource::Background | InputSource::Interaction(_) => {
+            input.display.clone()
+        }
     }
 }
 

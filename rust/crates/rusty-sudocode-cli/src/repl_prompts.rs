@@ -2,6 +2,7 @@
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use crate::cli::interactions::{answers_for_field, permission_question, question_field};
 use crate::repl_ui;
 use engine_core::{EngineCommand, EngineEvent};
 use runtime::{PermissionPrompter, QuestionPrompter};
@@ -66,45 +67,13 @@ impl IocraftQuestionPrompter {
         index: usize,
         earlier: Option<&[runtime::QuestionPromptAnswer]>,
     ) {
-        let field = &request.fields[index];
-        let multi_select = field.kind == runtime::QuestionKind::MultiSelect;
-        self.ui.show_turn_question(repl_ui::QuestionPromptView {
-            presentation: request.presentation.clone(),
-            title: match (&self.agent, &request.title) {
-                (Some(agent), Some(title)) => Some(format!("{agent} · {title}")),
-                (Some(agent), None) => Some(agent.clone()),
-                (None, title) => title.clone(),
-            },
-            description: request.description.clone(),
-            index,
-            total: request.fields.len(),
-            prompt: field.prompt.clone(),
-            options: field
-                .options
-                .iter()
-                .map(|option| repl_ui::QuestionOptionView {
-                    label: option.label.clone(),
-                    value: option.value.clone(),
-                    description: option.description.clone(),
-                    recommended: option.recommended,
-                    is_navigable: false,
-                })
-                .collect(),
-            allow_custom_input: field.allow_custom_input,
-            custom_input_hint: field.custom_input_hint.clone(),
-            force_fuzzy_select: false,
-            back_value: (index > 0).then(|| repl_ui::QUESTION_BACK.to_string()),
-            initial_value: earlier.and_then(|answers| {
-                if multi_select {
-                    let values: Vec<String> =
-                        answers.iter().map(|answer| answer.value.clone()).collect();
-                    Some(repl_ui::multi_select_answer(&values))
-                } else {
-                    answers.first().map(|answer| answer.value.clone())
-                }
-            }),
-            multi_select,
-        });
+        let mut field = question_field(request, index, earlier);
+        field.title = match (&self.agent, &field.title) {
+            (Some(agent), Some(title)) => Some(format!("{agent} · {title}")),
+            (Some(agent), None) => Some(agent.clone()),
+            (None, title) => title.clone(),
+        };
+        self.ui.show_turn_question(field);
     }
 
     fn prepare_answer_receiver(&self) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
@@ -123,38 +92,6 @@ impl IocraftQuestionPrompter {
             *pending = Some(tx);
         }
         Ok(rx)
-    }
-
-    /// One answer per chosen value: a multi-select dialog sends them together.
-    fn answers_for_field(
-        field: &runtime::QuestionField,
-        raw_answer: String,
-    ) -> Vec<runtime::QuestionPromptAnswer> {
-        match repl_ui::multi_select_values(&raw_answer) {
-            Some(values) => values
-                .into_iter()
-                .map(|value| Self::answer_for_field(field, value))
-                .collect(),
-            None => vec![Self::answer_for_field(field, raw_answer)],
-        }
-    }
-
-    fn answer_for_field(
-        field: &runtime::QuestionField,
-        raw_answer: String,
-    ) -> runtime::QuestionPromptAnswer {
-        let matched = field
-            .options
-            .iter()
-            .find(|option| option.value == raw_answer);
-        let label = matched
-            .map(|option| option.label.clone())
-            .or_else(|| (!raw_answer.is_empty()).then(|| raw_answer.clone()));
-        runtime::QuestionPromptAnswer {
-            id: field.id.clone(),
-            value: raw_answer,
-            label,
-        }
     }
 }
 
@@ -195,7 +132,7 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
                     index = index.saturating_sub(1);
                     continue;
                 }
-                answers[index] = Some(Self::answers_for_field(&request.fields[index], raw));
+                answers[index] = Some(answers_for_field(&request.fields[index], raw));
                 index += 1;
             }
             this.ui.clear_turn_question();
@@ -216,40 +153,7 @@ impl runtime::PermissionPrompter for IocraftQuestionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
-        let question = runtime::QuestionPromptRequest {
-            presentation: runtime::QuestionPresentation::Question,
-            title: Some(format!("Approve {}?", request.tool_name)),
-            description: Some(
-                format!(
-                    "{}\n{}",
-                    request.input,
-                    request.reason.as_deref().unwrap_or_default()
-                )
-                .into(),
-            ),
-            fields: vec![runtime::QuestionField {
-                id: "permission".into(),
-                prompt: "Allow this tool call?".into(),
-                kind: runtime::QuestionKind::SingleSelect,
-                required: true,
-                allow_custom_input: false,
-                custom_input_hint: None,
-                options: vec![
-                    runtime::QuestionOption {
-                        label: "Allow once".into(),
-                        value: "allow".into(),
-                        description: None,
-                        recommended: false,
-                    },
-                    runtime::QuestionOption {
-                        label: "Deny".into(),
-                        value: "deny".into(),
-                        description: None,
-                        recommended: false,
-                    },
-                ],
-            }],
-        };
+        let question = permission_question(request);
         let reply = runtime::QuestionPrompter::begin_question(self, &question);
         Box::pin(async move {
             match reply.await {
@@ -361,7 +265,7 @@ impl Drop for SessionPrompts {
 
 #[cfg(test)]
 mod tests {
-    use super::IocraftQuestionPrompter;
+    use crate::cli::interactions::answers_for_field;
 
     #[test]
     fn a_multi_select_answer_becomes_one_answer_per_chosen_option() {
@@ -382,7 +286,7 @@ mod tests {
                 .into(),
         };
         let raw = crate::repl_ui::multi_select_answer(&["target".into(), "typed".into()]);
-        let answers: Vec<_> = IocraftQuestionPrompter::answers_for_field(&field, raw)
+        let answers: Vec<_> = answers_for_field(&field, raw)
             .into_iter()
             .map(|answer| (answer.id, answer.value, answer.label))
             .collect();
@@ -394,7 +298,7 @@ mod tests {
             ]
         );
         // Any other answer stays a single answer, even if it looks like a list.
-        let single = IocraftQuestionPrompter::answers_for_field(&field, r#"["target"]"#.into());
+        let single = answers_for_field(&field, r#"["target"]"#.into());
         assert_eq!(single.len(), 1);
         assert_eq!(single[0].value, r#"["target"]"#);
     }

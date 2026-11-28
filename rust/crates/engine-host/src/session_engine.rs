@@ -9,6 +9,7 @@
 //! report DATA a model switch returns (each renderer formats it its own way).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use engine_core::AuthMode;
@@ -146,6 +147,8 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    interaction_journal:
+        std::sync::Mutex<Option<std::sync::Arc<runtime::session_interactions::InteractionJournal>>>,
     agent_directory: std::sync::RwLock<runtime::attention::AgentDirectoryReader>,
     /// Observation metadata stays readable while a turn owns the model mutex.
     /// The session handle remains its writer, through `rebuild_locked` below.
@@ -230,6 +233,7 @@ impl SessionEngine {
             os_pid: Some(std::process::id()),
         };
         Ok(Self {
+            interaction_journal: std::sync::Mutex::default(),
             agent_directory: std::sync::RwLock::new(session.runtime.agent_directory.clone()),
             runtime_observation: session.host.runtime_observation.clone(),
             runtime_identity: std::sync::Arc::new(std::sync::RwLock::new(runtime_identity)),
@@ -1113,6 +1117,27 @@ fn require_fit_without_compaction(
 }
 
 impl engine_core::EngineDelegate for SessionEngine {
+    fn interaction_journal(
+        &self,
+    ) -> Result<Option<std::sync::Arc<runtime::session_interactions::InteractionJournal>>, String>
+    {
+        let session = self.lock_session();
+        let mut current = self
+            .interaction_journal
+            .lock()
+            .map_err(|_| "interaction journal binding poisoned")?;
+        if let Some(journal) = current.as_ref() {
+            if journal.belongs_to(session.runtime.session(), &session.cwd)? {
+                return Ok(Some(journal.clone()));
+            }
+        }
+        let journal = runtime::session_interactions::InteractionJournal::open(
+            session.runtime.session(),
+            &session.cwd,
+        )?;
+        *current = Some(journal.clone());
+        Ok(Some(journal))
+    }
     fn agent_directory(&self) -> Result<serde_json::Value, String> {
         let read = self
             .agent_directory
@@ -1383,6 +1408,34 @@ impl engine_core::EngineDelegate for SessionEngine {
     fn turn_input_inbox(&self) -> Option<runtime::turn_input::TurnInputInbox> {
         Some(self.turn_inputs.clone())
     }
+    fn continue_direct_interaction(
+        &self,
+        receipt: engine_core::engine_events::InteractionReceipt,
+        journal: Arc<runtime::session_interactions::InteractionJournal>,
+        prompter: &mut dyn runtime::PermissionPrompter,
+    ) -> Result<(), engine_core::DirectToolError> {
+        let mut session = self.lock_session();
+        if !journal
+            .belongs_to(session.runtime.session(), &session.cwd)
+            .map_err(engine_core::DirectToolError::Refused)?
+        {
+            return Err(engine_core::DirectToolError::Refused(
+                "the approved direct call belongs to another session context".into(),
+            ));
+        }
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        let runtime = session.runtime.runtime_mut().ok_or_else(|| {
+            engine_core::DirectToolError::Refused("the session runtime is not available".into())
+        })?;
+        self.rt()
+            .block_on(runtime.continue_direct_interaction(
+                receipt,
+                journal,
+                prompter,
+                self.background_tasks.clone(),
+            ))
+            .map_err(|error| engine_core::DirectToolError::Unknown(error.to_string()))
+    }
 
     fn abort_signal(&self) -> runtime::HookAbortSignal {
         self.compaction_abort_signal.clone()
@@ -1448,6 +1501,10 @@ impl engine_core::EngineDelegate for SessionEngine {
         // shared journal binding before releasing the session's writer.
         let _ = self.background_tasks.clone().with_completion(None);
         let session = self.lock_session();
+        self.interaction_journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         session.runtime.api_client().flush_response_captures();
         let path = session.handle.path.clone();
         let saved = session

@@ -365,6 +365,12 @@ struct AgentCompletionRegistry {
 
 struct AgentCompletionEntry {
     terminal_manifest: Option<AgentOutput>,
+    human_waits: usize,
+}
+
+enum AgentWait {
+    Finished(Box<AgentOutput>),
+    AwaitingHuman,
 }
 
 impl AgentCompletionRegistry {
@@ -385,6 +391,7 @@ impl AgentCompletionRegistry {
             agent_id.to_string(),
             AgentCompletionEntry {
                 terminal_manifest: None,
+                human_waits: 0,
             },
         );
     }
@@ -401,9 +408,24 @@ impl AgentCompletionRegistry {
         self.condvar.notify_all();
     }
 
-    /// Block until the agent reaches a terminal state or the timeout expires.
-    /// Returns the terminal manifest on success, or an error message.
-    fn await_agent(&self, agent_id: &str, timeout: Duration) -> Result<AgentOutput, String> {
+    fn human_wait(&self, agent_id: &str, waiting: bool) {
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = map.get_mut(agent_id) {
+            entry.human_waits = if waiting {
+                entry.human_waits.saturating_add(1)
+            } else {
+                entry.human_waits.saturating_sub(1)
+            };
+        }
+        self.condvar.notify_all();
+    }
+
+    /// A human wait releases the caller immediately. It never treats a live
+    /// worker as completed or replays its tool in the parent.
+    fn await_agent(&self, agent_id: &str, timeout: Option<Duration>) -> Result<AgentWait, String> {
         // No session filesystem reaches this trait method, so the store is the
         // host's — which is what it has always been here. A co-hosted caller
         // goes through the tool dispatch, which carries its own.
@@ -415,24 +437,38 @@ impl AgentCompletionRegistry {
         if !map.contains_key(agent_id) {
             // Not registered in-process — try to read from the manifest file.
             drop(map);
-            return read_manifest_from_store(agent_id, fs);
+            return read_manifest_from_store(agent_id, fs)
+                .map(Box::new)
+                .map(AgentWait::Finished);
         }
-        let (map, wait_result) = self
-            .condvar
-            .wait_timeout_while(map, timeout, |map| {
-                map.get(agent_id)
-                    .is_none_or(|e| e.terminal_manifest.is_none())
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if wait_result.timed_out() {
-            return Err(format!(
-                "timed out waiting for agent {agent_id} after {}s",
-                timeout.as_secs()
-            ));
-        }
-        map.get(agent_id)
-            .and_then(|e| e.terminal_manifest.clone())
-            .ok_or_else(|| format!("agent {agent_id} not found after wait"))
+        let pending = |map: &mut BTreeMap<String, AgentCompletionEntry>| {
+            map.get(agent_id)
+                .is_none_or(|entry| entry.terminal_manifest.is_none() && entry.human_waits == 0)
+        };
+        let map = if let Some(timeout) = timeout {
+            let (map, result) = self
+                .condvar
+                .wait_timeout_while(map, timeout, pending)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if result.timed_out() {
+                return Err(format!(
+                    "timed out waiting for agent {agent_id} after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            map
+        } else {
+            self.condvar
+                .wait_while(map, pending)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let entry = map
+            .get(agent_id)
+            .ok_or_else(|| format!("agent {agent_id} not found after wait"))?;
+        Ok(match &entry.terminal_manifest {
+            Some(manifest) => AgentWait::Finished(Box::new(manifest.clone())),
+            None => AgentWait::AwaitingHuman,
+        })
     }
 }
 
@@ -2444,8 +2480,14 @@ fn await_agent_output(
 
     // Blocking: use condvar registry for instant wake.
     let timeout = Duration::from_millis(timeout_ms.min(agent_await_timeout_cap_ms()));
-    match global_agent_registry().await_agent(agent_id, timeout) {
-        Ok(manifest) => format_agent_output(&manifest, "success"),
+    match global_agent_registry().await_agent(agent_id, Some(timeout)) {
+        Ok(AgentWait::Finished(manifest)) => format_agent_output(&manifest, "success"),
+        Ok(AgentWait::AwaitingHuman) => to_pretty_json(json!({
+            "agent_id": agent_id,
+            "status": "running",
+            "retrieval_status": "awaiting_human",
+            "message": "The worker is waiting for a session interaction. Continue independent work; its result remains available through TaskOutput.",
+        })),
         Err(e) if e.contains("timed out") => to_pretty_json(json!({
             "agent_id": agent_id,
             "status": "running",
@@ -5467,6 +5509,18 @@ struct PreparedAgent {
     job: AgentJob,
 }
 
+fn subagent_permission_sink(
+    ctx: Option<&ToolDispatchContext>,
+    identity: runtime::SubagentIdentity,
+) -> Option<runtime::PermissionPromptSink> {
+    ctx.and_then(|ctx| ctx.permission_sink.clone()).map(|sink| {
+        let agent_id = identity.agent_id.clone();
+        sink.for_agent(identity).with_activity(move |waiting| {
+            global_agent_registry().human_wait(&agent_id, waiting);
+        })
+    })
+}
+
 fn prepare_agent_job(
     mut input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
@@ -5606,9 +5660,7 @@ fn prepare_agent_job(
         workspace: WorkspaceRootHandoff::capture(),
         subagent,
         permission_mode,
-        permission_sink: ctx
-            .and_then(|ctx| ctx.permission_sink.as_ref())
-            .map(|sink| sink.for_agent(manifest.identity(background))),
+        permission_sink: subagent_permission_sink(ctx, manifest.identity(background)),
     };
     job.register_started()?;
     Ok(PreparedAgent { manifest, job })
@@ -5736,7 +5788,12 @@ where
     let subagent = job.subagent.clone();
     let registration = register_agent_job(&job)?;
     let permission_owner = job.permission_sink.clone();
-    let Some(threshold) = auto_background_threshold() else {
+    let threshold = auto_background_threshold();
+    let session_prompts = job
+        .permission_sink
+        .as_ref()
+        .is_some_and(runtime::PermissionPromptSink::is_session_owned);
+    if threshold.is_none() && !session_prompts {
         // Auto-bg disabled — original fully-sync path.
         let abort_signal = job.abort_signal.clone();
         let outcome = persist_agent_outcome(&manifest, work_fn(job), &abort_signal, fs.as_ref());
@@ -5744,7 +5801,7 @@ where
             link.emit_finished(&manifest, abort_signal.is_aborted(), fs.as_ref());
         }
         return outcome.and_then(|()| reload_manifest_or_fallback(manifest, fs.as_ref()));
-    };
+    }
 
     // Auto-bg enabled: run on a worker thread + await up to threshold.
     let agent_id = manifest.agent_id.clone();
@@ -5773,7 +5830,20 @@ where
     });
 
     match global_agent_registry().await_agent(&agent_id, threshold) {
-        Ok(final_manifest) => Ok(final_manifest),
+        Ok(AgentWait::Finished(final_manifest)) => Ok(*final_manifest),
+        Ok(AgentWait::AwaitingHuman) => {
+            if let Some(owner) = &permission_owner {
+                owner.detach();
+            }
+            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+                tasks.update(&manifest.agent_id, |task| task.background = true);
+            }
+            // Do not overwrite a terminal manifest if the worker finishes
+            // concurrently with this observation.
+            let mut waiting = manifest;
+            waiting.status = "backgrounded".into();
+            Ok(waiting)
+        }
         Err(e) if e.contains("timed out") => {
             if let Some(owner) = &permission_owner {
                 owner.detach();
@@ -7910,6 +7980,17 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        if canonicalize_tool_name(tool_name) == "AskUserQuestion" {
+            let sink = ctx.permission_sink.as_ref().ok_or_else(|| {
+                ToolError::new("worker questions require a session-owned human input route")
+            })?;
+            let request = parse_question_request(value).map_err(ToolError::new)?;
+            let answers = sink
+                .begin_question(&request)
+                .await
+                .map_err(ToolError::new)?;
+            return question_result(&request, &answers).map_err(ToolError::new);
+        }
         let tool_name = tool_name.to_string();
         let enforcer = self.enforcer.clone();
         let abort = self.abort_signal.clone();

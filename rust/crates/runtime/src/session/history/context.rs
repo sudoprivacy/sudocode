@@ -120,6 +120,19 @@ impl ContextHistory {
             .ok_or_else(|| invalid("context missing"))
     }
 
+    pub(crate) fn committed_interactions(
+        &mut self,
+        candidates: &[crate::turn_input::InteractionReceipt],
+    ) -> io::Result<Vec<crate::turn_input::InteractionReceipt>> {
+        self.check()?;
+        self.history.refresh()?;
+        Ok(candidates
+            .iter()
+            .copied()
+            .filter(|receipt| self.history.graph().has_interaction_receipt(*receipt))
+            .collect())
+    }
+
     pub(crate) fn message_head(&self) -> io::Result<Option<&str>> {
         self.check()?;
         self.history.graph().message_head(&self.context)

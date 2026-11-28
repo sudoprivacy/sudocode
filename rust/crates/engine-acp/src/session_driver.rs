@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use agent_client_protocol::role::acp::Client;
 use agent_client_protocol::ConnectionTo;
-use agent_client_protocol_schema::{ClientRequest, ExtRequest};
+use agent_client_protocol_schema::{AgentNotification, ClientRequest, ExtRequest};
 use engine_core::engine_events::{CompletionAction, CompletionReceipt};
 use engine_core::{
     EngineAttachment, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
@@ -142,6 +142,18 @@ impl SessionDriver {
             });
     }
 
+    fn notify_client(&self, notification: AgentNotification) {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
+        if let Some(connection) = connection {
+            let _ = connection.send_notification(notification);
+        }
+    }
+
     fn on_event(self: &Arc<Self>, session_id: &str, event: EngineEvent) {
         if let EngineEvent::Attention(state) = &event {
             // Request removal, including cancellation, owns reply teardown.
@@ -149,16 +161,7 @@ impl SessionDriver {
             self.retain_interactions(|id, pending| {
                 !pending.is_attention || state.requests.iter().any(|request| request.id == id)
             });
-            if let Some(connection) = self
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .connection
-                .clone()
-            {
-                let _ = connection
-                    .send_notification(crate::attention_control::notification(session_id, state));
-            }
+            self.notify_client(crate::attention_control::notification(session_id, state));
             return;
         }
         if let EngineEvent::State(state) = &event {
@@ -185,39 +188,23 @@ impl SessionDriver {
         }
         let input_update = self.input_update(&event);
         if let Some(update) = input_update {
-            if let Some(connection) = self
-                .connection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .connection
-                .clone()
-            {
-                let _ = connection
-                    .send_notification(crate::input_control::notification(session_id, &update));
-            }
+            self.notify_client(crate::input_control::notification(session_id, &update));
         }
         match event {
+            EngineEvent::Interactions(snapshot) => {
+                self.notify_client(crate::interaction_control::notification(
+                    session_id, &snapshot,
+                ));
+                return;
+            }
+            EngineEvent::InteractionError { message } => {
+                self.notify_client(crate::interaction_control::error_notification(
+                    session_id, &message,
+                ));
+                return;
+            }
             EngineEvent::CommandResult { id, result } => {
-                {
-                    let mut state = self
-                        .connection
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if state.pending_configuration == Some(id) {
-                        state.pending_configuration = None;
-                        if result.is_err() {
-                            state.disconnect();
-                        }
-                    }
-                }
-                if let Some(waiter) = self
-                    .requests
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&id)
-                {
-                    let _ = waiter.send(result);
-                }
+                self.finish_control_request(id, result);
                 return;
             }
             EngineEvent::CompletionRequest {
@@ -244,6 +231,29 @@ impl SessionDriver {
             _ => {}
         }
         self.route_event(session_id, event);
+    }
+
+    fn finish_control_request(&self, id: u64, result: Result<Value, String>) {
+        {
+            let mut state = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.pending_configuration == Some(id) {
+                state.pending_configuration = None;
+                if result.is_err() {
+                    state.disconnect();
+                }
+            }
+        }
+        if let Some(waiter) = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+        {
+            let _ = waiter.send(result);
+        }
     }
 
     fn answer_interaction(self: &Arc<Self>, session_id: &str, event: &EngineEvent) -> bool {
@@ -566,7 +576,7 @@ impl SessionDriver {
             if !self.native_input.swap(true, Ordering::Relaxed) {
                 // Native hosts consume completions through the same engine input queue.
                 state.tasks = true;
-                self.configure_connection(&mut state);
+                drop(self.configure_connection(&mut state));
             }
         }
         let driver = Arc::clone(self);
@@ -585,6 +595,32 @@ impl SessionDriver {
         tokio::task::spawn_blocking(move || driver.request(command))
             .await
             .map_err(|error| error.to_string())?
+    }
+
+    pub(crate) async fn interactions(
+        self: &Arc<Self>,
+        action: engine_core::engine_events::InteractionAction,
+        connection: ConnectionTo<Client>,
+    ) -> Result<Value, String> {
+        if matches!(
+            action,
+            engine_core::engine_events::InteractionAction::Configure {
+                delivery: engine_core::engine_events::InteractionDeliveryOwner::Host,
+                ..
+            }
+        ) {
+            return Err("ACP sessions use the engine input coordinator".into());
+        }
+        self.connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection = Some(connection);
+        let driver = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            driver.request(|id| EngineCommand::Interactions { id, action })
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) async fn cancel_subagent(
@@ -643,22 +679,36 @@ impl SessionDriver {
     }
 
     /// Publish connection/protocol state and its causal event barrier together.
-    fn configure_connection(&self, state: &mut ConnectionState) {
+    fn configure_connection(
+        &self,
+        state: &mut ConnectionState,
+    ) -> std::sync::mpsc::Receiver<Result<Value, String>> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let (reply, receiver) = std::sync::mpsc::channel();
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, reply);
         state.abort_transport();
         state.pending_configuration = Some(id);
-        if self
-            .send(EngineCommand::Completion {
-                id: Some(id),
-                action: CompletionAction::Configure {
-                    tasks: state.tasks,
-                    connected: state.connection.is_some(),
-                },
-            })
-            .is_err()
-        {
+        if let Err(error) = self.send(EngineCommand::Completion {
+            id: Some(id),
+            action: CompletionAction::Configure {
+                tasks: state.tasks,
+                connected: state.connection.is_some(),
+            },
+        }) {
             state.disconnect();
+            if let Some(reply) = self
+                .requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id)
+            {
+                let _ = reply.send(Err(error));
+            }
         }
+        receiver
     }
 
     pub(crate) fn set_task_protocol(&self, tasks: bool) {
@@ -667,17 +717,29 @@ impl SessionDriver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.tasks = tasks;
-        self.configure_connection(&mut state);
+        drop(self.configure_connection(&mut state));
     }
 
-    pub(crate) fn bind(self: &Arc<Self>, connection: ConnectionTo<Client>) {
-        let mut state = self
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.connection = Some(connection);
-        state.keepalive = Some(Arc::clone(self));
-        self.configure_connection(&mut state);
+    pub(crate) async fn bind(
+        self: &Arc<Self>,
+        connection: ConnectionTo<Client>,
+    ) -> Result<(), String> {
+        let receiver = {
+            let mut state = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.connection = Some(connection);
+            state.keepalive = Some(Arc::clone(self));
+            self.configure_connection(&mut state)
+        };
+        // Setup is ordered with durable controls. Only this dependent host
+        // operation waits; the engine pump keeps serving input/status/cancel.
+        tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(30)))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())??;
+        Ok(())
     }
 
     pub(crate) fn unbind(&self) {
@@ -686,7 +748,7 @@ impl SessionDriver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.disconnect();
-        self.configure_connection(&mut state);
+        drop(self.configure_connection(&mut state));
     }
 
     fn deliver(

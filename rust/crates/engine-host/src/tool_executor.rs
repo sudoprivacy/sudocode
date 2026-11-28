@@ -376,7 +376,7 @@ impl ToolExecutor for CliToolExecutor {
                 .is_some()
         {
             return self
-                .execute_ask_user_question(value)
+                .execute_ask_user_question(value, ctx)
                 .await
                 .map(ToolOutput::text);
         }
@@ -502,6 +502,32 @@ impl ToolExecutor for CliToolExecutor {
 }
 
 impl CliToolExecutor {
+    fn submit_question(
+        &self,
+        request: &QuestionPromptRequest,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<Option<runtime::session_interactions::Interaction>, ToolError> {
+        let Some(call_id) = ctx.tool_use_id.as_deref() else {
+            return Ok(None);
+        };
+        let parent_id = ctx
+            .parent_assistant_message
+            .as_ref()
+            .and_then(|message| message.history.as_ref())
+            .map(|identity| identity.id.as_str());
+        let source = runtime::session_history::tool_source_key(parent_id, call_id);
+        let mut guard = self
+            .question_prompter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_mut() {
+            Some(prompter) => prompter
+                .submit_question(&source, request)
+                .map_err(ToolError::new),
+            None => Ok(None),
+        }
+    }
+
     fn begin_question(
         &self,
         request: &QuestionPromptRequest,
@@ -520,8 +546,17 @@ impl CliToolExecutor {
     async fn execute_ask_user_question(
         &self,
         value: serde_json::Value,
+        ctx: &runtime::ToolDispatchContext,
     ) -> Result<String, ToolError> {
         let request = tools::parse_question_request(value).map_err(ToolError::new)?;
+        if let Some(interaction) = self.submit_question(&request, ctx)? {
+            return Ok(serde_json::json!({
+                "status": "pending",
+                "requestId": interaction.id,
+                "revision": interaction.revision,
+                "message": "The question has been sent. Continue independent work. The answer will arrive as a separate input; do not assume an answer."
+            }).to_string());
+        }
 
         let answers = self
             .begin_question(&request)?
@@ -558,6 +593,16 @@ impl CliToolExecutor {
         // (the REPL / iocraft / ACP each draw the dialog + read the choice their
         // own way), so it works on Windows too (no raw stdin read_line here).
         let request = plan_review_request(&plan, &plan_file);
+        if let Some(interaction) = self.submit_question(&request, ctx)? {
+            return Ok(ToolOutput::text(serde_json::json!({
+                "ok": true,
+                "status": "draft_saved",
+                "planFile": plan_file,
+                "requestId": interaction.id,
+                "revision": interaction.revision,
+                "message": "The plan is waiting for review. Continue read-only investigation; implementation remains gated until the exact plan is approved."
+            }).to_string()));
+        }
 
         let answers = self
             .begin_question(&request)?

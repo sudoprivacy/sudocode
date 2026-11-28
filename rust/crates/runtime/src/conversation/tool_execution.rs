@@ -16,6 +16,7 @@ use super::{
 use crate::{
     hooks::HookEvent,
     image_input::{ToolContextAction, ToolOutput},
+    permissions::{ToolApproval, ToolAuthorization},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,7 @@ struct Invocation {
 
 enum Stage {
     Prepared(HookRunResult),
-    Authorized(PermissionOutcome),
+    Authorized(ToolAuthorization),
     Executed(Result<ToolOutput, ToolError>),
     Finished(HookRunResult),
 }
@@ -80,6 +81,14 @@ pub(super) struct ToolScheduler<'a, T> {
     limit: usize,
     context: Option<ToolDispatchContext>,
     context_action: Option<ToolContextAction>,
+    approval: Option<ApprovedInvocation>,
+    pending: Option<crate::session_interactions::Interaction>,
+}
+
+pub(super) struct ApprovedInvocation {
+    pub receipt: crate::turn_input::InteractionReceipt,
+    pub request: crate::PermissionRequest,
+    pub journal: Arc<crate::session_interactions::InteractionJournal>,
 }
 
 impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
@@ -102,7 +111,18 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
             limit: max_tool_use_concurrency(),
             context: None,
             context_action: None,
+            approval: None,
+            pending: None,
         }
+    }
+
+    pub(super) fn with_approval(mut self, approval: ApprovedInvocation) -> Self {
+        self.approval = Some(approval);
+        self
+    }
+
+    pub(super) fn pending_interaction(&self) -> Option<&crate::session_interactions::Interaction> {
+        self.pending.as_ref()
     }
 
     /// Pure text responses never need a cloned tool history. Capture it once,
@@ -206,66 +226,139 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
             if matches!(call.phase, Phase::Queued | Phase::Preparing) {
                 earlier_unclassified = true;
             } else if !earlier_unclassified {
-                if call.phase == Phase::Prepared {
-                    let context = PermissionContext::new(
-                        call.pre_hook.permission_override(),
-                        call.pre_hook.permission_reason().map(ToOwned::to_owned),
-                    );
-                    let reply = self.policy.begin_authorization(
-                        &call.name,
-                        &call.input,
-                        &context,
-                        prompter
-                            .as_mut()
-                            .map(|p| &mut **p as &mut dyn PermissionPrompter),
-                    );
-                    call.phase = Phase::Authorizing;
-                    self.active
-                        .push(async move { (index, Stage::Authorized(reply.await)) }.boxed_local());
-                } else if call.phase == Phase::Authorized {
-                    call.phase = Phase::Running;
-                    let executor = self.executor;
-                    let name = call.name.clone();
-                    let input = call.input.clone();
-                    // Only executing calls clone session history; queued calls
-                    // retain their assistant prefix, not another full session.
-                    let mut context = self
-                        .context
-                        .as_ref()
-                        .expect("context before first call")
-                        .clone();
-                    context.tool_use_id = Some(call.id.clone());
-                    // A call the host made directly has no assistant message:
-                    // its tool sees the session as it is, not a model turn.
-                    if let Some(parent) = call.parent.take() {
-                        context.parent_session_messages.push(parent.clone());
-                        context.parent_assistant_message = Some(parent);
+                if matches!(call.phase, Phase::Prepared | Phase::Authorized) {
+                    if self.approval.as_ref().is_some_and(|approval| {
+                        approval.request.tool_name != call.name
+                            || approval.request.input != call.input
+                    }) {
+                        let reason =
+                            "Tool input changed after approval; the operation was not executed."
+                                .to_owned();
+                        self.complete(index, ToolOutput::text(reason.clone()), true, Some(reason));
+                        continue;
                     }
-                    self.updates.push_back(ToolUpdate::Started {
-                        id: call.id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-                    self.active.push(
-                        async move {
-                            (
+                    if let Some(prompter) = prompter.as_deref() {
+                        if let Err(reason) = prompter.check_session_gate(
+                            &call.name,
+                            self.policy.required_mode_for(&call.name),
+                        ) {
+                            self.complete(
                                 index,
-                                Stage::Executed(
-                                    executor
-                                        .execute_with_attachments(&name, &input, &context)
-                                        .await,
-                                ),
-                            )
+                                ToolOutput::text(reason.clone()),
+                                true,
+                                Some(reason),
+                            );
+                            continue;
                         }
-                        .boxed_local(),
-                    );
+                    }
+                }
+                if call.phase == Phase::Prepared {
+                    self.authorize(index, prompter);
+                } else if call.phase == Phase::Authorized {
+                    if let Some(approval) = &self.approval {
+                        if let Err(reason) = approval.journal.claim_permission(approval.receipt) {
+                            self.complete(
+                                index,
+                                ToolOutput::text(reason.clone()),
+                                true,
+                                Some(reason),
+                            );
+                            continue;
+                        }
+                    }
+                    self.execute(index);
                 }
             }
             earlier_pending = true;
-            if !call.parallel {
+            if !self.calls[index].parallel {
                 break;
             }
         }
+    }
+
+    fn authorize(&mut self, index: usize, prompter: &mut Option<&mut dyn PermissionPrompter>) {
+        let call = &mut self.calls[index];
+        let context = PermissionContext::new(
+            call.pre_hook.permission_override(),
+            call.pre_hook.permission_reason().map(ToOwned::to_owned),
+        );
+        let source = call
+            .origin
+            .as_ref()
+            .map(|origin| format!("permission:{origin}:{}", call.id))
+            .or_else(|| {
+                self.context
+                    .as_ref()?
+                    .external_a2a
+                    .as_ref()
+                    .map(|external| format!("permission:{}", external.identity.command_id))
+            });
+        let origin = self
+            .context
+            .as_ref()
+            .and_then(|context| context.external_a2a.as_ref())
+            .map_or(
+                crate::session_interactions::InteractionOrigin::Conversation,
+                |external| crate::session_interactions::InteractionOrigin::Direct {
+                    identity: external.identity.clone(),
+                },
+            );
+        let reply = self.policy.begin_authorization(
+            &call.name,
+            &call.input,
+            &context,
+            ToolApproval {
+                source: source.as_deref(),
+                granted: self.approval.as_ref().map(|approval| &approval.request),
+                origin,
+            },
+            prompter
+                .as_mut()
+                .map(|p| &mut **p as &mut dyn PermissionPrompter),
+        );
+        call.phase = Phase::Authorizing;
+        self.active
+            .push(async move { (index, Stage::Authorized(reply.await)) }.boxed_local());
+    }
+
+    fn execute(&mut self, index: usize) {
+        let call = &mut self.calls[index];
+        call.phase = Phase::Running;
+        let executor = self.executor;
+        let name = call.name.clone();
+        let input = call.input.clone();
+        // Only executing calls clone session history; queued calls
+        // retain their assistant prefix, not another full session.
+        let mut context = self
+            .context
+            .as_ref()
+            .expect("context before first call")
+            .clone();
+        context.tool_use_id = Some(call.id.clone());
+        // A call the host made directly has no assistant message:
+        // its tool sees the session as it is, not a model turn.
+        if let Some(parent) = call.parent.take() {
+            context.parent_session_messages.push(parent.clone());
+            context.parent_assistant_message = Some(parent);
+        }
+        self.updates.push_back(ToolUpdate::Started {
+            id: call.id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        });
+        self.active.push(
+            async move {
+                (
+                    index,
+                    Stage::Executed(
+                        executor
+                            .execute_with_attachments(&name, &input, &context)
+                            .await,
+                    ),
+                )
+            }
+            .boxed_local(),
+        );
     }
 
     fn advance(&mut self, index: usize, stage: Stage) {
@@ -297,9 +390,21 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                     self.complete(index, ToolOutput::text(reason.clone()), true, Some(reason));
                 }
             }
-            Stage::Authorized(PermissionOutcome::Allow) => call.phase = Phase::Authorized,
-            Stage::Authorized(PermissionOutcome::Deny { reason }) => {
+            Stage::Authorized(ToolAuthorization::Decision(PermissionOutcome::Allow)) => {
+                call.phase = Phase::Authorized;
+            }
+            Stage::Authorized(ToolAuthorization::Decision(PermissionOutcome::Deny { reason })) => {
                 self.complete(index, ToolOutput::text(reason.clone()), true, Some(reason));
+            }
+            Stage::Authorized(ToolAuthorization::Pending(interaction)) => {
+                let output = ToolOutput::text(serde_json::json!({
+                    "status": "pending_approval",
+                    "request_id": interaction.id,
+                    "revision": interaction.revision,
+                    "message": "This operation has not run. Continue independent work; the engine will resume the captured operation if approved. Do not submit it again while approval is pending."
+                }).to_string());
+                self.pending = Some(*interaction);
+                self.complete(index, output, false, None);
             }
             Stage::Executed(result) => {
                 let (mut output, is_error) = match result {

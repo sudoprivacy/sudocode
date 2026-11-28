@@ -8,9 +8,33 @@ use sha2::{Digest, Sha256};
 use crate::fs_backend::{FsBackend, FsLock, RecordLogMode};
 use crate::session::history::ContextHistory;
 
+/// The writer that claimed an approved operation. Native identity refers to
+/// the existing SID writer-presence lock, never a second lease or heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionOwner {
+    NativeWriter {
+        id: uuid::Uuid,
+    },
+    /// Identity alone permits the original instance to finish its claim. It
+    /// cannot prove retirement after a lost connection or on another instance.
+    UnverifiedInstance {
+        id: uuid::Uuid,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutionOwnerState {
+    Current,
+    Live,
+    Retired,
+    Unverified,
+}
+
 pub struct SessionWriter {
     backend: CommitBackend,
     transcript: PathBuf,
+    instance_id: uuid::Uuid,
     cursor: Mutex<Option<String>>,
     deleted: AtomicBool,
     writes: Mutex<()>,
@@ -71,6 +95,79 @@ impl FsLock for BackupCommitGuard {
 }
 
 impl SessionWriter {
+    pub(crate) fn execution_owner(&self) -> Result<ExecutionOwner, String> {
+        let native = self
+            .native
+            .lock()
+            .map_err(|_| "native writer handles poisoned")?;
+        self.check()?;
+        match &native.presence {
+            Some(presence) => Ok(ExecutionOwner::NativeWriter {
+                id: presence
+                    .path
+                    .file_stem()
+                    .and_then(|id| id.to_str())
+                    .ok_or("writer presence identity missing")?
+                    .parse()
+                    .map_err(|_| "invalid writer presence identity")?,
+            }),
+            None => Ok(ExecutionOwner::UnverifiedInstance {
+                id: self.instance_id,
+            }),
+        }
+    }
+
+    pub(crate) fn execution_owner_state(
+        &self,
+        owner: Option<&ExecutionOwner>,
+    ) -> Result<ExecutionOwnerState, String> {
+        self.check()?;
+        let Some(owner) = owner else {
+            // Older claims lacked an owner. Only retained legacy exclusive
+            // admission proves that no earlier writer can still execute it.
+            let native = self
+                .native
+                .lock()
+                .map_err(|_| "native writer handles poisoned")?;
+            self.check()?;
+            return Ok(if native.legacy_owner.is_some() {
+                ExecutionOwnerState::Retired
+            } else {
+                ExecutionOwnerState::Unverified
+            });
+        };
+        if *owner == self.execution_owner()? {
+            return Ok(ExecutionOwnerState::Current);
+        }
+        let (ExecutionOwner::NativeWriter { id }, CommitBackend::Native(fs)) =
+            (owner, &self.backend)
+        else {
+            return Ok(ExecutionOwnerState::Unverified);
+        };
+        let path = crate::session_backup::owner(&self.transcript)
+            .with_extension("writers")
+            .join(format!("{id}.lock"));
+        if !fs
+            .exists(&path.to_string_lossy())
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(ExecutionOwnerState::Retired);
+        }
+        // IDs are never reused. A successful lock or a missing presence is a
+        // retirement proof in this existing fenced native storage domain.
+        Ok(
+            if fs
+                .try_lock(&path.to_string_lossy(), 30_000)
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                ExecutionOwnerState::Retired
+            } else {
+                ExecutionOwnerState::Live
+            },
+        )
+    }
+
     pub fn acquire(fs: Arc<dyn FsBackend>, transcript: &Path) -> Result<Arc<Self>, String> {
         Self::acquire_native(fs, transcript, true)
     }
@@ -137,6 +234,7 @@ impl SessionWriter {
         Self::watch(Arc::new(Self {
             backend: CommitBackend::Native(fs),
             transcript: transcript.to_path_buf(),
+            instance_id: uuid::Uuid::new_v4(),
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
@@ -176,6 +274,7 @@ impl SessionWriter {
         Ok(Arc::new(Self {
             backend: CommitBackend::Stream(fs),
             transcript: transcript.to_path_buf(),
+            instance_id: uuid::Uuid::new_v4(),
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
@@ -254,6 +353,7 @@ impl SessionWriter {
                 CommitBackend::Stream(fs)
             },
             transcript: transcript.to_path_buf(),
+            instance_id: uuid::Uuid::new_v4(),
             cursor: Mutex::default(),
             deleted: AtomicBool::new(false),
             writes: Mutex::new(()),
@@ -443,6 +543,22 @@ impl SessionWriter {
             .lock()
             .map(|head| head.clone())
             .map_err(|_| "session history cursor poisoned".into())
+    }
+
+    /// Receipt recovery observes the whole authoritative log, even when this
+    /// continuation intentionally restores an older completed projection.
+    pub(crate) fn committed_interactions(
+        &self,
+        candidates: &[crate::turn_input::InteractionReceipt],
+    ) -> Result<Vec<crate::turn_input::InteractionReceipt>, String> {
+        let mut history = self.history()?;
+        match history.as_mut() {
+            Some(active) => active
+                .context
+                .committed_interactions(candidates)
+                .map_err(|error| error.to_string()),
+            None => Ok(Vec::new()),
+        }
     }
 
     pub(crate) fn commit_lock(

@@ -125,7 +125,7 @@ export function openScodeMailbox(connection: ScodeConnection, threadId: string, 
   const maxBytes = maxTextBytes;
   let chain: Promise<unknown> = Promise.resolve();
   let closed = false;
-  let poisoned: ScodeMailboxError | undefined;
+  let blocked: ScodeMailboxError | undefined;
   const read = (input: ScodeInboxInput): Promise<ScodeMailboxOffer> => {
     // Copy and validate now so a queued caller cannot mutate a later ACK.
     let validated: ScodeInboxInput;
@@ -133,7 +133,7 @@ export function openScodeMailbox(connection: ScodeConnection, threadId: string, 
     catch (error) { return Promise.reject(error); }
     const task = chain.then(async () => {
       if (closed || connection.closed) throw new Error('Mailbox owner is closed');
-      if (poisoned) throw poisoned;
+      if (blocked) throw blocked;
       const pending = legacy?.pending();
       const request = connection.request('_sudocode/session/peer_offer', {
         sessionId: connection.sessionId, threadId, maxBytes,
@@ -143,12 +143,21 @@ export function openScodeMailbox(connection: ScodeConnection, threadId: string, 
         ...(pending?.length ? { legacy: pending } : {}),
       });
       const raw = await new Promise<unknown>((resolve, reject) => {
+        const hasAck = Boolean(validated.ack?.length);
         const timer = setTimeout(() => {
-          poisoned = new ScodeMailboxError('Mailbox request timed out after 15000ms; ACK outcome unknown. Close the ACP owner before replacing this mailbox');
-          reject(poisoned);
+          blocked = new ScodeMailboxError(hasAck
+            ? 'Mailbox request timed out after 15000ms; ACK outcome unknown. Close the ACP owner before replacing this mailbox'
+            : 'Mailbox read timed out after 15000ms; waiting for the outstanding read to settle');
+          reject(blocked);
         }, 15000);
-        request.then(value => { clearTimeout(timer); resolve(value); }, error => {
+        const settled = () => {
           clearTimeout(timer);
+          // A late read cannot retire a frame. Allow the next independent call
+          // only after the old request has settled, without replaying it.
+          if (!hasAck) blocked = undefined;
+        };
+        request.then(value => { settled(); resolve(value); }, error => {
+          settled();
           const remote = error as { code?: unknown; data?: unknown } | null;
           reject(new ScodeMailboxError(String(error), typeof remote?.code === 'number'
             ? { code: remote.code, data: remote.data } : undefined, error));

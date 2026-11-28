@@ -373,6 +373,7 @@ pub(crate) fn build_new_session(
 
 /// Open a persisted session (`session/load`). The caller has entered the cwd
 /// lease + scope.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn open_loaded_session(
     config: &SdkAcpConfig,
     registry: &SessionRegistry,
@@ -381,7 +382,15 @@ pub(crate) fn open_loaded_session(
     mcp_servers: BTreeMap<String, runtime::ScopedMcpServerConfig>,
     prompt_overrides: runtime::SystemPromptOverrides,
     memory: runtime::memory::MemoryMode,
-) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
+    with_completions: bool,
+) -> Result<
+    (
+        Arc<SessionEngine>,
+        PathBuf,
+        Option<Arc<crate::session_driver::SessionDriver>>,
+    ),
+    crate::AcpError,
+> {
     let cwd = canonical_session_cwd(cwd).map_err(crate::AcpError::invalid_params)?;
     if let Some(engine) = registry.engine(session_id) {
         if registry.cwd(session_id).as_ref() != Some(&cwd) {
@@ -390,12 +399,12 @@ pub(crate) fn open_loaded_session(
         engine
             .reconfigure(mcp_servers, prompt_overrides, memory)
             .map_err(crate::AcpError::internal)?;
-        return Ok((engine, cwd));
+        return Ok((engine, cwd, None));
     }
     // Only a well-formed id that was never persisted is a definite not-found.
     // Unreadable or mismatched transcripts stay internal: the caller cannot
     // treat them as proof that nothing exists.
-    let (handle, session) = load_session_exact(session_id).map_err(|error| match error {
+    let (handle, mut session) = load_session_exact(session_id).map_err(|error| match error {
         runtime::session_control::SessionControlError::NotFound(_) => {
             crate::AcpError::session_not_found(session_id)
         }
@@ -404,7 +413,16 @@ pub(crate) fn open_loaded_session(
         }
         error => crate::AcpError::internal(format!("failed to load session: {error}")),
     })?;
-    registry.attach_completion_writer(&session, &cwd)?;
+    let route = if with_completions {
+        let route = registry.completion_route(&session, &cwd, false)?;
+        route
+            .confirm_loaded_session(&mut session, &cwd)
+            .map_err(crate::AcpError::internal)?;
+        Some(route)
+    } else {
+        registry.attach_completion_writer(&session, &cwd)?;
+        None
+    };
     let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides, memory)
         .map_err(crate::AcpError::internal)?;
     let engine = SessionEngine::open_persisted(
@@ -423,7 +441,7 @@ pub(crate) fn open_loaded_session(
         config.auth_mode,
     )
     .map_err(crate::AcpError::internal)?;
-    Ok((Arc::new(engine), cwd))
+    Ok((Arc::new(engine), cwd, route))
 }
 
 /// Fork a session (`session/new { _meta.sudocode.forkFrom }`). Reads the source

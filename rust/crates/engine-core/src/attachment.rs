@@ -122,6 +122,14 @@ impl EngineAttachment {
         Ok(())
     }
 
+    pub fn confirm_loaded_session(
+        &self,
+        session: &mut runtime::Session,
+        cwd: &std::path::Path,
+    ) -> Result<(), String> {
+        self.completions.confirm_loaded_session(session, cwd)
+    }
+
     pub fn attach_session(
         &self,
         session: &runtime::Session,

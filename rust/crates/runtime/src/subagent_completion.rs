@@ -221,6 +221,7 @@ pub struct CompletionJournal {
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clear_cache: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     instance: String,
+    opened_after_interrupted_turn: bool,
     task_protocol: std::sync::atomic::AtomicBool,
     writer: Arc<crate::session_writer::SessionWriter>,
     context_owner: Mutex<Option<Arc<dyn crate::fs_backend::FsLock>>>,
@@ -283,7 +284,11 @@ impl CompletionJournal {
             .ok_or("session has no transcript")?
             .to_path_buf();
         let fs = session.fs_handle();
-        let writer = session.completion_writer()?;
+        let writer = if create {
+            session.completion_writer()?
+        } else {
+            session.existing_completion_writer()?
+        };
         let (path, previous, context_owner) = {
             let _write = writer.write()?;
             let storage = storage::open_context(fs.as_ref(), &transcript, session, cwd, create)?;
@@ -320,6 +325,7 @@ impl CompletionJournal {
             wake: Mutex::new(None),
             clear_cache: Mutex::new(None),
             instance: uuid::Uuid::new_v4().to_string(),
+            opened_after_interrupted_turn: interrupted.is_some(),
             task_protocol: std::sync::atomic::AtomicBool::new(false),
             writer,
             context_owner: Mutex::new(Some(context_owner)),
@@ -694,6 +700,63 @@ impl CompletionJournal {
         let session = Session::load_history_at(self.fs.as_ref(), &self.transcript, head.as_deref())
             .map_err(|error| error.to_string())?;
         session.context_digest().map_err(|error| error.to_string())
+    }
+
+    /// Validate the exact cold-loaded context under the journal owner and SID writer.
+    /// Older ACP clients appended model/prompt changes while merely opening a
+    /// session. Repair only a proven chain of those checkpoints, without changing
+    /// the completion journal or replaying a turn.
+    pub fn confirm_loaded_session(&self, session: &mut Session, cwd: &Path) -> Result<(), String> {
+        self.attach_session(session, cwd)?;
+        let _write = self.writer.write()?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "completion journal poisoned")?;
+        if state.active_trace.is_some() {
+            return Err("source_context_unconfirmed".into());
+        }
+        let Some(context) = &state.context else {
+            return Ok(());
+        };
+        let head = self.writer.history_head()?;
+        let latest = Session::load_history_at(self.fs.as_ref(), &self.transcript, head.as_deref())
+            .map_err(|e| e.to_string())?;
+        let latest_digest = latest.context_digest().map_err(|e| e.to_string())?;
+        if session.context_digest().map_err(|e| e.to_string())? != latest_digest {
+            return Err("source_context_unconfirmed".into());
+        }
+        if context.digest == latest_digest {
+            return Ok(());
+        }
+        if self.opened_after_interrupted_turn {
+            return Err("source_context_unconfirmed".into());
+        }
+        let (Some(anchor), Some(head)) = (state.head_id.as_deref(), head.as_deref()) else {
+            return Err("source_context_unconfirmed".into());
+        };
+        let bytes = self
+            .fs
+            .read_snapshot(&self.transcript.to_string_lossy())
+            .map_err(|e| e.to_string())?;
+        let contents = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+        if !contents.ends_with('\n') || crate::session::history::is_record_history(&bytes) {
+            return Err("source_context_unconfirmed".into());
+        }
+        let history =
+            Session::shared_history_suffix(contents)?.ok_or("source_context_unconfirmed")?;
+        let proven =
+            crate::session_history::proven_load_checkpoint(history, anchor, head, &context.digest)?;
+        let mut corrected = session.clone();
+        corrected.restore_load_metadata(&proven);
+        if corrected.context_digest().map_err(|e| e.to_string())? != context.digest {
+            return Err("source_context_unconfirmed".into());
+        }
+        corrected
+            .save_snapshot(&self.transcript, &self.writer)
+            .map_err(|e| e.to_string())?;
+        *session = corrected;
+        Ok(())
     }
 
     pub fn context(&self) -> Result<Option<ContextRef>, String> {

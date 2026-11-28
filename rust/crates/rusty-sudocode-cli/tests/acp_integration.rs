@@ -11193,3 +11193,69 @@ async fn acp_cron_methods_manage_the_shared_store_and_report_changes() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+#[tokio::test]
+async fn acp_cold_load_confirms_context_before_applying_changed_prompt() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("cold-committed-prompt");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut original = spawn_stdio_client(&workspace);
+    initialize_task_completions(&mut original).await;
+    let sid = scenario_session_new(&mut original, &workspace.root).await;
+    let (_, switched) = original
+        .send_request(
+            "session/set_model",
+            json!({"sessionId":sid,"modelId":"haiku"}),
+        )
+        .await;
+    assert!(switched.get("error").is_none(), "{switched}");
+    let (_, first) = original.send_request("session/prompt", json!({
+        "sessionId":sid, "prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}streaming_text")}],
+        "_meta":{"traceId":"before-reconnect"}
+    })).await;
+    let context = &first["result"]["_meta"]["sudocode"]["contextRef"];
+    assert!(context["digest"].is_string(), "{first}");
+    original.shutdown().await;
+    let path = find_session_transcript(&workspace.root, &sid);
+    let before = std::fs::read(&path).unwrap();
+    let mut restored = spawn_stdio_client_with_args(
+        &workspace,
+        &["--append-system-prompt", "new runtime instruction"],
+    );
+    initialize_task_completions(&mut restored).await;
+    let (_, loaded) = restored
+        .send_request(
+            "session/load",
+            json!({"sessionId":sid,"cwd":workspace.root,"mcpServers":[]}),
+        )
+        .await;
+    assert_eq!(
+        &loaded["result"]["_meta"]["sudocode"]["contextRef"], context,
+        "{loaded}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "cold load appended to the transcript"
+    );
+    let (_, next) = restored.send_request("session/prompt", json!({
+        "sessionId":sid, "prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}streaming_text")}],
+        "_meta":{"traceId":"after-reconnect","sudocode":{"expectedContext":context}}
+    })).await;
+    assert_eq!(next["result"]["stopReason"], "end_turn", "{next}");
+    let next_context = &next["result"]["_meta"]["sudocode"]["contextRef"];
+    assert_eq!(next_context["lastTraceId"], "after-reconnect");
+    assert_ne!(next_context["digest"], context["digest"]);
+    let requests = server.captured_requests().await;
+    let request = &requests
+        .iter()
+        .rev()
+        .find(|r| !r.path.contains("count_tokens"))
+        .unwrap()
+        .raw_body;
+    assert!(request.contains("new runtime instruction"), "{request}");
+    assert!(request.contains("sonnet"), "{request}");
+    restored.shutdown().await;
+    workspace.cleanup();
+}

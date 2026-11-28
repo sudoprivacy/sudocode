@@ -2351,7 +2351,7 @@ impl SessionRegistry {
         }
     }
 
-    fn completion_route(
+    pub(crate) fn completion_route(
         &self,
         session: &runtime::Session,
         cwd: &std::path::Path,
@@ -3706,7 +3706,7 @@ pub(crate) async fn run_acp_on_transport(
                                 }
                                 // A live engine retains its prompt/memory snapshot and
                                 // children. New settings apply on a true cold rebuild.
-                                return Ok((engine, sid, cwd));
+                                return Ok((engine, sid, cwd, None));
                             }
                             if let Some(factory) = factory {
                                 let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
@@ -3717,7 +3717,7 @@ pub(crate) async fn run_acp_on_transport(
                                     memory,
                                 )?;
                                 let session_id = engine.session_handle().id;
-                                return Ok((engine, session_id, cwd));
+                                return Ok((engine, session_id, cwd, None));
                             }
                             let lease_cwd = session_lease_cwd(&cwd);
                             let _cwd = lease.acquire(&lease_cwd).map_err(|e| {
@@ -3725,7 +3725,7 @@ pub(crate) async fn run_acp_on_transport(
                             })?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
-                            let (engine, cwd) = session_ops::open_loaded_session(
+                            let (engine, cwd, route) = session_ops::open_loaded_session(
                                 &config,
                                 &load_registry,
                                 &sid,
@@ -3733,24 +3733,30 @@ pub(crate) async fn run_acp_on_transport(
                                 mcp_servers,
                                 prompt_overrides,
                                 memory,
+                                completions_enabled,
                             )?;
                             let session_id = engine.session_handle().id;
-                            Ok::<_, AcpError>((engine, session_id, cwd))
+                            Ok::<_, AcpError>((engine, session_id, cwd, route))
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
 
                         match result {
-                            Ok((engine, session_id, cwd)) => {
+                            Ok((engine, session_id, cwd, loaded_route)) => {
                                 // A reload of a live session keeps its route, so
                                 engine.require_host_context(host_context);
                                 // background agents it already spawned still
                                 // reach the client.
                                 let completion = if completions_enabled {
-                                    match registry.completion_route(
-                                        &engine.session_snapshot(),
-                                        &cwd,
-                                        false,
+                                    match loaded_route.map_or_else(
+                                        || {
+                                            registry.completion_route(
+                                                &engine.session_snapshot(),
+                                                &cwd,
+                                                false,
+                                            )
+                                        },
+                                        Ok,
                                     ) {
                                         Ok(route) => {
                                             route.set_task_protocol(tasks_enabled);

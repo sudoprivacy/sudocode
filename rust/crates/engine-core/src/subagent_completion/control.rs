@@ -95,6 +95,16 @@ impl CompletionState {
     }
 
     /// Called by engine composition before attaching the model delegate.
+    pub fn confirm_loaded_session(
+        &self,
+        session: &mut runtime::Session,
+        cwd: &std::path::Path,
+    ) -> Result<(), String> {
+        self.journal()
+            .ok_or("completion journal unavailable")?
+            .confirm_loaded_session(session, cwd)
+    }
+
     pub fn attach_session(&self, session: &runtime::Session, cwd: &Path) -> Result<(), String> {
         if let Some(journal) = self.journal() {
             journal.attach_session(session, cwd)?;

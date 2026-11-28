@@ -462,6 +462,14 @@ impl SessionDriver {
         Ok(driver)
     }
 
+    pub(crate) fn confirm_loaded_session(
+        &self,
+        session: &mut runtime::Session,
+        cwd: &std::path::Path,
+    ) -> Result<(), String> {
+        self.attachment.confirm_loaded_session(session, cwd)
+    }
+
     pub(crate) fn attach_session(
         &self,
         session: &runtime::Session,

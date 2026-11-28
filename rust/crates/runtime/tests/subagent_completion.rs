@@ -384,3 +384,55 @@ fn failed_ack_write_does_not_remove_pending_delivery() {
     drop(journal);
     assert_eq!(store.open(false).pending(), before);
 }
+
+#[test]
+fn cold_reload_recovers_only_proven_checkpoint_metadata() {
+    use std::io::Write;
+    let mut store = Store::new();
+    store.session.model = Some("original-model".into());
+    let path = store.session.persistence_path().unwrap().to_owned();
+    store.session.save_to_path(&path).unwrap();
+    let journal = store.open(true);
+    journal.begin("committed", None).unwrap();
+    let context = journal.commit("committed").unwrap();
+    drop(journal);
+    store.session.close_persistence();
+    let committed = std::fs::read_to_string(&path).unwrap();
+    let checkpoint: serde_json::Value =
+        serde_json::from_str(committed.lines().last().unwrap()).unwrap();
+    assert_eq!(checkpoint["type"], "history_checkpoint");
+    for (index, legitimate_change) in [true, false].into_iter().enumerate() {
+        let mut drift = checkpoint.clone();
+        drift["parent_id"] = checkpoint["id"].clone();
+        drift["id"] = serde_json::json!(format!("later-checkpoint-{index}"));
+        drift["meta"]["model"] = serde_json::json!("new-default");
+        if legitimate_change {
+            drift["meta"]["created_at_ms"] = serde_json::json!(1);
+        }
+        std::fs::write(&path, &committed).unwrap();
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{drift}"
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut session = Session::load_from_path(&path)
+            .unwrap()
+            .with_persistence_path(path.clone());
+        let route = CompletionJournal::open(&session, &store.dir, false).unwrap();
+        let result = route.confirm_loaded_session(&mut session, &store.dir);
+        if legitimate_change {
+            assert_eq!(result.unwrap_err(), "source_context_unconfirmed");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        } else {
+            result.unwrap();
+            assert_eq!(session.model.as_deref(), Some("original-model"));
+            assert_eq!(route.context().unwrap().unwrap(), context);
+            let after = std::fs::read(&path).unwrap();
+            assert!(after.starts_with(&before) && after.len() > before.len());
+        }
+    }
+}

@@ -645,6 +645,58 @@ fn parse(contents: &str) -> Result<HistoryReplay, crate::SessionError> {
     Ok(replay)
 }
 
+/// A legacy cold-load repair accepts only consecutive checkpoints following
+/// the journal's exact committed anchor. Check every complete projection so
+/// an intervening user message, assistant edit, branch, compaction or changed
+/// permission/context field cannot be discarded by returning to an old head.
+pub(super) fn proven_load_checkpoint(
+    contents: &str,
+    anchor: &str,
+    latest: &str,
+    digest: &str,
+) -> Result<crate::Session, String> {
+    let refused = "source_context_unconfirmed";
+    let history = parse(contents).map_err(|e| e.to_string())?;
+    if history.head.as_deref() != Some(latest) {
+        return Err(refused.into());
+    }
+    let proven = history.project(Some(anchor))?;
+    if proven.context_digest().map_err(|e| e.to_string())? != digest {
+        return Err(refused.into());
+    }
+    let mut previous = None::<String>;
+    let mut checked = 0;
+    for line in contents.lines() {
+        let frame: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let id = frame["id"].as_str();
+        if previous.is_none() {
+            if id == Some(anchor) {
+                previous = Some(anchor.into());
+            }
+            continue;
+        }
+        if frame["type"] != "history_checkpoint"
+            || frame["replaces_context"] == true
+            || frame["parent_id"].as_str() != previous.as_deref()
+            || checked >= 256
+        {
+            return Err(refused.into());
+        }
+        let id = id.ok_or(refused)?;
+        let mut projected = history.project(Some(id))?;
+        projected.restore_load_metadata(&proven);
+        if projected.context_digest().map_err(|e| e.to_string())? != digest {
+            return Err(refused.into());
+        }
+        checked += 1;
+        previous = Some(id.into());
+    }
+    if checked == 0 || previous.as_deref() != Some(latest) {
+        return Err(refused.into());
+    }
+    Ok(proven)
+}
+
 /// Replay one immutable ancestry, independently of another runtime's appends.
 pub(super) fn replay(
     contents: &str,

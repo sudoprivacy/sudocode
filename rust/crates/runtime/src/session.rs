@@ -741,6 +741,16 @@ impl Session {
         }
         self.ensure_context_persisted()
             .map_err(|error| error.to_string())?;
+        self.existing_completion_writer()
+    }
+
+    /// Loading an existing binding must not append a bootstrap checkpoint.
+    pub(crate) fn existing_completion_writer(
+        &self,
+    ) -> Result<Arc<crate::session_writer::SessionWriter>, String> {
+        if !self.backend().fenced_locks() {
+            return Err("completion_storage_exclusion_unavailable".into());
+        }
         let path = self.persistence_path().ok_or("session has no transcript")?;
         self.writer_for(path).map_err(|error| error.to_string())
     }
@@ -995,6 +1005,12 @@ impl Session {
         Ok(durable_bytes_revision(bytes))
     }
 
+    pub(crate) fn restore_load_metadata(&mut self, proven: &Self) {
+        self.model.clone_from(&proven.model);
+        self.prompt_snapshot.clone_from(&proven.prompt_snapshot);
+        self.prompt_snapshot_dirty = false;
+    }
+
     pub(crate) fn context_digest(&self) -> Result<String, SessionError> {
         let JsonValue::Object(mut context) = self.to_json()? else {
             unreachable!("session is an object")
@@ -1187,7 +1203,7 @@ impl Session {
     }
 
     // Caller holds the writer operation guard, including bootstrap/compaction.
-    fn save_snapshot(
+    pub(crate) fn save_snapshot(
         &self,
         path: &Path,
         writer: &crate::session_writer::SessionWriter,

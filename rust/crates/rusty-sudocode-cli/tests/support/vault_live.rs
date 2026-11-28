@@ -7,6 +7,7 @@
 //! the platform's signed plugin library in `plugins/` (`libnexus_vault.so` or
 //! `.dylib`, with its `.sig`), as `e2e/vault-live/lib.sh` lays it out.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read as _;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use nexus_raft::transport::{
     generate_crl, generate_session_agent_cert, generate_user_runtime_cert, generate_zone_ca,
-    user_runtime_server_name, AgentCredential,
+    serial_from_cert_pem, user_runtime_server_name, AgentCredential,
 };
 use nexus_vfs_client::NexusVfsClient;
 use serde_json::{json, Value};
@@ -35,6 +36,8 @@ pub struct Live {
     root: TempDir,
     ca: Vec<u8>,
     ca_key: Vec<u8>,
+    /// Serials the CA has revoked, in the order they were revoked.
+    revoked: RefCell<Vec<Vec<u8>>>,
 }
 
 /// A running `serve-user` process. Dropping it kills the process.
@@ -54,19 +57,40 @@ impl Live {
     pub fn from_env() -> Option<Self> {
         let artifacts = PathBuf::from(std::env::var_os("SUDOCODE_VAULT_LIVE")?);
         let (ca, ca_key) = generate_zone_ca("vault-live").expect("zone CA");
-        let root = tempfile::tempdir().expect("scratch root");
-        let crl = generate_crl(&[], 1, &ca, &ca_key).expect("sign fixture revocation list");
-        fs::write(root.path().join("crl.pem"), crl).expect("write fixture revocation list");
-        Some(Self {
+        let live = Self {
             artifacts,
-            root,
+            root: tempfile::tempdir().expect("scratch root"),
             ca,
             ca_key,
-        })
+            revoked: RefCell::default(),
+        };
+        live.publish_crl();
+        Some(live)
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
         self.root.path().join(name)
+    }
+
+    /// Revoke the agent certificate in the bundle at `dir`. Runtimes refuse it
+    /// once they next read the revocation list.
+    pub fn revoke(&self, dir: &Path) {
+        let credential = AgentCredential::load(dir).expect("bundle to revoke");
+        let serial = serial_from_cert_pem(&credential.cert_pem).expect("certificate serial");
+        self.revoked.borrow_mut().push(serial);
+        self.publish_crl();
+    }
+
+    /// Sign the current revocation list, numbered one past the last, and
+    /// replace `crl.pem` whole so a runtime never reads a partial file.
+    fn publish_crl(&self) {
+        let revoked = self.revoked.borrow();
+        let number = u64::try_from(revoked.len() + 1).expect("revocation list number");
+        let crl = generate_crl(revoked.as_slice(), number, &self.ca, &self.ca_key)
+            .expect("sign the revocation list");
+        let next = self.path("crl.pem.next");
+        fs::write(&next, crl).expect("write the revocation list");
+        fs::rename(&next, self.path("crl.pem")).expect("publish the revocation list");
     }
 
     /// Start `serve-user` for `owner` on `data`, with or without the Vault plugin.

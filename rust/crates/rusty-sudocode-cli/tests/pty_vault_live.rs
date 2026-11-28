@@ -272,6 +272,54 @@ fn a_replaced_bundle_is_read_again_on_the_next_call() {
 }
 
 #[test]
+fn a_revoked_agent_is_refused_after_the_next_list_refresh_and_others_keep_access() {
+    let Some(live) = live() else { return };
+    let runtime = live.start(OWNER, &live.path("data"), true);
+    let secret = canary();
+    live.seed(&runtime, OWNER, "live", "present", &secret);
+    let (_listener, origin) = target();
+    let revoked_bundle = live.agent(&live.path("revoked-agent"), "revoked-agent", OWNER, 300);
+    let revoked = live.home("revoked-home");
+    revoked.configure(&section(
+        &runtime.endpoint(),
+        OWNER,
+        &revoked_bundle,
+        &origin,
+        &[PRESENT],
+    ));
+    let kept_bundle = live.agent(&live.path("kept-agent"), "kept-agent", OWNER, 300);
+    let kept = live.home("kept-home");
+    kept.configure(&section(
+        &runtime.endpoint(),
+        OWNER,
+        &kept_bundle,
+        &origin,
+        &[PRESENT],
+    ));
+
+    let before = revoked.availability();
+    live.revoke(&revoked_bundle);
+    // The runtime rereads its revocation list every 10 seconds.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let after = loop {
+        let after = revoked.availability();
+        if after != ["available"] || Instant::now() >= deadline {
+            break after;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    let other_agent = kept.availability();
+    record(
+        "i_revoked_agent",
+        &json!({"before": before, "after": after, "other_agent_after": other_agent}),
+    );
+    assert_eq!(before, ["available"]);
+    assert_eq!(after, ["access_denied"]);
+    assert_eq!(other_agent, ["available"]);
+    assert_unseen(&runtime, &[], &secret);
+}
+
+#[test]
 fn a_restarted_runtime_still_holds_the_secret() {
     let Some(live) = live() else { return };
     let data = live.path("data");

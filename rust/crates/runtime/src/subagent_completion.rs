@@ -713,6 +713,9 @@ impl CompletionJournal {
             .state
             .lock()
             .map_err(|_| "completion journal poisoned")?;
+        if state.deleted.is_some() {
+            return Err("session_deleted".into());
+        }
         if state.active_trace.is_some() {
             return Err("source_context_unconfirmed".into());
         }
@@ -728,6 +731,13 @@ impl CompletionJournal {
         }
         if context.digest == latest_digest {
             return Ok(());
+        }
+        // The digest excludes accounting and timestamps. They may have changed
+        // since the unlocked SessionStore read; never append a stale copy.
+        if session.to_json().map_err(|e| e.to_string())?
+            != latest.to_json().map_err(|e| e.to_string())?
+        {
+            return Err("source_context_unconfirmed".into());
         }
         if self.opened_after_interrupted_turn {
             return Err("source_context_unconfirmed".into());
